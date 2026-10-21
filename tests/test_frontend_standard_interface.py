@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,8 +62,11 @@ def _setup_runtime(tmp_path: Path):
         def get_command(self, cmd):
             return self.cmds[cmd]
 
+    workspace = tmp_path / "workspaces" / "test-agent"
+    workspace.mkdir(parents=True)
     runtime = SimpleNamespace(
         name="test-agent",
+        workspace_dir=workspace,
         global_config=SimpleNamespace(instance_id="HASHI1", authorized_id=7),
         session_store=store,
         command_registry=FakeRegistry(),
@@ -650,3 +654,82 @@ def test_runtime_ingress_keeps_reply_reference_typed_in_request_and_session(tmp_
 
     projected = _canonical_projection_row(store, stored, owner_id=owner)
     assert projected["reply_reference"] == stored["message_context"]["reply_reference"]
+
+
+def test_runtime_ingress_rebinds_current_attachment_content_to_agent_workspace(tmp_path):
+    from orchestrator.frontend_ingress import accept_runtime_ingress
+
+    runtime, store, owner, session = _setup_runtime(tmp_path)
+    payload = b"runtime image"
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="runtime.png",
+        media_type="image/png",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+    )
+    original_part = store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        item_index=1,
+    )
+    request_content = {
+        "type": "hashi.request-content",
+        "version": 1,
+        "parts": [dict(original_part)],
+    }
+    metadata = {
+        "session_id": session["session_id"],
+        "session_message_content": [dict(original_part)],
+    }
+    envelope = build_frontend_ingress_envelope(
+        source_id="session_api",
+        ingress_transport="session-api",
+        surface="session_api",
+        channel_key="default",
+        instance_id="HASHI1",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="not_applicable",
+        relay_chain=[],
+        request_id="req-workspace-attachment",
+        idempotency_key="key-workspace-attachment",
+        session_id=session["session_id"],
+        agent_id="test-agent",
+    )
+
+    _session, accepted, _owner, _surface, _channel = accept_runtime_ingress(
+        runtime,
+        envelope,
+        request_id="req-workspace-attachment",
+        chat_id=None,
+        prompt="inspect",
+        source="session-api",
+        request_metadata=metadata,
+        request_content=request_content,
+        idempotency_key="key-workspace-attachment",
+    )
+
+    rebound_ref = request_content["parts"][0]["local_ref"]
+    expected_parent = (
+        runtime.workspace_dir
+        / ".attachments"
+        / session["session_id"]
+        / accepted.message_id
+    )
+    assert Path(rebound_ref).parent == expected_parent
+    assert Path(rebound_ref).read_bytes() == payload
+    assert metadata["session_message_content"][0]["local_ref"] == rebound_ref
+    assert not Path(original_part["local_ref"]).exists()

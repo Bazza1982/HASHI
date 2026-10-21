@@ -1,6 +1,8 @@
 """Current-Run Session attachment grants for backend byte consumption only.
 
-These exact files never become workspace, CLI add-dir, or tool permissions.
+The grant itself remains task-local. Message-bound file attachments live in the
+target Agent's private workspace, where that Agent's ordinary read tools retain
+their existing workspace authority across later turns.
 """
 from __future__ import annotations
 
@@ -258,7 +260,7 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
                     _deny(attachment_id)
                 path = assets.files_root / storage_name
             else:
-                path = store._attachment_file_path(attachment_id, row["filename"])
+                path = store._validated_attachment_file(row)
             if secure_grants:
                 fd, ancestors = _open_no_symlinks(path, os.O_RDONLY)
                 try:

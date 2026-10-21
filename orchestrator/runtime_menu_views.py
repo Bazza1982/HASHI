@@ -1349,6 +1349,48 @@ def whatsapp_menu_text(*, enabled: bool) -> str:
     )
 
 
+def agentpresence_menu_text(
+    *,
+    enabled: bool,
+    ap_instance_id: str = "",
+    binding_available: bool = True,
+    default_agent: str = "",
+    settings_available: bool = True,
+    notice: str | None = None,
+) -> str:
+    if not binding_available:
+        instance_value = html.escape(_tr("menu.agentpresence.api_unavailable"))
+    elif ap_instance_id:
+        instance_value = f"<code>{html.escape(ap_instance_id)}</code>"
+    else:
+        instance_value = html.escape(_tr("menu.agentpresence.unbound"))
+    if not settings_available:
+        agent_value = html.escape(_tr("menu.agentpresence.config_unavailable"))
+    elif default_agent:
+        agent_value = f"<code>{html.escape(default_agent)}</code>"
+    else:
+        agent_value = html.escape(_tr("menu.agentpresence.agent_unbound"))
+    facts = [
+        _fact("menu.agentpresence.hashi_instance", instance_value),
+        _fact("menu.agentpresence.default_agent", agent_value),
+        _fact("common.scope", html.escape(_tr("menu.agentpresence.scope")))
+    ]
+    if notice:
+        facts.insert(0, f"✅ {html.escape(str(notice))}")
+    return setting_card(
+        "🖥️",
+        _tr("menu.agentpresence.title"),
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=facts,
+        consequence=(
+            _tr("menu.agentpresence.enabled")
+            if enabled
+            else _tr("menu.agentpresence.disabled")
+        ),
+        action=_tr("menu.agentpresence.action"),
+    )
+
+
 def telegram_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [

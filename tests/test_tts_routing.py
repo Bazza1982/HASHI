@@ -41,6 +41,20 @@ PROFILES = {
     }
 }
 
+PROVIDER_PROFILES = {
+    "openai": {
+        "style_support": "supported",
+        "fallbacks": ("edge", "windows", "piper"),
+    },
+    "edge": {
+        "style_support": "unsupported",
+        "fallbacks": ("windows", "piper"),
+    },
+    "windows": {"style_support": "unsupported", "fallbacks": ()},
+    "piper": {"style_support": "unsupported", "fallbacks": ()},
+    "coqui": {"style_support": "unknown", "fallbacks": ()},
+}
+
 
 def test_language_assessment_uses_ninety_percent_and_keeps_small_japanese_quote_chinese():
     assert LANGUAGE_DOMINANCE_THRESHOLD == 0.90
@@ -79,6 +93,7 @@ def test_english_is_compatible_with_every_known_voice():
         source_language="en",
         presets=PRESETS,
         profiles=PROFILES,
+        provider_profiles=PROVIDER_PROFILES,
     )
 
     assert route.language.language == "en"
@@ -98,6 +113,7 @@ def test_japanese_temporarily_switches_xiaoxiao_to_same_provider_voice():
         source_language="zh-CN",
         presets=PRESETS,
         profiles=PROFILES,
+        provider_profiles=PROVIDER_PROFILES,
     )
 
     assert route.provider == "edge"
@@ -118,6 +134,7 @@ def test_mixed_text_below_threshold_does_not_override_selected_voice():
         source_language="zh-CN",
         presets=PRESETS,
         profiles=PROFILES,
+        provider_profiles=PROVIDER_PROFILES,
     )
 
     assert route.language.language is None
@@ -135,15 +152,25 @@ def test_local_voice_without_target_language_has_no_upward_fallback():
         source_language="ja",
         presets=PRESETS,
         profiles=PROFILES,
+        provider_profiles=PROVIDER_PROFILES,
     )
 
     assert route.unsupported_language is True
-    assert fallback_providers("piper", {"edge", "windows", "piper"}) == ()
+    assert fallback_providers(
+        "piper", {"edge", "windows", "piper"}, PROVIDER_PROFILES
+    ) == ()
 
 
 def test_provider_fallback_is_monotonic_and_explicit():
     available = {"openai", "edge", "windows", "piper", "coqui"}
-    assert fallback_providers("openai", available) == ("edge", "windows", "piper")
-    assert fallback_providers("edge", available) == ("windows", "piper")
-    assert fallback_providers("windows", available) == ()
-    assert fallback_providers("coqui", available) == ()
+    assert fallback_providers("openai", available, PROVIDER_PROFILES) == (
+        "edge",
+        "windows",
+        "piper",
+    )
+    assert fallback_providers("edge", available, PROVIDER_PROFILES) == (
+        "windows",
+        "piper",
+    )
+    assert fallback_providers("windows", available, PROVIDER_PROFILES) == ()
+    assert fallback_providers("coqui", available, PROVIDER_PROFILES) == ()

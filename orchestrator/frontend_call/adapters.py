@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import base64
 import asyncio
-import io
 import json
 import os
-import wave
 import time
 import math
 import aiohttp
+from orchestrator.openai_compatible_speech import (
+    SpeechProtocolError,
+    build_speech_request,
+    validate_speech_audio,
+)
 from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
 from .contract import CallError, MAX_OUTPUT
 from .diagnostics import (
@@ -343,54 +346,34 @@ class MediaAdapters:
                         "google-ai-studio": {"speech_metadata": {"style": style}}
                     }
                 }
-        body = {
-            "model": target["model"],
-            "input": text,
-            "voice": slot["voice_id"],
-            "response_format": fmt,
-            **options,
-        }
+        try:
+            body = build_speech_request(
+                model=target["model"],
+                text=text,
+                voice=slot["voice_id"],
+                response_format=fmt,
+                options=options,
+            )
+        except SpeechProtocolError as exc:
+            raise CallError("call_option_invalid") from exc
         with diagnostic_context(media_kind="tts"):
             data, mime, receipt = await self._request(
                 target, "/audio/speech", json_body=body
             )
-        if not data:
-            raise CallError("call_speech_response_empty", 502)
-        audio_seconds = None
-        if fmt == "pcm":
-            # OpenRouter Gemini 3.8 emits headerless 24 kHz mono signed 16-bit PCM.
-            # Browser playback already accepts WAV; keep raw PCM off the client wire.
-            if mime != "audio/pcm" or len(data) < 4800 or len(data) % 2:
-                raise CallError("call_speech_format_invalid", 502)
-            audio_seconds = len(data) / (24000 * 2)
-            output = io.BytesIO()
-            with wave.open(output, "wb") as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(24000)
-                wav.writeframes(data)
-            data, mime = output.getvalue(), "audio/wav"
-        elif fmt == "wav":
-            if not (data.startswith(b"RIFF") and data[8:12] == b"WAVE"):
-                raise CallError("call_speech_format_invalid", 502)
-            mime = "audio/wav"
-            try:
-                with wave.open(io.BytesIO(data), "rb") as audio:
-                    audio_seconds = audio.getnframes() / audio.getframerate()
-            except (wave.Error, EOFError, OSError, ZeroDivisionError):
-                audio_seconds = None
-        else:
-            if not (
-                data.startswith(b"ID3")
-                or (len(data) > 2 and data[0] == 255 and data[1] & 0xE0 == 0xE0)
-            ):
-                raise CallError("call_speech_format_invalid", 502)
-            mime = "audio/mpeg"
+        try:
+            audio = validate_speech_audio(data, mime, fmt)
+        except SpeechProtocolError as exc:
+            code = (
+                "call_speech_response_empty"
+                if exc.code == "tts_response_empty"
+                else "call_speech_format_invalid"
+            )
+            raise CallError(code, 502) from exc
         return {
-            "content_b64": base64.b64encode(data).decode(),
-            "media_type": mime,
+            "content_b64": base64.b64encode(audio.data).decode(),
+            "media_type": audio.media_type,
             "provider_receipt": receipt,
-            "_billing_usage": {"audio_seconds": audio_seconds}
-            if audio_seconds is not None
+            "_billing_usage": {"audio_seconds": audio.duration_seconds}
+            if audio.duration_seconds is not None
             else None,
         }

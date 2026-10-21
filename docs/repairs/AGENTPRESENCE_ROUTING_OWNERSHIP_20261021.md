@@ -1,0 +1,106 @@
+# Agent Presence routing ownership — 2026-10-21
+
+## Decision
+
+Agent Presence chooses exactly one HASHI instance. The selected HASHI instance
+chooses exactly one default Agent for Agent Presence ingress. These are separate
+settings with separate user entry points:
+
+- AP tray: `HASHI instance` -> `Configure...` or `Clear binding`; AP persists
+  only `instance_id + loopback Backend API origin`.
+- HASHI command: `/agentpresence default <agent>` or
+  `/agentpresence default off`; HASHI persists only the local default Agent.
+
+AP does not store or submit an Agent name. HASHI ignores caller-selected Agent,
+owner, Session, generation and channel values, resolves its own configured
+Agent, verifies that it is enabled and running, and freezes that Agent's
+owner-scoped current primary Conversation Session at ingress. AP text, voice
+transcript, Run and reply use that canonical Conversation, so Workbench projects
+them in the same chat history. Missing or unavailable configuration fails
+closed; neither side guesses a route. Existing AP settings migrate by retaining
+the instance and Backend API while dropping the old AP-owned Agent field.
+
+Safe Voice preserves the same split ownership. HASHI owns STT, the pending
+transcript and admission; AP owns only the local review presentation. A PTT
+upload with Safe Voice enabled returns the transcript without creating a Run.
+AP must show confirm/discard, and its token-authenticated decision is bound to
+the same frozen primary Conversation Session and context generation. If HASHI's
+primary Conversation changes before the decision, confirmation fails closed.
+Workbench and AP confirmations cannot read or decide each other's pending
+transcripts.
+
+The AP text panel is normally non-activating, but an explicit click on `Type`
+temporarily enables window activation and keyboard focus until the panel closes.
+This is a user-requested input mode, not background focus stealing. Rejections
+retain their stable HASHI error code in AP status and logs.
+
+The AP Windows publish must retain full .NET globalization data. WPF resolves
+the active keyboard layout through `CultureInfo` when the text box receives
+focus, so globalization-invariant publishing can terminate the whole process
+for Chinese and other non-English input methods. The shipped selfcheck must
+resolve Windows culture `2052` as `zh-CN`; inability to do so is a release
+failure.
+
+## Ownership and scope
+
+- Functional owner: Frontend Connector.
+- Engineering layer: Agent Presence application/settings and HASHI3 Functions
+  plus instance configuration.
+- Protected Core and HASHI4 are outside scope and remain unchanged.
+
+## Validation and adoption
+
+The user requested the split routing model and both settings entries on
+2026-10-21. Source validation covers the two menus, persistence, caller-Agent
+rejection, instance mismatch, missing settings, disabled/offline Agents and the
+existing text/PTT path. Runtime adoption is a separate operational step; this
+revision does not inherit earlier restart authority.
+
+The user separately authorized this Safe Voice/text-input repair and restarting
+HASHI3 plus Agent Presence on 2026-10-21. Implementation, offline validation and
+running adoption are recorded separately; human microphone and typing acceptance
+remain the user's final check.
+
+Implementation was committed on HASHI3 branch `debug-issues-oct` at
+`c25e9236` and in Agent Presence branch `feat/dc-companion-shell` at
+`557958e`; AP version reporting was then corrected at `27b5d0b` so live
+readiness derives its version from the assembly instead of a copied constant.
+Offline validation completed with the HASHI3 full gate at 862 passed and one
+skipped, the AP HASHI-ingress suite passing, and the AP release publish
+succeeding.
+
+Live adoption was performed only after that validation under the user's explicit
+restart authorization. HASHI3 `/reboot max` operation
+`c7563ac505d743c0861006a4407ad4bc` adopted source commit `c25e9236`, completed
+successfully in 75.9 seconds, and confirmed all 13 configured Agents online with
+no warnings. The restarted AP reported ready as version 1.2.1, retained its
+explicit `HASHI3` loopback binding, and HASHI3 retained `agent1` as the default
+AP ingress Agent. This proves source adoption, route configuration and service
+readiness; it does not claim the user's pending physical keyboard/microphone
+acceptance. Protected Core and HASHI4 were not changed.
+
+The user's subsequent physical test proved text/PTT ingress, then exposed two
+AP process exits while the Chinese input method focused the WPF text box. The
+user directed the immediate repair on 2026-10-21. Pre-fix selfcheck reproduced
+`CultureNotFoundException` for Windows culture `2052`; the same selfcheck passed
+with `zh-CN` after full globalization was restored. Agent Presence commit
+`9ed30c9` publishes version 1.2.2 and adds this regression check. The release
+build, language audit, HASHI ingress test and Call animation state test passed.
+AP was then started and reported `ready=true`, version 1.2.2, with its existing
+`HASHI3` loopback binding. HASHI source and Workers did not change, so no HASHI
+reboot was needed. Physical IME focus remains the user's final acceptance.
+
+The user's later transcript check exposed that the original AP-only Session kept
+successful text/PTT turns outside the Workbench primary Conversation. The user
+directed the correction on 2026-10-21: AP remains responsible only for choosing
+the HASHI instance; HASHI alone chooses both the configured Agent and its current
+primary Conversation. Focused red evidence showed the old route accepting a
+caller owner and failing to resolve AP Safe Voice against a distinct primary
+Conversation. The corrected tests require HASHI-owned owner/Session/generation
+metadata for both text and voice while retaining AP-only confirmation authority.
+Implementation commit `db22e461` passed the two focused red/green regressions,
+then the complete related component scope at 11 passed. The post-commit HASHI3
+Core gate passed 862 tests with one skip, including real Function-generation
+qualification. Protected Core remained unchanged. Runtime adoption was not
+performed because this correction did not receive new `/reboot max` authority;
+earlier restart authority is not carried forward.

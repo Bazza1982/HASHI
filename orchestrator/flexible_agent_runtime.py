@@ -377,6 +377,8 @@ class FlexibleAgentRuntime:
             ffmpeg_cmd="ffmpeg",
             secrets=self.secrets,
             native_capabilities=list(config.allowed_backends or ()),
+            catalog_path=Path(self.global_config.project_root) / "voice_catalog.json",
+            project_root=Path(self.global_config.project_root),
         )
         self.phone_manager = PhoneManager(self.workspace_dir)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
@@ -1182,6 +1184,7 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            configured_owner_mirror_destinations,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
             normalize_run_delivery_route,
@@ -1373,6 +1376,10 @@ class FlexibleAgentRuntime:
             connector_id="whatsapp",
             default=False,
         )
+        owner_mirror_destinations = configured_owner_mirror_destinations(
+            request_metadata={**metadata, "owner_id": resolved_owner},
+            state_root=getattr(self.global_config, "bridge_home", None),
+        )
         if source_fact["id"] == "whatsapp" and telegram_requested:
             chat_id = int(getattr(self.global_config, "authorized_id", 0) or 0)
         delivery_route = freeze_run_delivery_route(
@@ -1385,6 +1392,7 @@ class FlexibleAgentRuntime:
             whatsapp_channel_key=whatsapp_channel,
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
+            additional_mirrors=owner_mirror_destinations,
         )
         parent_run_id = str(metadata.get("parent_run_id") or "").strip()
         parent_request_id = str(
@@ -1441,6 +1449,7 @@ class FlexibleAgentRuntime:
                             terminal_exchange=bool(
                                 metadata.get("system_exchange_terminal")
                             ),
+                            additional_mirrors=owner_mirror_destinations,
                         )
         metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the
@@ -1523,6 +1532,10 @@ class FlexibleAgentRuntime:
                 idempotency_key=idempotency_key,
             )
         )
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import attachment_manifest
+
+            manifest = attachment_manifest(normalized_request_content)
         if accepted is not None and accepted.replayed:
             self.message_logger.info(
                 "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id
@@ -3114,9 +3127,10 @@ class FlexibleAgentRuntime:
             raise ValueError("speech text is required")
         if len(spoken) > 20_000:
             raise ValueError("speech text is too long")
+        resolved_request_id = str(request_id or f"tui-say-{uuid4().hex}")
         asset = await self.voice_manager.synthesize_reply(
             self.name,
-            str(request_id or f"tui-say-{uuid4().hex}"),
+            resolved_request_id,
             spoken,
             force=True,
             source_language=source_language or ui_language.preferred_locale(self),
@@ -3132,10 +3146,34 @@ class FlexibleAgentRuntime:
             raise RuntimeError("the TTS provider returned malformed Ogg audio")
         if len(content) > 3 * 1024 * 1024:
             raise RuntimeError("the generated speech asset exceeds the TUI limit")
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        publication_key = hashlib.sha256(
+            f"{resolved_request_id}\n{content_sha256}".encode("utf-8")
+        ).hexdigest()
+        try:
+            runtime_session.publish_owner_mirror_media_notification(
+                self,
+                filename=f"voice-reply-{content_sha256[:16]}.ogg",
+                media_type="audio/ogg",
+                payload=content,
+                sha256=content_sha256,
+                caption="",
+                publication_id=f"tui-speech:{publication_key}",
+                semantic_role="voice_message",
+                presentation_role="voice",
+            )
+        except Exception as exc:
+            warning = getattr(getattr(self, "logger", None), "warning", None)
+            if callable(warning):
+                warning(
+                    "Optional owner-mirror speech delivery failed safely for %s (%s)",
+                    resolved_request_id,
+                    type(exc).__name__,
+                )
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": content_sha256,
             "media_type": "audio/ogg",
             "profile": self.voice_manager.get_voice_profile_id(),
             "provider": asset.provider,
@@ -4054,8 +4092,21 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self, view: str = "main") -> InlineKeyboardMarkup:
-        if view == "voices":
+        if view == "voices" or view.startswith("voices:"):
+            try:
+                requested_page = int(view.partition(":")[2] or "0")
+            except ValueError:
+                requested_page = 0
             active_alias = self.voice_manager.get_active_preset_alias()
+            available = [
+                (alias, preset)
+                for alias, preset, availability in self.voice_manager.get_voice_presets()
+                if availability == "ready"
+            ]
+            page_size = 12
+            total_pages = max(1, (len(available) + page_size - 1) // page_size)
+            page = min(max(0, requested_page), total_pages - 1)
+            visible = available[page * page_size : (page + 1) * page_size]
             rows = [
                 [
                     InlineKeyboardButton(
@@ -4066,9 +4117,25 @@ class FlexibleAgentRuntime:
                         callback_data=f"voice:use:{alias}",
                     )
                 ]
-                for alias, _preset, availability in self.voice_manager.get_voice_presets()
-                if availability == "ready"
+                for alias, _preset in visible
             ]
+            navigation = []
+            if page:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.previous"),
+                        callback_data=f"voice:page:{page - 1}",
+                    )
+                )
+            if page + 1 < total_pages:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.next"),
+                        callback_data=f"voice:page:{page + 1}",
+                    )
+                )
+            if navigation:
+                rows.append(navigation)
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -4732,6 +4799,18 @@ class FlexibleAgentRuntime:
             )
             await query.answer()
             return
+        if action == "page":
+            try:
+                page = max(0, int(value))
+            except ValueError:
+                page = 0
+            await query.edit_message_text(
+                self.voice_manager.voice_choice_menu_text(),
+                reply_markup=self._voice_keyboard(f"voices:{page}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
         if action == "back":
             await query.edit_message_text(
                 self.voice_manager.voice_menu_text(),
@@ -4761,7 +4840,16 @@ class FlexibleAgentRuntime:
                 )
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
-                render_view = "voices"
+                aliases = [
+                    alias
+                    for alias, _preset, availability in self.voice_manager.get_voice_presets()
+                    if availability == "ready"
+                ]
+                try:
+                    page = aliases.index(value) // 12
+                except ValueError:
+                    page = 0
+                render_view = f"voices:{page}"
                 preview_preset = value
         except Exception as e:
             await query.answer(str(e), show_alert=True)
@@ -4788,7 +4876,7 @@ class FlexibleAgentRuntime:
             )
         text = (
             self.voice_manager.voice_choice_menu_text()
-            if render_view == "voices"
+            if render_view.startswith("voices")
             else self.voice_manager.voice_menu_text()
         )
         await query.edit_message_text(

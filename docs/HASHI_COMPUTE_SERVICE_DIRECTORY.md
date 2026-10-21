@@ -138,6 +138,12 @@ configured public node origin. Compatibility is visible as
 neither is represented as compliance with the separate normative
 `hashi.compute.capabilities` schema.
 
+An explicitly unavailable compatibility model may report `unknown` modality,
+image, tool, or thinking support. The directory retains that model only as a
+disabled, non-authorizing observation instead of rejecting otherwise healthy
+services from the same manifest. An available model remains subject to the
+strict capability checks above.
+
 ## Resolution and availability
 
 A durable consumer selection is the structured tuple `node_id`, `service_id`,
@@ -160,11 +166,48 @@ Deleting or disabling a node removes it on the next refresh.
 ## Adoption boundary
 
 `orchestrator.compute_services` is the shared consumer interface. Existing
-inline Call and Engine endpoint declarations remain supported while their
-selections are migrated deliberately. This change does not rewrite saved
+inline Call STT/vision and Engine endpoint declarations remain supported while
+their selections are migrated deliberately. Call TTS no longer owns a copied
+target/voice list; it consumes the shared voice catalogue described below. This
+change does not rewrite saved
 profiles, create a Workbench page, start a polling daemon, or adopt a running
 Worker by itself. Each consumer migration must preserve its own persistence,
 failure, and live-acceptance tests.
+
+### Ordinary `/voice` TTS consumer
+
+Ordinary `/voice` owns a separate, validated `voice_catalog.json`. A Hashi
+Compute speech model can be declared there as an ordinary
+`openai_compatible` local/LAN service; no Compute-specific TTS provider or
+Python registration is required. The Compute directory remains the discovery
+and capability owner and is not silently copied into the voice catalogue.
+
+The Agent's revisioned voice state stores only the selected catalogue service
+ID, voice value, and bounded voice options. It stores no endpoint or credential
+and does not silently select another model, node, or cloud provider. See the
+[voice TTS catalogue decision](HASHI_VOICE_TTS_CATALOG.md).
+
+Speech responses are requested as bounded configured audio from the declared
+service with redirects and environment proxies disabled. HASHI validates the
+audio signature, then uses the instance-owned media executable to produce the
+ordinary OGG voice asset. A catalogue, service, voice, response, or conversion
+failure is explicit and does not become a successful voice reply.
+Runtime adoption and device playback remain separate acceptance facts.
+
+### Call TTS consumer
+
+Call persists its own selected service and voice alias, but derives every TTS
+target and voice from the same `voice_catalog.json` used by `/voice`. It invokes
+the shared language-routing, adapter, cooldown, and ordered-fallback execution
+path. New calls freeze one catalogue revision; existing calls are not rewritten
+by a later configuration edit.
+
+Fallback remains consumer policy declared by service ID. Call first attempts the
+saved service, then same-node or other configured services in order. Its privacy
+level filters candidates before any request; a cloud service is never contacted
+when that level forbids it. The first successful downgrade is fixed for the
+remaining call and is projected to Workbench as selected/effective labels.
+Call's STT, vision, segmentation, playback, and lifecycle remain independent.
 
 ### HERV3 visual fallback consumer
 

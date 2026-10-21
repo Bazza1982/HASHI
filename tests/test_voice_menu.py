@@ -954,15 +954,36 @@ def test_voice_picker_uses_clear_localized_language_annotations(tmp_path, monkey
     runtime.voice_manager = manager
 
     with voice_manager_module.ui_language.language_scope(manager, locale="zh-CN"):
-        keyboard = runtime._voice_keyboard("voices").inline_keyboard
-        labels = [row[0].text for row in keyboard[:-1]]
+        labels = []
+        page = 0
+        while True:
+            keyboard = runtime._voice_keyboard(f"voices:{page}").inline_keyboard
+            voice_buttons = [
+                button
+                for row in keyboard
+                for button in row
+                if str(button.callback_data).startswith("voice:use:")
+            ]
+            assert len(voice_buttons) <= 12
+            assert all(len(button.callback_data.encode("utf-8")) <= 64 for button in voice_buttons)
+            labels.extend(button.text for button in voice_buttons)
+            assert keyboard[-1][0].callback_data == "voice:back:main"
+            next_buttons = [
+                button
+                for row in keyboard
+                for button in row
+                if button.callback_data == f"voice:page:{page + 1}"
+            ]
+            if not next_buttons:
+                break
+            page += 1
         main_menu = manager.voice_menu_text()
 
     assert "晓晓（简中 · 女声 · Edge）" in labels
     assert "七海（日语 · 女声 · Edge）" in labels
     assert "晓晓（简中 · 女声 · Kokoro）" in labels
+    assert page >= 1
     assert "<b>语音风格</b> · 未设置" in main_menu
-    assert keyboard[-1][0].callback_data == "voice:back:main"
 
 
 @pytest.mark.asyncio

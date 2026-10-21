@@ -48,6 +48,40 @@ class HashiPorts:
     def phone_busy(self, owner):
         return self.api.live_voice_manager.has_foreground_call(owner)
 
+    def frontend_subscribers(self, owner, binding):
+        """Freeze optional FC subscribers without exposing them to CallService."""
+
+        del binding
+        from orchestrator.frontend_optional_egress import (
+            configured_owner_subscribers,
+        )
+
+        return configured_owner_subscribers(self.api, owner)
+
+    def emit_frontend_event(
+        self,
+        owner,
+        binding,
+        kind,
+        *,
+        subscribers=(),
+        payload=None,
+    ):
+        """Project a Call-domain event into the optional FC fan-out."""
+
+        from orchestrator.frontend_optional_egress import (
+            schedule_call_frontend_event,
+        )
+
+        return schedule_call_frontend_event(
+            self.api,
+            owner_id=owner,
+            binding=binding,
+            kind=kind,
+            subscribers=subscribers,
+            payload=payload,
+        )
+
     async def opening(self, owner, binding, profile, targets, visual_context=None):
         """Ask the selected Agent for a tool-free once-only call greeting."""
 

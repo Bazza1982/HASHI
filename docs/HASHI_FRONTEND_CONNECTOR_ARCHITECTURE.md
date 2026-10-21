@@ -192,15 +192,21 @@ Current implementation boundary:
   ownership only after the clipboard accepts it;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
-- TUI `/say` and automatic reply speech are local Connector presentation. The selected
+- TUI `/say` and automatic reply speech are Connector presentation. The selected
   instance generates bounded Ogg bytes using the Agent-owned semantic voice
-  profile, while the launch computer owns the sole non-overlapping player.
-  These controls never enqueue a chat command or create Telegram output;
+  profile and returns them to the requesting Workbench. When the owner enables
+  a registry-declared mirror, PAO also commits those exact bytes to a generic,
+  independently receipted media outbox in the Agent's hidden activity Session.
+  This creates neither a duplicate Conversation row nor Telegram output, and
+  optional publication failure cannot fail the Workbench speech response. The
+  ordinary Workbench reply player does not autoplay, leaving an enabled local
+  presentation frontend as the sole automatic speaker on one machine;
 - `/say` selects only final Agent replies, never cost tails, command cards, or
   progress. `/say N` selects the newest N (1-4), and `/say A-B` selects inclusive
-  newest-first positions but plays them oldest first. TUI and Workbench keep
-  speech local; Telegram selects only replies confirmed on its delivery route.
-  Selection stays within the current Agent and Conversation Session;
+  newest-first positions but plays them oldest first. Telegram selects only
+  replies confirmed on its delivery route and is not implied by an owner-mirror
+  media event. Selection stays within the current Agent and Conversation
+  Session;
 - TUI auto-read is persisted per launch client, instance and Agent. The four
   available semantic profiles are discovered from the Agent voice owner and
   profile changes use that existing revision-safe state rather than a second
@@ -263,6 +269,62 @@ disable the destination's transport. A Run's destinations are frozen at
 admission, so switching later does not replay or redirect it. Automatic
 WhatsApp mirrors require exactly one configured allowed personal number; the
 transport's ordinary replies still use their original chat endpoint.
+
+AgentPresence is an optional local desktop-companion egress Connector. Its
+owner-scoped `/agentpresence on|off` preference defaults off and is shared by
+existing and future Agents through the connector-neutral preference store. The
+public command is discovered from the shared RuntimeCommand registry; it is not
+a Telegram command implementation or a Backend/API special case. All
+command-capable Connectors may invoke it through their existing command adapter.
+
+When enabled, PAO freezes AgentPresence as an optional media destination at Run
+admission. Canonical reply voice then receives its own outbox task and receipt;
+Telegram, Workbench and other destination delivery succeed or fail independently.
+The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
+call-start, call-end and synthesized-speech events through its Call port. The
+AgentPresence adapter consumes call start/end as one visual lifecycle: the
+companion answers and leaves its workspace, stays away for the whole call, then
+returns only after call end. It deliberately skips call speech because the
+initiating Call frontend is the sole local playback owner. Durable non-call
+voice replies still use the companion's phone-reply animation and audio path.
+This prevents duplicate automatic playback and echo when both frontends run on
+one machine. Enabling AgentPresence neither exposes `/call` on another
+Connector nor makes Workbench its transport.
+
+The companion authenticates with its local token; missing tokens, an absent
+companion, timeouts and rejected egress requests fail open and never change call
+or any other Connector's delivery outcome. Output audio is capped at 25 MB.
+
+AgentPresence also exposes an explicit local message/voice ingress. Routing has
+two separate owners. AP owns one all-or-none HASHI instance setting: instance ID
+and loopback Backend API origin, configured from AP's tray menu. The selected
+HASHI instance owns its default Agent setting through
+`/agentpresence default <agent>`; `default off` clears only that instance's Agent
+route. AP never stores or submits an Agent name. There is no inferred current
+Agent, and either missing setting prevents sending. PTT freezes the configured
+instance at button-down, records PCM/WAV, and submits it at button-up; typed text
+uses the same route. Before either write, AP verifies the exact instance
+identity. An ambiguous write timeout is not retried.
+
+The Backend API accepts the reserved `agentpresence` source only with the same
+local token and exact instance ID. It ignores any caller-selected Agent and
+discards caller-selected owner, Session, generation and channel values. HASHI
+resolves its configured default Agent, verifies that it is enabled and running,
+then freezes that Agent's owner-scoped current primary Conversation Session and
+context generation for the AP message. Text, voice transcript, Run and reply
+therefore share the Conversation projected by Workbench instead of creating an
+AP-only chat history. Voice uses the existing STT, Safe Voice and PAO admission
+path. When Safe Voice is enabled, HASHI returns the transcript without admitting
+a Run; AP presents an explicit confirm/discard choice, and only an authenticated
+AP decision bound to the same frozen Conversation Session and generation can
+admit it. A primary-Session change invalidates the pending confirmation. AP
+never silently confirms, and Workbench cannot decide an AP-held transcript.
+AgentPresence owns capture, its instance binding and this local presentation,
+not HASHI Agent, Session, Message, Run, Event, call, STT or voice authority.
+Ingress authentication/routing fails closed; this is separate from the egress
+mirror's fail-open policy.
+The scoped implementation and adoption record is
+[Agent Presence routing ownership](repairs/AGENTPRESENCE_ROUTING_OWNERSHIP_20261021.md).
 
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and
@@ -392,6 +454,18 @@ whole Run before an Agent Turn is enqueued. A frontend must never turn a failed
 capability check into multiple legacy chat submissions, because that would
 change one user action into multiple Messages and Turns. Upload staging is not
 a Run and may be cleaned up later by retention policy.
+
+When PAO accepts the Run, every committed non-voice attachment moves from
+upload staging into the target Agent's private home at
+`.attachments/{session_id}/{message_id}/`. The durable Message and the
+current canonical request content both receive that bound path before Agent
+execution; the central staging file is removed only after the Session
+transaction commits. Ordinary file tools may therefore read the attachment in
+later turns through that Agent's existing home scope, while another Agent's
+scope cannot authorize the path. Session attachment cleanup and owner purge
+remove the bound bytes and empty private directories. Agent homes and the
+`.attachments` subtree remain Git-ignored. Safe Voice audio retains its
+separately owned managed-audio lifecycle.
 
 ### 6.3 Standard assistant attachment output
 

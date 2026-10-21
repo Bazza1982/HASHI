@@ -9,15 +9,13 @@ Current decisions, with full rationale in the linked owners:
   single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Agent Move qualifies mutable state at staging, becomes forward-only after
   confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
-- Image fallback is selected model, same-Provider visual model, then LAN Compute;
-  it is request-only, visible, and sends derived text rather than raw LAN images
-  back to cloud. Every FC uses the same HERV3 admission facts. See
-  [visual fallback](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+- Image fallback is selected model, same-Provider visual model, then LAN Compute.
+  It is visible/request-only and returns derived text, not LAN images, to cloud.
+  Every FC shares these [admission facts](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute services resolve through PAO's fail-closed Function directory; no
   silent LAN-to-internet fallback. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
-- Call frames are input-only and cleared camera-off; LAN targets must be literal
-  private IPv4 with no redirects. Preview is not Agent vision. See
-  [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- Call frames are input-only/cleared camera-off; LAN targets are literal private
+  IPv4 without redirects. Preview is not Agent vision. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
 - Tool screenshots use provider-native image input, never Base64 text. Ollama
   behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
@@ -43,35 +41,35 @@ secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
 shared compatibility uses the qualified registry. Unknown capability/price is
 neither unsupported nor zero; explicit choices persist.
 
-Agent name/Emoji come from revisioned config; runtime supplies status. Failed
-post-save Worker refresh cannot reverse durable success.
+Agent name/Emoji come from revisioned config; failed post-save refresh cannot reverse durable success.
 
-Verified exact-model capabilities do not expire or vanish on lookup failure;
-changed model/adapter identity or validated source may replace them. Pricing
-freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
+Verified model capabilities survive lookup failure until identity/source changes;
+pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
 Portable carries no credentials; PAO starts Workers. Wildcards grant permission,
-not capability; path names grant nothing. Runs freeze Workzone roots/revision
-and reload only idle. Keep experiments, secrets, media bytes and remote paths
-out of PCM, logs, chat and Git.
+not capability; path names grant nothing. Runs freeze Workzones until idle.
+Keep experiments, secrets, media bytes and remote paths out of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
-JSON writers validate private candidates under lock/revision and atomically
-replace. Display fallback is read-only. On conflict, read fresh state/request
-fresh action; never retry blindly or restore stale bytes. See
-[configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+JSON writers validate private candidates under lock/revision and atomically replace.
+Display fallback is read-only; conflicts require fresh state/action, never blind
+retry or stale restore. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
-Endpoint publication may retry only a bounded Windows sharing-blocked rename of
-the same fsynced candidate. Permanent failure keeps prior durable state; never
-advertise unwritten routes or replay actions.
+Endpoint publication may retry only bounded Windows rename blocking of the same
+fsynced candidate; permanent failure keeps prior state and never replays actions.
 
 ## Sessions, trust, and delivery
 
 PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider and
 frontend history are rebuildable. Preserve order; stage attachments atomically
 per Message/Run and never leak failed/cancelled assets.
+
+Accepted non-voice attachments move into the target Agent's Git-ignored
+`.attachments/{session}/{message}/` subtree; Message/Run paths become canonical
+and staging is removed after commit. Only that Agent's home scope may read them,
+and Session retention removes them. Safe Voice keeps its own audio lifecycle.
 
 Incremental deliverables bind exact files/stable publication IDs. Persistence,
 receipts and UI visibility differ; uncertain delivery never auto-retries and
@@ -84,26 +82,21 @@ relay/target; cross-instance needs authenticated Remote. See
 [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
 PAO freezes destinations before PCM and owns ingress/routing/idempotency; FC owns
-presentation/receipts. Remote attachment commits retain canonical HChat
-idempotency and original send time; HChat IDs bind FC Sessions to Superloop
-review. Sent needs a receipt; failure wins. Deduplicate/settle; prose grants no
-Tool authority. Continuations retain Session/Connector and replay only saved
-non-action completions; pending/conflict/unknown cannot execute.
+presentation/receipts. Remote commits keep HChat idempotency/send time; IDs bind
+FC Sessions to Superloop review. Sent needs a receipt and failure wins. Prose
+grants no authority; only saved non-action completions may replay.
 
-Network frontends preserve original send time. PAO admits Workbench/Telegram
-within 30/60 seconds; older/invalid messages need one durable 15-minute
-confirmation before a Run. Expiry/discard stays visible. TUI exemption needs
-Remote-signed local evidence; `/hchat` needs 60 seconds plus exact reverse-route
-correlation. Qualified only on HASHI3/Workbench; production adoption is separate.
+Network frontends preserve send time. PAO admits Workbench/Telegram within 30/60
+seconds; older/invalid messages need one durable 15-minute confirmation. TUI
+exemption needs Remote-signed local evidence; `/hchat` needs 60 seconds plus
+reverse-route correlation. HASHI3 qualification is not production adoption.
 
-Scheduler/recovery and `/bg` use an Agent-owned hidden activity Session. Separate
-execution/delivery/receipts; show each final once in its owning Conversation and
-exclude Engine/Phone copies. `/bg` freezes admission; schedules get no implicit
-chat; `/delay` and interactive `/loop` retain context.
+Scheduler/recovery and `/bg` use an Agent-owned hidden Session; separate
+execution/delivery/receipts and show each final once. `/bg` freezes admission;
+schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
 
-HASHI3 Telegram is healthy only after a bounded poll; normal startup preserves
-pending updates. HERV3 retains and may quote complete WIP, never premature recovery cards.
-Source changes need separate Worker adoption/live checks.
+HASHI3 Telegram health needs a bounded poll; startup preserves pending updates.
+HERV3 keeps complete WIP; source, Worker adoption and live proof stay separate.
 
 ## Engine, tools, and recovery
 
@@ -112,19 +105,17 @@ Preserve history/usage and qualified Gemini models; old-client rejection is not
 an account ban. See [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
 
 Public HERV3 is `her-v3`; `her-v2` is compatibility only. JEV defaults off.
-`/backend`, `/provider`, `/model`, `/effort` select named layers; Fixed/Flex and
-Memory+ are independent. `/meter` counts physical calls/cost. Codex cumulative
-usage needs a persisted baseline; otherwise estimate. USD is not a subscription bill.
+Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
+counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
 
 Privacy Level 2 is HERV3/DeepSeek only, needs risk acceptance and blocks on
 local-detector failure. Its dependencies use a separate interpreter; install or
 synthetic readiness does not activate privacy or prove Worker adoption.
 
-Model/provider cards share a contract; chat-only has no tools. `/style`
-separates facts/meters. Fallback is opt-in; never replay uncertain/committed
-effects. Reject bad Tool batches. Native Codex `/steer` keeps its Run; HERV3 links
-one successor to a verified same-Session checkpoint. Keep command frontend
-primary and mirrors secondary. Receipts omit reasoning; recovery grants no authority.
+Model/provider cards share a contract; chat-only has no tools. Fallback is opt-in
+and never replays uncertain effects. Codex `/steer` keeps its Run; HERV3 links one
+verified successor. Command frontend stays primary; receipts omit reasoning and
+recovery grants no authority.
 
 ## UI, media, and Phone
 
@@ -146,39 +137,31 @@ neither translates replies/IDs. TUI switches freeze runtime identity/state.
 Remote authenticates. Mirror opt-outs preserve origin replies; `/think` and
 `/commentary` are independent.
 
-`/stop` fences every Agent Session: cancel/reap owned work, clear pre-fence
-one-shots, reject stale callbacks, retain periodic definitions. Save `stopped`
-and terminal event before cleanup; repair adoption remnants. Never retry
-unconfirmed saves; close DB after commit/rollback. HERV3 releases its Turn
-before outer cleanup. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
+`/stop` fences every Agent Session, cancels owned work, rejects stale callbacks,
+retains periodic definitions, and durably records `stopped` before cleanup.
+Never retry uncertain saves; HERV3 releases its Turn first. See
+[stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
-Media bind one draft/instance/Agent/Run; Remote sends managed bytes and grants
-HERV3 no wider authority. Safe Voice requires typed confirm/discard and
-idempotency; discard stale media. `/voice` uses validated Function/local media;
-Workbench gets Session audio, Telegram its renderer. Workbench keeps
-`voice_message` audio durable but hides its generic attachment/player and any
-transport-only bubble; ordinary audio remains visible. Its Safe Voice
-confirmation card sizes to content.
+Media bind one draft/instance/Agent/Run; Remote grants no wider authority. Safe
+Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
+audio durable while hiding its duplicate generic player/bubble; ordinary audio
+stays visible. Telegram uses its renderer.
 
 Phone binds to the owner's foreground Conversation until hang-up. Actions get
-bounded original PCM/Conversation/job evidence, excluding scheduled prompts;
-lookups create no Run and required context must fit. See
-[PCM](HASHI_PCM_SYSTEM_DESIGN.md) and [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+bounded original PCM/Conversation/job evidence, never scheduled prompts; lookups
+create no Run. See [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and
+[PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 
-Phone fragments are ordered durable Session speech. Prove acceptance, execution,
-playback and listening separately; validate origin/order, deliver finals, never
-auto-retry uncertain writes.
+Phone speech is ordered and durable. Prove acceptance, execution, playback and
+listening separately; uncertain writes never auto-retry.
 
-Phone handoff keeps its frozen ID only after scoped snapshot/delegation checks.
-Pre-model errors settle Run/activity through the result owner; caught errors are
-not success. Byte grouping preserves roles, text, event IDs, order/timestamps
-and accepts old snapshots; it grants no authority/retry. See
+Phone handoff freezes its ID only after scoped checks; preserves roles, text,
+IDs, order/timestamps and old snapshots; and grants no authority. See
 [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
-Function adapters own Phone settings: apply next call and retain provider on
-recovery. Open once with Persona/language after readiness; yield to speech.
-Window movement cannot hang up. Failed PCM refresh permits stop/inspection only.
-Sideband follows the Session fence; explicit hang-up wins stale faults. Keep
+Function adapters own next-call settings and recovery. Open once after readiness;
+window movement cannot hang up. Failed PCM refresh permits stop/inspection only;
+sideband follows the Session fence and explicit hang-up wins stale faults. Keep
 source, adoption and device acceptance separate.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
@@ -189,12 +172,32 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-TTS logs omit secrets. `/voice` selects labelled voice/preview; >=90%
-unsupported text switches within provider (English exempt). Workbench uses its
-display locale, others `/language`. Visible fallback is paid/network to
-free/local only; Windows Edge may use named SAPI. `/call` is unchanged. See
+`/voice` logs omit secrets. Its shipped/instance catalogue owns services,
+voices, labels and fallbacks; Agent state stores no endpoint/credential.
+`/call` shares that catalogue/execution path but owns its lifecycle/selection,
+freezes each revision, privacy-filters fallbacks and locks the first downgrade.
+Only the Call Window plays its bounded MP3/WAV/Ogg output. See
+[catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
+
+AgentPresence is default-off, owner-scoped and fail-open. Its command, voice
+outbox, Telegram and Workbench Call subscription remain independent. Departure
+finishes before interruptible return; only the initiating frontend plays Call
+audio. Non-call `/voice` and `/say` use the generic owner-mirror outbox without
+another Conversation row; AP plays phone replies. See
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+AP text/PTT ingress is fail-closed. AP stores only one explicit
+`instance + Backend API` binding; HASHI owns `/agentpresence default <agent>`
+and the current Conversation. HASHI authenticates AP, ignores submitted routing
+fields, resolves its enabled default Agent and freezes that Agent's current
+Conversation, so transcript/Run/reply share Workbench history. WAV PTT uses
+ordinary STT/Safe Voice; confirmation is bound to the same Session/generation.
+Missing settings block rather than guess.
+
+AP desktop publishing retains .NET globalization data; invariant mode can crash
+WPF focus under non-English IMEs. Selfcheck verifies published `zh-CN` support.
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

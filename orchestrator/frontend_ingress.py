@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from orchestrator.frontend_command_admission import (
@@ -22,7 +22,10 @@ from orchestrator.frontend_contracts import (
     normalize_frontend_ingress_envelope,
     normalize_frontend_request,
 )
-from orchestrator.frontend_delivery import freeze_run_delivery_route
+from orchestrator.frontend_delivery import (
+    configured_owner_mirror_destinations,
+    freeze_run_delivery_route,
+)
 from orchestrator.runtime_session import ensure_store, owner_id
 from orchestrator.session_store import (
     IdempotencyConflict,
@@ -246,6 +249,23 @@ def accept_runtime_ingress(
             idempotency_key=idempotency_key,
         )
     session, accepted, _owner, _surface, _channel = result
+    if accepted is not None:
+        store = ensure_store(runtime)
+        if isinstance(request_content, MutableMapping):
+            rebound_content = store.rebind_request_content_attachments(
+                session_id=accepted.session_id,
+                owner_id=_owner,
+                request_content=request_content,
+            )
+            request_content.clear()
+            request_content.update(rebound_content)
+        if isinstance(request_metadata, MutableMapping):
+            message = store.get_message(
+                accepted.message_id,
+                session_id=accepted.session_id,
+                owner_id=_owner,
+            )
+            request_metadata["session_message_content"] = list(message["content"])
     if str(session.get("session_id") or "") != normalized["target"]["session_id"]:
         raise SessionConflict("frontend ingress Session binding was not preserved")
     if accepted is not None and str(accepted.request_id) != str(request_id):
@@ -666,6 +686,10 @@ def admit_frontend_ingress(
             default=False,
         ),
         whatsapp_channel_key=whatsapp_channel,
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata=delivery_metadata,
+            state_root=state_root,
+        ),
     )
 
     request_id = normalized_env["message"]["request_id"]
@@ -686,6 +710,7 @@ def admit_frontend_ingress(
             parent_run_id=parent_run_id,
             response_preferences=response_preferences,
             delivery_route=delivery_route,
+            agent_workspace=getattr(runtime, "workspace_dir", None),
         )
         return normalize_admission_receipt(
             {

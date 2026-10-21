@@ -87,14 +87,64 @@ def test_server_builds_opaque_endpoint_envelope_from_resolved_source_facts():
     assert "private-chat-id" not in str(envelope)
     assert envelope["message"]["idempotency_digest"].startswith("sha256:")
 
+    agentpresence = build_frontend_ingress_envelope(
+        source_id="agentpresence",
+        ingress_transport="agentpresence",
+        surface="agentpresence",
+        channel_key="default",
+        instance_id="HASHI3",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="local_shared_token",
+        relay_chain=[],
+        request_id="req-ap-1",
+        idempotency_key="agentpresence:interaction-1",
+        session_id="ses_ap",
+        agent_id="agent1",
+    )
+    assert agentpresence["connector"]["id"] == "agentpresence"
+
 
 def test_registry_maps_legacy_names_to_connector_neutral_ids():
     assert canonical_connector_id("api", ingress_transport="api_chat") == "backend_api"
     assert canonical_connector_id("api", ingress_transport="session-api") == "session_api"
     assert canonical_connector_id("workbench", ingress_transport="api_chat") == "backend_api"
+    assert (
+        canonical_connector_id(
+            "agentpresence",
+            ingress_transport="agentpresence",
+            surface="agentpresence",
+        )
+        == "agentpresence"
+    )
     registry = connector_registry_snapshot()
     identifiers = {item["id"] for item in registry["connectors"]}
-    assert {"telegram", "tui", "backend_api", "session_api", "hchat", "remote", "exchange"} <= identifiers
+    assert {
+        "telegram", "tui", "backend_api", "session_api", "hchat", "remote",
+        "exchange", "agentpresence",
+    } <= identifiers
+    agentpresence = next(
+        item for item in registry["connectors"] if item["id"] == "agentpresence"
+    )
+    assert agentpresence["ingress"] == ["message", "voice", "command"]
+    assert agentpresence["egress"] == [
+        "message",
+        "state",
+        "notification",
+        "media",
+    ]
+    assert agentpresence["owner_mirror"] is True
+    assert agentpresence["delivery_content_modes"] == ["media"]
+    adapter_ids = {
+        item["id"] for item in registry["compatibility_adapters"]
+    }
+    assert {
+        "agentpresence.message",
+        "agentpresence.voice",
+        "agentpresence.command",
+        "agentpresence.call_state",
+        "agentpresence.notification",
+        "agentpresence.voice_mirror",
+    } <= adapter_ids
     assert all("workbench" not in item["id"] for item in registry["connectors"])
 
 

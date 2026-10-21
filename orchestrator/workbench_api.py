@@ -147,6 +147,7 @@ from orchestrator.hchat_attachment_contract import (
     canonical_hchat_attachment_manifest,
 )
 from orchestrator.message_context import (
+    AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
     CONNECTOR_EVIDENCE_METADATA_KEY,
     HCHAT_CONTEXT_METADATA_KEY,
     MESSAGE_CONTEXT_METADATA_KEY,
@@ -902,6 +903,10 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post(
+            "/api/agentpresence/voice-decision",
+            self.handle_agentpresence_voice_decision,
+        )
         self.app.router.add_post("/api/tui/speech", self.handle_tui_speech)
         self.app.router.add_post("/api/tui/voice", self.handle_tui_voice)
         self.app.router.add_get(
@@ -9704,7 +9709,7 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, **state})
 
     async def handle_tui_speech(self, request):
-        """Generate a TUI-only audio asset without a Connector delivery side effect."""
+        """Generate Workbench audio plus any enabled owner-mirror presentation."""
 
         try:
             payload = await request.json()
@@ -10206,6 +10211,222 @@ class WorkbenchApiServer:
         )
         return web.json_response(result, status=409)
 
+    def _agentpresence_ingress_rejection(
+        self,
+        request,
+        *,
+        source: Any,
+        surface: Any,
+        instance_id: Any,
+    ):
+        """Authenticate the reserved AP source before any Run is admitted."""
+        source_norm = str(source or "").strip().casefold()
+        surface_norm = str(surface or "").strip().casefold()
+        claims_agentpresence = "agentpresence" in {source_norm, surface_norm}
+        if not claims_agentpresence:
+            return None
+        if source_norm != "agentpresence" or surface_norm != "agentpresence":
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence source and surface must match",
+                    "error_code": "agentpresence_source_mismatch",
+                },
+                status=400,
+            )
+        expected_instance = str(
+            getattr(self.global_config, "instance_id", "") or ""
+        ).strip().upper()
+        requested_instance = str(instance_id or "").strip().upper()
+        if not expected_instance or requested_instance != expected_instance:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence instance binding does not match",
+                    "error_code": "agentpresence_instance_mismatch",
+                },
+                status=409,
+            )
+        from orchestrator.agent_presence_notify import token_matches
+
+        if not token_matches(request.headers.get("X-AP-Token")):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence authentication is required",
+                    "error_code": "agentpresence_auth_required",
+                },
+                status=401,
+            )
+        return None
+
+    def _agentpresence_runtime(self, runtime_map):
+        """Resolve AP ingress through HASHI-owned instance configuration."""
+        from orchestrator.agent_presence_settings import get_default_agent
+
+        bridge_home = getattr(self.global_config, "bridge_home", None)
+        try:
+            agent_name = get_default_agent(bridge_home) if bridge_home else ""
+        except (OSError, TypeError, ValueError):
+            return None, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence Agent settings are unavailable",
+                    "error_code": "agentpresence_agent_config_unavailable",
+                },
+                status=503,
+            )
+        if not agent_name:
+            return None, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "No default Agent is configured for Agent Presence",
+                    "error_code": "agentpresence_agent_unconfigured",
+                },
+                status=409,
+            )
+        runtime = next(
+            (
+                candidate
+                for name, candidate in runtime_map.items()
+                if str(name).casefold() == agent_name.casefold()
+            ),
+            None,
+        )
+        if runtime is None:
+            return agent_name, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "The default Agent for Agent Presence is unavailable",
+                    "error_code": "agentpresence_agent_unavailable",
+                },
+                status=409,
+            )
+        return str(getattr(runtime, "name", None) or agent_name), runtime, None
+
+    def _agentpresence_current_session_metadata(self, request, runtime):
+        """Freeze HASHI's current Conversation without accepting an AP route."""
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence Session owner is unavailable",
+                    "error_code": "agentpresence_session_unavailable",
+                },
+                status=503,
+            )
+        try:
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner_id,
+                agent_id=str(getattr(runtime, "name", "") or ""),
+                establish=True,
+            )
+        except (OSError, TypeError, ValueError, SessionConflict, SessionNotFound):
+            logger.warning("Agent Presence current Session resolution failed")
+            return None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "The current Agent Session is unavailable",
+                    "error_code": "agentpresence_session_unavailable",
+                },
+                status=503,
+            )
+        return {
+            "session_id": str(session["session_id"]),
+            "owner_id": owner_id,
+            # Keep AP as the authenticated Connector identity while the exact
+            # HASHI-owned primary Conversation is frozen above.
+            "session_surface": "agentpresence",
+            "session_channel_key": "default",
+            "session_context_generation": int(session["context_generation"]),
+            AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
+            MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
+        }, None
+
+    async def _agentpresence_voice_confirmation_transport(
+        self,
+        runtime,
+        *,
+        op: str,
+        idempotency_key: str | None = None,
+        pending_id: str | None = None,
+        decision: str | None = None,
+    ) -> dict[str, Any]:
+        """Use the selected Worker's typed Safe Voice lane for authenticated AP."""
+        from orchestrator.voice_confirmation_transport import (
+            encode_voice_confirmation_request,
+        )
+
+        try:
+            text = encode_voice_confirmation_request(
+                op=op,
+                idempotency_key=idempotency_key,
+                pending_id=pending_id,
+                decision=decision,
+            )
+        except ValueError:
+            return {
+                "ok": False,
+                "accepted": False,
+                "error_code": "voice_confirmation_request_invalid",
+                "http_status": 400,
+            }
+        result = await try_execute_slash_command_text(
+            runtime,
+            text,
+            source_channel="agentpresence_api",
+        )
+        if not isinstance(result, Mapping):
+            return {
+                "ok": False,
+                "accepted": None,
+                "error_code": "voice_confirmation_outcome_unknown",
+                "http_status": 503,
+            }
+        return dict(result)
+
+    async def handle_agentpresence_voice_decision(self, request):
+        """Confirm or discard one AP transcript after AP token authentication."""
+        payload = await request.json()
+        source = str(payload.get("source") or "").strip()
+        surface = str(payload.get("surface") or "").strip()
+        ingress_rejection = self._agentpresence_ingress_rejection(
+            request,
+            source=source,
+            surface=surface,
+            instance_id=payload.get("instance_id"),
+        )
+        if ingress_rejection is not None:
+            return ingress_rejection
+        _agent_name, runtime, route_rejection = self._agentpresence_runtime(
+            self._runtime_map()
+        )
+        if route_rejection is not None:
+            return route_rejection
+        result = await self._agentpresence_voice_confirmation_transport(
+            runtime,
+            op="decide",
+            pending_id=str(payload.get("pending_id") or ""),
+            decision=str(payload.get("decision") or ""),
+        )
+        status = int(
+            result.pop("http_status", 200 if result.get("ok") is True else 503)
+        )
+        if result.get("ok") is True:
+            result["accepted"] = result.get("state") == "confirmed"
+        elif "accepted" not in result:
+            result["accepted"] = False
+        return web.json_response(result, status=status)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -10234,12 +10455,37 @@ class WorkbenchApiServer:
                 else:
                     fields[part.name] = await part.text()
 
-            agent_name = fields.get("agent") or fields.get("agentId")
-            runtime = runtime_map.get(agent_name)
-            if runtime is None:
-                return web.json_response(
-                    {"ok": False, "error": "agent not found"}, status=404
+            source = str(fields.get("source") or "api").strip() or "api"
+            surface = str(fields.get("surface") or "workbench").strip() or "workbench"
+            agentpresence_ingress = source.casefold() == "agentpresence"
+            ingress_rejection = self._agentpresence_ingress_rejection(
+                request,
+                source=source,
+                surface=surface,
+                instance_id=fields.get("instance_id"),
+            )
+            if ingress_rejection is not None:
+                return ingress_rejection
+
+            if agentpresence_ingress:
+                agent_name, runtime, route_rejection = self._agentpresence_runtime(
+                    runtime_map
                 )
+                if route_rejection is not None:
+                    return route_rejection
+                agentpresence_session_metadata, route_rejection = (
+                    self._agentpresence_current_session_metadata(request, runtime)
+                )
+                if route_rejection is not None:
+                    return route_rejection
+            else:
+                agentpresence_session_metadata = None
+                agent_name = fields.get("agent") or fields.get("agentId")
+                runtime = runtime_map.get(agent_name)
+                if runtime is None:
+                    return web.json_response(
+                        {"ok": False, "error": "agent not found"}, status=404
+                    )
 
             text = fields.get("text", "").strip()
             caption = fields.get("caption", "").strip()
@@ -10248,10 +10494,14 @@ class WorkbenchApiServer:
             session_metadata = {
                 "session_id": fields.get("session_id") or None,
                 "owner_id": self._v1_owner_id(request),
-                "session_surface": fields.get("surface") or "workbench",
-                "session_channel_key": fields.get("client_id") or "default",
+                "session_surface": "agentpresence" if agentpresence_ingress else surface,
+                "session_channel_key": (
+                    "default"
+                    if agentpresence_ingress
+                    else fields.get("client_id") or "default"
+                ),
             }
-            if fields.get("session_context_generation"):
+            if not agentpresence_ingress and fields.get("session_context_generation"):
                 try:
                     generation = int(fields["session_context_generation"])
                     if generation < 1:
@@ -10260,8 +10510,10 @@ class WorkbenchApiServer:
                 except ValueError:
                     return web.json_response({"ok": False, "accepted": False,
                         "error_code": "voice_session_changed"}, status=409)
+            if agentpresence_session_metadata is not None:
+                session_metadata.update(agentpresence_session_metadata)
             source_declaration_text = str(fields.get("message_source") or "").strip()
-            if source_declaration_text:
+            if source_declaration_text and not agentpresence_ingress:
                 try:
                     source_declaration = json.loads(source_declaration_text)
                     session_metadata[MESSAGE_SOURCE_CLAIM_METADATA_KEY] = (
@@ -10290,7 +10542,7 @@ class WorkbenchApiServer:
             ):
                 transfer_response = self._transfer_redirect_response(
                     runtime,
-                    source="api",
+                    source=source,
                     session_metadata=session_metadata,
                     idempotency_key=base_idempotency_key,
                     request_fingerprint={
@@ -10330,6 +10582,7 @@ class WorkbenchApiServer:
                 try:
                     request_id = await runtime.enqueue_api_text(
                         text,
+                        source=source,
                         deliver_to_telegram=True,
                         request_metadata=session_metadata,
                         idempotency_key=base_idempotency_key,
@@ -10342,7 +10595,7 @@ class WorkbenchApiServer:
                         raise
                     return self._transfer_redirect_response(
                         runtime,
-                        source="api",
+                        source=source,
                         session_metadata=session_metadata,
                         idempotency_key=base_idempotency_key,
                         request_fingerprint={
@@ -10369,6 +10622,7 @@ class WorkbenchApiServer:
                         filename=original_name,
                         caption=caption or text,
                         emoji=emoji,
+                        source=source,
                         request_metadata=session_metadata,
                         idempotency_key=(
                             f"{base_idempotency_key}:{upload_index}"
@@ -10384,7 +10638,7 @@ class WorkbenchApiServer:
                         local_path.unlink(missing_ok=True)
                         return self._transfer_redirect_response(
                             runtime,
-                            source="api",
+                            source=source,
                             session_metadata=session_metadata,
                             idempotency_key=(
                                 f"{base_idempotency_key}:{upload_index}"
@@ -10415,6 +10669,46 @@ class WorkbenchApiServer:
                         code = "voice_session_changed"
                     if media_kind == "voice" and code in statuses:
                         local_path.unlink(missing_ok=True)
+                        if (
+                            agentpresence_ingress
+                            and code == "voice_safe_confirmation_required"
+                        ):
+                            confirmation_result = (
+                                await self._agentpresence_voice_confirmation_transport(
+                                    runtime,
+                                    op="read",
+                                    idempotency_key=(
+                                        f"{base_idempotency_key}:{upload_index}"
+                                        if base_idempotency_key
+                                        else None
+                                    ),
+                                )
+                            )
+                            confirmation_status = int(
+                                confirmation_result.pop(
+                                    "http_status",
+                                    200
+                                    if confirmation_result.get("ok") is True
+                                    else 503,
+                                )
+                            )
+                            confirmation = confirmation_result.get("confirmation")
+                            if (
+                                confirmation_result.get("ok") is True
+                                and isinstance(confirmation, Mapping)
+                            ):
+                                return web.json_response(
+                                    {
+                                        "ok": True,
+                                        "accepted": False,
+                                        "confirmation_required": True,
+                                        "voice_confirmation": dict(confirmation),
+                                    }
+                                )
+                            confirmation_result.setdefault("accepted", False)
+                            return web.json_response(
+                                confirmation_result, status=confirmation_status
+                            )
                         rejection = {"ok": False,
                             "accepted": None if request_ids else False,
                             "error_code": code}
@@ -10445,11 +10739,36 @@ class WorkbenchApiServer:
             )
 
         payload = await request.json()
-        agent_name = payload.get("agent") or payload.get("agentId")
+        source = str(payload.get("source") or "api").strip() or "api"
+        surface = str(payload.get("surface") or "workbench").strip() or "workbench"
+        agentpresence_ingress = source.casefold() == "agentpresence"
+        ingress_rejection = self._agentpresence_ingress_rejection(
+            request,
+            source=source,
+            surface=surface,
+            instance_id=payload.get("instance_id"),
+        )
+        if ingress_rejection is not None:
+            return ingress_rejection
+
         text = (payload.get("text") or "").strip()
         attachment_spec = payload.get("attachment")
         workzone_ref = str(payload.get("workzone_ref") or "").strip()
-        runtime = runtime_map.get(agent_name)
+        if agentpresence_ingress:
+            agent_name, runtime, route_rejection = self._agentpresence_runtime(
+                runtime_map
+            )
+            if route_rejection is not None:
+                return route_rejection
+            agentpresence_session_metadata, route_rejection = (
+                self._agentpresence_current_session_metadata(request, runtime)
+            )
+            if route_rejection is not None:
+                return route_rejection
+        else:
+            agentpresence_session_metadata = None
+            agent_name = payload.get("agent") or payload.get("agentId")
+            runtime = runtime_map.get(agent_name)
         if runtime is None:
             from orchestrator.agent_move.service import moved_agent_destination
 
@@ -10475,7 +10794,6 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "text is required"}, status=400
             )
 
-        source = str(payload.get("source") or "api").strip() or "api"
         if source.casefold().startswith(("bridge-transfer:", "bridge-fork:")):
             return web.json_response(
                 {
@@ -10495,7 +10813,7 @@ class WorkbenchApiServer:
         session_metadata = {
             "session_id": payload.get("session_id") or None,
             "owner_id": self._v1_owner_id(request),
-            "session_surface": payload.get("surface") or "workbench",
+            "session_surface": surface,
             "session_channel_key": payload.get("client_id") or "default",
         }
         if isinstance(supplied_metadata, dict):
@@ -10504,6 +10822,7 @@ class WorkbenchApiServer:
             # result through the general compatibility metadata bag.
             protected_keys = {
                 CONNECTOR_EVIDENCE_METADATA_KEY,
+                AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
                 MESSAGE_CONTEXT_METADATA_KEY,
                 MESSAGE_SOURCE_CLAIM_METADATA_KEY,
                 MESSAGE_SOURCE_RESERVED_METADATA_KEY,
@@ -10529,9 +10848,21 @@ class WorkbenchApiServer:
                 session_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
                     connector_evidence
                 )
+        if agentpresence_session_metadata is not None:
+            session_metadata.update(agentpresence_session_metadata)
         telegram_mirror = True
         supplied_delivery_policy = payload.get("delivery_policy")
-        if source.casefold() == "tui":
+        if agentpresence_ingress:
+            if supplied_delivery_policy is not None:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "delivery_policy is not accepted from Agent Presence",
+                        "error_code": "invalid_delivery_policy_source",
+                    },
+                    status=400,
+                )
+        elif source.casefold() == "tui":
             client_id = str(payload.get("client_id") or "").strip()
             try:
                 _normalized_policy = normalize_tui_run_delivery_policy(
