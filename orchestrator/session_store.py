@@ -398,6 +398,15 @@ class AcceptedRun:
     replayed: bool = False
 
 
+@dataclass(frozen=True)
+class AudioDeleteClaim:
+    asset_id: str
+    owner_id: str
+    session_id: str
+    claim_token: str
+    claimed_at: str
+
+
 class SessionStore:
     """Transactional HASHI-owned conversation Session repository.
 
@@ -406,7 +415,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 24
+    SCHEMA_VERSION = 25
 
     def __init__(
         self,
@@ -938,12 +947,16 @@ class SessionStore:
                     semantic_role TEXT NOT NULL DEFAULT '',
                     duration_ms INTEGER,
                     retention_seconds INTEGER,
+                    retention_expires_at TEXT,
                     retention_indefinite INTEGER NOT NULL DEFAULT 0,
                     upload_required INTEGER NOT NULL DEFAULT 0,
                     asset_id TEXT,
                     workspace_path TEXT,
                     bound_message_id TEXT,
                     uploaded_at TEXT,
+                    audio_delete_claim_token TEXT,
+                    audio_delete_claimed_at TEXT,
+                    audio_projection_pending INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     committed_at TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
@@ -1564,18 +1577,26 @@ class SessionStore:
                 "semantic_role": "TEXT NOT NULL DEFAULT ''",
                 "duration_ms": "INTEGER",
                 "retention_seconds": "INTEGER",
+                "retention_expires_at": "TEXT",
                 "retention_indefinite": "INTEGER NOT NULL DEFAULT 0",
                 "upload_required": "INTEGER NOT NULL DEFAULT 0",
                 "asset_id": "TEXT",
                 "workspace_path": "TEXT",
                 "bound_message_id": "TEXT",
                 "uploaded_at": "TEXT",
+                "audio_delete_claim_token": "TEXT",
+                "audio_delete_claimed_at": "TEXT",
+                "audio_projection_pending": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, declaration in attachment_migrations.items():
                 if column not in attachment_columns:
                     connection.execute(
                         f"ALTER TABLE session_attachments ADD COLUMN {column} {declaration}"
                     )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS session_attachments_audio_lifecycle "
+                "ON session_attachments(asset_id, state)"
+            )
             output_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -3194,6 +3215,99 @@ class SessionStore:
         )
         return default
 
+    @staticmethod
+    def _audio_attachment_id(asset_id: str) -> str:
+        digest = hashlib.sha256(str(asset_id).encode("utf-8")).hexdigest()[:32]
+        return f"att_audio_{digest}"
+
+    def _register_audio_asset(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        metadata: Mapping[str, Any],
+        owner_id: str,
+        session_id: str,
+        committed_at: str,
+    ) -> str:
+        """Register provider audio in the existing canonical attachment owner."""
+
+        asset_id = str(metadata.get("asset_id") or "").strip()
+        if not asset_id:
+            raise SessionConflict("audio asset identity is unavailable")
+        rows = connection.execute(
+            "SELECT * FROM session_attachments WHERE asset_id=?",
+            (asset_id,),
+        ).fetchall()
+        if rows:
+            for row in rows:
+                if (
+                    str(row["owner_id"]) != str(owner_id)
+                    or str(row["session_id"]) != str(session_id)
+                    or not str(row["media_type"]).casefold().startswith("audio/")
+                ):
+                    raise SessionConflict("audio asset is bound to another Session")
+                if str(row["state"]) != "committed":
+                    raise SessionConflict("audio asset is no longer available")
+            return str(rows[0]["attachment_id"])
+        session = connection.execute(
+            "SELECT 1 FROM sessions WHERE session_id=? AND owner_id=? AND instance_id=?",
+            (str(session_id), str(owner_id), self.instance_id),
+        ).fetchone()
+        if session is None:
+            raise SessionNotFound(str(session_id))
+        attachment_id = self._audio_attachment_id(asset_id)
+        connection.execute(
+            """INSERT INTO session_attachments(
+                   attachment_id,session_id,owner_id,filename,media_type,size_bytes,
+                   sha256,state,semantic_role,duration_ms,retention_seconds,
+                   retention_expires_at,retention_indefinite,upload_required,
+                   asset_id,uploaded_at,created_at,committed_at
+               ) VALUES(?,?,?,?,?,?,?,'committed','audio_attachment',?,?,?,?,0,?,?,?,?)""",
+            (
+                attachment_id,
+                str(session_id),
+                str(owner_id),
+                str(metadata.get("filename") or asset_id),
+                str(metadata.get("mime_type") or "audio/octet-stream"),
+                int(metadata.get("size_bytes") or 0),
+                str(metadata.get("sha256") or ""),
+                metadata.get("duration_ms"),
+                metadata.get("retention_seconds"),
+                metadata.get("retention_expires_at"),
+                int(bool(metadata.get("retention_indefinite"))),
+                asset_id,
+                committed_at,
+                str(metadata.get("created_at") or committed_at),
+                committed_at,
+            ),
+        )
+        return attachment_id
+
+    @staticmethod
+    def _require_audio_asset_rows(
+        connection: sqlite3.Connection,
+        *,
+        asset_id: str,
+        owner_id: str,
+        session_id: str,
+    ) -> list[sqlite3.Row]:
+        rows = connection.execute(
+            "SELECT * FROM session_attachments WHERE asset_id=?",
+            (str(asset_id),),
+        ).fetchall()
+        if not rows:
+            raise SessionConflict("audio asset is not canonically registered")
+        for row in rows:
+            if (
+                str(row["owner_id"]) != str(owner_id)
+                or str(row["session_id"]) != str(session_id)
+                or not str(row["media_type"]).casefold().startswith("audio/")
+            ):
+                raise SessionConflict("audio asset is bound to another Session")
+            if str(row["state"]) != "committed":
+                raise SessionConflict("audio asset is no longer available")
+        return list(rows)
+
     def accept_run(
         self,
         *,
@@ -3313,8 +3427,11 @@ class SessionStore:
                             "attachment MIME does not match committed metadata"
                         )
                     if is_audio:
-                        self.audio_assets.describe(
-                            asset_id, owner_id=owner_id, session_id=session_id
+                        self.audio_assets.claim(
+                            asset_id,
+                            owner_id=owner_id,
+                            session_id=session_id,
+                            canonical_managed=True,
                         )
                         block["semantic_role"] = semantic_role
                         audio_rows.append(attachment)
@@ -3555,7 +3672,8 @@ class SessionStore:
             if attachment_rows:
                 connection.executemany(
                     """UPDATE session_attachments
-                       SET retention_seconds=NULL, retention_indefinite=1
+                       SET retention_seconds=NULL, retention_expires_at=NULL,
+                           retention_indefinite=1
                        WHERE attachment_id=? AND session_id=? AND owner_id=?""",
                     [
                         (
@@ -3568,11 +3686,14 @@ class SessionStore:
                 )
             for attachment in audio_rows:
                 asset_id = str(attachment["asset_id"])
-                self.audio_assets.set_indefinite(
-                    asset_id, owner_id=owner_id, session_id=session_id
-                )
-                self.audio_assets.acquire(
-                    asset_id, owner_id=owner_id, session_id=session_id
+                connection.execute(
+                    """UPDATE session_attachments SET audio_projection_pending=1
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    (
+                        str(attachment["attachment_id"]),
+                        str(session_id),
+                        str(owner_id),
+                    ),
                 )
                 connection.execute(
                     """INSERT INTO run_audio_assets(
@@ -3703,6 +3824,24 @@ class SessionStore:
                         target.unlink(missing_ok=True)
                         self._prune_empty_attachment_directories(target)
                     raise
+        for attachment in audio_rows:
+            asset_id = str(attachment["asset_id"])
+            try:
+                self.audio_assets.set_indefinite(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+                self.audio_assets.acquire(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+            except AudioAssetError:
+                continue
+            with self._lock, self._connection() as connection:
+                connection.execute(
+                    """UPDATE session_attachments SET audio_projection_pending=0
+                       WHERE asset_id=? AND session_id=? AND owner_id=?
+                         AND state='committed'""",
+                    (asset_id, str(session_id), str(owner_id)),
+                )
         for staging_path in staging_files_to_remove:
             try:
                 staging_path.unlink(missing_ok=True)
@@ -5298,6 +5437,7 @@ class SessionStore:
                 ),
                 retention_indefinite=bool(attachment.get("retention_indefinite")),
                 correlation={"attachment_id": str(attachment_id)},
+                canonical_managed=True,
             )
             stored_asset_id = str(asset["asset_id"])
             observed_duration_ms = asset.get("duration_ms")
@@ -5322,12 +5462,13 @@ class SessionStore:
         with self._lock, self._connection() as connection:
             connection.execute(
                 """UPDATE session_attachments SET asset_id=?, uploaded_at=?,
-                       duration_ms=COALESCE(duration_ms, ?)
+                       duration_ms=COALESCE(duration_ms, ?), retention_expires_at=?
                    WHERE attachment_id=? AND state='staged'""",
                 (
                     stored_asset_id,
                     now,
                     observed_duration_ms,
+                    asset.get("retention_expires_at") if str(attachment["media_type"]).casefold().startswith("audio/") else None,
                     str(attachment_id),
                 ),
             )
@@ -5436,10 +5577,11 @@ class SessionStore:
             if str(row["asset_id"] or ""):
                 if str(row["media_type"]).casefold().startswith("audio/"):
                     try:
-                        self.audio_assets.describe(
+                        self.audio_assets.claim(
                             str(row["asset_id"]),
                             owner_id=owner_id,
                             session_id=session_id,
+                            canonical_managed=True,
                         )
                     except AudioAssetError as exc:
                         raise SessionConflict("uploaded attachment is unavailable") from exc
@@ -6288,6 +6430,7 @@ class SessionStore:
             # tool versions with preview-only retention.
             durable_audio_assets: list[tuple[str, str]] = []
             with self._lock, self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 for attachment_id in durable_audio_attachment_ids:
                     row = connection.execute(
                         """SELECT asset_id FROM session_attachments
@@ -6301,30 +6444,57 @@ class SessionStore:
                             "frontend audio attachment is unavailable"
                         )
                     durable_audio_assets.append((attachment_id, asset_id))
-            for _attachment_id, asset_id in durable_audio_assets:
-                self.audio_assets.set_indefinite(
-                    asset_id,
-                    owner_id=owner_id,
-                    session_id=session_id,
-                )
-            with self._lock, self._connection() as connection:
                 connection.executemany(
                     """UPDATE session_attachments
-                       SET retention_seconds=NULL, retention_indefinite=1
+                       SET retention_seconds=NULL, retention_expires_at=NULL,
+                           retention_indefinite=1,
+                           audio_projection_pending=CASE
+                               WHEN media_type LIKE 'audio/%' THEN 1
+                               ELSE audio_projection_pending END
                        WHERE attachment_id=? AND session_id=? AND owner_id=?""",
                     [
                         (attachment_id, str(session_id), str(owner_id))
                         for attachment_id in durable_attachment_ids
                     ],
                 )
+            for _attachment_id, asset_id in durable_audio_assets:
+                try:
+                    self.audio_assets.set_indefinite(
+                        asset_id,
+                        owner_id=owner_id,
+                        session_id=session_id,
+                    )
+                except AudioAssetError:
+                    continue
+                with self._lock, self._connection() as connection:
+                    connection.execute(
+                        """UPDATE session_attachments SET audio_projection_pending=0
+                           WHERE asset_id=? AND session_id=? AND owner_id=?
+                             AND state='committed'""",
+                        (asset_id, str(session_id), str(owner_id)),
+                    )
         return {**group, "replayed": replayed}
 
     def audio_asset_bytes(
         self, *, session_id: str, owner_id: str, asset_id: str
     ) -> tuple[dict[str, Any], bytes]:
-        return self.audio_assets.read_bytes(
-            asset_id, owner_id=owner_id, session_id=session_id
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_audio_asset_rows(
+                connection,
+                asset_id=asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+            self.audio_assets.claim(
+                asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+                canonical_managed=True,
+            )
+            return self.audio_assets.read_bytes(
+                asset_id, owner_id=owner_id, session_id=session_id
+            )
 
     def claim_output_audio_asset(
         self,
@@ -6334,40 +6504,112 @@ class SessionStore:
         request_id: str,
         asset_id: str,
     ) -> dict[str, Any]:
-        return self.audio_assets.claim(
-            asset_id,
-            owner_id=owner_id,
-            session_id=session_id,
-            request_id=request_id,
-        )
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            metadata = self.audio_assets.claim(
+                asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+                request_id=request_id,
+                canonical_managed=True,
+            )
+            self._register_audio_asset(
+                connection,
+                metadata=metadata,
+                owner_id=owner_id,
+                session_id=session_id,
+                committed_at=now,
+            )
+            return metadata
 
     def audio_asset_path(
         self, *, session_id: str, owner_id: str, asset_id: str
     ) -> tuple[dict[str, Any], Path]:
-        return self.audio_assets.authorized_path(
-            asset_id, owner_id=owner_id, session_id=session_id
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = self._require_audio_asset_rows(
+                connection,
+                asset_id=asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+            active_lease = connection.execute(
+                """SELECT 1 FROM run_audio_assets
+                   WHERE asset_id=? AND lease_released=0 LIMIT 1""",
+                (str(asset_id),),
+            ).fetchone()
+            if not any(bool(row["retention_indefinite"]) for row in rows) and active_lease is None:
+                raise SessionConflict("audio provider path requires a durable lease")
+            return self.audio_assets.authorized_path(
+                asset_id, owner_id=owner_id, session_id=session_id
+            )
 
     def acquire_audio_asset(
         self, *, session_id: str, owner_id: str, asset_id: str
     ) -> dict[str, Any]:
-        return self.audio_assets.acquire(
-            asset_id, owner_id=owner_id, session_id=session_id
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_audio_asset_rows(
+                connection,
+                asset_id=asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+            return self.audio_assets.acquire(
+                asset_id, owner_id=owner_id, session_id=session_id
+            )
 
     def release_audio_asset(
         self, *, session_id: str, owner_id: str, asset_id: str
     ) -> dict[str, Any]:
-        return self.audio_assets.release(
-            asset_id, owner_id=owner_id, session_id=session_id
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_audio_asset_rows(
+                connection,
+                asset_id=asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+            return self.audio_assets.release(
+                asset_id, owner_id=owner_id, session_id=session_id
+            )
 
     def archive_audio_asset(
         self, *, session_id: str, owner_id: str, asset_id: str
     ) -> dict[str, Any]:
-        return self.audio_assets.set_indefinite(
-            asset_id, owner_id=owner_id, session_id=session_id
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_audio_asset_rows(
+                connection,
+                asset_id=asset_id,
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+            connection.execute(
+                """UPDATE session_attachments
+                   SET retention_seconds=NULL, retention_expires_at=NULL,
+                       retention_indefinite=1, audio_projection_pending=1
+                   WHERE asset_id=? AND state='committed'""",
+                (str(asset_id),),
+            )
+        try:
+            metadata = self.audio_assets.set_indefinite(
+                asset_id, owner_id=owner_id, session_id=session_id
+            )
+        except AudioAssetError:
+            return {
+                "asset_id": str(asset_id),
+                "retention_indefinite": True,
+                "projection_pending": True,
+            }
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """UPDATE session_attachments SET audio_projection_pending=0
+                   WHERE asset_id=? AND state='committed'""",
+                (str(asset_id),),
+            )
+        return metadata
 
     def create_output_audio_asset(
         self,
@@ -6386,7 +6628,9 @@ class SessionStore:
         provider: str = "",
         model: str = "",
     ) -> dict[str, Any]:
-        self.get_run(run_id, owner_id=owner_id)
+        run = self.get_run(run_id, owner_id=owner_id)
+        if str(run["session_id"]) != str(session_id):
+            raise SessionConflict("audio output Run belongs to another Session")
         asset = self.audio_assets.create(
             payload,
             owner_id=owner_id,
@@ -6398,6 +6642,7 @@ class SessionStore:
             duration_ms=duration_ms,
             retention_seconds=retention_seconds,
             retention_indefinite=retention_indefinite,
+            canonical_managed=True,
             correlation={
                 "run_id": str(run_id),
                 "request_id": str(request_id),
@@ -6405,6 +6650,15 @@ class SessionStore:
                 "model": str(model),
             },
         )
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._register_audio_asset(
+                connection,
+                metadata=asset,
+                owner_id=owner_id,
+                session_id=session_id,
+                committed_at=_utc_now(),
+            )
         return {
             "type": "audio",
             "asset_id": asset["asset_id"],
@@ -6543,50 +6797,222 @@ class SessionStore:
                 )
         return expired
 
-    def cleanup_audio_assets(self) -> list[dict[str, Any]]:
-        expired = self.audio_assets.cleanup()
-        if not expired:
-            return []
+    def cleanup_audio_assets(
+        self, *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Claim in SQLite, then idempotently unlink without holding SQL locks."""
+
+        observed_now = now or datetime.now(timezone.utc)
+        if observed_now.tzinfo is None:
+            observed_now = observed_now.replace(tzinfo=timezone.utc)
+        observed_now = observed_now.astimezone(timezone.utc)
+        claimed_at = observed_now.isoformat().replace("+00:00", "Z")
+        claims: dict[str, AudioDeleteClaim] = {}
+        projection_repairs: set[tuple[str, str, str]] = set()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            for asset in expired:
-                asset_id = str(asset["asset_id"])
+            rows = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE asset_id IS NOT NULL AND asset_id != ''
+                     AND media_type LIKE 'audio/%'
+                   ORDER BY asset_id, attachment_id"""
+            ).fetchall()
+            grouped: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["asset_id"]), []).append(row)
+            for asset_id, asset_rows in grouped.items():
+                deleting_rows = [
+                    row for row in asset_rows if str(row["state"]) == "deleting"
+                ]
+                if deleting_rows:
+                    tokens = {
+                        str(row["audio_delete_claim_token"] or "")
+                        for row in deleting_rows
+                    }
+                    if len(tokens) != 1 or not next(iter(tokens)):
+                        continue
+                    owner_ids = {str(row["owner_id"]) for row in deleting_rows}
+                    session_ids = {str(row["session_id"]) for row in deleting_rows}
+                    if len(owner_ids) != 1 or len(session_ids) != 1:
+                        continue
+                    token = next(iter(tokens))
+                    claims[asset_id] = AudioDeleteClaim(
+                        asset_id=asset_id,
+                        owner_id=next(iter(owner_ids)),
+                        session_id=next(iter(session_ids)),
+                        claim_token=token,
+                        claimed_at=str(
+                            deleting_rows[0]["audio_delete_claimed_at"] or claimed_at
+                        ),
+                    )
+                    continue
+                if any(str(row["state"]) != "committed" for row in asset_rows):
+                    continue
+                owners = {str(row["owner_id"]) for row in asset_rows}
+                sessions = {str(row["session_id"]) for row in asset_rows}
+                if len(owners) != 1 or len(sessions) != 1:
+                    continue
+                owner_id = next(iter(owners))
+                session_id = next(iter(sessions))
+                if any(bool(row["retention_indefinite"]) for row in asset_rows):
+                    if any(bool(row["audio_projection_pending"]) for row in asset_rows):
+                        projection_repairs.add((asset_id, owner_id, session_id))
+                    continue
+                attachment_ids = [str(row["attachment_id"]) for row in asset_rows]
+                placeholders = ",".join("?" for _ in attachment_ids)
+                active_run = connection.execute(
+                    "SELECT 1 FROM run_audio_assets "
+                    "WHERE asset_id=? AND lease_released=0 LIMIT 1",
+                    (asset_id,),
+                ).fetchone()
+                durable_output = connection.execute(
+                    f"SELECT 1 FROM run_output_attachments WHERE attachment_id IN ({placeholders}) LIMIT 1",
+                    attachment_ids,
+                ).fetchone()
+                asset_pattern = '%"asset_id":"' + asset_id + '"%'
+                message_reference = connection.execute(
+                    "SELECT 1 FROM messages WHERE session_id=? AND content_json LIKE ? LIMIT 1",
+                    (session_id, asset_pattern),
+                ).fetchone()
+                bound_message = any(
+                    str(row["bound_message_id"] or "") for row in asset_rows
+                )
+                if durable_output is not None or message_reference is not None or bound_message:
+                    connection.execute(
+                        """UPDATE session_attachments
+                           SET retention_seconds=NULL, retention_expires_at=NULL,
+                               retention_indefinite=1, audio_projection_pending=1
+                           WHERE asset_id=? AND state='committed'""",
+                        (asset_id,),
+                    )
+                    projection_repairs.add((asset_id, owner_id, session_id))
+                    continue
+                if active_run is not None:
+                    continue
+                expired = True
+                for row in asset_rows:
+                    expiry_value = str(row["retention_expires_at"] or "")
+                    try:
+                        if expiry_value:
+                            deadline = datetime.fromisoformat(
+                                expiry_value.replace("Z", "+00:00")
+                            )
+                        else:
+                            if row["retention_seconds"] is None:
+                                expired = False
+                                break
+                            created = datetime.fromisoformat(
+                                str(row["uploaded_at"] or row["created_at"]).replace(
+                                    "Z", "+00:00"
+                                )
+                            )
+                            deadline = created + timedelta(
+                                seconds=max(1, int(row["retention_seconds"]))
+                            )
+                    except (TypeError, ValueError):
+                        expired = False
+                        break
+                    if deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=timezone.utc)
+                    if deadline.astimezone(timezone.utc) > observed_now:
+                        expired = False
+                        break
+                if not expired:
+                    continue
+                try:
+                    metadata = self.audio_assets.claim(
+                        asset_id,
+                        owner_id=owner_id,
+                        session_id=session_id,
+                        canonical_managed=True,
+                    )
+                except AudioAssetError:
+                    continue
+                if int(metadata.get("lease_count") or 0) > 0:
+                    continue
+                token = _new_id("audio_delete")
+                updated = connection.execute(
+                    """UPDATE session_attachments
+                       SET state='deleting', audio_delete_claim_token=?,
+                           audio_delete_claimed_at=?
+                       WHERE asset_id=? AND state='committed'""",
+                    (token, claimed_at, asset_id),
+                ).rowcount
+                if updated != len(asset_rows):
+                    raise SessionConflict("audio deletion claim lost canonical ownership")
+                claims[asset_id] = AudioDeleteClaim(
+                    asset_id=asset_id,
+                    owner_id=owner_id,
+                    session_id=session_id,
+                    claim_token=token,
+                    claimed_at=claimed_at,
+                )
+        for asset_id, owner_id, session_id in projection_repairs:
+            try:
+                self.audio_assets.set_indefinite(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+            except AudioAssetError:
+                continue
+            with self._lock, self._connection() as connection:
                 connection.execute(
-                    """UPDATE session_attachments SET state='expired'
+                    """UPDATE session_attachments SET audio_projection_pending=0
                        WHERE asset_id=? AND state='committed'""",
                     (asset_id,),
                 )
-                session_id = str(asset.get("session_id") or "")
-                if not session_id:
-                    continue
-                session_exists = connection.execute(
-                    "SELECT 1 FROM sessions WHERE session_id=?",
-                    (session_id,),
-                ).fetchone()
-                if session_exists is None:
-                    continue
-                run_id = str(
-                    dict(asset.get("correlation") or {}).get("run_id") or ""
-                ) or None
-                if run_id is not None:
-                    run_exists = connection.execute(
-                        "SELECT 1 FROM runs WHERE run_id=? AND session_id=?",
-                        (run_id, session_id),
-                    ).fetchone()
-                    if run_exists is None:
-                        run_id = None
-                self._append_event(
-                    connection,
-                    session_id=session_id,
-                    run_id=run_id,
-                    kind="audio.asset.expired",
-                    status="expired",
-                    phase="retention",
-                    summary="Retained audio bytes expired",
-                    detail={"asset_id": asset_id},
-                    outbox=True,
+        expired_assets: list[dict[str, Any]] = []
+        for claim in claims.values():
+            try:
+                self.audio_assets.begin_delete_claim(
+                    claim.asset_id,
+                    owner_id=claim.owner_id,
+                    session_id=claim.session_id,
+                    claim_token=claim.claim_token,
+                    claimed_at=claim.claimed_at,
                 )
-        return expired
+                asset = self.audio_assets.finish_delete_claim(
+                    claim.asset_id,
+                    owner_id=claim.owner_id,
+                    session_id=claim.session_id,
+                    claim_token=claim.claim_token,
+                    expired_at=claimed_at,
+                )
+            except AudioAssetError:
+                continue
+            with self._lock, self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                affected_rows = connection.execute(
+                    """SELECT DISTINCT session_id FROM session_attachments
+                       WHERE asset_id=? AND state='deleting'
+                         AND audio_delete_claim_token=?""",
+                    (claim.asset_id, claim.claim_token),
+                ).fetchall()
+                updated = connection.execute(
+                    """UPDATE session_attachments
+                       SET state='expired', audio_projection_pending=0
+                       WHERE asset_id=? AND state='deleting'
+                         AND audio_delete_claim_token=?""",
+                    (claim.asset_id, claim.claim_token),
+                ).rowcount
+                if not updated:
+                    continue
+                for row in affected_rows:
+                    self._append_event(
+                        connection,
+                        session_id=str(row["session_id"]),
+                        run_id=None,
+                        kind="audio.asset.expired",
+                        status="expired",
+                        phase="retention",
+                        summary="Retained audio bytes expired",
+                        detail={
+                            "asset_id": claim.asset_id,
+                            "claim_token": claim.claim_token,
+                        },
+                        outbox=True,
+                    )
+            expired_assets.append(asset)
+        return expired_assets
 
     def record_voice_transcript(
         self,
@@ -7049,14 +7475,26 @@ class SessionStore:
             detail: dict[str, Any] = {}
             if has_audio:
                 canonical_kind = "assistant.output.available"
+                output_audio_assets: list[tuple[str, str]] = []
                 for part in parts:
                     if part.get("type") != "audio":
                         continue
-                    self.audio_assets.claim(
+                    metadata = self.audio_assets.claim(
                         str(part["asset_id"]),
                         owner_id=str(run["owner_id"]),
                         session_id=str(run["session_id"]),
                         request_id=str(request_id),
+                        canonical_managed=True,
+                    )
+                    attachment_id = self._register_audio_asset(
+                        connection,
+                        metadata=metadata,
+                        owner_id=str(run["owner_id"]),
+                        session_id=str(run["session_id"]),
+                        committed_at=now,
+                    )
+                    output_audio_assets.append(
+                        (attachment_id, str(part["asset_id"]))
                     )
                 content_json = _json(parts)
                 content_hash = hashlib.sha256(
@@ -7100,6 +7538,20 @@ class SessionStore:
                     )
                 else:
                     message_id = str(existing_message["message_id"])
+                for attachment_id, asset_id in output_audio_assets:
+                    connection.execute(
+                        """UPDATE session_attachments
+                           SET retention_seconds=NULL, retention_expires_at=NULL,
+                               retention_indefinite=1,
+                               bound_message_id=COALESCE(bound_message_id, ?)
+                           WHERE attachment_id=? AND state='committed'""",
+                        (message_id, attachment_id),
+                    )
+                    self.audio_assets.set_indefinite(
+                        asset_id,
+                        owner_id=str(run["owner_id"]),
+                        session_id=str(run["session_id"]),
+                    )
                 self._queue_foreground_message(
                     connection, session_id=str(run["session_id"]), message_id=message_id
                 )

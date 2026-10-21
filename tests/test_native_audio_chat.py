@@ -5,6 +5,9 @@ import base64
 import hashlib
 import io
 import json
+import multiprocessing
+import os
+import sqlite3
 import shutil
 import subprocess
 import wave
@@ -34,7 +37,7 @@ from orchestrator.multimodal_contract import (
     route_request_content,
 )
 from orchestrator.native_audio_delivery import native_reply_content_policy
-from orchestrator.session_store import SessionStore
+from orchestrator.session_store import SessionConflict, SessionStore
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_transcript_gate import (
     await_authorized_transcript,
@@ -73,6 +76,132 @@ def _voice_content(path: Path, *, attachment_id: str = "att-voice") -> dict:
             }
         ]
     )
+
+
+def _accept_audio_process(
+    db_path: str,
+    session_id: str,
+    attachment_id: str,
+    ready,
+    release,
+    results,
+    pause_in_admission: bool,
+) -> None:
+    store = SessionStore(Path(db_path))
+    if pause_in_admission:
+        original_claim = store.audio_assets.claim
+
+        def gated_claim(*args, **kwargs):
+            metadata = original_claim(*args, **kwargs)
+            ready.set()
+            if not release.wait(20):
+                raise RuntimeError("admission test gate timed out")
+            return metadata
+
+        store.audio_assets.claim = gated_claim
+    try:
+        accepted = store.accept_run(
+            session_id=session_id,
+            owner_id="user:7",
+            agent_id="arale",
+            request_id="request-audio-race",
+            text="voice turn",
+            source="test",
+            idempotency_key="idem-audio-race",
+            content=[
+                {
+                    "type": "audio",
+                    "attachment_id": attachment_id,
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                }
+            ],
+        )
+    except Exception as exc:  # pragma: no cover - child-process evidence
+        results.put(("accept_error", type(exc).__name__, str(exc)))
+    else:
+        results.put(("accepted", accepted.run_id, accepted.message_id))
+
+
+def _cleanup_audio_process(
+    db_path: str,
+    now_iso: str,
+    started,
+    ready,
+    release,
+    results,
+    mode: str,
+) -> None:
+    started.set()
+    store = SessionStore(Path(db_path))
+    if mode in {"pause_after_claim", "crash_after_claim"}:
+        original_begin = store.audio_assets.begin_delete_claim
+
+        def controlled_begin(*args, **kwargs):
+            metadata = original_begin(*args, **kwargs)
+            ready.set()
+            if mode == "crash_after_claim":
+                os._exit(17)
+            if not release.wait(20):
+                raise RuntimeError("cleanup claim test gate timed out")
+            return metadata
+
+        store.audio_assets.begin_delete_claim = controlled_begin
+    elif mode == "crash_after_unlink":
+        original_finish = store.audio_assets.finish_delete_claim
+
+        def controlled_finish(*args, **kwargs):
+            original_finish(*args, **kwargs)
+            ready.set()
+            os._exit(18)
+
+        store.audio_assets.finish_delete_claim = controlled_finish
+    try:
+        expired = store.cleanup_audio_assets(
+            now=datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        )
+    except Exception as exc:  # pragma: no cover - child-process evidence
+        results.put(("cleanup_error", type(exc).__name__, str(exc)))
+    else:
+        results.put(("cleaned", [row["asset_id"] for row in expired]))
+
+
+def _prepare_expiring_audio(tmp_path: Path):
+    db_path = tmp_path / "state" / "sessions.sqlite3"
+    store = SessionStore(db_path)
+    session = store.create_session(owner_id="user:7", agent_id="arale")
+    payload = _wav_bytes(tmp_path / "race.wav")
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename="race.wav",
+        media_type="audio/wav",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        semantic_role="voice_message",
+        retention_seconds=60,
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=staged["attachment_id"],
+    )
+    return db_path, session["session_id"], staged["attachment_id"], payload
+
+
+def _join_spawned(process, *, expected_exit: int = 0) -> None:
+    process.join(30)
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        pytest.fail("spawned audio lifecycle process did not terminate")
+    assert process.exitcode == expected_exit
 
 
 def test_voice_manager_native_controls_are_persistent_and_legacy_tts_stays_separate(
@@ -323,6 +452,408 @@ def test_audio_asset_cleanup_is_authorized_lease_aware_and_archive_safe(tmp_path
     assert store.read_bytes(
         archived["asset_id"], owner_id="user:7", session_id="session-a"
     )[1] == payload
+
+
+def test_session_audio_admission_wins_against_spawned_gc(tmp_path):
+    db_path, session_id, attachment_id, payload = _prepare_expiring_audio(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    admission_ready = context.Event()
+    admission_release = context.Event()
+    cleanup_started = context.Event()
+    unused_cleanup_ready = context.Event()
+    unused_cleanup_release = context.Event()
+    results = context.Queue()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    admission = context.Process(
+        target=_accept_audio_process,
+        args=(
+            str(db_path),
+            session_id,
+            attachment_id,
+            admission_ready,
+            admission_release,
+            results,
+            True,
+        ),
+    )
+    cleanup = context.Process(
+        target=_cleanup_audio_process,
+        args=(
+            str(db_path),
+            future,
+            cleanup_started,
+            unused_cleanup_ready,
+            unused_cleanup_release,
+            results,
+            "normal",
+        ),
+    )
+    admission.start()
+    assert admission_ready.wait(20)
+    cleanup.start()
+    assert cleanup_started.wait(20)
+    admission_release.set()
+    _join_spawned(admission)
+    _join_spawned(cleanup)
+
+    outcomes = [results.get(timeout=5) for _ in range(2)]
+    assert {outcome[0] for outcome in outcomes} == {"accepted", "cleaned"}
+    assert next(outcome for outcome in outcomes if outcome[0] == "cleaned") == (
+        "cleaned",
+        [],
+    )
+    store = SessionStore(db_path)
+    assert store.audio_asset_bytes(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )[1] == payload
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT state, retention_indefinite FROM session_attachments "
+            "WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()
+    assert row == ("committed", 1)
+
+
+def test_session_audio_gc_wins_and_rejects_spawned_admission(tmp_path):
+    db_path, session_id, attachment_id, _payload = _prepare_expiring_audio(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    cleanup_started = context.Event()
+    cleanup_ready = context.Event()
+    cleanup_release = context.Event()
+    unused_admission_ready = context.Event()
+    unused_admission_release = context.Event()
+    results = context.Queue()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    cleanup = context.Process(
+        target=_cleanup_audio_process,
+        args=(
+            str(db_path),
+            future,
+            cleanup_started,
+            cleanup_ready,
+            cleanup_release,
+            results,
+            "pause_after_claim",
+        ),
+    )
+    admission = context.Process(
+        target=_accept_audio_process,
+        args=(
+            str(db_path),
+            session_id,
+            attachment_id,
+            unused_admission_ready,
+            unused_admission_release,
+            results,
+            False,
+        ),
+    )
+    cleanup.start()
+    assert cleanup_started.wait(20)
+    assert cleanup_ready.wait(20)
+    admission.start()
+    _join_spawned(admission)
+    admission_result = results.get(timeout=5)
+    assert admission_result[:2] == ("accept_error", "SessionConflict")
+    cleanup_release.set()
+    _join_spawned(cleanup)
+    assert results.get(timeout=5) == ("cleaned", [attachment_id])
+
+    with sqlite3.connect(db_path) as connection:
+        state = connection.execute(
+            "SELECT state FROM session_attachments WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()[0]
+        counts = connection.execute(
+            """SELECT
+                   (SELECT COUNT(*) FROM runs WHERE request_id='request-audio-race'),
+                   (SELECT COUNT(*) FROM messages WHERE text='voice turn'),
+                   (SELECT COUNT(*) FROM idempotency_records
+                      WHERE idempotency_key='idem-audio-race')"""
+        ).fetchone()
+    assert state == "expired"
+    assert counts == (0, 0, 0)
+    with pytest.raises(SessionConflict, match="no longer available"):
+        SessionStore(db_path).archive_audio_asset(
+            session_id=session_id,
+            owner_id="user:7",
+            asset_id=attachment_id,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_exit", "bytes_exist_before_recovery"),
+    [
+        ("crash_after_claim", 17, True),
+        ("crash_after_unlink", 18, False),
+    ],
+)
+def test_session_audio_delete_claim_recovers_after_process_crash(
+    tmp_path, mode, expected_exit, bytes_exist_before_recovery
+):
+    db_path, _session_id, attachment_id, _payload = _prepare_expiring_audio(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    crashed = context.Event()
+    unused_release = context.Event()
+    results = context.Queue()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    cleanup = context.Process(
+        target=_cleanup_audio_process,
+        args=(
+            str(db_path),
+            future,
+            started,
+            crashed,
+            unused_release,
+            results,
+            mode,
+        ),
+    )
+    cleanup.start()
+    assert started.wait(20)
+    assert crashed.wait(20)
+    _join_spawned(cleanup, expected_exit=expected_exit)
+
+    store = SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT state, audio_delete_claim_token FROM session_attachments "
+            "WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()
+    assert row[0] == "deleting"
+    assert row[1]
+    metadata = store.audio_assets._read(attachment_id)
+    asset_path = store.audio_assets.files_root / metadata["storage_name"]
+    assert asset_path.exists() is bytes_exist_before_recovery
+
+    recovered = store.cleanup_audio_assets(
+        now=datetime.fromisoformat(future.replace("Z", "+00:00"))
+    )
+    assert [row["asset_id"] for row in recovered] == [attachment_id]
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT state FROM session_attachments WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()[0] == "expired"
+    assert not asset_path.exists()
+
+
+def test_audio_admission_rollback_has_no_phantom_lease(tmp_path, monkeypatch):
+    db_path, session_id, attachment_id, _payload = _prepare_expiring_audio(tmp_path)
+    store = SessionStore(db_path)
+    original_append = store._append_event
+
+    def fail_run_accepted(connection, **kwargs):
+        if kwargs.get("kind") == "run.accepted":
+            raise RuntimeError("injected admission rollback")
+        return original_append(connection, **kwargs)
+
+    monkeypatch.setattr(store, "_append_event", fail_run_accepted)
+    with pytest.raises(RuntimeError, match="injected admission rollback"):
+        store.accept_run(
+            session_id=session_id,
+            owner_id="user:7",
+            agent_id="arale",
+            request_id="request-rollback",
+            text="voice turn",
+            source="test",
+            idempotency_key="idem-rollback",
+            content=[
+                {
+                    "type": "audio",
+                    "attachment_id": attachment_id,
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                }
+            ],
+        )
+    assert store.audio_assets._read(attachment_id)["lease_count"] == 0
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE request_id='request-rollback'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_records "
+            "WHERE idempotency_key='idem-rollback'"
+        ).fetchone()[0] == 0
+
+
+def test_audio_projection_failure_keeps_canonical_admission_and_repairs(
+    tmp_path, monkeypatch
+):
+    db_path, session_id, attachment_id, payload = _prepare_expiring_audio(tmp_path)
+    store = SessionStore(db_path)
+    original_set_indefinite = store.audio_assets.set_indefinite
+    monkeypatch.setattr(
+        store.audio_assets,
+        "set_indefinite",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AudioAssetNotFound(attachment_id)
+        ),
+    )
+    accepted = store.accept_run(
+        session_id=session_id,
+        owner_id="user:7",
+        agent_id="arale",
+        request_id="request-projection-failure",
+        text="voice turn",
+        source="test",
+        idempotency_key="idem-projection-failure",
+        content=[
+            {
+                "type": "audio",
+                "attachment_id": attachment_id,
+                "semantic_role": "voice_message",
+                "mime_type": "audio/wav",
+            }
+        ],
+    )
+    assert accepted.run_id
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT retention_indefinite, audio_projection_pending "
+            "FROM session_attachments WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone() == (1, 1)
+    monkeypatch.setattr(store.audio_assets, "set_indefinite", original_set_indefinite)
+    assert store.cleanup_audio_assets(
+        now=datetime.now(timezone.utc) + timedelta(minutes=2)
+    ) == []
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT audio_projection_pending FROM session_attachments "
+            "WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()[0] == 0
+    assert store.audio_asset_bytes(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )[1] == payload
+
+
+def test_audio_gc_aggregates_all_attachment_references(tmp_path):
+    db_path, session_id, attachment_id, payload = _prepare_expiring_audio(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        source = connection.execute(
+            "SELECT * FROM session_attachments WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(session_attachments)")]
+        duplicate = dict(zip(columns, source, strict=True))
+        duplicate["attachment_id"] = "att_shared_reference"
+        duplicate["retention_indefinite"] = 1
+        duplicate["retention_seconds"] = None
+        duplicate["retention_expires_at"] = None
+        connection.execute(
+            f"INSERT INTO session_attachments({','.join(columns)}) "
+            f"VALUES({','.join('?' for _ in columns)})",
+            [duplicate[column] for column in columns],
+        )
+    store = SessionStore(db_path)
+    assert store.cleanup_audio_assets(
+        now=datetime.now(timezone.utc) + timedelta(minutes=2)
+    ) == []
+    assert store.audio_asset_bytes(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )[1] == payload
+
+
+def test_canonical_audio_acquire_and_archive_fence_cleanup(tmp_path):
+    db_path, session_id, attachment_id, payload = _prepare_expiring_audio(tmp_path)
+    store = SessionStore(db_path)
+    future = datetime.now(timezone.utc) + timedelta(minutes=2)
+    store.acquire_audio_asset(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )
+    assert store.cleanup_audio_assets(now=future) == []
+    store.release_audio_asset(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )
+    archived = store.archive_audio_asset(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )
+    assert archived["retention_indefinite"] is True
+    assert store.cleanup_audio_assets(now=future) == []
+    assert store.audio_asset_bytes(
+        session_id=session_id,
+        owner_id="user:7",
+        asset_id=attachment_id,
+    )[1] == payload
+
+
+def test_audio_lifecycle_schema_migrates_v24_without_rewriting_rows(tmp_path):
+    db_path = tmp_path / "state" / "sessions.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_metadata(key, value) VALUES('schema_version', '24');
+            CREATE TABLE session_attachments (
+                attachment_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'staged',
+                semantic_role TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER,
+                retention_seconds INTEGER,
+                retention_indefinite INTEGER NOT NULL DEFAULT 0,
+                upload_required INTEGER NOT NULL DEFAULT 0,
+                asset_id TEXT,
+                workspace_path TEXT,
+                bound_message_id TEXT,
+                uploaded_at TEXT,
+                created_at TEXT NOT NULL,
+                committed_at TEXT
+            );
+            INSERT INTO session_attachments(
+                attachment_id,session_id,owner_id,filename,media_type,size_bytes,
+                sha256,state,semantic_role,retention_seconds,asset_id,created_at
+            ) VALUES(
+                'att_legacy','ses_legacy','user:7','legacy.wav','audio/wav',4,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'committed','voice_message',60,'att_legacy','2026-10-21T00:00:00Z'
+            );
+            """
+        )
+    SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(session_attachments)")
+        }
+        legacy = connection.execute(
+            "SELECT attachment_id,state,asset_id FROM session_attachments "
+            "WHERE attachment_id='att_legacy'"
+        ).fetchone()
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert {
+        "retention_expires_at",
+        "audio_delete_claim_token",
+        "audio_delete_claimed_at",
+        "audio_projection_pending",
+    } <= columns
+    assert legacy == ("att_legacy", "committed", "att_legacy")
+    assert version == "25"
 
 
 def test_audio_duration_limit_uses_verified_duration_instead_of_rejecting_all(

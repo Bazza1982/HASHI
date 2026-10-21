@@ -1200,6 +1200,22 @@ The cleanup worker must be:
 - auditable without logging bytes; and
 - able to emit one **audio.asset.expired** Event when a referenced asset expires.
 
+For Session-managed audio, `session_attachments` is the lifecycle owner. Cleanup
+first claims every row for one asset as `deleting` with one durable token in a
+SQLite transaction. Admission, archive, acquire, retrieval, and provider-path
+resolution reject that state. Only after the claim commits may the file store
+project the token and unlink bytes; a second transaction then publishes
+`expired`. Restart recovery repeats the same token and never guesses that a
+`deleting` asset is available again. JSON metadata remains a file projection,
+not an independent retention or deletion decision.
+
+All rows and durable Message/Run/output references for an asset are aggregated
+before a claim. If admission wins the transaction, its indefinite retention and
+Run lease commit with the Message and the bytes remain. If cleanup wins,
+admission writes no Message, Run, or idempotency record. SQLite transactions are
+not held across unlink, and every file-side writer uses the same cross-process
+catalogue lock.
+
 ### 18.5 Provider privacy
 
 Local retention settings do not control an upstream provider's data policy.
