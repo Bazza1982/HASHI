@@ -23,7 +23,8 @@ def register_call_api(api):
         getattr(global_config, "bridge_home", None) or Path(api.config_path).parent
     )
     project_root = Path(
-        getattr(global_config, "project_root", None) or Path(__file__).resolve().parents[2]
+        getattr(global_config, "project_root", None)
+        or Path(__file__).resolve().parents[2]
     )
     media_root = Path(
         getattr(global_config, "base_media_dir", None) or bridge_home / "media"

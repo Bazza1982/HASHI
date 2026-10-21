@@ -1345,9 +1345,7 @@ class CallService:
             return await self.tts_synthesizer.synthesize(
                 call,
                 text,
-                privacy_level=self.ports.privacy_level(
-                    call.binding["agent_id"]
-                ),
+                privacy_level=self.ports.privacy_level(call.binding["agent_id"]),
                 request_id=request_id,
             )
         return await self.adapters.synthesize(

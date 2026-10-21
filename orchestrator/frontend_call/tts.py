@@ -110,7 +110,9 @@ class CatalogCallTTS:
             voice_name = call.tts_effective_voice
             provider_options = dict(call.tts_effective_options)
         else:
-            provider, voice_name, provider_options = self._initial_selection(call, catalog)
+            provider, voice_name, provider_options = self._initial_selection(
+                call, catalog
+            )
         selected = str(call.profile["tts"]["target_id"])
 
         self.temp_root.mkdir(parents=True, exist_ok=True)
@@ -142,7 +144,9 @@ class CatalogCallTTS:
             raise CallError("call_speech_unavailable", 502) from exc
         except (OSError, ValueError) as exc:
             call.tts_error_code = "tts_audio_unavailable"
-            call.tts_error_reason = "The selected speech path returned no playable audio."
+            call.tts_error_reason = (
+                "The selected speech path returned no playable audio."
+            )
             raise CallError("call_speech_unavailable", 502) from exc
         if not audio.startswith(b"OggS") or len(audio) > 32 * 1024 * 1024:
             call.tts_error_code = "tts_audio_invalid"

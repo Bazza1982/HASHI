@@ -126,9 +126,7 @@ def test_call_derives_tts_services_and_voices_from_the_shared_catalog(tmp_path):
     second = config.context("owner", "agent")
 
     assert second["revision"] != first["revision"]
-    refreshed = {
-        row["id"]: row for row in second["targets"] if row["kind"] == "tts"
-    }
+    refreshed = {row["id"]: row for row in second["targets"] if row["kind"] == "tts"}
     assert refreshed["compute-premium"]["voices"] == [
         "premium_one",
         "premium_two",
@@ -245,12 +243,8 @@ def test_call_voice_menu_pages_every_shared_catalog_voice(tmp_path):
     ] + [payload["voices"][1]]
     document = _call_document()
     document["default_profile"]["tts"]["voice_id"] = "premium_00"
-    (tmp_path / "call_profiles.json").write_text(
-        json.dumps(document), encoding="utf-8"
-    )
-    (tmp_path / "voice_catalog.json").write_text(
-        json.dumps(payload), encoding="utf-8"
-    )
+    (tmp_path / "call_profiles.json").write_text(json.dumps(document), encoding="utf-8")
+    (tmp_path / "voice_catalog.json").write_text(json.dumps(payload), encoding="utf-8")
     settings = CallSettings.__new__(CallSettings)
     settings.runtime = SimpleNamespace()
     settings.owner, settings.agent = "owner", "agent"

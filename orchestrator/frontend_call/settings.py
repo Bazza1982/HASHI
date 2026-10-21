@@ -202,7 +202,9 @@ class CallSettings:
                     button(
                         back_label(),
                         "view",
-                        "tts" if page == "voice" or page.startswith("voice.") else "home",
+                        "tts"
+                        if page == "voice" or page.startswith("voice.")
+                        else "home",
                     )
                 ]
             )
