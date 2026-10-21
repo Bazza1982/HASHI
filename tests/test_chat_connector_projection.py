@@ -19,6 +19,36 @@ from orchestrator.session_store import IdempotencyConflict, SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
+def _commit_session_attachment(
+    store: SessionStore,
+    *,
+    session_id: str,
+    owner_id: str,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+) -> dict:
+    staged = store.stage_attachment(
+        session_id=session_id,
+        owner_id=owner_id,
+        filename=filename,
+        media_type=media_type,
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=session_id,
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    return store.commit_attachment(
+        session_id=session_id,
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+    )
+
+
 def test_activity_projects_real_public_channels_and_keeps_disabled_internal_private():
     settings = {"think": True, "commentary": True, "verbose": False}
     store = RequestActivityStore()
@@ -357,6 +387,22 @@ def test_snapshot_keeps_new_scheduled_results_after_a_full_older_log_page(tmp_pa
 def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_path: Path):
     store = SessionStore(tmp_path / "media.sqlite", instance_id="HASHI2")
     session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    attachment = _commit_session_attachment(
+        store,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename="photo.jpg",
+        media_type="image/jpeg",
+        payload=b"x" * 123,
+    )
+    media_part = store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=attachment["attachment_id"],
+        item_index=2,
+        presentation_role="photo",
+        caption="look here",
+    )
     accepted = store.accept_run(
         session_id=session["session_id"],
         owner_id="user:7",
@@ -370,18 +416,7 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
                 "type": "text",
                 "text": "User sent a photo saved at C:\\private\\photo.jpg",
             },
-            {
-                "type": "media",
-                "attachment_id": "attachment-photo",
-                "modality": "image",
-                "kind": "photo",
-                "mime_type": "image/jpeg",
-                "filename": "photo.jpg",
-                "caption": "look here",
-                "local_ref": "C:\\private\\photo.jpg",
-                "sha256": "secret-digest",
-                "size_bytes": 123,
-            },
+            media_part,
         ],
     )
     store.mark_request_running(accepted.request_id, worker_id="fixture")
@@ -402,7 +437,7 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
     assert user["text"] == "look here"
     assert user["attachments"] == [
         {
-            "attachment_id": "attachment-photo",
+            "attachment_id": attachment["attachment_id"],
             "modality": "image",
             "kind": "photo",
             "mime_type": "image/jpeg",
@@ -518,6 +553,22 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
     session = server.session_store.ensure_default_session(
         owner_id="user:7", agent_id="a"
     )
+    attachment = _commit_session_attachment(
+        server.session_store,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename="photo.png",
+        media_type="image/png",
+        payload=payload,
+    )
+    media_part = server.session_store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=attachment["attachment_id"],
+        item_index=1,
+        presentation_role="photo",
+    )
+    media_part["local_ref"] = str(image)
     accepted = server.session_store.accept_run(
         session_id=session["session_id"],
         owner_id="user:7",
@@ -526,25 +577,13 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
         text="photo",
         source="photo",
         idempotency_key="image-preview",
-        content=[
-            {
-                "type": "media",
-                "attachment_id": "attachment-image",
-                "modality": "image",
-                "kind": "photo",
-                "mime_type": "image/png",
-                "filename": "photo.png",
-                "local_ref": str(image),
-                "size_bytes": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        ],
+        content=[media_part],
     )
     request = SimpleNamespace(
         match_info={
             "name": "a",
             "message_id": accepted.message_id,
-            "attachment_id": "attachment-image",
+            "attachment_id": attachment["attachment_id"],
         },
         query={},
         headers={},
@@ -564,6 +603,22 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
 
     escaped_image = tmp_path / "escaped.png"
     escaped_payload = escaped_image.read_bytes()
+    escaped_attachment = _commit_session_attachment(
+        server.session_store,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename="escaped.png",
+        media_type="image/png",
+        payload=escaped_payload,
+    )
+    escaped_part = server.session_store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=escaped_attachment["attachment_id"],
+        item_index=1,
+        presentation_role="photo",
+    )
+    escaped_part["local_ref"] = str(escaped_image)
     escaped_run = server.session_store.accept_run(
         session_id=session["session_id"],
         owner_id="user:7",
@@ -572,25 +627,13 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
         text="outside photo",
         source="photo",
         idempotency_key="escaped-preview",
-        content=[
-            {
-                "type": "media",
-                "attachment_id": "attachment-escaped",
-                "modality": "image",
-                "kind": "photo",
-                "mime_type": "image/png",
-                "filename": "escaped.png",
-                "local_ref": str(escaped_image),
-                "size_bytes": len(escaped_payload),
-                "sha256": hashlib.sha256(escaped_payload).hexdigest(),
-            }
-        ],
+        content=[escaped_part],
     )
     escaped_request = SimpleNamespace(
         match_info={
             "name": "a",
             "message_id": escaped_run.message_id,
-            "attachment_id": "attachment-escaped",
+            "attachment_id": escaped_attachment["attachment_id"],
         },
         query={},
         headers={},
@@ -616,6 +659,21 @@ async def test_transcript_attachment_in_session_attachments_root_is_served(
     session = server.session_store.ensure_default_session(
         owner_id="user:7", agent_id="a"
     )
+    attachment = _commit_session_attachment(
+        server.session_store,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename="session-report.pdf",
+        media_type="application/pdf",
+        payload=payload,
+    )
+    media_part = server.session_store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=attachment["attachment_id"],
+        item_index=1,
+    )
+    media_part["local_ref"] = str(report)
     accepted = server.session_store.accept_run(
         session_id=session["session_id"],
         owner_id="user:7",
@@ -624,25 +682,13 @@ async def test_transcript_attachment_in_session_attachments_root_is_served(
         text="session attachment",
         source="session-api",
         idempotency_key="session-attachment-preview",
-        content=[
-            {
-                "type": "media",
-                "attachment_id": "attachment-session-pdf",
-                "modality": "file",
-                "kind": "file",
-                "mime_type": "application/pdf",
-                "filename": "session-report.pdf",
-                "local_ref": str(report),
-                "size_bytes": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        ],
+        content=[media_part],
     )
     request = SimpleNamespace(
         match_info={
             "name": "a",
             "message_id": accepted.message_id,
-            "attachment_id": "attachment-session-pdf",
+            "attachment_id": attachment["attachment_id"],
         },
         query={},
         headers={},
