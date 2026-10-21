@@ -9,6 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
 from orchestrator import agent_presence_notify
+from orchestrator.frontend_compatibility import normalize_compatibility_command
 from orchestrator.message_context import (
     AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
     MESSAGE_SOURCE_RESERVED_METADATA_KEY,
@@ -66,6 +67,17 @@ def test_authenticated_agentpresence_source_is_typed_in_message_context():
     )
     assert snapshot["message_source"]["id"] == "agentpresence"
     assert snapshot["network_authentication"] == "local_shared_token"
+
+
+def test_agentpresence_slash_text_uses_registered_command_adapter():
+    normalized = normalize_compatibility_command(
+        "/agentpresence",
+        source_channel="api_chat",
+        session_metadata={"session_surface": "agentpresence"},
+    )
+    assert normalized["connector_id"] == "agentpresence"
+    assert normalized["adapter"]["id"] == "agentpresence.command"
+    assert normalized["operation"]["kind"] == "command"
 
 
 @pytest.mark.asyncio

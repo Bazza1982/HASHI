@@ -11,8 +11,9 @@ No binding means no send. AP never derives a target from the character pack,
 the focused window, an Agent list, or a previous conversation. Button-down
 freezes the route; button-up submits one in-memory PCM/WAV recording through the
 existing HASHI voice/STT/Safe Voice path. Text uses the same target and isolated
-`agentpresence/default` Session. A write with an ambiguous outcome is not
-retried.
+`agentpresence/default` Session. Slash-prefixed text follows the same registered
+Frontend Connector command adapter rather than falling outside that contract. A
+write with an ambiguous outcome is not retried.
 
 HASHI admits the reserved source only when `source=surface=agentpresence`, the
 local AP token matches, and the requested instance is the current instance.

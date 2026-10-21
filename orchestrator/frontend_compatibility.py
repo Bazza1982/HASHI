@@ -115,6 +115,7 @@ def _adapter_id(
         "hchat": "hchat.command",
         "remote": "remote.command",
         "exchange": "exchange.command",
+        "agentpresence": "agentpresence.command",
     }[connector_id]
 
 

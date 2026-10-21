@@ -463,6 +463,13 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "route": "standard_fc",
     },
     {
+        "id": "agentpresence.command",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
         "id": "agentpresence.call_state",
         "connector_id": "agentpresence",
         "direction": "egress",
@@ -597,7 +604,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
         "id": "agentpresence",
         "class": "desktop_companion",
-        "ingress": ["message", "voice"],
+        "ingress": ["message", "voice", "command"],
         "egress": ["message", "state", "notification", "media"],
         "canonical_feed": "persistent_session_events",
         "owner_mirror": True,

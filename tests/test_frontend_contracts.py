@@ -125,7 +125,7 @@ def test_registry_maps_legacy_names_to_connector_neutral_ids():
     agentpresence = next(
         item for item in registry["connectors"] if item["id"] == "agentpresence"
     )
-    assert agentpresence["ingress"] == ["message", "voice"]
+    assert agentpresence["ingress"] == ["message", "voice", "command"]
     assert agentpresence["egress"] == [
         "message",
         "state",
@@ -140,6 +140,7 @@ def test_registry_maps_legacy_names_to_connector_neutral_ids():
     assert {
         "agentpresence.message",
         "agentpresence.voice",
+        "agentpresence.command",
         "agentpresence.call_state",
         "agentpresence.notification",
         "agentpresence.voice_mirror",
