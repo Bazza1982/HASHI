@@ -290,7 +290,11 @@ async def test_terminal_listener_schedules_failure_without_blocking_listeners(
     monkeypatch.setattr(
         runtime_session,
         "finish_request_from_listener",
-        lambda *_args, **_kwargs: None,
+        lambda _runtime, _request_id, proposed: runtime_session.TerminalResolution(
+            payload=dict(proposed),
+            run={},
+            continuity_status="captured",
+        ),
     )
 
     async def finish_voice(*_args, **_kwargs):
@@ -310,7 +314,9 @@ async def test_terminal_listener_schedules_failure_without_blocking_listeners(
     payload = {"success": False, "error": "backend failed", "source": "text"}
     await FlexibleAgentRuntime._notify_request_listeners(runtime, "req-source-0005", payload)
 
-    assert scheduled == [("req-source-0005", payload)]
+    assert scheduled == [
+        ("req-source-0005", {**payload, "continuity_status": "captured"})
+    ]
 
 
 @pytest.mark.asyncio
