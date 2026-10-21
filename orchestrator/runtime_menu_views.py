@@ -1349,8 +1349,21 @@ def whatsapp_menu_text(*, enabled: bool) -> str:
     )
 
 
-def agentpresence_menu_text(*, enabled: bool, notice: str | None = None) -> str:
+def agentpresence_menu_text(
+    *,
+    enabled: bool,
+    binding_target: str = "",
+    binding_available: bool = True,
+    notice: str | None = None,
+) -> str:
+    if not binding_available:
+        binding_value = html.escape(_tr("menu.agentpresence.api_unavailable"))
+    elif binding_target:
+        binding_value = f"<code>{html.escape(binding_target)}</code>"
+    else:
+        binding_value = html.escape(_tr("menu.agentpresence.unbound"))
     facts = [
+        _fact("menu.agentpresence.default_agent", binding_value),
         _fact("common.scope", html.escape(_tr("menu.agentpresence.scope")))
     ]
     if notice:

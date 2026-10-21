@@ -213,6 +213,14 @@ ordinary local player does not autoplay, while AgentPresence uses phone-reply
 playback. See
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
+AP text/PTT ingress is separately fail-closed. AP persists exactly one explicit
+`instance + Backend API + default Agent` binding, set with
+`/agentpresence default agent@instance`; without it the device cannot send.
+HASHI requires the AP token and matching instance, forces an independent
+`agentpresence/default` Session, and routes WAV PTT through the ordinary voice
+STT/Safe Voice path. AP verifies the Agent is online before one non-retried
+write, so it never guesses a current Agent or silently changes instances.
+
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).

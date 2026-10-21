@@ -449,6 +449,20 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "route": "standard_fc",
     },
     {
+        "id": "agentpresence.message",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.voice",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
         "id": "agentpresence.call_state",
         "connector_id": "agentpresence",
         "direction": "egress",
@@ -583,7 +597,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
         "id": "agentpresence",
         "class": "desktop_companion",
-        "ingress": [],
+        "ingress": ["message", "voice"],
         "egress": ["message", "state", "notification", "media"],
         "canonical_feed": "persistent_session_events",
         "owner_mirror": True,
@@ -654,6 +668,10 @@ def canonical_connector_id(
         return "remote"
     if _matches(normalized_surface, "hchat") or _matches(transport, "hchat"):
         return "hchat"
+    if _matches(normalized_surface, "agentpresence") or _matches(
+        transport, "agentpresence"
+    ):
+        return "agentpresence"
     if normalized_surface in _DYNAMIC_CONNECTORS:
         return normalized_surface
 
@@ -685,6 +703,8 @@ def canonical_connector_id(
         return "remote"
     if source in {"exchange", "hchat-exchange"}:
         return "exchange"
+    if source == "agentpresence":
+        return "agentpresence"
     if source in {"api", "api_chat", "workbench", "backend-api"}:
         return "backend_api"
     if source in _DYNAMIC_CONNECTORS:

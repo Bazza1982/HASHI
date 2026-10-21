@@ -287,6 +287,8 @@ def _fake_runtime(tmp_path: Path, *, allowed: bool = True) -> SimpleNamespace:
         global_config=SimpleNamespace(
             bridge_home=str(tmp_path),
             authorized_id=12345,
+            instance_id="TEST",
+            workbench_port=18804,
         ),
         _is_command_allowed=(lambda _cmd: True) if allowed else (lambda _cmd: False),
     )
@@ -412,11 +414,15 @@ def test_whatsapp_switch_is_central_and_independent(tmp_path, no_transport_dispa
 
 
 def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
-    tmp_path, no_transport_dispatch
+    tmp_path, no_transport_dispatch, monkeypatch
 ):
+    from orchestrator.commands import agentpresence as agentpresence_command_module
     from orchestrator.command_registry import load_runtime_commands
     from orchestrator.connector_delivery_preferences import get_connector_preference
 
+    monkeypatch.setattr(
+        agentpresence_command_module, "get_hashi_binding", lambda: None
+    )
     runtime = _fake_runtime(tmp_path)
     initial = _run_command(runtime, "/agentpresence")
     assert initial["ok"] is True
@@ -458,12 +464,68 @@ def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
             session_metadata={"owner_id": "owner-a", "ui_locale": "zh-CN"},
         )
     )
-    assert "AGENTPRESENCE MIRROR" in english["messages"][0]["text"]
-    assert "智能体在场镜像" in chinese["messages"][0]["text"]
+    assert "AGENT PRESENCE" in english["messages"][0]["text"]
+    assert "智能体在场" in chinese["messages"][0]["text"]
     command = next(
         item for item in load_runtime_commands() if item.name == "agentpresence"
     )
     assert command.callback.__module__ == "orchestrator.commands.agentpresence"
+
+
+def test_agentpresence_default_target_is_singular_and_instance_scoped(
+    tmp_path, no_transport_dispatch, monkeypatch
+):
+    from orchestrator.commands import agentpresence as agentpresence_command_module
+
+    (tmp_path / "agents.json").write_text(
+        json.dumps(
+            {
+                "global": {"instance_id": "TEST"},
+                "agents": [
+                    {"name": "agent1", "is_active": True},
+                    {"name": "disabled", "is_active": False},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    changes = []
+
+    def set_binding(**kwargs):
+        changes.append(kwargs)
+        target = (
+            f"{kwargs.get('default_agent')}@{kwargs.get('instance_id')}"
+            if kwargs.get("default_agent")
+            else ""
+        )
+        return {"configured": bool(target), "target": target}
+
+    monkeypatch.setattr(agentpresence_command_module, "set_hashi_binding", set_binding)
+    monkeypatch.setattr(
+        agentpresence_command_module,
+        "get_hashi_binding",
+        lambda: {"configured": True, "target": "agent1@TEST"},
+    )
+    runtime = _fake_runtime(tmp_path)
+
+    changed = _run_command(runtime, "/agentpresence default agent1@test")
+    assert changed["ok"] is True
+    assert changes == [
+        {
+            "instance_id": "TEST",
+            "base_url": "http://127.0.0.1:18804",
+            "default_agent": "agent1",
+        }
+    ]
+    assert "agent1@TEST" in changed["messages"][0]["text"]
+
+    wrong_instance = _run_command(runtime, "/agentpresence default agent1@HASHI4")
+    assert wrong_instance["ok"] is True
+    assert len(changes) == 1
+
+    cleared = _run_command(runtime, "/agentpresence default off")
+    assert cleared["ok"] is True
+    assert changes[-1] == {}
 
 
 @pytest.mark.asyncio

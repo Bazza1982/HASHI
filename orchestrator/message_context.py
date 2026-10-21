@@ -23,6 +23,7 @@ MESSAGE_CONTEXT_VERSION = 1
 MESSAGE_CONTEXT_METADATA_KEY = "message_context_snapshot"
 MESSAGE_SOURCE_CLAIM_METADATA_KEY = "message_source_claim"
 MESSAGE_SOURCE_RESERVED_METADATA_KEY = "_message_source_reserved"
+AGENTPRESENCE_AUTHENTICATED_METADATA_KEY = "_agentpresence_authenticated"
 HCHAT_CONTEXT_METADATA_KEY = "_hchat_context"
 PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY = "_private_authorization_results"
 PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY = "_private_authorization_proofs"
@@ -43,6 +44,7 @@ RESERVED_SOURCE_NAMES = {
     "whatsapp": "WhatsApp",
     "hchat": "HChat",
     "workbench": "Workbench-compatible client",
+    "agentpresence": "Agent Presence",
     "api": "Backend API",
     "unknown": "Unknown frontend",
 }
@@ -497,6 +499,11 @@ def build_message_context_snapshot(
         "private_authorizations": authorizations,
         "authorization_scope": "current_message",
     }
+    if (
+        source_fact["id"] == "agentpresence"
+        and inputs.get(AGENTPRESENCE_AUTHENTICATED_METADATA_KEY) is True
+    ):
+        snapshot["network_authentication"] = "local_shared_token"
     hchat = inputs.get(HCHAT_CONTEXT_METADATA_KEY)
     if source_fact["id"] == "hchat" and isinstance(hchat, Mapping):
         from_agent = str(hchat.get("from_agent") or "unknown").strip().casefold()
@@ -792,6 +799,7 @@ __all__ = [
     "MESSAGE_CONTEXT_VERSION",
     "MESSAGE_SOURCE_CLAIM_METADATA_KEY",
     "MESSAGE_SOURCE_RESERVED_METADATA_KEY",
+    "AGENTPRESENCE_AUTHENTICATED_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY",

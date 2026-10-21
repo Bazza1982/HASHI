@@ -15,6 +15,7 @@ token or unreachable companion is fail-open for the originating operation.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import urllib.error
@@ -44,6 +45,76 @@ def _token() -> str:
         return token_path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def token_matches(candidate: Any) -> bool:
+    """Authenticate an AP-labelled ingress without exposing the local token."""
+    expected = _token()
+    supplied = str(candidate or "").strip()
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
+def _json_request(
+    method: str,
+    path: str,
+    payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """One bounded token-authenticated AP settings request; never raises."""
+    token = _token()
+    if not token:
+        return None
+    data = None
+    headers = {
+        "X-AP-Token": token,
+        "User-Agent": "hashi-agent-presence/1",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        try:
+            data = json.dumps(dict(payload)).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        _base_url() + path,
+        data=data,
+        headers=headers,
+        method=str(method or "GET").upper(),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            if not 200 <= int(response.status) < 300:
+                return None
+            decoded = json.loads(response.read().decode("utf-8"))
+            return dict(decoded) if isinstance(decoded, Mapping) else None
+    except (
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+    ):
+        return None
+
+
+def get_hashi_binding() -> dict[str, Any] | None:
+    """Read AP's singular HASHI instance/default-Agent binding."""
+    return _json_request("GET", "/v1/hashi")
+
+
+def set_hashi_binding(
+    *, instance_id: str = "", base_url: str = "", default_agent: str = ""
+) -> dict[str, Any] | None:
+    """Atomically set or clear AP's singular HASHI binding."""
+    return _json_request(
+        "PUT",
+        "/v1/hashi",
+        {
+            "instance_id": str(instance_id or ""),
+            "base_url": str(base_url or ""),
+            "default_agent": str(default_agent or ""),
+        },
+    )
 
 
 def mirror_enabled(bridge_home: Any, owner_id: Any) -> bool:
@@ -259,6 +330,9 @@ __all__ = [
     "VOICE_MAX_BYTES",
     "call_ended",
     "call_started",
+    "get_hashi_binding",
     "mirror_enabled",
+    "set_hashi_binding",
+    "token_matches",
     "voice_bytes",
 ]

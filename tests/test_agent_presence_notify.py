@@ -20,13 +20,18 @@ from orchestrator.session_store import SessionStore
 
 
 class _Response:
-    status = 204
+    def __init__(self, status=204, payload=b"{}"):
+        self.status = status
+        self._payload = payload
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
         return False
+
+    def read(self):
+        return self._payload
 
 
 def test_owner_enabled_notifications_use_token_authenticated_local_api(
@@ -100,6 +105,46 @@ def test_missing_companion_or_token_is_fail_open(tmp_path, monkeypatch):
         agent_presence_notify.voice_bytes(bridge_home, "owner-a", b"", "audio/ogg")
         is False
     )
+
+
+def test_hashi_binding_roundtrip_and_ingress_token_check(tmp_path, monkeypatch):
+    appdata = tmp_path / "appdata"
+    token_dir = appdata / "AgentPresence"
+    token_dir.mkdir(parents=True)
+    (token_dir / "ap-token").write_text("local-token", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("AGENT_PRESENCE_URL", "http://127.0.0.1:7740/")
+    requests = []
+
+    def _urlopen(request, *, timeout):
+        requests.append((request, timeout))
+        payload = {
+            "configured": True,
+            "instance_id": "HASHI3",
+            "base_url": "http://127.0.0.1:18804",
+            "default_agent": "agent1",
+            "target": "agent1@HASHI3",
+        }
+        return _Response(200, json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(agent_presence_notify.urllib.request, "urlopen", _urlopen)
+
+    assert agent_presence_notify.token_matches("local-token") is True
+    assert agent_presence_notify.token_matches("wrong-token") is False
+    assert agent_presence_notify.get_hashi_binding()["target"] == "agent1@HASHI3"
+    changed = agent_presence_notify.set_hashi_binding(
+        instance_id="HASHI3",
+        base_url="http://127.0.0.1:18804",
+        default_agent="agent1",
+    )
+    assert changed["configured"] is True
+    assert [request.method for request, _timeout in requests] == ["GET", "PUT"]
+    assert json.loads(requests[1][0].data) == {
+        "instance_id": "HASHI3",
+        "base_url": "http://127.0.0.1:18804",
+        "default_agent": "agent1",
+    }
+    assert all(timeout == agent_presence_notify.TIMEOUT_SECONDS for _, timeout in requests)
 
 
 @pytest.mark.asyncio

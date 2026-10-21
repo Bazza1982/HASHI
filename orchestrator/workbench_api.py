@@ -147,6 +147,7 @@ from orchestrator.hchat_attachment_contract import (
     canonical_hchat_attachment_manifest,
 )
 from orchestrator.message_context import (
+    AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
     CONNECTOR_EVIDENCE_METADATA_KEY,
     HCHAT_CONTEXT_METADATA_KEY,
     MESSAGE_CONTEXT_METADATA_KEY,
@@ -10206,6 +10207,58 @@ class WorkbenchApiServer:
         )
         return web.json_response(result, status=409)
 
+    def _agentpresence_ingress_rejection(
+        self,
+        request,
+        *,
+        source: Any,
+        surface: Any,
+        instance_id: Any,
+    ):
+        """Authenticate the reserved AP source before any Run is admitted."""
+        source_norm = str(source or "").strip().casefold()
+        surface_norm = str(surface or "").strip().casefold()
+        claims_agentpresence = "agentpresence" in {source_norm, surface_norm}
+        if not claims_agentpresence:
+            return None
+        if source_norm != "agentpresence" or surface_norm != "agentpresence":
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence source and surface must match",
+                    "error_code": "agentpresence_source_mismatch",
+                },
+                status=400,
+            )
+        expected_instance = str(
+            getattr(self.global_config, "instance_id", "") or ""
+        ).strip().upper()
+        requested_instance = str(instance_id or "").strip().upper()
+        if not expected_instance or requested_instance != expected_instance:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence instance binding does not match",
+                    "error_code": "agentpresence_instance_mismatch",
+                },
+                status=409,
+            )
+        from orchestrator.agent_presence_notify import token_matches
+
+        if not token_matches(request.headers.get("X-AP-Token")):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence authentication is required",
+                    "error_code": "agentpresence_auth_required",
+                },
+                status=401,
+            )
+        return None
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -10234,6 +10287,18 @@ class WorkbenchApiServer:
                 else:
                     fields[part.name] = await part.text()
 
+            source = str(fields.get("source") or "api").strip() or "api"
+            surface = str(fields.get("surface") or "workbench").strip() or "workbench"
+            agentpresence_ingress = source.casefold() == "agentpresence"
+            ingress_rejection = self._agentpresence_ingress_rejection(
+                request,
+                source=source,
+                surface=surface,
+                instance_id=fields.get("instance_id"),
+            )
+            if ingress_rejection is not None:
+                return ingress_rejection
+
             agent_name = fields.get("agent") or fields.get("agentId")
             runtime = runtime_map.get(agent_name)
             if runtime is None:
@@ -10248,9 +10313,21 @@ class WorkbenchApiServer:
             session_metadata = {
                 "session_id": fields.get("session_id") or None,
                 "owner_id": self._v1_owner_id(request),
-                "session_surface": fields.get("surface") or "workbench",
-                "session_channel_key": fields.get("client_id") or "default",
+                "session_surface": "agentpresence" if agentpresence_ingress else surface,
+                "session_channel_key": (
+                    "default"
+                    if agentpresence_ingress
+                    else fields.get("client_id") or "default"
+                ),
             }
+            if agentpresence_ingress:
+                session_metadata.update(
+                    {
+                        "session_id": None,
+                        AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
+                        MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
+                    }
+                )
             if fields.get("session_context_generation"):
                 try:
                     generation = int(fields["session_context_generation"])
@@ -10261,7 +10338,7 @@ class WorkbenchApiServer:
                     return web.json_response({"ok": False, "accepted": False,
                         "error_code": "voice_session_changed"}, status=409)
             source_declaration_text = str(fields.get("message_source") or "").strip()
-            if source_declaration_text:
+            if source_declaration_text and not agentpresence_ingress:
                 try:
                     source_declaration = json.loads(source_declaration_text)
                     session_metadata[MESSAGE_SOURCE_CLAIM_METADATA_KEY] = (
@@ -10290,7 +10367,7 @@ class WorkbenchApiServer:
             ):
                 transfer_response = self._transfer_redirect_response(
                     runtime,
-                    source="api",
+                    source=source,
                     session_metadata=session_metadata,
                     idempotency_key=base_idempotency_key,
                     request_fingerprint={
@@ -10330,6 +10407,7 @@ class WorkbenchApiServer:
                 try:
                     request_id = await runtime.enqueue_api_text(
                         text,
+                        source=source,
                         deliver_to_telegram=True,
                         request_metadata=session_metadata,
                         idempotency_key=base_idempotency_key,
@@ -10342,7 +10420,7 @@ class WorkbenchApiServer:
                         raise
                     return self._transfer_redirect_response(
                         runtime,
-                        source="api",
+                        source=source,
                         session_metadata=session_metadata,
                         idempotency_key=base_idempotency_key,
                         request_fingerprint={
@@ -10369,6 +10447,7 @@ class WorkbenchApiServer:
                         filename=original_name,
                         caption=caption or text,
                         emoji=emoji,
+                        source=source,
                         request_metadata=session_metadata,
                         idempotency_key=(
                             f"{base_idempotency_key}:{upload_index}"
@@ -10384,7 +10463,7 @@ class WorkbenchApiServer:
                         local_path.unlink(missing_ok=True)
                         return self._transfer_redirect_response(
                             runtime,
-                            source="api",
+                            source=source,
                             session_metadata=session_metadata,
                             idempotency_key=(
                                 f"{base_idempotency_key}:{upload_index}"
@@ -10445,6 +10524,18 @@ class WorkbenchApiServer:
             )
 
         payload = await request.json()
+        source = str(payload.get("source") or "api").strip() or "api"
+        surface = str(payload.get("surface") or "workbench").strip() or "workbench"
+        agentpresence_ingress = source.casefold() == "agentpresence"
+        ingress_rejection = self._agentpresence_ingress_rejection(
+            request,
+            source=source,
+            surface=surface,
+            instance_id=payload.get("instance_id"),
+        )
+        if ingress_rejection is not None:
+            return ingress_rejection
+
         agent_name = payload.get("agent") or payload.get("agentId")
         text = (payload.get("text") or "").strip()
         attachment_spec = payload.get("attachment")
@@ -10475,7 +10566,6 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "text is required"}, status=400
             )
 
-        source = str(payload.get("source") or "api").strip() or "api"
         if source.casefold().startswith(("bridge-transfer:", "bridge-fork:")):
             return web.json_response(
                 {
@@ -10495,7 +10585,7 @@ class WorkbenchApiServer:
         session_metadata = {
             "session_id": payload.get("session_id") or None,
             "owner_id": self._v1_owner_id(request),
-            "session_surface": payload.get("surface") or "workbench",
+            "session_surface": surface,
             "session_channel_key": payload.get("client_id") or "default",
         }
         if isinstance(supplied_metadata, dict):
@@ -10504,6 +10594,7 @@ class WorkbenchApiServer:
             # result through the general compatibility metadata bag.
             protected_keys = {
                 CONNECTOR_EVIDENCE_METADATA_KEY,
+                AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
                 MESSAGE_CONTEXT_METADATA_KEY,
                 MESSAGE_SOURCE_CLAIM_METADATA_KEY,
                 MESSAGE_SOURCE_RESERVED_METADATA_KEY,
@@ -10529,9 +10620,29 @@ class WorkbenchApiServer:
                 session_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
                     connector_evidence
                 )
+        if agentpresence_ingress:
+            session_metadata.update(
+                {
+                    "session_id": None,
+                    "session_surface": "agentpresence",
+                    "session_channel_key": "default",
+                    AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
+                    MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
+                }
+            )
         telegram_mirror = True
         supplied_delivery_policy = payload.get("delivery_policy")
-        if source.casefold() == "tui":
+        if agentpresence_ingress:
+            if supplied_delivery_policy is not None:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "delivery_policy is not accepted from Agent Presence",
+                        "error_code": "invalid_delivery_policy_source",
+                    },
+                    status=400,
+                )
+        elif source.casefold() == "tui":
             client_id = str(payload.get("client_id") or "").strip()
             try:
                 _normalized_policy = normalize_tui_run_delivery_policy(
