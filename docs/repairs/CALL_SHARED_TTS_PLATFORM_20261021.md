@@ -1,7 +1,7 @@
 # Call shared TTS platform — 2026-10-21
 
-Status: implemented candidate; offline validation complete; HASHI3 Function
-adoption and live audio verification are recorded separately below.
+Status: implemented and adopted on HASHI3; offline and live provider validation
+complete. Physical speaker playback remains a separate user acceptance fact.
 
 ## Authority and ownership
 
@@ -76,9 +76,23 @@ Green offline evidence after implementation:
 
 ## Adoption and live verification
 
-- HASHI3 source commit: the commit containing this decision record.
-- HASHI3 instance configuration migration: pending final publication.
-- `/reboot max` Function adoption: pending.
-- live Compute premium failure → Kokoro audio and Call Window notice: pending.
+- HASHI3 Function source commit: `052109264366a4483c5c7d0c08344bcfb363dc56`.
+- HASHI3 instance configuration migration completed with revision-retaining
+  `orchestrator.config_json` writes. Call has zero copied TTS targets; the
+  merged catalogue exposes 57 Compute Kokoro, 23 Compute MiniCPM, and 30
+  OpenRouter Gemini voices. The existing owner selection remains Compute
+  Kokoro.
+- `/reboot max` receipt `622da7083ed8494d9799b2a7bbb86594` succeeded and
+  committed in 76.9 seconds: shared Functions and all 13 Workers adopted the
+  source commit while Core remained live.
+- The live `/call` settings menu displayed the shared services, including both
+  Compute TTS services and OpenRouter Gemini.
+- A no-speaker live provider canary received a protocol rejection from Compute
+  MiniCPM, followed the declared same-node fallback, and produced valid Ogg
+  audio through Compute Kokoro.
+- Workbench commit `ca5127ce61bb89824b4f1c29c7a9b29637e8f922` passed its
+  Call tests/build, and the published browser bundle containing the localized
+  downgrade notice was loaded. A real Call did not need to be started merely
+  to prove bundle adoption.
 - physical speaker playback/user acceptance: pending user test.
 - HASHI4 source/runtime: not touched.
