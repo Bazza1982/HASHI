@@ -224,6 +224,12 @@ returns a reviewable transcript to AP; AP must explicitly confirm or discard it
 on the same authenticated Session before HASHI creates a Run. Either missing
 setting blocks the write, so neither side guesses a route.
 
+AP desktop releases retain full .NET globalization data. WPF resolves the
+active keyboard layout through `CultureInfo` when its text box receives focus;
+globalization-invariant publishing can therefore terminate AP under Chinese or
+another non-English input method. AP selfcheck verifies the `zh-CN` input
+culture in the published runtime.
+
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
