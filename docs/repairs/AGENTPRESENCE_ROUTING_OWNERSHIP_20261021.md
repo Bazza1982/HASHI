@@ -49,3 +49,21 @@ The user separately authorized this Safe Voice/text-input repair and restarting
 HASHI3 plus Agent Presence on 2026-10-21. Implementation, offline validation and
 running adoption are recorded separately; human microphone and typing acceptance
 remain the user's final check.
+
+Implementation was committed on HASHI3 branch `debug-issues-oct` at
+`c25e9236` and in Agent Presence branch `feat/dc-companion-shell` at
+`557958e`; AP version reporting was then corrected at `27b5d0b` so live
+readiness derives its version from the assembly instead of a copied constant.
+Offline validation completed with the HASHI3 full gate at 862 passed and one
+skipped, the AP HASHI-ingress suite passing, and the AP release publish
+succeeding.
+
+Live adoption was performed only after that validation under the user's explicit
+restart authorization. HASHI3 `/reboot max` operation
+`c7563ac505d743c0861006a4407ad4bc` adopted source commit `c25e9236`, completed
+successfully in 75.9 seconds, and confirmed all 13 configured Agents online with
+no warnings. The restarted AP reported ready as version 1.2.1, retained its
+explicit `HASHI3` loopback binding, and HASHI3 retained `agent1` as the default
+AP ingress Agent. This proves source adoption, route configuration and service
+readiness; it does not claim the user's pending physical keyboard/microphone
+acceptance. Protected Core and HASHI4 were not changed.
