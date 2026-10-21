@@ -97,24 +97,9 @@ def _json_request(
         return None
 
 
-def get_hashi_binding() -> dict[str, Any] | None:
-    """Read AP's singular HASHI instance/default-Agent binding."""
+def get_hashi_instance_binding() -> dict[str, Any] | None:
+    """Read the singular HASHI instance selected in AP."""
     return _json_request("GET", "/v1/hashi")
-
-
-def set_hashi_binding(
-    *, instance_id: str = "", base_url: str = "", default_agent: str = ""
-) -> dict[str, Any] | None:
-    """Atomically set or clear AP's singular HASHI binding."""
-    return _json_request(
-        "PUT",
-        "/v1/hashi",
-        {
-            "instance_id": str(instance_id or ""),
-            "base_url": str(base_url or ""),
-            "default_agent": str(default_agent or ""),
-        },
-    )
 
 
 def mirror_enabled(bridge_home: Any, owner_id: Any) -> bool:
@@ -330,9 +315,8 @@ __all__ = [
     "VOICE_MAX_BYTES",
     "call_ended",
     "call_started",
-    "get_hashi_binding",
+    "get_hashi_instance_binding",
     "mirror_enabled",
-    "set_hashi_binding",
     "token_matches",
     "voice_bytes",
 ]

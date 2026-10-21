@@ -8,7 +8,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
-from orchestrator import agent_presence_notify
+from orchestrator import agent_presence_notify, agent_presence_settings
 from orchestrator.frontend_compatibility import normalize_compatibility_command
 from orchestrator.message_context import (
     AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
@@ -18,12 +18,14 @@ from orchestrator.message_context import (
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
-def _server(tmp_path):
+def _server(tmp_path, *, default_agent="agent1"):
     config_path = tmp_path / "agents.json"
     config_path.write_text(
         json.dumps({"global": {"instance_id": "TEST"}, "agents": [{"name": "agent1"}]}),
         encoding="utf-8",
     )
+    if default_agent:
+        agent_presence_settings.set_default_agent(tmp_path, default_agent)
     media_dir = tmp_path / "media"
     media_dir.mkdir()
     runtime = SimpleNamespace(
@@ -89,7 +91,6 @@ async def test_agentpresence_reserved_source_requires_token_and_exact_instance(
         agent_presence_notify, "token_matches", lambda value: value == "ap-secret"
     )
     base = {
-        "agent": "agent1",
         "text": "hello",
         "source": "agentpresence",
         "surface": "agentpresence",
@@ -132,7 +133,7 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
         response = await client.post(
             "/api/chat",
             json={
-                "agent": "agent1",
+                "agent": "caller-cannot-select-agent",
                 "text": "hello from AP",
                 "source": "agentpresence",
                 "surface": "agentpresence",
@@ -162,7 +163,7 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
 
         form = FormData()
         for key, value in {
-            "agent": "agent1",
+            "agent": "caller-cannot-select-agent",
             "source": "agentpresence",
             "surface": "agentpresence",
             "client_id": "attempted-other-channel",
@@ -193,3 +194,25 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
             voice_kwargs["request_metadata"][AGENTPRESENCE_AUTHENTICATED_METADATA_KEY]
             is True
         )
+
+
+@pytest.mark.asyncio
+async def test_agentpresence_ingress_fails_closed_without_hashi_default_agent(tmp_path, monkeypatch):
+    server, runtime = _server(tmp_path, default_agent="")
+    monkeypatch.setattr(
+        agent_presence_notify, "token_matches", lambda value: value == "ap-secret"
+    )
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "text": "must not guess",
+                "source": "agentpresence",
+                "surface": "agentpresence",
+                "instance_id": "TEST",
+            },
+            headers={"X-AP-Token": "ap-secret"},
+        )
+        assert response.status == 409
+        assert (await response.json())["error_code"] == "agentpresence_agent_unconfigured"
+    runtime.enqueue_api_text.assert_not_awaited()

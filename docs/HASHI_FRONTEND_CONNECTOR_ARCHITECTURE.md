@@ -295,25 +295,28 @@ The companion authenticates with its local token; missing tokens, an absent
 companion, timeouts and rejected egress requests fail open and never change call
 or any other Connector's delivery outcome. Output audio is capped at 25 MB.
 
-AgentPresence also exposes an explicit local message/voice ingress. AP owns one
-all-or-none setting: HASHI instance ID, loopback Backend API origin and default
-Agent. `/agentpresence default agent@instance` validates the target against the
-current instance and writes that setting through AP's token-authenticated API;
-`default off` clears it. There is no inferred current Agent and an unbound AP
-cannot send. PTT freezes the configured target at button-down, records PCM/WAV,
-and submits it at button-up; typed text uses the same route. Before either write,
-AP verifies the exact instance identity and that the Agent is running. An
-ambiguous write timeout is not retried.
+AgentPresence also exposes an explicit local message/voice ingress. Routing has
+two separate owners. AP owns one all-or-none HASHI instance setting: instance ID
+and loopback Backend API origin, configured from AP's tray menu. The selected
+HASHI instance owns its default Agent setting through
+`/agentpresence default <agent>`; `default off` clears only that instance's Agent
+route. AP never stores or submits an Agent name. There is no inferred current
+Agent, and either missing setting prevents sending. PTT freezes the configured
+instance at button-down, records PCM/WAV, and submits it at button-up; typed text
+uses the same route. Before either write, AP verifies the exact instance
+identity. An ambiguous write timeout is not retried.
 
 The Backend API accepts the reserved `agentpresence` source only with the same
-local token and exact instance ID. It discards caller-selected Session/channel
-values, binds every AP message to the connector's independent `default` Session,
-and sends voice through the existing STT, Safe Voice and PAO admission path.
-AgentPresence owns capture and its binding setting, not HASHI Session, Message,
-Run, Event, call, STT or voice authority. Ingress authentication/routing fails
-closed; this is separate from the egress mirror's fail-open policy.
+local token and exact instance ID. It ignores any caller-selected Agent and
+discards caller-selected Session/channel values. HASHI resolves its configured
+default Agent, verifies that it is enabled and running, binds every AP message to
+the connector's independent `default` Session, and sends voice through the
+existing STT, Safe Voice and PAO admission path. AgentPresence owns capture and
+the instance binding, not HASHI Agent, Session, Message, Run, Event, call, STT or
+voice authority. Ingress authentication/routing fails closed; this is separate
+from the egress mirror's fail-open policy.
 The scoped implementation and adoption record is
-[Agent Presence single-instance ingress binding](repairs/AGENTPRESENCE_INGRESS_BINDING_20261021.md).
+[Agent Presence routing ownership](repairs/AGENTPRESENCE_ROUTING_OWNERSHIP_20261021.md).
 
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and

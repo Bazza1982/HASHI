@@ -10259,6 +10259,53 @@ class WorkbenchApiServer:
             )
         return None
 
+    def _agentpresence_runtime(self, runtime_map):
+        """Resolve AP ingress through HASHI-owned instance configuration."""
+        from orchestrator.agent_presence_settings import get_default_agent
+
+        bridge_home = getattr(self.global_config, "bridge_home", None)
+        try:
+            agent_name = get_default_agent(bridge_home) if bridge_home else ""
+        except (OSError, TypeError, ValueError):
+            return None, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence Agent settings are unavailable",
+                    "error_code": "agentpresence_agent_config_unavailable",
+                },
+                status=503,
+            )
+        if not agent_name:
+            return None, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "No default Agent is configured for Agent Presence",
+                    "error_code": "agentpresence_agent_unconfigured",
+                },
+                status=409,
+            )
+        runtime = next(
+            (
+                candidate
+                for name, candidate in runtime_map.items()
+                if str(name).casefold() == agent_name.casefold()
+            ),
+            None,
+        )
+        if runtime is None:
+            return agent_name, None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "The default Agent for Agent Presence is unavailable",
+                    "error_code": "agentpresence_agent_unavailable",
+                },
+                status=409,
+            )
+        return str(getattr(runtime, "name", None) or agent_name), runtime, None
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -10299,12 +10346,19 @@ class WorkbenchApiServer:
             if ingress_rejection is not None:
                 return ingress_rejection
 
-            agent_name = fields.get("agent") or fields.get("agentId")
-            runtime = runtime_map.get(agent_name)
-            if runtime is None:
-                return web.json_response(
-                    {"ok": False, "error": "agent not found"}, status=404
+            if agentpresence_ingress:
+                agent_name, runtime, route_rejection = self._agentpresence_runtime(
+                    runtime_map
                 )
+                if route_rejection is not None:
+                    return route_rejection
+            else:
+                agent_name = fields.get("agent") or fields.get("agentId")
+                runtime = runtime_map.get(agent_name)
+                if runtime is None:
+                    return web.json_response(
+                        {"ok": False, "error": "agent not found"}, status=404
+                    )
 
             text = fields.get("text", "").strip()
             caption = fields.get("caption", "").strip()
@@ -10536,11 +10590,18 @@ class WorkbenchApiServer:
         if ingress_rejection is not None:
             return ingress_rejection
 
-        agent_name = payload.get("agent") or payload.get("agentId")
         text = (payload.get("text") or "").strip()
         attachment_spec = payload.get("attachment")
         workzone_ref = str(payload.get("workzone_ref") or "").strip()
-        runtime = runtime_map.get(agent_name)
+        if agentpresence_ingress:
+            agent_name, runtime, route_rejection = self._agentpresence_runtime(
+                runtime_map
+            )
+            if route_rejection is not None:
+                return route_rejection
+        else:
+            agent_name = payload.get("agent") or payload.get("agentId")
+            runtime = runtime_map.get(agent_name)
         if runtime is None:
             from orchestrator.agent_move.service import moved_agent_destination
 

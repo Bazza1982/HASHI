@@ -12,9 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator import runtime_menu_views, runtime_session, ui_language
-from orchestrator.agent_presence_notify import get_hashi_binding, set_hashi_binding
+from orchestrator.agent_presence_notify import get_hashi_instance_binding
+from orchestrator.agent_presence_settings import (
+    get_default_agent,
+    set_default_agent,
+)
 from orchestrator.command_registry import RuntimeCommand
-from orchestrator.config_json import read_config_json
+from orchestrator.config_json import ConfigConflictError, read_config_json
 from orchestrator.connector_delivery_preferences import (
     get_connector_preference,
     set_connector_preference,
@@ -31,15 +35,6 @@ def _instance_id(runtime: Any) -> str:
     ).strip().upper()
 
 
-def _workbench_base_url(runtime: Any) -> str:
-    port = int(
-        getattr(getattr(runtime, "global_config", None), "workbench_port", 0) or 0
-    )
-    if port < 1 or port > 65535:
-        raise ValueError("workbench port is unavailable")
-    return f"http://127.0.0.1:{port}"
-
-
 def _configured_agents(bridge_home: Any) -> set[str]:
     document = read_config_json(Path(bridge_home) / "agents.json")
     agents = document.get("agents")
@@ -54,18 +49,12 @@ def _configured_agents(bridge_home: Any) -> set[str]:
     }
 
 
-def _parse_target(runtime: Any, bridge_home: Any, value: str) -> tuple[str, str]:
+def _parse_agent(bridge_home: Any, value: str) -> str:
     raw = str(value or "").strip()
-    if raw.count("@") != 1:
-        raise ValueError("target")
-    agent_id, instance_id = (part.strip() for part in raw.split("@", 1))
-    expected_instance = _instance_id(runtime)
-    if not agent_id or instance_id.upper() != expected_instance:
-        raise ValueError("instance")
-    normalized_agent = agent_id.casefold()
+    normalized_agent = raw.casefold()
     if normalized_agent not in _configured_agents(bridge_home):
         raise ValueError("agent")
-    return normalized_agent, expected_instance
+    return normalized_agent
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -116,8 +105,14 @@ async def agentpresence_command(runtime: Any, update: Any, context: Any) -> None
         if str(arg).strip()
     ]
     owner_id = _owner_id(runtime, update)
+    enabled = get_connector_preference(
+        bridge_home,
+        owner_id,
+        CONNECTOR_ID,
+        "mirror",
+        default=False,
+    )
     notice = None
-    binding: dict[str, Any] | None = None
     if args:
         action = args[0].casefold()
         if len(args) == 1 and action in {"on", "off"}:
@@ -132,12 +127,21 @@ async def agentpresence_command(runtime: Any, update: Any, context: Any) -> None
             notice = ui_language.tr(f"menu.agentpresence.notice.{action}")
         elif len(args) == 2 and action == "default":
             if args[1].casefold() in {"off", "none", "clear"}:
-                binding = await asyncio.to_thread(set_hashi_binding)
-                notice_key = "menu.agentpresence.notice.default_cleared"
+                try:
+                    await asyncio.to_thread(set_default_agent, bridge_home)
+                except (OSError, TypeError, ValueError, ConfigConflictError):
+                    await _send(
+                        runtime,
+                        update,
+                        ui_language.tr("menu.agentpresence.config_unavailable"),
+                    )
+                    return
+                notice = ui_language.tr(
+                    "menu.agentpresence.notice.default_cleared"
+                )
             else:
                 try:
-                    agent_id, instance_id = _parse_target(runtime, bridge_home, args[1])
-                    base_url = _workbench_base_url(runtime)
+                    agent_id = _parse_agent(bridge_home, args[1])
                 except (OSError, TypeError, ValueError):
                     await _send(
                         runtime,
@@ -145,53 +149,48 @@ async def agentpresence_command(runtime: Any, update: Any, context: Any) -> None
                         ui_language.tr("menu.agentpresence.invalid_target"),
                     )
                     return
-                binding = await asyncio.to_thread(
-                    set_hashi_binding,
-                    instance_id=instance_id,
-                    base_url=base_url,
-                    default_agent=agent_id,
+                try:
+                    await asyncio.to_thread(
+                        set_default_agent,
+                        bridge_home,
+                        agent_id,
+                    )
+                except (OSError, TypeError, ValueError, ConfigConflictError):
+                    await _send(
+                        runtime,
+                        update,
+                        ui_language.tr("menu.agentpresence.config_unavailable"),
+                    )
+                    return
+                notice = ui_language.tr(
+                    "menu.agentpresence.notice.default_set",
+                    agent=agent_id,
+                    instance=_instance_id(runtime),
                 )
-                notice_key = "menu.agentpresence.notice.default_set"
-            if binding is None:
-                await _send(
-                    runtime,
-                    update,
-                    ui_language.tr("menu.agentpresence.api_unavailable"),
-                )
-                return
-            notice = ui_language.tr(
-                notice_key,
-                target=str(binding.get("target") or ""),
-            )
-            enabled = get_connector_preference(
-                bridge_home,
-                owner_id,
-                CONNECTOR_ID,
-                "mirror",
-                default=False,
-            )
         else:
             await _send(runtime, update, ui_language.tr("menu.agentpresence.usage"))
             return
-    else:
-        enabled = get_connector_preference(
-            bridge_home,
-            owner_id,
-            CONNECTOR_ID,
-            "mirror",
-            default=False,
-        )
-    if binding is None:
-        binding = await asyncio.to_thread(get_hashi_binding)
+
+    try:
+        default_agent = await asyncio.to_thread(get_default_agent, bridge_home)
+        settings_available = True
+    except (OSError, TypeError, ValueError):
+        default_agent = ""
+        settings_available = False
+    binding = await asyncio.to_thread(get_hashi_instance_binding)
     await _send(
         runtime,
         update,
         runtime_menu_views.agentpresence_menu_text(
             enabled=enabled,
-            binding_target=(
-                str(binding.get("target") or "") if binding is not None else ""
+            ap_instance_id=(
+                str(binding.get("instance_id") or "")
+                if binding is not None
+                else ""
             ),
             binding_available=binding is not None,
+            default_agent=default_agent,
+            settings_available=settings_available,
             notice=notice,
         ),
     )
@@ -200,7 +199,7 @@ async def agentpresence_command(runtime: Any, update: Any, context: Any) -> None
 COMMANDS = [
     RuntimeCommand(
         name="agentpresence",
-        description="Control AgentPresence output and default HASHI Agent",
+        description="Control AgentPresence output and default Agent",
         callback=agentpresence_command,
     )
 ]

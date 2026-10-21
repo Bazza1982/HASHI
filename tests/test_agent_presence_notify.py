@@ -107,7 +107,7 @@ def test_missing_companion_or_token_is_fail_open(tmp_path, monkeypatch):
     )
 
 
-def test_hashi_binding_roundtrip_and_ingress_token_check(tmp_path, monkeypatch):
+def test_hashi_instance_binding_read_and_ingress_token_check(tmp_path, monkeypatch):
     appdata = tmp_path / "appdata"
     token_dir = appdata / "AgentPresence"
     token_dir.mkdir(parents=True)
@@ -122,8 +122,6 @@ def test_hashi_binding_roundtrip_and_ingress_token_check(tmp_path, monkeypatch):
             "configured": True,
             "instance_id": "HASHI3",
             "base_url": "http://127.0.0.1:18804",
-            "default_agent": "agent1",
-            "target": "agent1@HASHI3",
         }
         return _Response(200, json.dumps(payload).encode("utf-8"))
 
@@ -131,19 +129,9 @@ def test_hashi_binding_roundtrip_and_ingress_token_check(tmp_path, monkeypatch):
 
     assert agent_presence_notify.token_matches("local-token") is True
     assert agent_presence_notify.token_matches("wrong-token") is False
-    assert agent_presence_notify.get_hashi_binding()["target"] == "agent1@HASHI3"
-    changed = agent_presence_notify.set_hashi_binding(
-        instance_id="HASHI3",
-        base_url="http://127.0.0.1:18804",
-        default_agent="agent1",
-    )
-    assert changed["configured"] is True
-    assert [request.method for request, _timeout in requests] == ["GET", "PUT"]
-    assert json.loads(requests[1][0].data) == {
-        "instance_id": "HASHI3",
-        "base_url": "http://127.0.0.1:18804",
-        "default_agent": "agent1",
-    }
+    binding = agent_presence_notify.get_hashi_instance_binding()
+    assert binding["instance_id"] == "HASHI3"
+    assert [request.method for request, _timeout in requests] == ["GET"]
     assert all(timeout == agent_presence_notify.TIMEOUT_SECONDS for _, timeout in requests)
 
 

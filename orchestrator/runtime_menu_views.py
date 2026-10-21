@@ -1352,18 +1352,27 @@ def whatsapp_menu_text(*, enabled: bool) -> str:
 def agentpresence_menu_text(
     *,
     enabled: bool,
-    binding_target: str = "",
+    ap_instance_id: str = "",
     binding_available: bool = True,
+    default_agent: str = "",
+    settings_available: bool = True,
     notice: str | None = None,
 ) -> str:
     if not binding_available:
-        binding_value = html.escape(_tr("menu.agentpresence.api_unavailable"))
-    elif binding_target:
-        binding_value = f"<code>{html.escape(binding_target)}</code>"
+        instance_value = html.escape(_tr("menu.agentpresence.api_unavailable"))
+    elif ap_instance_id:
+        instance_value = f"<code>{html.escape(ap_instance_id)}</code>"
     else:
-        binding_value = html.escape(_tr("menu.agentpresence.unbound"))
+        instance_value = html.escape(_tr("menu.agentpresence.unbound"))
+    if not settings_available:
+        agent_value = html.escape(_tr("menu.agentpresence.config_unavailable"))
+    elif default_agent:
+        agent_value = f"<code>{html.escape(default_agent)}</code>"
+    else:
+        agent_value = html.escape(_tr("menu.agentpresence.agent_unbound"))
     facts = [
-        _fact("menu.agentpresence.default_agent", binding_value),
+        _fact("menu.agentpresence.hashi_instance", instance_value),
+        _fact("menu.agentpresence.default_agent", agent_value),
         _fact("common.scope", html.escape(_tr("menu.agentpresence.scope")))
     ]
     if notice:

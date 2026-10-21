@@ -421,7 +421,7 @@ def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
     from orchestrator.connector_delivery_preferences import get_connector_preference
 
     monkeypatch.setattr(
-        agentpresence_command_module, "get_hashi_binding", lambda: None
+        agentpresence_command_module, "get_hashi_instance_binding", lambda: None
     )
     runtime = _fake_runtime(tmp_path)
     initial = _run_command(runtime, "/agentpresence")
@@ -472,10 +472,11 @@ def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
     assert command.callback.__module__ == "orchestrator.commands.agentpresence"
 
 
-def test_agentpresence_default_target_is_singular_and_instance_scoped(
+def test_agentpresence_default_agent_is_hashi_owned_and_instance_scoped(
     tmp_path, no_transport_dispatch, monkeypatch
 ):
     from orchestrator.commands import agentpresence as agentpresence_command_module
+    from orchestrator.agent_presence_settings import get_default_agent
 
     (tmp_path / "agents.json").write_text(
         json.dumps(
@@ -489,43 +490,34 @@ def test_agentpresence_default_target_is_singular_and_instance_scoped(
         ),
         encoding="utf-8",
     )
-    changes = []
-
-    def set_binding(**kwargs):
-        changes.append(kwargs)
-        target = (
-            f"{kwargs.get('default_agent')}@{kwargs.get('instance_id')}"
-            if kwargs.get("default_agent")
-            else ""
-        )
-        return {"configured": bool(target), "target": target}
-
-    monkeypatch.setattr(agentpresence_command_module, "set_hashi_binding", set_binding)
     monkeypatch.setattr(
         agentpresence_command_module,
-        "get_hashi_binding",
-        lambda: {"configured": True, "target": "agent1@TEST"},
+        "get_hashi_instance_binding",
+        lambda: {
+            "configured": True,
+            "instance_id": "TEST",
+            "base_url": "http://127.0.0.1:18804",
+        },
     )
     runtime = _fake_runtime(tmp_path)
 
-    changed = _run_command(runtime, "/agentpresence default agent1@test")
+    changed = _run_command(runtime, "/agentpresence default agent1")
     assert changed["ok"] is True
-    assert changes == [
-        {
-            "instance_id": "TEST",
-            "base_url": "http://127.0.0.1:18804",
-            "default_agent": "agent1",
-        }
-    ]
-    assert "agent1@TEST" in changed["messages"][0]["text"]
+    assert get_default_agent(tmp_path) == "agent1"
+    assert "agent1" in changed["messages"][0]["text"]
+    assert "TEST" in changed["messages"][0]["text"]
 
-    wrong_instance = _run_command(runtime, "/agentpresence default agent1@HASHI4")
-    assert wrong_instance["ok"] is True
-    assert len(changes) == 1
+    invalid = _run_command(runtime, "/agentpresence default agent1@HASHI4")
+    assert invalid["ok"] is True
+    assert get_default_agent(tmp_path) == "agent1"
+
+    disabled = _run_command(runtime, "/agentpresence default disabled")
+    assert disabled["ok"] is True
+    assert get_default_agent(tmp_path) == "agent1"
 
     cleared = _run_command(runtime, "/agentpresence default off")
     assert cleared["ok"] is True
-    assert changes[-1] == {}
+    assert get_default_agent(tmp_path) == ""
 
 
 @pytest.mark.asyncio

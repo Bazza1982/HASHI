@@ -1,5 +1,9 @@
 # Agent Presence single-instance ingress binding — 2026-10-21
 
+> Historical implementation/adoption record. Its combined AP-owned
+> `instance + Agent` routing decision is superseded by
+> [Agent Presence routing ownership](AGENTPRESENCE_ROUTING_OWNERSHIP_20261021.md).
+
 ## Decision
 
 Agent Presence is a bidirectional local Frontend Connector. Its egress mirror
