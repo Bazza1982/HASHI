@@ -219,8 +219,10 @@ owns its default Agent through `/agentpresence default <agent>`. AP never stores
 or submits an Agent name. HASHI requires the AP token and matching instance,
 ignores caller Agent/Session/channel values, resolves an enabled running Agent
 from its own setting, forces an independent `agentpresence/default` Session,
-and routes WAV PTT through the ordinary voice STT/Safe Voice path. Either
-missing setting blocks the write, so neither side guesses a route.
+and routes WAV PTT through the ordinary voice STT/Safe Voice path. Safe Voice
+returns a reviewable transcript to AP; AP must explicitly confirm or discard it
+on the same authenticated Session before HASHI creates a Run. Either missing
+setting blocks the write, so neither side guesses a route.
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

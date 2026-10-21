@@ -903,6 +903,10 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post(
+            "/api/agentpresence/voice-decision",
+            self.handle_agentpresence_voice_decision,
+        )
         self.app.router.add_post("/api/tui/speech", self.handle_tui_speech)
         self.app.router.add_post("/api/tui/voice", self.handle_tui_voice)
         self.app.router.add_get(
@@ -10306,6 +10310,81 @@ class WorkbenchApiServer:
             )
         return str(getattr(runtime, "name", None) or agent_name), runtime, None
 
+    async def _agentpresence_voice_confirmation_transport(
+        self,
+        runtime,
+        *,
+        op: str,
+        idempotency_key: str | None = None,
+        pending_id: str | None = None,
+        decision: str | None = None,
+    ) -> dict[str, Any]:
+        """Use the selected Worker's typed Safe Voice lane for authenticated AP."""
+        from orchestrator.voice_confirmation_transport import (
+            encode_voice_confirmation_request,
+        )
+
+        try:
+            text = encode_voice_confirmation_request(
+                op=op,
+                idempotency_key=idempotency_key,
+                pending_id=pending_id,
+                decision=decision,
+            )
+        except ValueError:
+            return {
+                "ok": False,
+                "accepted": False,
+                "error_code": "voice_confirmation_request_invalid",
+                "http_status": 400,
+            }
+        result = await try_execute_slash_command_text(
+            runtime,
+            text,
+            source_channel="agentpresence_api",
+        )
+        if not isinstance(result, Mapping):
+            return {
+                "ok": False,
+                "accepted": None,
+                "error_code": "voice_confirmation_outcome_unknown",
+                "http_status": 503,
+            }
+        return dict(result)
+
+    async def handle_agentpresence_voice_decision(self, request):
+        """Confirm or discard one AP transcript after AP token authentication."""
+        payload = await request.json()
+        source = str(payload.get("source") or "").strip()
+        surface = str(payload.get("surface") or "").strip()
+        ingress_rejection = self._agentpresence_ingress_rejection(
+            request,
+            source=source,
+            surface=surface,
+            instance_id=payload.get("instance_id"),
+        )
+        if ingress_rejection is not None:
+            return ingress_rejection
+        _agent_name, runtime, route_rejection = self._agentpresence_runtime(
+            self._runtime_map()
+        )
+        if route_rejection is not None:
+            return route_rejection
+        result = await self._agentpresence_voice_confirmation_transport(
+            runtime,
+            op="decide",
+            pending_id=str(payload.get("pending_id") or ""),
+            decision=str(payload.get("decision") or ""),
+        )
+        status = int(
+            result.pop("http_status", 200 if result.get("ok") is True else 503)
+        )
+        if result.get("ok") is True:
+            result["accepted"] = result.get("state") == "confirmed"
+        elif "accepted" not in result:
+            result["accepted"] = False
+        return web.json_response(result, status=status)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -10548,6 +10627,46 @@ class WorkbenchApiServer:
                         code = "voice_session_changed"
                     if media_kind == "voice" and code in statuses:
                         local_path.unlink(missing_ok=True)
+                        if (
+                            agentpresence_ingress
+                            and code == "voice_safe_confirmation_required"
+                        ):
+                            confirmation_result = (
+                                await self._agentpresence_voice_confirmation_transport(
+                                    runtime,
+                                    op="read",
+                                    idempotency_key=(
+                                        f"{base_idempotency_key}:{upload_index}"
+                                        if base_idempotency_key
+                                        else None
+                                    ),
+                                )
+                            )
+                            confirmation_status = int(
+                                confirmation_result.pop(
+                                    "http_status",
+                                    200
+                                    if confirmation_result.get("ok") is True
+                                    else 503,
+                                )
+                            )
+                            confirmation = confirmation_result.get("confirmation")
+                            if (
+                                confirmation_result.get("ok") is True
+                                and isinstance(confirmation, Mapping)
+                            ):
+                                return web.json_response(
+                                    {
+                                        "ok": True,
+                                        "accepted": False,
+                                        "confirmation_required": True,
+                                        "voice_confirmation": dict(confirmation),
+                                    }
+                                )
+                            confirmation_result.setdefault("accepted", False)
+                            return web.json_response(
+                                confirmation_result, status=confirmation_status
+                            )
                         rejection = {"ok": False,
                             "accepted": None if request_ids else False,
                             "error_code": code}

@@ -23,7 +23,7 @@ def _wire(**payload):
     return TRANSPORT_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _runtime(tmp_path, *, now=1000.0):
+def _runtime(tmp_path, *, now=1000.0, surface="workbench"):
     clock = [now]
     target = NS(
         name="nana",
@@ -42,19 +42,28 @@ def _runtime(tmp_path, *, now=1000.0):
         enqueue_request=AsyncMock(return_value="request-confirmed"),
     )
     session = runtime_session.current_session(
-        target, surface="workbench", channel_key="default"
+        target, surface=surface, channel_key="default"
     )
     metadata = {
         "session_id": session["session_id"],
         "owner_id": "user:7",
-        "session_surface": "workbench",
+        "session_surface": surface,
         "session_channel_key": "default",
         "session_context_generation": session["context_generation"],
     }
     return target, session, metadata, clock
 
 
-async def _upload(tmp_path, monkeypatch, target, metadata, *, key, transcript="check this text"):
+async def _upload(
+    tmp_path,
+    monkeypatch,
+    target,
+    metadata,
+    *,
+    key,
+    transcript="check this text",
+    source="api",
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     audio = tmp_path / f"{key.replace(':', '-')}.webm"
     audio.write_bytes(b"complete audio bytes")
@@ -66,6 +75,7 @@ async def _upload(tmp_path, monkeypatch, target, metadata, *, key, transcript="c
             audio,
             "voice",
             "voice.webm",
+            source=source,
             request_metadata=metadata,
             idempotency_key=key,
         )
@@ -113,6 +123,68 @@ async def test_safe_voice_transcribes_but_admits_only_after_confirm(tmp_path, mo
     assert call.args[1] == "[Voice message transcription] check this text"
     assert call.kwargs["request_metadata"]["session_id"] == session["session_id"]
     assert call.kwargs["idempotency_key"] == "recording-one:0"
+
+
+@pytest.mark.asyncio
+async def test_agentpresence_safe_voice_uses_its_own_confirmable_session(
+    tmp_path, monkeypatch
+):
+    target, session, metadata, _clock = _runtime(
+        tmp_path, surface="agentpresence"
+    )
+    await _upload(
+        tmp_path,
+        monkeypatch,
+        target,
+        metadata,
+        key="agentpresence:recording-one:0",
+        transcript="send this from the companion",
+        source="agentpresence",
+    )
+    target.enqueue_request.assert_not_awaited()
+
+    read = await try_execute_slash_command_text(
+        target,
+        _wire(op="read", idempotency_key="agentpresence:recording-one:0"),
+        source_channel="agentpresence_api",
+    )
+    assert read["ok"] is True
+    confirmation = read["confirmation"]
+    assert confirmation["transcript"] == "send this from the companion"
+    assert confirmation["session_id"] == session["session_id"]
+
+    wrong_surface = await try_execute_slash_command_text(
+        target,
+        _wire(op="read", idempotency_key="agentpresence:recording-one:0"),
+        source_channel="workbench_api",
+    )
+    assert wrong_surface["error_code"] == "voice_confirmation_forbidden"
+
+    wrong_decision = await execute_local_command(
+        target,
+        _wire(
+            op="decide",
+            pending_id=confirmation["pending_id"],
+            decision="confirm",
+        ),
+        source_channel="workbench_api",
+    )
+    assert wrong_decision["error_code"] == "voice_confirmation_forbidden"
+    target.enqueue_request.assert_not_awaited()
+
+    confirmed = await execute_local_command(
+        target,
+        _wire(
+            op="decide",
+            pending_id=confirmation["pending_id"],
+            decision="confirm",
+        ),
+        source_channel="agentpresence_api",
+    )
+    assert confirmed["request_id"] == "request-confirmed"
+    call = target.enqueue_request.await_args
+    assert call.args[2] == "agentpresence"
+    assert call.kwargs["request_metadata"]["session_surface"] == "agentpresence"
 
 
 @pytest.mark.asyncio

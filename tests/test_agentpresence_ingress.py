@@ -15,6 +15,7 @@ from orchestrator.message_context import (
     MESSAGE_SOURCE_RESERVED_METADATA_KEY,
     build_message_context_snapshot,
 )
+from orchestrator.runtime_media import VoiceIngressError
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -194,6 +195,107 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
             voice_kwargs["request_metadata"][AGENTPRESENCE_AUTHENTICATED_METADATA_KEY]
             is True
         )
+
+
+@pytest.mark.asyncio
+async def test_agentpresence_safe_voice_returns_transcript_and_accepts_explicit_decision(
+    tmp_path, monkeypatch
+):
+    server, runtime = _server(tmp_path)
+    runtime.is_function_worker_proxy = True
+    runtime.enqueue_api_media.side_effect = VoiceIngressError(
+        "voice_safe_confirmation_required"
+    )
+    runtime.execute_slash_command = AsyncMock(
+        side_effect=[
+            {
+                "ok": True,
+                "voice_confirmation_version": 1,
+                "confirmation": {
+                    "version": 1,
+                    "pending_id": "voice-ap-pending",
+                    "state": "pending_confirmation",
+                    "transcript": "review this transcript",
+                    "session_id": "ses-ap",
+                    "context_generation": 1,
+                    "expires_at": "2026-10-21T06:00:00Z",
+                },
+            },
+            {
+                "ok": True,
+                "voice_confirmation_version": 1,
+                "state": "confirmed",
+                "request_id": "req-ap-confirmed",
+                "session_id": "ses-ap",
+                "context_generation": 1,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        agent_presence_notify, "token_matches", lambda value: value == "ap-secret"
+    )
+    headers = {"X-AP-Token": "ap-secret"}
+    form = FormData()
+    for key, value in {
+        "source": "agentpresence",
+        "surface": "agentpresence",
+        "instance_id": "TEST",
+        "media_type": "voice",
+        "idempotency_key": "agentpresence:voice-safe",
+    }.items():
+        form.add_field(key, value)
+    form.add_field(
+        "files",
+        b"RIFF-safe-voice-route-test",
+        filename="voice.wav",
+        content_type="audio/wav",
+    )
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post("/api/chat", data=form, headers=headers)
+        assert response.status == 200
+        pending = await response.json()
+        assert pending["ok"] is True
+        assert pending["accepted"] is False
+        assert pending["confirmation_required"] is True
+        assert pending["voice_confirmation"]["transcript"] == "review this transcript"
+
+        response = await client.post(
+            "/api/agentpresence/voice-decision",
+            json={
+                "source": "agentpresence",
+                "surface": "agentpresence",
+                "instance_id": "TEST",
+                "pending_id": "voice-ap-pending",
+                "decision": "confirm",
+            },
+            headers={"X-AP-Token": "wrong"},
+        )
+        assert response.status == 401
+        assert (await response.json())["error_code"] == "agentpresence_auth_required"
+
+        response = await client.post(
+            "/api/agentpresence/voice-decision",
+            json={
+                "source": "agentpresence",
+                "surface": "agentpresence",
+                "instance_id": "TEST",
+                "pending_id": "voice-ap-pending",
+                "decision": "confirm",
+                "agent": "caller-cannot-select-agent",
+            },
+            headers=headers,
+        )
+        assert response.status == 200
+        confirmed = await response.json()
+        assert confirmed["ok"] is True
+        assert confirmed["accepted"] is True
+        assert confirmed["request_id"] == "req-ap-confirmed"
+
+    assert runtime.execute_slash_command.await_count == 2
+    for call in runtime.execute_slash_command.await_args_list:
+        assert call.kwargs["source_channel"] == "agentpresence_api"
+        assert call.args[0].startswith("__hashi_voice_confirmation_v1__:")
 
 
 @pytest.mark.asyncio

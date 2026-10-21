@@ -945,8 +945,9 @@ async def enqueue_api_voice(
     """Transcribe a basic upload, admitting it only when policy permits.
 
     Safe Voice uploads are held in a Worker-owned, short-lived confirmation
-    record.  Workbench must read and explicitly confirm that transcript through
-    the versioned confirmation transport before a model request exists.
+    record. The authenticated originating frontend must read and explicitly
+    confirm that transcript through the versioned confirmation transport before
+    a model request exists.
     """
     safe_voice_at_start = bool(getattr(runtime, "_safevoice_enabled", False))
     if safe_voice_at_start and not idempotency_key:

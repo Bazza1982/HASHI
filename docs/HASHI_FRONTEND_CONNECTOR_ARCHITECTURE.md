@@ -311,10 +311,14 @@ local token and exact instance ID. It ignores any caller-selected Agent and
 discards caller-selected Session/channel values. HASHI resolves its configured
 default Agent, verifies that it is enabled and running, binds every AP message to
 the connector's independent `default` Session, and sends voice through the
-existing STT, Safe Voice and PAO admission path. AgentPresence owns capture and
-the instance binding, not HASHI Agent, Session, Message, Run, Event, call, STT or
-voice authority. Ingress authentication/routing fails closed; this is separate
-from the egress mirror's fail-open policy.
+existing STT, Safe Voice and PAO admission path. When Safe Voice is enabled,
+HASHI returns the transcript without admitting a Run; AP presents an explicit
+confirm/discard choice, and only an authenticated decision bound to the same
+`agentpresence/default` Session can admit it. AP never silently confirms.
+AgentPresence owns capture, its instance binding and this local presentation,
+not HASHI Agent, Session, Message, Run, Event, call, STT or voice authority.
+Ingress authentication/routing fails closed; this is separate from the egress
+mirror's fail-open policy.
 The scoped implementation and adoption record is
 [Agent Presence routing ownership](repairs/AGENTPRESENCE_ROUTING_OWNERSHIP_20261021.md).
 
