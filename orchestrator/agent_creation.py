@@ -21,11 +21,14 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from orchestrator.config import default_agent_mode_for_backend
-from orchestrator.config_admin import ConfigAdmin
+from orchestrator.config_admin import (
+    AgentScaffoldReceipt,
+    AgentWorkspaceConflictError,
+    ConfigAdmin,
+)
 from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -533,23 +536,6 @@ class AgentCreationService:
             return False
         return self._name_collides(raw, name)
 
-    def _rollback_created_scaffold(
-        self, ws_dir: Path, agent_md_preexisted: bool
-    ) -> None:
-        """Remove only resources created by the current attempt."""
-        try:
-            agent_md = ws_dir / "agent.md"
-            if not agent_md_preexisted and agent_md.exists():
-                agent_md.unlink()
-            if ws_dir.exists():
-                ws_dir.rmdir()  # only succeeds while empty
-        except OSError as exc:
-            logger.warning(
-                "agent_create.rollback incomplete workspace=%s error=%s",
-                ws_dir.name,
-                type(exc).__name__,
-            )
-
     def create(self, spec: AgentCreationSpec) -> AgentCreationResult:
         started = time.monotonic()
         name = validate_agent_name(spec.name)
@@ -610,20 +596,25 @@ class AgentCreationService:
         )
         logger.info("agent_create.config_built agent_name=%s", name)
 
-        agent_md_preexisted = (ws_dir / "agent.md").exists()
         try:
-            published = self.admin.add_agent_to_config(name, agent_cfg, raw_config=raw)
+            receipt = self.admin.add_agent_to_config(
+                name,
+                agent_cfg,
+                raw_config=raw,
+                return_receipt=True,
+            )
+        except AgentWorkspaceConflictError as exc:
+            if self._agent_row_exists(name):
+                raise AgentExistsError(f"agent '{name}' already exists") from exc
+            raise WorkspaceExistsError(
+                f"workspace 'workspaces/{name}' already exists"
+            ) from exc
         except ConfigConflictError as exc:
             if self._agent_row_exists(name):
                 raise ConfigConflictCreationError(
                     "configuration changed while the agent was being created; "
                     "an agent with this name now exists"
                 ) from exc
-            self._rollback_created_scaffold(ws_dir, agent_md_preexisted)
-            logger.info(
-                "agent_create.rollback agent_name=%s reason=config_conflict",
-                name,
-            )
             raise ConfigConflictCreationError(
                 "configuration changed while the agent was being created; try again"
             ) from exc
@@ -648,7 +639,9 @@ class AgentCreationService:
                 "configuration publication could not be confirmed"
             ) from exc
 
-        if not published:
+        if not isinstance(receipt, AgentScaffoldReceipt):
+            raise CreationFailedError("Agent creation returned an invalid receipt")
+        if not receipt.created:
             # Lost a duplicate race; the other request is authoritative.
             logger.info("agent_create.rejected agent_name=%s reason=agent_exists", name)
             raise AgentExistsError(f"agent '{name}' already exists")
@@ -667,5 +660,6 @@ class AgentCreationService:
             active_backend=public_backend_engine(backend),
             workspace_created=True,
             config_published=True,
-            config_revision=self.admin.load_raw_config().revision,
+            durability_warning=not receipt.durability_confirmed,
+            config_revision=receipt.config_revision,
         )
