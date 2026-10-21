@@ -192,7 +192,11 @@ Workbench/TUI play locally; reboot receipts never prove playback.
 `/voice` logs omit secrets. Its validated shipped and instance catalogue owns
 services, voices, menu labels, and fallbacks; Agent state stores no endpoint or
 credential. Compatible local, LAN, and cloud TTS services are configuration,
-not vendor modules. See [catalogue](HASHI_VOICE_TTS_CATALOG.md),
+not vendor modules. `/call` is a separate consumer of this same TTS catalogue
+and execution path: it keeps its own selection/lifecycle, freezes each call's
+revision, privacy-filters configured fallbacks, locks the first successful
+downgrade, and exposes selected/effective services to the Call Window. It no
+longer copies TTS targets or voices. See [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 

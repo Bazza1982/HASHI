@@ -13,6 +13,7 @@ from orchestrator.command_ui import (
     back_label,
     refresh_label,
 )
+from orchestrator.tts_voice_previews import get_tts_voice_preview_assets
 from .config import CallConfig
 from .contract import CallError
 from .voice_catalog import voice_label
@@ -20,6 +21,8 @@ from .voice_previews import get_call_preview, preview_caption
 
 
 class CallSettings:
+    VOICE_PAGE_SIZE = 12
+
     @staticmethod
     def choice(values, index):
         if not str(index).isdigit() or not 0 <= int(index) < len(values):
@@ -32,7 +35,22 @@ class CallSettings:
             getattr(runtime.global_config, "bridge_home", None)
             or runtime.global_config.project_root
         )
-        self.config = CallConfig(Path(root) / "call_profiles.json")
+        project_root = Path(
+            getattr(runtime.global_config, "project_root", None) or root
+        )
+        catalog_default = project_root / "orchestrator" / "voice_catalog.default.json"
+        catalog_options = (
+            {
+                "voice_catalog_path": project_root / "voice_catalog.json",
+                "project_root": project_root,
+            }
+            if catalog_default.is_file()
+            else {}
+        )
+        self.config = CallConfig(
+            Path(root) / "call_profiles.json",
+            **catalog_options,
+        )
         self.config.initialize()
         self.owner, self.agent = runtime_session.owner_id(runtime), runtime.name
 
@@ -105,10 +123,22 @@ class CallSettings:
                 )
             if page == "tts":
                 rows.append([button(tr("call.voice"), "view", "voice")])
-        elif page == "voice":
+        elif page == "voice" or page.startswith("voice."):
             title = tr("call.voice")
             target = selected("tts") or {}
-            for index, voice in enumerate(target.get("voices", [])):
+            try:
+                requested_page = int(page.partition(".")[2] or "0")
+            except ValueError as exc:
+                raise CallError("call_menu_invalid") from exc
+            voices = list(target.get("voices", []))
+            total_pages = max(
+                1, (len(voices) + self.VOICE_PAGE_SIZE - 1) // self.VOICE_PAGE_SIZE
+            )
+            voice_page = min(max(0, requested_page), total_pages - 1)
+            start = voice_page * self.VOICE_PAGE_SIZE
+            for index, voice in enumerate(
+                voices[start : start + self.VOICE_PAGE_SIZE], start=start
+            ):
                 label = voice_label(target, voice)
                 rows.append(
                     [
@@ -122,6 +152,17 @@ class CallSettings:
             if profile["tts"]:
                 current = voice_label(target, profile["tts"]["voice_id"])
                 rows.insert(0, [button(tr("call.voice.preview"), "preview")])
+            navigation = []
+            if voice_page:
+                navigation.append(
+                    button(tr("voice.tts.previous"), "view", f"voice.{voice_page - 1}")
+                )
+            if voice_page + 1 < total_pages:
+                navigation.append(
+                    button(tr("voice.tts.next"), "view", f"voice.{voice_page + 1}")
+                )
+            if navigation:
+                rows.append(navigation)
         elif page == "advanced":
             title = tr("call.advanced")
             for kind in ("stt", "tts", "vision"):
@@ -157,7 +198,13 @@ class CallSettings:
         rows.append([button(refresh_label(), "view", page)])
         if page != "home":
             rows.append(
-                [button(back_label(), "view", "tts" if page == "voice" else "home")]
+                [
+                    button(
+                        back_label(),
+                        "view",
+                        "tts" if page == "voice" or page.startswith("voice.") else "home",
+                    )
+                ]
             )
         return setting_card(
             "☎️",
@@ -201,7 +248,8 @@ class CallSettings:
                 t for t in ctx["targets"] if t["id"] == profile["tts"]["target_id"]
             )
             profile["tts"]["voice_id"] = self.choice(target["voices"], value)
-            page = "voice"
+            page_number = int(value) // self.VOICE_PAGE_SIZE
+            page = "voice" if page_number == 0 else f"voice.{page_number}"
         elif action == "option":
             kind, key_index, index = value.split(".")
             target = next(
@@ -232,6 +280,25 @@ class CallSettings:
             return "", (), ""
         target = targets[slot["target_id"]]
         voice = slot["voice_id"]
+        metadata = (target.get("voice_metadata") or {}).get(voice)
+        if isinstance(metadata, dict):
+            preset = {**metadata, "provider": target["id"]}
+            assets = get_tts_voice_preview_assets(
+                voice,
+                preset,
+                telegram=telegram,
+            )
+            if not assets and preset.get("voice_name"):
+                assets = get_call_preview(
+                    target,
+                    preset["voice_name"],
+                    telegram=telegram,
+                )
+            return (
+                f"call:{target['id']}:{voice}",
+                assets,
+                preview_caption(target, voice),
+            )
         return (
             f"call:{target['model']}:{voice}",
             get_call_preview(target, voice, telegram=telegram),

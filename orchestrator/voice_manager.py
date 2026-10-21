@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -186,6 +186,19 @@ def _installed_windows_voice_names() -> frozenset[str]:
     return frozenset(line.strip() for line in completed.stdout.splitlines() if line.strip())
 
 
+@dataclass(frozen=True)
+class ConfiguredTTSResult:
+    """One shared TTS execution result for /voice or another PAO consumer."""
+
+    asset: VoiceAsset
+    selected_provider: str
+    effective_provider: str
+    effective_voice_name: str | None
+    effective_provider_options: dict[str, object]
+    fallback_chain: tuple[str, ...]
+    attempts: tuple[dict[str, object], ...]
+
+
 _SOURCE_ROOT = Path(
     os.environ.get("HASHI_SOURCE_ROOT")
     or os.environ.get("BRIDGE_HOME")
@@ -293,6 +306,9 @@ class VoiceManager:
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
         self.project_root = Path(project_root or self.PROJECT_ROOT).resolve()
+        self.catalog_path = (
+            Path(catalog_path).resolve() if catalog_path is not None else None
+        )
         self.state_path = workspace_dir / "voice_state.json"
         self.output_dir = media_dir / "voice"
         self.ffmpeg_cmd = ffmpeg_cmd
@@ -308,7 +324,7 @@ class VoiceManager:
         )
         try:
             self.voice_catalog = VoiceCatalog.load(
-                instance_path=Path(catalog_path) if catalog_path is not None else None,
+                instance_path=self.catalog_path,
                 project_root=self.project_root,
             )
             self._voice_catalog_error: VoiceCatalogError | None = None
@@ -317,12 +333,43 @@ class VoiceManager:
             # Worker down. Voice actions fail closed until the file is repaired.
             self.voice_catalog = VoiceCatalog.load(project_root=self.project_root)
             self._voice_catalog_error = exc
+        self._voice_catalog_signature = self._catalog_signature()
         self.VOICE_PRESETS = self.voice_catalog.presets
         self._provider_cooldowns: dict[str, tuple[float, VoiceProviderFailure]] = {}
         self.voice_audit_path = self.workspace_dir / "logs" / "voice_synthesis.jsonl"
         self._voice_audit_lock = threading.Lock()
 
+    def _catalog_signature(self) -> tuple[int, int] | None:
+        if self.catalog_path is None:
+            return None
+        try:
+            stat = self.catalog_path.stat()
+        except FileNotFoundError:
+            return (0, 0)
+        except OSError:
+            return (-1, -1)
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+
+    def _refresh_voice_catalog(self) -> None:
+        signature = self._catalog_signature()
+        if signature == self._voice_catalog_signature:
+            return
+        try:
+            catalog = VoiceCatalog.load(
+                instance_path=self.catalog_path,
+                project_root=self.project_root,
+            )
+        except VoiceCatalogError as exc:
+            self._voice_catalog_error = exc
+            self._voice_catalog_signature = signature
+            return
+        self.voice_catalog = catalog
+        self.VOICE_PRESETS = catalog.presets
+        self._voice_catalog_error = None
+        self._voice_catalog_signature = signature
+
     def _require_voice_catalog(self) -> None:
+        self._refresh_voice_catalog()
         if self._voice_catalog_error is not None:
             raise RuntimeError(
                 "Voice catalog is unreadable; no voice setting was changed: "
@@ -339,7 +386,12 @@ class VoiceManager:
     def _service_menu_label(self, service_id: str) -> str:
         return self.voice_catalog.service_menu_label(service_id)
 
-    def _active_provider_failure(self, provider_name: str) -> VoiceProviderFailure | None:
+    def _active_provider_failure(
+        self,
+        provider_name: str,
+        *,
+        configured_label: str | None = None,
+    ) -> VoiceProviderFailure | None:
         name = str(provider_name or "").strip().casefold()
         current = self._provider_cooldowns.get(name)
         if current is None:
@@ -353,7 +405,7 @@ class VoiceManager:
             failure.code,
             (
                 f"{failure.reason} "
-                f"{_provider_label(name, self._service_label(name))} is temporarily "
+                f"{_provider_label(name, configured_label)} is temporarily "
                 "bypassed after that failure."
             ),
             False,
@@ -1418,9 +1470,11 @@ class VoiceManager:
         voice_name: str | None,
         *,
         locale: str | None,
+        catalog: VoiceCatalog | None = None,
     ) -> str:
+        selected_catalog = catalog or self.voice_catalog
         folded_voice = str(voice_name or "").strip().casefold()
-        for alias, preset in self.VOICE_PRESETS.items():
+        for alias, preset in selected_catalog.presets.items():
             if (
                 str(preset.get("provider") or "").strip().casefold() == provider
                 and str(preset.get("voice_name") or "").strip().casefold() == folded_voice
@@ -1428,7 +1482,7 @@ class VoiceManager:
                 return self.voice_preset_menu_label(alias, locale=locale)
         if voice_name:
             return str(voice_name)
-        return _provider_label(provider, self._service_label(provider))
+        return _provider_label(provider, selected_catalog.service_label(provider))
 
     def _routing_notice(
         self,
@@ -1439,7 +1493,9 @@ class VoiceManager:
         fallback_from: str | None,
         fallback_reason: str | None,
         locale: str | None,
+        catalog: VoiceCatalog | None = None,
     ) -> str | None:
+        selected_catalog = catalog or self.voice_catalog
         chinese = str(locale or "").strip().casefold().startswith("zh")
         notices: list[str] = []
         if final_route.adapted_from_voice:
@@ -1447,11 +1503,13 @@ class VoiceManager:
                 final_route.provider,
                 final_route.adapted_from_voice,
                 locale=locale,
+                catalog=selected_catalog,
             )
             new_voice = self._runtime_voice_label(
                 final_route.provider,
                 final_voice_name or final_route.voice_name,
                 locale=locale,
+                catalog=selected_catalog,
             )
             language = self._notice_language_name(
                 final_route.language.language,
@@ -1469,10 +1527,11 @@ class VoiceManager:
                 )
         if fallback_from:
             primary = _provider_label(
-                fallback_from, self._service_label(fallback_from)
+                fallback_from, selected_catalog.service_label(fallback_from)
             )
             fallback = _provider_label(
-                final_route.provider, self._service_label(final_route.provider)
+                final_route.provider,
+                selected_catalog.service_label(final_route.provider),
             )
             reason = safe_voice_error_detail(fallback_reason or "")[:240]
             if chinese:
@@ -1498,19 +1557,109 @@ class VoiceManager:
         source_language: str | None = None,
         source_surface: str = "unknown",
     ) -> VoiceAsset | None:
-        import asyncio
-
-        logger = logging.getLogger(f"Runtime.{agent_name}.voice")
         state = self._load()
         if not force and not state.get("enabled"):
             return None
-        self._require_voice_catalog()
+        result = await self._synthesize_configured_state(
+            agent_name=agent_name,
+            request_id=request_id,
+            text=text,
+            state=state,
+            max_retries=max_retries,
+            max_chars_override=max_chars_override,
+            source_language=source_language,
+            source_surface=source_surface,
+        )
+        return result.asset
+
+    async def synthesize_configured(
+        self,
+        *,
+        agent_name: str,
+        request_id: str,
+        text: str,
+        provider: str,
+        voice_name: str | None,
+        provider_options: dict | None = None,
+        requested_style: str | None = None,
+        rate: int = 0,
+        max_chars: int = 1200,
+        max_retries: int = 2,
+        source_language: str | None = None,
+        source_surface: str = "shared_tts",
+        catalog: VoiceCatalog | None = None,
+        provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
+        output_dir: Path | None = None,
+    ) -> ConfiguredTTSResult:
+        """Synthesize one explicit selection through the shared TTS platform.
+
+        Consumers keep their own selection and lifecycle. This method owns the
+        common catalogue, language routing, provider adapters, cooldown and
+        monotonic fallback behavior.
+        """
+
+        state = {
+            "provider": str(provider or "").strip().casefold(),
+            "voice_name": voice_name,
+            "provider_options": dict(provider_options or {}),
+            "voice_profile": requested_style,
+            "rate": int(rate),
+            "max_chars": max(1, int(max_chars)),
+        }
+        return await self._synthesize_configured_state(
+            agent_name=agent_name,
+            request_id=request_id,
+            text=text,
+            state=state,
+            max_retries=max_retries,
+            max_chars_override=max_chars,
+            source_language=source_language,
+            source_surface=source_surface,
+            catalog=catalog,
+            provider_allowed=provider_allowed,
+            output_dir=output_dir,
+        )
+
+    async def _synthesize_configured_state(
+        self,
+        *,
+        agent_name: str,
+        request_id: str,
+        text: str,
+        state: dict,
+        max_retries: int,
+        max_chars_override: int | None,
+        source_language: str | None,
+        source_surface: str,
+        catalog: VoiceCatalog | None = None,
+        provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
+        output_dir: Path | None = None,
+    ) -> ConfiguredTTSResult:
+        import asyncio
+
+        logger = logging.getLogger(f"Runtime.{agent_name}.voice")
+        if catalog is None:
+            self._require_voice_catalog()
+            selected_catalog = self.voice_catalog
+        else:
+            selected_catalog = catalog
+
+        def service(service_id: str) -> dict[str, object]:
+            return selected_catalog.service(service_id)
+
+        def service_label(service_id: str) -> str:
+            return selected_catalog.service_label(service_id)
+
+        def allowed(service_id: str) -> bool:
+            return provider_allowed is None or bool(
+                provider_allowed(service_id, service(service_id))
+            )
 
         primary_name = str(
             state.get("provider") or _default_tts_provider()
         ).strip().casefold()
-        self._service(primary_name)
-        routing_profiles = self.voice_catalog.routing_profiles()
+        service(primary_name)
+        routing_profiles = selected_catalog.routing_profiles()
         style_id = self._voice_profile_from_state(state)
         max_attempts = max(0, int(max_retries)) + 1
         max_chars = (
@@ -1525,15 +1674,18 @@ class VoiceManager:
             requested_style=style_id,
             text=text,
             source_language=source_language,
-            presets=self.VOICE_PRESETS,
+            presets=selected_catalog.presets,
             profiles=self.VOICE_PROFILES,
             provider_profiles=routing_profiles,
         )
-        available_providers = set(self.list_providers())
-        fallback_chain = fallback_providers(
+        available_providers = set(selected_catalog.service_ids)
+        declared_fallback_chain = fallback_providers(
             primary_name,
             available_providers,
             routing_profiles,
+        )
+        fallback_chain = tuple(
+            candidate for candidate in declared_fallback_chain if allowed(candidate)
         )
         attempts: list[dict[str, object]] = []
         audit: dict[str, object] = {
@@ -1564,7 +1716,8 @@ class VoiceManager:
                     "style_reason": primary_route.style_reason,
                     "capability_source": primary_route.capability_source,
                 },
-                "fallback_candidates": list(fallback_chain),
+                "fallback_candidates": list(declared_fallback_chain),
+                "eligible_fallback_candidates": list(fallback_chain),
             },
             "attempts": attempts,
         }
@@ -1575,7 +1728,7 @@ class VoiceManager:
                 route.provider,
                 "tts_language_unsupported",
                 (
-                    f"{_provider_label(route.provider, self._service_label(route.provider))} "
+                    f"{_provider_label(route.provider, service_label(route.provider))} "
                     "has no configured voice "
                     f"that supports language: {language}."
                 ),
@@ -1620,13 +1773,13 @@ class VoiceManager:
                 provider = build_provider(
                     route.provider,
                     ffmpeg_cmd=self.ffmpeg_cmd,
-                    provider_config=self._service(route.provider),
+                    provider_config=service(route.provider),
                     secrets=self._secrets,
                     bridge_home=self.project_root,
                 )
                 asset = await provider.synthesize(
                     text=text,
-                    output_dir=self.output_dir,
+                    output_dir=Path(output_dir or self.output_dir),
                     stem=stem,
                     voice_name=route.voice_name,
                     rate=int(state.get("rate", 0)),
@@ -1637,7 +1790,7 @@ class VoiceManager:
                 failure = _provider_failure(
                     route.provider,
                     exc,
-                    configured_label=self._service_label(route.provider),
+                    configured_label=service_label(route.provider),
                 )
                 attempts.append(
                     {
@@ -1679,7 +1832,19 @@ class VoiceManager:
                 None,
             )
 
-        primary_failure = self._active_provider_failure(primary_name)
+        primary_failure = (
+            VoiceProviderFailure(
+                primary_name,
+                "tts_privacy_blocked",
+                f"{service_label(primary_name)} is not allowed by the current privacy level.",
+                False,
+            )
+            if not allowed(primary_name)
+            else self._active_provider_failure(
+                primary_name,
+                configured_label=service_label(primary_name),
+            )
+        )
         primary_asset: VoiceAsset | None = None
         if primary_failure is None:
             for attempt in range(max_attempts):
@@ -1697,6 +1862,7 @@ class VoiceManager:
                         fallback_from=None,
                         fallback_reason=None,
                         locale=source_language,
+                        catalog=selected_catalog,
                     )
                     primary_asset = replace(primary_asset, notice=notice)
                     audit["result"] = {
@@ -1706,7 +1872,15 @@ class VoiceManager:
                         "notice": notice,
                     }
                     self._write_voice_audit(audit, logger)
-                    return primary_asset
+                    return ConfiguredTTSResult(
+                        asset=primary_asset,
+                        selected_provider=primary_name,
+                        effective_provider=primary_route.provider,
+                        effective_voice_name=primary_asset.voice_name,
+                        effective_provider_options=dict(primary_route.provider_options),
+                        fallback_chain=tuple(fallback_chain),
+                        attempts=tuple(copy.deepcopy(attempts)),
+                    )
                 assert primary_failure is not None
                 if not primary_failure.retryable or attempt + 1 >= max_attempts:
                     break
@@ -1734,7 +1908,10 @@ class VoiceManager:
 
         assert primary_failure is not None
         failures: list[VoiceProviderFailure] = [primary_failure]
-        if primary_failure.code != "tts_language_unsupported":
+        if primary_failure.code not in {
+            "tts_language_unsupported",
+            "tts_privacy_blocked",
+        }:
             self._remember_provider_failure(primary_failure)
 
         for fallback_name in fallback_chain:
@@ -1752,11 +1929,14 @@ class VoiceManager:
                 requested_style=style_id,
                 text=text,
                 source_language=primary_route.language.language or source_language,
-                presets=self.VOICE_PRESETS,
+                presets=selected_catalog.presets,
                 profiles=self.VOICE_PROFILES,
                 provider_profiles=routing_profiles,
             )
-            active_failure = self._active_provider_failure(fallback_name)
+            active_failure = self._active_provider_failure(
+                fallback_name,
+                configured_label=service_label(fallback_name),
+            )
             if active_failure is not None:
                 failures.append(active_failure)
                 attempts.append(
@@ -1791,6 +1971,7 @@ class VoiceManager:
                 fallback_from=primary_name,
                 fallback_reason=primary_failure.reason,
                 locale=source_language,
+                catalog=selected_catalog,
             )
             fallback_asset = replace(
                 fallback_asset,
@@ -1808,7 +1989,15 @@ class VoiceManager:
                 "notice": notice,
             }
             self._write_voice_audit(audit, logger)
-            return fallback_asset
+            return ConfiguredTTSResult(
+                asset=fallback_asset,
+                selected_provider=primary_name,
+                effective_provider=fallback_route.provider,
+                effective_voice_name=fallback_asset.voice_name,
+                effective_provider_options=dict(fallback_route.provider_options),
+                fallback_chain=tuple(fallback_chain),
+                attempts=tuple(copy.deepcopy(attempts)),
+            )
 
         code = (
             primary_failure.code

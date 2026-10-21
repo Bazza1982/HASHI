@@ -1,10 +1,10 @@
-# HASHI `/voice` TTS catalogue
+# HASHI shared TTS catalogue
 
-Status: adopted PAO Function design for ordinary `/voice` synthesis.
+Status: adopted PAO Function design for `/voice` and `/call` synthesis.
 
 ## Decision
 
-`/voice` consumes a validated service and voice catalogue. A service entry
+`/voice` and `/call` consume one validated service and voice catalogue. A service entry
 selects a protocol adapter; it is not a Python registration for a vendor. New
 OpenAI-compatible local, LAN, or cloud TTS services and their voices are added
 through instance configuration, without editing Python.
@@ -23,11 +23,16 @@ ordinary `openai_compatible` service declaration.
 
 ## Ownership and boundaries
 
-- PAO owns `/voice` selection, persistence, routing, and failure reporting.
+- PAO owns the shared TTS catalogue, routing, adapters, fallback execution, and
+  failure reporting. `/voice` and `/call` remain separate consumers and persist
+  separate selections.
 - TTS protocol adapters are replaceable Functions. Built-in operating-system
   adapters remain implementation adapters; remote service instances are data.
-- `/call` remains a separate Workbench capability with its own profiles and
-  state. It shares only the OpenAI-compatible speech wire validator.
+- `/call` remains a separate Workbench capability with its own profiles,
+  segmentation, playback, interruption, and call state. It derives TTS
+  services and voices from this catalogue and uses the same language routing,
+  adapters, cooldowns, privacy filtering, and ordered fallback execution as
+  `/voice`; it does not call the `/voice` command or share Agent voice state.
 - Workbench `/voice` and `/say` return the generated Ogg asset to Workbench and,
   when an owner enables a registry-declared mirror, commit those same bytes to
   an independent FC media outbox in the Agent's hidden activity Session. This
@@ -37,16 +42,19 @@ ordinary `openai_compatible` service declaration.
   prevent Workbench from receiving the generated speech asset. Workbench's
   ordinary reply player remains non-autoplay, so an enabled local presentation
   frontend is the sole automatic speaker on the same machine.
-- A catalogue edit does not reboot Core or prove that a running Worker adopted
-  it. Adoption and live audio playback are separate facts.
+- A valid catalogue revision is loaded for new `/voice` requests and new calls
+  without a Core restart. An active call retains the immutable catalogue
+  snapshot with which it started. Configuration adoption and physical audio
+  playback remain separate facts.
 
 ## Instance configuration
 
 Start with `examples/voice_catalog.example.json`, copy it to the repository
-root as `voice_catalog.json`, and edit only the instance copy. Existing and
-future Agent Workers load that same instance catalogue when they start. Each
-Agent still keeps its selected service and voice in its own revisioned
-`voice_state.json`.
+root as `voice_catalog.json`, and edit only the instance copy. Existing Agent
+Workers safely refresh a changed valid revision before a new synthesis; new
+calls freeze the revision they start with. Each Agent still keeps its `/voice`
+selection in its own revisioned `voice_state.json`, while Call stores its
+selection in the separate Call profile.
 
 Service fields:
 
@@ -94,16 +102,26 @@ conversion. Saved Agent state contains service and voice identifiers, not
 endpoint URLs or credentials. Provider failures remain explicit and use the
 existing bounded fallback and audit path.
 
-The menu derives its voices and localized labels from the merged catalogue and
-paginates large catalogues. Selecting a voice persists the exact service ID,
-voice value, and declared per-voice options.
+The `/voice` and `/call` menus derive their voices and localized labels from the
+merged catalogue and paginate large catalogues. Selecting a voice persists the
+exact service ID, voice alias, and declared per-voice options in the owning
+consumer only.
+
+Call evaluates the selected service followed by its configured fallback IDs.
+Cloud candidates are skipped when the current privacy level disallows them.
+After one segment falls back, the call keeps that effective service for later
+segments; it does not oscillate between voices. The Call snapshot exposes both
+selected and effective service labels so the initiating Call Window can render
+one explicit downgrade notice. Agent Presence receives lifecycle events only
+and never becomes a second Call audio output.
 
 ## Validation contract
 
 Focused tests cover catalogue merge and schema rejection, configuration-only
 service creation, menu selection and pagination, missing credentials,
 no-redirect/no-proxy HTTP requests, bounded audio validation, routing and
-fallbacks, owner-mirror byte identity and failure isolation, and `/call` wire
+fallbacks, Call fallback locking and privacy filtering, structured Call Window
+degradation, owner-mirror byte identity and failure isolation, and wire
 compatibility. Core protection and the applicable offline product suite remain
-release gates. A real endpoint test proves only that endpoint; a Worker reboot
+release gates. A real endpoint test proves only that endpoint; Function adoption
 and device playback are separate live checks.

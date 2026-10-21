@@ -55,6 +55,7 @@ _COMMON_SERVICE_FIELDS = frozenset(
         "adapter",
         "label",
         "menu_label",
+        "location",
         "style_support",
         "fallbacks",
         "platforms",
@@ -86,6 +87,7 @@ _VOICE_FIELDS = frozenset(
         "language_labels",
         "locale",
         "gender",
+        "style",
         "provider_options",
         "other_languages_unsupported",
         "platforms",
@@ -271,6 +273,16 @@ def _validate_service(value: object) -> dict[str, object]:
         "platforms": _platforms(value.get("platforms")),
         "enabled": value.get("enabled", True),
     }
+    default_location = "cloud" if adapter == "edge" else "local"
+    location = str(value.get("location") or default_location).strip().casefold()
+    if location not in {"local", "lan", "cloud"}:
+        raise VoiceCatalogError("service location is invalid")
+    if adapter != "openai_compatible" and (
+        (adapter == "edge" and location != "cloud")
+        or (adapter != "edge" and location != "local")
+    ):
+        raise VoiceCatalogError("service adapter and location do not match")
+    service["location"] = location
     if service["style_support"] not in {"supported", "unsupported", "unknown"}:
         raise VoiceCatalogError("service style_support is invalid")
     if type(service["enabled"]) is not bool:
@@ -338,7 +350,7 @@ def _validate_voice(value: object) -> dict[str, object]:
     voice_id = _identifier(value.get("id"), "voice id")
     if len(voice_id) > 48:
         raise VoiceCatalogError("voice id is too long for menu callbacks")
-    return {
+    result = {
         "id": voice_id,
         "service": _identifier(value.get("service"), "voice service"),
         "voice_name": _plain_text(value.get("voice_name"), "voice_name", 500),
@@ -359,6 +371,9 @@ def _validate_voice(value: object) -> dict[str, object]:
         "platforms": _platforms(value.get("platforms")),
         "enabled": enabled,
     }
+    if value.get("style") is not None:
+        result["style"] = _plain_text(value.get("style"), "voice style", 80)
+    return result
 
 
 def _read_document(path: Path, *, optional: bool) -> tuple[dict[str, object], str | None]:
@@ -409,11 +424,18 @@ class VoiceCatalog:
         *,
         services: Mapping[str, Mapping[str, object]],
         presets: Mapping[str, Mapping[str, object]],
+        default_revision: str,
         instance_revision: str | None,
+        platform: str,
     ) -> None:
         self._services = copy.deepcopy(dict(services))
         self.presets = copy.deepcopy(dict(presets))
+        self.default_revision = str(default_revision)
         self.instance_revision = instance_revision
+        self.platform = str(platform)
+        self.revision = ":".join(
+            (self.default_revision, self.instance_revision or "", self.platform)
+        )
 
     @classmethod
     def load(
@@ -422,11 +444,14 @@ class VoiceCatalog:
         instance_path: Path | None = None,
         project_root: Path | None = None,
         platform: str | None = None,
+        include_disabled: bool = False,
         default_path: Path = DEFAULT_VOICE_CATALOG_PATH,
     ) -> "VoiceCatalog":
         root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
         selected_platform = str(platform or sys.platform).strip().casefold()
-        default_document, _ = _read_document(Path(default_path), optional=False)
+        default_document, default_revision = _read_document(
+            Path(default_path), optional=False
+        )
         instance_document: dict[str, object] = {}
         revision: str | None = None
         if instance_path is not None:
@@ -461,7 +486,8 @@ class VoiceCatalog:
         active_services = {
             service_id: service
             for service_id, service in services.items()
-            if service["enabled"] and _matches_platform(service, selected_platform)
+            if (service["enabled"] or include_disabled)
+            and _matches_platform(service, selected_platform)
         }
         presets: dict[str, dict[str, object]] = {}
         for voice_id, voice in voices.items():
@@ -499,11 +525,15 @@ class VoiceCatalog:
             for key in ("display_names", "language_labels"):
                 if voice[key]:
                     preset[key] = copy.deepcopy(voice[key])
+            if voice.get("style"):
+                preset["style"] = voice["style"]
             presets[voice_id] = preset
         return cls(
             services=active_services,
             presets=presets,
+            default_revision=str(default_revision or "default"),
             instance_revision=revision,
+            platform=selected_platform,
         )
 
     @property
@@ -530,6 +560,22 @@ class VoiceCatalog:
             for candidate in service["fallbacks"]
             if candidate in self._services and candidate != service_id
         )
+
+    def voice_ids(self, service_id: str | None = None) -> tuple[str, ...]:
+        selected = str(service_id or "").strip().casefold()
+        return tuple(
+            voice_id
+            for voice_id, preset in self.presets.items()
+            if not selected
+            or str(preset.get("provider") or "").strip().casefold() == selected
+        )
+
+    def preset(self, voice_id: str) -> dict[str, object]:
+        selected = str(voice_id or "").strip().casefold()
+        try:
+            return copy.deepcopy(self.presets[selected])
+        except KeyError as exc:
+            raise VoiceCatalogError(f"unknown TTS voice: {voice_id}") from exc
 
     def routing_profiles(self) -> dict[str, dict[str, object]]:
         return {

@@ -10,6 +10,7 @@
       ],
       "id": "edge",
       "label": "Edge TTS",
+      "location": "cloud",
       "menu_label": "Edge",
       "style_support": "unsupported"
     },
@@ -18,6 +19,7 @@
       "fallbacks": [],
       "id": "windows",
       "label": "Windows TTS",
+      "location": "local",
       "menu_label": "Windows",
       "platforms": [
         "win32"
@@ -29,6 +31,7 @@
       "fallbacks": [],
       "id": "macos",
       "label": "macOS TTS",
+      "location": "local",
       "menu_label": "macOS",
       "platforms": [
         "darwin"
@@ -40,6 +43,7 @@
       "fallbacks": [],
       "id": "piper",
       "label": "Piper TTS",
+      "location": "local",
       "menu_label": "Piper",
       "style_support": "unsupported"
     },
@@ -48,6 +52,7 @@
       "fallbacks": [],
       "id": "kokoro",
       "label": "Kokoro TTS",
+      "location": "local",
       "menu_label": "Kokoro",
       "style_support": "unsupported"
     },
@@ -56,8 +61,30 @@
       "fallbacks": [],
       "id": "coqui",
       "label": "Coqui TTS",
+      "location": "local",
       "menu_label": "Coqui",
       "style_support": "unknown"
+    },
+    {
+      "adapter": "openai_compatible",
+      "audio_format": "pcm",
+      "base_url": "https://openrouter.ai/api/v1",
+      "credential_ref": "secrets://openrouter-api_key",
+      "enabled": false,
+      "fallbacks": [
+        "edge",
+        "windows",
+        "macos",
+        "piper",
+        "kokoro"
+      ],
+      "id": "openrouter-gemini-tts",
+      "label": "Gemini 3.8 Flash-Lite TTS (OpenRouter)",
+      "location": "cloud",
+      "menu_label": "Gemini TTS",
+      "model": "google/gemini-3.8-flash-lite-tts",
+      "pcm_sample_rate_hz": 24000,
+      "style_support": "supported"
     }
   ],
   "version": 1,
@@ -602,6 +629,336 @@
       ],
       "service": "macos",
       "voice_name": "Moira"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_achernar",
+      "label": "Achernar [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Soft",
+      "voice_name": "Achernar"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_achird",
+      "label": "Achird [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Friendly",
+      "voice_name": "Achird"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_algenib",
+      "label": "Algenib [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Gravelly",
+      "voice_name": "Algenib"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_algieba",
+      "label": "Algieba [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Smooth",
+      "voice_name": "Algieba"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_alnilam",
+      "label": "Alnilam [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Alnilam"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_aoede",
+      "label": "Aoede [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Breezy",
+      "voice_name": "Aoede"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_autonoe",
+      "label": "Autonoe [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Bright",
+      "voice_name": "Autonoe"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_callirrhoe",
+      "label": "Callirrhoe [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Easy-going",
+      "voice_name": "Callirrhoe"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_charon",
+      "label": "Charon [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Informative",
+      "voice_name": "Charon"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_despina",
+      "label": "Despina [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Smooth",
+      "voice_name": "Despina"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_enceladus",
+      "label": "Enceladus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Breathy",
+      "voice_name": "Enceladus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_erinome",
+      "label": "Erinome [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Clear",
+      "voice_name": "Erinome"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_fenrir",
+      "label": "Fenrir [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Excitable",
+      "voice_name": "Fenrir"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_gacrux",
+      "label": "Gacrux [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Mature",
+      "voice_name": "Gacrux"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_iapetus",
+      "label": "Iapetus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Clear",
+      "voice_name": "Iapetus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_kore",
+      "label": "Kore [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Kore"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_laomedeia",
+      "label": "Laomedeia [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Upbeat",
+      "voice_name": "Laomedeia"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_leda",
+      "label": "Leda [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Youthful",
+      "voice_name": "Leda"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_orus",
+      "label": "Orus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Orus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_pulcherrima",
+      "label": "Pulcherrima [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Forward",
+      "voice_name": "Pulcherrima"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_puck",
+      "label": "Puck [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Upbeat",
+      "voice_name": "Puck"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_rasalgethi",
+      "label": "Rasalgethi [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Informative",
+      "voice_name": "Rasalgethi"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_sadachbia",
+      "label": "Sadachbia [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Lively",
+      "voice_name": "Sadachbia"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_sadaltager",
+      "label": "Sadaltager [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Knowledgeable",
+      "voice_name": "Sadaltager"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_schedar",
+      "label": "Schedar [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Even",
+      "voice_name": "Schedar"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_sulafat",
+      "label": "Sulafat [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Warm",
+      "voice_name": "Sulafat"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_umbriel",
+      "label": "Umbriel [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Easy-going",
+      "voice_name": "Umbriel"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_vindemiatrix",
+      "label": "Vindemiatrix [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Gentle",
+      "voice_name": "Vindemiatrix"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_zephyr",
+      "label": "Zephyr [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Bright",
+      "voice_name": "Zephyr"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_zubenelgenubi",
+      "label": "Zubenelgenubi [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Casual",
+      "voice_name": "Zubenelgenubi"
     }
   ]
 }
