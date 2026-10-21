@@ -403,11 +403,18 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                     request_id=item.request_id,
                     purpose="remote-backend-policy",
                 )
-            terminal_console.finish_request(
-                runtime.name,
+            await runtime._notify_request_listeners(
                 item.request_id,
-                success=False,
-                error="[REMOTE_BACKEND_BLOCKED]",
+                {
+                    "request_id": item.request_id,
+                    "success": False,
+                    "text": None,
+                    "error": remote_backend_block,
+                    "error_code": "REMOTE_BACKEND_BLOCKED",
+                    "error_retryable": False,
+                    "source": item.source,
+                    "summary": item.summary,
+                },
             )
             return
         await runtime_workzone.activate_backend_state(runtime)
@@ -654,6 +661,22 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                 queued_monotonic=queued_monotonic,
             )
 
+    except runtime_session.ExecutionClaimLost as exc:
+        runtime.error_logger.warning(
+            "Skipped Provider execution after durable claim loss for %s: %s",
+            getattr(item, "request_id", "unknown"),
+            exc,
+        )
+        return
+    except runtime_session.TerminalResolutionPending as exc:
+        # The Provider result must never be replayed merely because the
+        # canonical terminal projection is temporarily unresolved.
+        runtime.error_logger.error(
+            "Canonical terminal projection remains unresolved for %s: %s",
+            getattr(item, "request_id", "unknown"),
+            exc,
+        )
+        return
     except asyncio.CancelledError:
         runtime.is_generating = False
         if item is not None:

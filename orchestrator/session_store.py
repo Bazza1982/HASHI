@@ -4232,6 +4232,7 @@ class SessionStore:
         error_context: Mapping[str, Any] | None = None,
         failure_state: str = "failed",
         fencing_token: int | None = None,
+        _unsubmitted_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         public_error_context: dict[str, Any] = {}
@@ -4311,6 +4312,36 @@ class SessionStore:
             current_state = str(run["state"])
             if current_state in TERMINAL_RUN_STATES:
                 return self._run_dict(run)
+            if isinstance(_unsubmitted_identity, Mapping):
+                session = connection.execute(
+                    "SELECT owner_id FROM sessions WHERE session_id = ?",
+                    (str(run["session_id"]),),
+                ).fetchone()
+                exact_identity = (
+                    session is not None
+                    and str(session["owner_id"])
+                    == str(_unsubmitted_identity.get("owner_id") or "")
+                    and str(run["agent_id"])
+                    == str(_unsubmitted_identity.get("agent_id") or "")
+                    and str(run["session_id"])
+                    == str(_unsubmitted_identity.get("session_id") or "")
+                    and str(run["run_id"])
+                    == str(_unsubmitted_identity.get("run_id") or "")
+                    and str(run["request_id"])
+                    == str(_unsubmitted_identity.get("request_id") or "")
+                    and str(run["user_message_id"])
+                    == str(_unsubmitted_identity.get("message_id") or "")
+                    and int(run["context_generation"])
+                    == int(_unsubmitted_identity.get("context_generation") or 0)
+                )
+                still_unsubmitted = (
+                    current_state == "queued"
+                    and int(run["fencing_token"]) == 0
+                    and int(run["attempt"]) == 0
+                    and run["worker_id"] is None
+                )
+                if not exact_identity or not still_unsubmitted:
+                    return self._run_dict(run)
             if fencing_token is not None and int(run["fencing_token"]) != int(
                 fencing_token
             ):
@@ -4510,6 +4541,39 @@ class SessionStore:
                 "SELECT * FROM runs WHERE run_id = ?", (run["run_id"],)
             ).fetchone()
             return self._run_dict(result)
+
+    def fail_unsubmitted_request(
+        self,
+        request_id: str,
+        *,
+        session_id: str,
+        run_id: str,
+        message_id: str,
+        context_generation: int,
+        owner_id: str,
+        agent_id: str,
+        error_text: str,
+        error_code: str = "ADMISSION_PREPARATION_FAILED",
+        failure_state: str = "failed",
+    ) -> dict[str, Any] | None:
+        """Fail only the exact accepted Run that has not reached an executor."""
+
+        return self.finish_request(
+            request_id,
+            success=False,
+            error_text=str(error_text or "request preparation failed"),
+            error_context={"error_code": str(error_code)},
+            failure_state=str(failure_state or "failed"),
+            _unsubmitted_identity={
+                "session_id": str(session_id),
+                "run_id": str(run_id),
+                "message_id": str(message_id),
+                "request_id": str(request_id),
+                "context_generation": int(context_generation),
+                "owner_id": str(owner_id),
+                "agent_id": str(agent_id),
+            },
+        )
 
     def record_assistant_delivery(
         self,

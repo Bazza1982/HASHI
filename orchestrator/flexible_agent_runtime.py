@@ -1518,8 +1518,8 @@ class FlexibleAgentRuntime:
         metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
         from orchestrator.frontend_ingress import accept_runtime_ingress
 
-        session, accepted, session_owner, session_surface, session_channel_key = (
-            await asyncio.to_thread(
+        admission_task = asyncio.create_task(
+            asyncio.to_thread(
                 accept_runtime_ingress,
                 self,
                 frontend_ingress_envelope,
@@ -1530,8 +1530,37 @@ class FlexibleAgentRuntime:
                 request_metadata=metadata,
                 request_content=normalized_request_content,
                 idempotency_key=idempotency_key,
-            )
+            ),
+            name=f"admit-{self.name}-{request_id}",
         )
+        admission_cancelled: asyncio.CancelledError | None = None
+        try:
+            admission_result = await asyncio.shield(admission_task)
+        except asyncio.CancelledError as cancellation:
+            # The thread cannot be cancelled once SQLite admission has begun.
+            # Join it under the original identity, then close only an exact
+            # receipt proven not to have reached an executor.
+            admission_cancelled = cancellation
+            admission_result = await admission_task
+        session, accepted, session_owner, session_surface, session_channel_key = (
+            admission_result
+        )
+        if admission_cancelled is not None:
+            if accepted is not None and not accepted.replayed:
+                await asyncio.to_thread(
+                    self.session_store.fail_unsubmitted_request,
+                    accepted.request_id,
+                    session_id=accepted.session_id,
+                    run_id=accepted.run_id,
+                    message_id=accepted.message_id,
+                    context_generation=accepted.context_generation,
+                    owner_id=session_owner,
+                    agent_id=self.name,
+                    error_text="request admission caller was cancelled before executor handoff",
+                    error_code="ADMISSION_CALLER_CANCELLED",
+                    failure_state="interrupted",
+                )
+            raise admission_cancelled
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import attachment_manifest
 
@@ -1566,18 +1595,61 @@ class FlexibleAgentRuntime:
                 "voice_origin",
                 request_content_is_voice_origin(normalized_request_content),
             )
-        session_workspace, workzone_snapshot = await asyncio.gather(
-            asyncio.to_thread(
-                self.session_store.session_workspace,
-                session["session_id"],
-                int(session["context_generation"]),
-            ),
-            asyncio.to_thread(
-                runtime_session.session_workzone_state,
-                self,
-                session_id=session["session_id"],
-            ),
-        )
+
+        async def fail_unsubmitted_preparation(
+            failure: BaseException,
+            *,
+            error_code: str = "ADMISSION_PREPARATION_FAILED",
+            failure_state: str = "failed",
+        ):
+            if accepted is None or accepted.replayed:
+                return None
+            return await asyncio.to_thread(
+                self.session_store.fail_unsubmitted_request,
+                accepted.request_id,
+                session_id=accepted.session_id,
+                run_id=accepted.run_id,
+                message_id=accepted.message_id,
+                context_generation=accepted.context_generation,
+                owner_id=session_owner,
+                agent_id=self.name,
+                error_text=(
+                    "request preparation failed before executor handoff "
+                    f"({type(failure).__name__})"
+                ),
+                error_code=error_code,
+                failure_state=failure_state,
+            )
+
+        try:
+            session_workspace, workzone_snapshot = await asyncio.gather(
+                asyncio.to_thread(
+                    self.session_store.session_workspace,
+                    session["session_id"],
+                    int(session["context_generation"]),
+                ),
+                asyncio.to_thread(
+                    runtime_session.session_workzone_state,
+                    self,
+                    session_id=session["session_id"],
+                ),
+            )
+        except BaseException as failure:
+            await fail_unsubmitted_preparation(
+                failure,
+                error_code=(
+                    "ADMISSION_PREPARATION_CANCELLED"
+                    if isinstance(failure, asyncio.CancelledError)
+                    else "ADMISSION_PREPARATION_FAILED"
+                ),
+                failure_state=(
+                    "interrupted"
+                    if isinstance(failure, asyncio.CancelledError)
+                    else "failed"
+                ),
+            )
+            discard_live_frames(self, accepted.request_id if accepted is not None else request_id)
+            raise
         metadata.update(
             {
                 "hashi_session_id": session["session_id"],
@@ -1626,41 +1698,134 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.agent_stop_fence import lock_for as stop_fence_lock_for
 
-        async with stop_fence_lock_for(self):
-            if current_runtime_epoch(self) != current_stop_epoch:
-                if accepted is not None:
-                    await asyncio.to_thread(
-                        self.session_store.finish_request,
+        turn_registered = False
+        activity_started = False
+        admission_snapshotted = False
+        live_frames_bound = False
+
+        async def discard_unsubmitted_preparation() -> None:
+            nonlocal turn_registered, activity_started
+            if turn_registered:
+                try:
+                    await runtime_delivery_order.complete_turn(self, item.request_id)
+                except Exception as cleanup_error:
+                    self.logger.warning(
+                        "Direct-turn admission cleanup failed for %s (%s)",
+                        item.request_id,
+                        type(cleanup_error).__name__,
+                    )
+                turn_registered = False
+            if activity_started:
+                try:
+                    self.request_activity.complete(
                         item.request_id,
                         success=False,
-                        error_text="request superseded by user stop",
-                        failure_state="superseded",
+                        error="request was not submitted to an executor",
                     )
-                return None
-            usage_recorder = getattr(
-                getattr(self, "skill_manager", None), "record_skill_usage", None
-            )
-            if item.skill_id and callable(usage_recorder):
-                item.skill_usage_event_id = usage_recorder(
-                    item.skill_id,
-                    agent=self.name,
-                    request_id=item.request_id,
-                    source=item.source,
-                )
-            runtime_delivery_order.register_turn(self, item)
-            self.request_activity.start(
-                item.request_id,
-                source=item.source,
-                created_at=datetime.fromisoformat(item.created_at).timestamp(),
-            )
-            from orchestrator import runtime_execution
-            self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
-            if transient_live_frames:
-                bind_live_frames(self, item.request_id, transient_live_frames)
-            try:
-                await self.queue.put(item)
-            except BaseException:
+                except Exception as cleanup_error:
+                    self.logger.warning(
+                        "Request activity admission cleanup failed for %s (%s)",
+                        item.request_id,
+                        type(cleanup_error).__name__,
+                    )
+                activity_started = False
+            if admission_snapshotted:
+                self._execution_admissions.pop(item.request_id, None)
+            if live_frames_bound:
                 discard_live_frames(self, item.request_id)
+
+        def queue_publication_observed() -> bool | None:
+            raw_queue = getattr(self.queue, "_queue", None)
+            if raw_queue is None:
+                return None
+            try:
+                return any(
+                    candidate is item
+                    or str(getattr(candidate, "request_id", "") or "")
+                    == item.request_id
+                    for candidate in tuple(raw_queue)
+                )
+            except Exception:
+                return None
+
+        async with stop_fence_lock_for(self):
+            if current_runtime_epoch(self) != current_stop_epoch:
+                await fail_unsubmitted_preparation(
+                    RuntimeError("request superseded before executor handoff"),
+                    error_code="ADMISSION_SUPERSEDED",
+                    failure_state="superseded",
+                )
+                return None
+            submission_started = False
+            try:
+                usage_recorder = getattr(
+                    getattr(self, "skill_manager", None), "record_skill_usage", None
+                )
+                if item.skill_id and callable(usage_recorder):
+                    item.skill_usage_event_id = usage_recorder(
+                        item.skill_id,
+                        agent=self.name,
+                        request_id=item.request_id,
+                        source=item.source,
+                    )
+                turn_registered = (
+                    runtime_delivery_order.register_turn(self, item) is not None
+                )
+                activity_started = True
+                self.request_activity.start(
+                    item.request_id,
+                    source=item.source,
+                    created_at=datetime.fromisoformat(item.created_at).timestamp(),
+                )
+                from orchestrator import runtime_execution
+                self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
+                admission_snapshotted = True
+                if transient_live_frames:
+                    live_frames_bound = True
+                    bind_live_frames(self, item.request_id, transient_live_frames)
+                submission_started = True
+                await self.queue.put(item)
+            except BaseException as failure:
+                published = queue_publication_observed() if submission_started else False
+                if published is not True:
+                    if published is False:
+                        terminal_run = await fail_unsubmitted_preparation(
+                            failure,
+                            error_code=(
+                                (
+                                    "QUEUE_PUBLICATION_CANCELLED"
+                                    if submission_started
+                                    else "ADMISSION_PREPARATION_CANCELLED"
+                                )
+                                if isinstance(failure, asyncio.CancelledError)
+                                else "QUEUE_PUBLICATION_FAILED"
+                                if submission_started
+                                else "ADMISSION_PREPARATION_FAILED"
+                            ),
+                            failure_state=(
+                                "interrupted"
+                                if isinstance(failure, asyncio.CancelledError)
+                                else "failed"
+                            ),
+                        )
+                        if (
+                            terminal_run is not None
+                            and str(terminal_run.get("state") or "")
+                            in {
+                                "completed",
+                                "failed",
+                                "stopped",
+                                "superseded",
+                                "interrupted",
+                            }
+                        ):
+                            await discard_unsubmitted_preparation()
+                    else:
+                        self.error_logger.warning(
+                            "Queue publication outcome is unknown for %s; "
+                            "leaving the durable Run queued for reconciliation",
+                            item.request_id,
+                        )
                 raise
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
@@ -1676,15 +1841,28 @@ class FlexibleAgentRuntime:
     async def _notify_request_listeners(self, request_id: str, payload: dict):
         # Commit the canonical Session terminal state before any transport or
         # in-memory listener observes the result.
-        await asyncio.to_thread(
+        resolution = await asyncio.to_thread(
             runtime_session.finish_request_from_listener,
             self,
             request_id,
             payload,
         )
-        await runtime_media.finish_native_voice_transcript_path(
-            self, request_id, payload
-        )
+        payload = dict(resolution.payload)
+        payload["continuity_status"] = resolution.continuity_status
+        if resolution.side_errors:
+            payload["terminal_side_errors"] = [
+                dict(item) for item in resolution.side_errors
+            ]
+        try:
+            await runtime_media.finish_native_voice_transcript_path(
+                self, request_id, payload
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Native voice terminal projection failed for %s (%s)",
+                request_id,
+                type(exc).__name__,
+            )
         try:
             self.request_activity.complete(
                 request_id,
@@ -1697,13 +1875,20 @@ class FlexibleAgentRuntime:
                 request_id,
                 type(exc).__name__,
             )
-        terminal_console.finish_request(
-            self.name,
-            request_id,
-            success=bool(payload.get("success")),
-            error=payload.get("error") or "",
-            interrupted=bool(payload.get("interrupted")),
-        )
+        try:
+            terminal_console.finish_request(
+                self.name,
+                request_id,
+                success=bool(payload.get("success")),
+                error=payload.get("error") or "",
+                interrupted=bool(payload.get("interrupted")),
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Terminal console projection failed for %s (%s)",
+                request_id,
+                type(exc).__name__,
+            )
         try:
             runtime_debug_reporting.schedule_terminal_diagnostic(
                 self, request_id, payload
@@ -1729,9 +1914,16 @@ class FlexibleAgentRuntime:
         if not callbacks:
             self._pending_request_results[request_id] = payload
         for callback in callbacks:
-            result = callback(payload)
-            if inspect.isawaitable(result):
-                await result
+            try:
+                result = callback(payload)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                self.logger.warning(
+                    "Request listener failed after terminal commit for %s (%s)",
+                    request_id,
+                    type(exc).__name__,
+                )
         try:
             from orchestrator.frontend_whatsapp_mirror import deliver_whatsapp_mirror
 
