@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -439,6 +440,63 @@ def test_local_recency_decay_is_monotonic_and_components_are_observable(tmp_path
     assert results[recent_id]["score"] > results[old_id]["score"]
     for key in ("vector_score", "text_score", "importance_score", "recency_score"):
         assert key in results[recent_id]
+
+
+def test_local_embedding_score_is_stable_across_python_hash_seeds(tmp_path):
+    script = """
+import json
+import sys
+from pathlib import Path
+from orchestrator.bridge_memory import BridgeMemoryStore
+
+workspace = Path(sys.argv[1])
+store = BridgeMemoryStore(workspace)
+if sys.argv[2] == 'write':
+    store.record_memory('fact', 'test', 'stable vector sentinel', 1.0)
+result = store.retrieve_memories('stable vector sentinel', limit=1)[0]
+print(json.dumps({'vector_score': result['vector_score'], 'encoder_id': store.encoder.encoder_id}))
+"""
+    repo = Path(__file__).resolve().parents[1]
+
+    def run(seed: str, action: str) -> dict:
+        environment = dict(os.environ)
+        environment["PYTHONHASHSEED"] = seed
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), action],
+            cwd=repo,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    first = run("1", "write")
+    second = run("987654", "read")
+
+    assert first == second
+    assert first["vector_score"] == pytest.approx(1.0)
+
+
+def test_legacy_unversioned_embeddings_are_rebuilt_from_canonical_text(tmp_path):
+    first = BridgeMemoryStore(tmp_path)
+    memory_id = first.record_memory("fact", "test", "rebuild this vector", 1.0)
+    with sqlite3.connect(first.db_path) as connection:
+        connection.execute(
+            "UPDATE memories SET embedding = ?, embedding_version = ? WHERE id = ?",
+            (json.dumps([0.0] * 256), "legacy-python-hash-v0", memory_id),
+        )
+        connection.commit()
+
+    rebuilt = BridgeMemoryStore(tmp_path)
+    with sqlite3.connect(rebuilt.db_path) as connection:
+        embedding, version = connection.execute(
+            "SELECT embedding, embedding_version FROM memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+
+    assert version == rebuilt.encoder.encoder_id
+    assert json.loads(embedding) == rebuilt.encoder.encode("rebuild this vector")
 
 
 def _central_db(path: Path):

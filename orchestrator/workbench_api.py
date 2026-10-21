@@ -1308,7 +1308,7 @@ class WorkbenchApiServer:
             build_memory_plus_context,
             is_memory_plus_enabled,
             memory_plus_config,
-            prepare_memory_plus_store,
+            read_memory_plus_context_state,
         )
         from orchestrator.pcm import canonical_agent_md
         from orchestrator.pcm_voice_projection import (
@@ -1380,10 +1380,7 @@ class WorkbenchApiServer:
                     generation,
                 )
                 memory_plus_cfg = memory_plus_config(workspace)
-                memory_plus_state = prepare_memory_plus_store(
-                    session_workspace,
-                    memory_plus_cfg,
-                )
+                memory_plus_state = read_memory_plus_context_state(session_workspace)
                 extra_sections.append(
                     (
                         "Memory+ Continuity",

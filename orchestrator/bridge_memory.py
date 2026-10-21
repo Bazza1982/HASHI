@@ -69,6 +69,7 @@ class LocalEmbeddingEncoder:
     def __init__(self, dim: int = 256):
         self.dim = dim
         self.vector_dim = dim
+        self.encoder_id = f"local-hash-v1:blake2b8:ascii-lower:{dim}"
         self.ready = True
         self.error = None
 
@@ -78,7 +79,12 @@ class LocalEmbeddingEncoder:
         if not tokens:
             return vec
         for tok in tokens:
-            idx = hash(tok) % self.dim
+            digest = hashlib.blake2b(
+                tok.encode("utf-8"),
+                digest_size=8,
+                person=b"HASHI-MEM-v1",
+            ).digest()
+            idx = int.from_bytes(digest, "big") % self.dim
             vec[idx] += 1.0
         norm = math.sqrt(sum(v * v for v in vec))
         if norm <= 0.0:
@@ -133,6 +139,12 @@ class BgeM3Encoder:
     @property
     def vector_dim(self) -> int | None:
         return self.DIM if self._ready else None
+
+    @property
+    def encoder_id(self) -> str:
+        if self._ready:
+            return "bge-m3-onnx-v1:mean-pool-l2:1024"
+        return self._fallback.encoder_id
 
     def _init(self):
         try:
@@ -320,10 +332,20 @@ class BridgeMemoryStore:
                     role TEXT NOT NULL,
                     source TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    embedding TEXT NOT NULL
+                    embedding TEXT NOT NULL,
+                    embedding_version TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'
                 )
                 """
             )
+            turn_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+            if "embedding_version" not in turn_columns:
+                conn.execute(
+                    "ALTER TABLE turns ADD COLUMN embedding_version "
+                    "TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'"
+                )
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS turns_wip_recovery_source_unique
@@ -340,6 +362,7 @@ class BridgeMemoryStore:
                     content TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 1.0,
                     embedding TEXT NOT NULL,
+                    embedding_version TEXT NOT NULL DEFAULT 'legacy-python-hash-v0',
                     origin TEXT NOT NULL DEFAULT 'legacy',
                     origin_ref TEXT NOT NULL DEFAULT '',
                     session_id TEXT,
@@ -354,6 +377,7 @@ class BridgeMemoryStore:
                 for row in conn.execute("PRAGMA table_info(memories)").fetchall()
             }
             for name, definition in (
+                ("embedding_version", "TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'"),
                 ("origin", "TEXT NOT NULL DEFAULT 'legacy'"),
                 ("origin_ref", "TEXT NOT NULL DEFAULT ''"),
                 ("session_id", "TEXT"),
@@ -445,7 +469,35 @@ class BridgeMemoryStore:
                 self._vec_reason = self._vec_reason or "sqlite-vec unavailable"
             else:
                 self._vec_reason = self.encoder.error or "BGE-M3 unavailable; using legacy hash retrieval"
+            self._rebuild_stale_embeddings(conn)
             conn.commit()
+
+    def _rebuild_stale_embeddings(self, conn: sqlite3.Connection) -> None:
+        """Rebuild derived vectors whose persisted encoder identity is stale."""
+
+        encoder_id = str(self.encoder.encoder_id)
+        for table, text_column, vec_table, key_column in (
+            ("turns", "text", "turns_vec", "turn_id"),
+            ("memories", "content", "memory_vec", "memory_id"),
+        ):
+            rows = conn.execute(
+                f"SELECT id, {text_column} AS body FROM {table} "
+                "WHERE embedding_version != ? OR embedding_version IS NULL",
+                (encoder_id,),
+            ).fetchall()
+            for row in rows:
+                embedding = self.encoder.encode(str(row["body"] or ""))
+                conn.execute(
+                    f"UPDATE {table} SET embedding = ?, embedding_version = ? WHERE id = ?",
+                    (json.dumps(embedding), encoder_id, int(row["id"])),
+                )
+                self._upsert_vec(
+                    conn,
+                    vec_table,
+                    key_column,
+                    int(row["id"]),
+                    embedding,
+                )
 
     def _now(self) -> str:
         return datetime.now().isoformat()
@@ -485,8 +537,10 @@ class BridgeMemoryStore:
         emb = json.dumps(embedding)
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO turns (ts, role, source, text, embedding) VALUES (?, ?, ?, ?, ?)",
-                (self._now(), role, source, clean, emb),
+                "INSERT INTO turns "
+                "(ts, role, source, text, embedding, embedding_version) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self._now(), role, source, clean, emb, self.encoder.encoder_id),
             )
             if cur.lastrowid is not None:
                 self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
@@ -506,10 +560,17 @@ class BridgeMemoryStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO turns(ts, role, source, text, embedding)
-                VALUES (?, 'recovery', ?, ?, ?)
+                INSERT OR IGNORE INTO turns(
+                    ts, role, source, text, embedding, embedding_version
+                ) VALUES (?, 'recovery', ?, ?, ?, ?)
                 """,
-                (self._now(), source, clean, encoded_embedding),
+                (
+                    self._now(),
+                    source,
+                    clean,
+                    encoded_embedding,
+                    self.encoder.encoder_id,
+                ),
             )
             row = conn.execute(
                 "SELECT id, text FROM turns WHERE role = 'recovery' AND source = ?",
@@ -520,6 +581,10 @@ class BridgeMemoryStore:
                     "recovery capsule source digest resolved to different content"
                 )
             if row is not None:
+                conn.execute(
+                    "UPDATE turns SET embedding = ?, embedding_version = ? WHERE id = ?",
+                    (encoded_embedding, self.encoder.encoder_id, int(row["id"])),
+                )
                 self._upsert_vec(
                     conn,
                     "turns_vec",
@@ -846,9 +911,9 @@ class BridgeMemoryStore:
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO memories (
-                    ts, memory_type, source, content, importance, embedding,
+                    ts, memory_type, source, content, importance, embedding, embedding_version,
                     origin, origin_ref, session_id, run_id, message_id, promoted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._now(),
@@ -857,6 +922,7 @@ class BridgeMemoryStore:
                     clean,
                     float(importance),
                     emb,
+                    self.encoder.encoder_id,
                     str(origin or "legacy"),
                     str(origin_ref or ""),
                     str(session_id) if session_id else None,
@@ -931,7 +997,6 @@ class BridgeMemoryStore:
 
         safe_query = self._safe_query(query)
         q_vec = self.encoder.encode(query or "")
-        legacy_q_vec = self.legacy_encoder.encode(query or "")
         candidates: dict[int, dict[str, Any]] = {}
 
         with self._connect() as conn:
@@ -940,7 +1005,7 @@ class BridgeMemoryStore:
                     rows = conn.execute(
                         """
                         SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance,
-                               m.embedding, v.distance
+                               m.embedding, m.embedding_version, v.distance
                         FROM memory_vec v
                         JOIN memories m ON m.id = v.memory_id
                         WHERE v.embedding MATCH ?
@@ -960,7 +1025,8 @@ class BridgeMemoryStore:
                 try:
                     rows = conn.execute(
                         """
-                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
+                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance,
+                               m.embedding, m.embedding_version
                         FROM memory_fts f
                         JOIN memories m ON m.id = f.memory_id
                         WHERE memory_fts MATCH ?
@@ -978,7 +1044,8 @@ class BridgeMemoryStore:
 
             recent_rows = conn.execute(
                 """
-                SELECT id, ts, memory_type, source, content, importance, embedding
+                SELECT id, ts, memory_type, source, content, importance,
+                       embedding, embedding_version
                 FROM memories
                 ORDER BY id DESC
                 LIMIT 60
@@ -995,20 +1062,19 @@ class BridgeMemoryStore:
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in candidates.values():
             sim = 0.0
-            if row.get("distance") is not None:
+            encoder_matches = row.get("embedding_version") == self.encoder.encoder_id
+            if encoder_matches and row.get("distance") is not None:
                 try:
                     sim = max(0.0, 1.0 - float(row["distance"]))
                 except Exception:
                     sim = 0.0
-            elif row.get("embedding"):
+            elif encoder_matches and row.get("embedding"):
                 try:
                     emb = json.loads(row["embedding"])
                 except Exception:
                     emb = []
                 if len(emb) == len(q_vec):
                     sim = self.encoder.cosine(q_vec, emb)
-                elif len(emb) == len(legacy_q_vec):
-                    sim = self.legacy_encoder.cosine(legacy_q_vec, emb)
             vector_score = max(0.0, min(1.0, float(sim)))
             text_score = 1.0 if row.pop("_text_match", False) else 0.0
             row.pop("_vector_match", None)
@@ -1076,6 +1142,7 @@ class BridgeMemoryStore:
         status: dict[str, Any] = {
             "db_path": str(self.db_path),
             "encoder_ready": bool(self.encoder.ready),
+            "encoder_id": str(self.encoder.encoder_id),
             "encoder_dim": self.encoder.vector_dim,
             "encoder_error": self.encoder.error,
             "sqlite_vec_supported": bool(self._sqlite_vec_supported),

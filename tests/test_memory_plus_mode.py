@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import multiprocessing
 import sys
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,8 @@ from orchestrator.memory_plus_mode import (  # noqa: E402
     MEMORY_PLUS_OPEN,
     MEMORY_PLUS_SCHEMA_VERSION,
     MemoryPlusObserver,
+    MemoryPlusStateUnreadable,
+    MemoryPlusUnsupportedSchema,
     append_memory_plus_manual_note,
     build_memory_plus_context,
     clear_memory_plus_notepad,
@@ -38,6 +41,7 @@ from orchestrator.memory_plus_mode import (  # noqa: E402
     mark_memory_plus_session_synced,
     migrate_legacy_memory_plus_runtime,
     prepare_memory_plus_store,
+    read_memory_plus_context_state,
     read_memory_plus_notepad,
     replace_memory_plus_notepad,
     search_memory_plus_history,
@@ -50,6 +54,29 @@ from orchestrator.bridge_memory import BridgeContextAssembler  # noqa: E402
 from orchestrator.post_turn_observer import TurnContextRequest  # noqa: E402
 from orchestrator.runtime_mode import mode_keyboard  # noqa: E402
 from orchestrator.runtime_wrapper import apply_wrapper_to_visible_text  # noqa: E402
+
+
+def _write_memory_plus_in_process(
+    workspace: str,
+    request_id: str,
+    fact: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    try:
+        if not start.wait(10):
+            raise TimeoutError("test start gate timed out")
+        written = write_memory_plus_update(
+            Path(workspace),
+            request_id=request_id,
+            source="test",
+            prompt="must not persist",
+            update={"write": True, "facts": [fact]},
+        )
+    except Exception as exc:  # pragma: no cover - relayed to the parent process
+        results.put((request_id, type(exc).__name__, str(exc)))
+    else:
+        results.put((request_id, "ok" if written else "not-written", ""))
 
 
 def test_memory_plus_is_not_an_exclusive_mode_button() -> None:
@@ -437,7 +464,7 @@ def test_structured_updates_dedupe_resolve_cap_and_redact(tmp_path: Path) -> Non
     assert "old prompt must never be stored" not in json.dumps(state, ensure_ascii=False)
 
 
-def test_memory_plus_observer_only_refreshes_changed_state_in_incremental_session(
+def test_memory_plus_observer_does_not_treat_preparation_as_engine_ack(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "sakura"
@@ -453,15 +480,122 @@ def test_memory_plus_observer_only_refreshes_changed_state_in_incremental_sessio
         metadata={"incremental": True},
     )
 
-    assert asyncio.run(observer.build_context_sections(request))
-    assert asyncio.run(observer.build_context_sections(request)) == []
+    first = asyncio.run(observer.build_context_sections(request))
+    second = asyncio.run(observer.build_context_sections(request))
+    assert first
+    assert second == first
 
     append_memory_plus_manual_note(workspace, "New state")
     assert asyncio.run(observer.build_context_sections(request))
 
     runtime = SimpleNamespace(_pre_turn_context_providers=[observer])
     mark_memory_plus_session_synced(runtime)
-    assert asyncio.run(observer.build_context_sections(request)) == []
+    assert asyncio.run(observer.build_context_sections(request))
+
+
+def test_context_build_is_read_only_when_canonical_state_is_absent(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps({"agent_mode": "flex", "memory_plus": {"enabled": True}}),
+        encoding="utf-8",
+    )
+    observer = MemoryPlusObserver(workspace_dir=workspace)
+
+    sections = asyncio.run(
+        observer.build_context_sections(
+            TurnContextRequest(
+                request_id="read-only",
+                source="text",
+                user_text="hello",
+                model_name="gpt-test",
+                metadata={"incremental": True},
+            )
+        )
+    )
+
+    assert sections
+    assert not (workspace / "memory").exists()
+
+
+def test_memory_plus_canonical_read_accepts_utf8_bom(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(parents=True)
+    state = read_memory_plus_context_state(tmp_path / "absent")
+    (memory_dir / "memory_plus_state.json").write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(state).encode("utf-8")
+    )
+
+    loaded = load_memory_plus_state(workspace)
+
+    assert loaded["schema_version"] == MEMORY_PLUS_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_type"),
+    [
+        (b"{broken", MemoryPlusStateUnreadable),
+        (
+            json.dumps(
+                {
+                    "schema_version": 99,
+                    "today": {},
+                    "carryover": {},
+                }
+            ).encode("utf-8"),
+            MemoryPlusUnsupportedSchema,
+        ),
+    ],
+)
+def test_unreadable_or_future_canonical_state_is_never_migrated_or_rewritten(
+    tmp_path: Path,
+    payload: bytes,
+    error_type: type[Exception],
+) -> None:
+    workspace = tmp_path / "sakura"
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(parents=True)
+    state_path = memory_dir / "memory_plus_state.json"
+    notepad = memory_dir / "memory_plus_notepad.md"
+    state_path.write_bytes(payload)
+    notepad.write_text("# Memory+ Notepad\n\n- Note: do not migrate me\n", encoding="utf-8")
+    before_state = state_path.read_bytes()
+    before_notepad = notepad.read_bytes()
+
+    with pytest.raises(error_type):
+        prepare_memory_plus_store(workspace)
+
+    assert state_path.read_bytes() == before_state
+    assert notepad.read_bytes() == before_notepad
+    assert not (memory_dir / "memory_plus_wiki").exists()
+
+
+def test_windows_safe_cross_process_updates_preserve_all_writers(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    prepare_memory_plus_store(workspace)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    workers = [
+        context.Process(
+            target=_write_memory_plus_in_process,
+            args=(str(workspace), f"req-{index}", f"fact-{index}", start, results),
+        )
+        for index in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    outcomes = [results.get(timeout=30) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=30)
+        assert worker.exitcode == 0
+
+    assert {outcome[1] for outcome in outcomes} == {"ok"}
+    assert set(load_memory_plus_state(workspace)["today"]["facts"]) == {
+        f"fact-{index}" for index in range(4)
+    }
 
 
 def test_memory_plus_enablement_is_independent_of_execution_mode(tmp_path: Path) -> None:
