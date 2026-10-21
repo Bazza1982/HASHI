@@ -196,13 +196,17 @@ not vendor modules. `/call` is a separate consumer of this same TTS catalogue
 and execution path: it keeps its own selection/lifecycle, freezes each call's
 revision, privacy-filters configured fallbacks, locks the first successful
 downgrade, and exposes selected/effective services to the Call Window. It no
-longer copies TTS targets or voices. See [catalogue](HASHI_VOICE_TTS_CATALOG.md),
+longer copies TTS targets or voices. The Call Window is the sole Call audio
+output and accepts the shared path's bounded MP3/WAV/Ogg assets. See
+[catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
 AgentPresence is default-off, owner-scoped and fail-open. Its command, voice
 outbox, Telegram, and Workbench Call subscription are independent. Call
-start/end drive away/return; only the initiating frontend plays Call audio.
+start/end drive a non-interruptible full departure and an interruptible return;
+early hang-up waits for departure, while a new Call or Voice Message may replace
+the return. Only the initiating frontend plays Call audio.
 Workbench non-call `/voice` and `/say` publish the exact generated audio through
 the generic owner-mirror outbox without adding another Conversation row; its
 ordinary local player does not autoplay, while AgentPresence uses phone-reply
