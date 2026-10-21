@@ -1081,6 +1081,7 @@ class HerSessionStore:
             "format": str(value.get("format") or ""),
             "provider": str(value.get("provider") or ""),
             "model": str(value.get("model") or ""),
+            "effort": str(value.get("effort") or ""),
             "stage": str(value.get("stage") or ""),
             "boundary": str(value.get("boundary") or ""),
             "message_count": int(value.get("message_count") or 0),
@@ -1262,6 +1263,7 @@ class HerSessionStore:
         turn_id: str,
         provider: str,
         model: str,
+        effort: str = "",
         stage: str,
         boundary: str,
         messages: Sequence[Mapping[str, Any]],
@@ -1302,6 +1304,7 @@ class HerSessionStore:
             "storage": _PROVIDER_CONTEXT_STORAGE,
             "provider": str(provider or ""),
             "model": str(model or ""),
+            "effort": str(effort or ""),
             "stage": str(stage or ""),
             "boundary": clean_boundary,
             "provider_request_id": str(provider_request_id or ""),
@@ -1438,10 +1441,58 @@ class HerSessionStore:
                 )
             return context
 
+    @staticmethod
+    def _normalise_run_claim(
+        claim: Mapping[str, Any] | None,
+        *,
+        expected_request_id: str = "",
+    ) -> dict[str, Any] | None:
+        value = dict(claim or {})
+        run_id = str(value.get("run_id") or "")
+        request_id = str(value.get("request_id") or "")
+        attempt = value.get("attempt")
+        state_revision = value.get("state_revision")
+        attempt_id = str(value.get("attempt_id") or "")
+        input_digest = str(value.get("input_digest") or "")
+        state = str(value.get("state") or "")
+        if (
+            not run_id
+            or not request_id
+            or (expected_request_id and request_id != expected_request_id)
+            or type(attempt) is not int
+            or attempt <= 0
+            or type(state_revision) is not int
+            or state_revision <= 0
+            or attempt_id != f"{run_id}:attempt:{attempt}"
+            or not input_digest
+            or not state
+        ):
+            return None
+        return {
+            "run_id": run_id,
+            "request_id": request_id,
+            "attempt": attempt,
+            "attempt_id": attempt_id,
+            "state_revision": state_revision,
+            "input_digest": input_digest,
+            "state": state,
+            "parent_run_id": str(value.get("parent_run_id") or "") or None,
+        }
+
     def interruption_evidence_for_request(
-        self, request_id: str
+        self,
+        request_id: str,
+        *,
+        run_claim: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Return a privacy-safe receipt for one interrupted provider Turn."""
+
+        canonical_run = self._normalise_run_claim(
+            run_claim,
+            expected_request_id=str(request_id),
+        )
+        if canonical_run is None:
+            return None
 
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -1460,9 +1511,29 @@ class HerSessionStore:
         state = self._recovery_dict(row)
         if state is None:
             return None
+        provider_context = self._provider_context_metadata(
+            state.get("provider_context")
+            if isinstance(state.get("provider_context"), Mapping)
+            else None,
+            digest=str(state.get("provider_context_digest") or ""),
+        )
+        provider = str(provider_context.get("provider") or "")
+        model = str(provider_context.get("model") or "")
+        effort = str(provider_context.get("effort") or "")
+        if not bool(provider_context.get("available")) or not all(
+            (provider, model, effort)
+        ):
+            return None
         evidence = {
             "kind": "herv3_active_turn_recovery",
             "source_request_id": str(state.get("source_request_id") or ""),
+            "run_id": canonical_run["run_id"],
+            "attempt_id": canonical_run["attempt_id"],
+            "state_revision": canonical_run["state_revision"],
+            "input_digest": canonical_run["input_digest"],
+            "provider": provider,
+            "model": model,
+            "effort": effort,
             "turn_id": str(state.get("turn_id") or ""),
             "turn_status": str(state.get("turn_status") or ""),
             "recovery_status": str(state.get("status") or ""),
@@ -1472,12 +1543,7 @@ class HerSessionStore:
             "safe_to_resume": bool(state.get("safe_to_resume")),
             "tool_receipt_count": len(state.get("tool_receipts") or []),
             "side_effect_count": len(state.get("side_effects") or []),
-            "provider_context": self._provider_context_metadata(
-                state.get("provider_context")
-                if isinstance(state.get("provider_context"), Mapping)
-                else None,
-                digest=str(state.get("provider_context_digest") or ""),
-            ),
+            "provider_context": provider_context,
             "evidence_ref": (
                 f"herv3:{state.get('session_id')}:{state.get('turn_id')}"
             ),
@@ -1489,6 +1555,8 @@ class HerSessionStore:
         self,
         evidence: Mapping[str, Any] | None,
         *,
+        source_run_claim: Mapping[str, Any] | None,
+        successor_run_claim: Mapping[str, Any] | None,
         instance_id: str,
         agent_id: str,
         owner_id: str,
@@ -1504,7 +1572,24 @@ class HerSessionStore:
         source_request_id = str(candidate.get("source_request_id") or "")
         if not source_request_id:
             return None
-        canonical = self.interruption_evidence_for_request(source_request_id)
+        source_run = self._normalise_run_claim(
+            source_run_claim,
+            expected_request_id=source_request_id,
+        )
+        successor_run = self._normalise_run_claim(successor_run_claim)
+        if (
+            source_run is None
+            or successor_run is None
+            or source_run["state"] != "superseded"
+            or successor_run["state"] != "running"
+            or successor_run["run_id"] == source_run["run_id"]
+            or successor_run["parent_run_id"] != source_run["run_id"]
+        ):
+            return None
+        canonical = self.interruption_evidence_for_request(
+            source_request_id,
+            run_claim=source_run,
+        )
         if canonical is None:
             return None
         if (
@@ -1515,7 +1600,18 @@ class HerSessionStore:
             or not bool(canonical.get("safe_to_resume"))
         ):
             return None
-        for key in ("evidence_ref", "evidence_digest", "turn_id"):
+        for key in (
+            "evidence_ref",
+            "evidence_digest",
+            "turn_id",
+            "run_id",
+            "attempt_id",
+            "state_revision",
+            "input_digest",
+            "provider",
+            "model",
+            "effort",
+        ):
             supplied = str(candidate.get(key) or "")
             if not supplied or supplied != str(canonical.get(key) or ""):
                 return None

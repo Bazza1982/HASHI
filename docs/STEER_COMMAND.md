@@ -61,6 +61,13 @@ auditable boundaries:
 - before accepting the successor Turn, HERV3 rebinds only a durable steer
   receipt that resolves to the same open HERV3 Session and matches the full
   HASHI instance, Agent, owner, conversation, generation, and Workzone binding;
+- the receipt also binds the source PAO Run ID, attempt, fencing revision,
+  input digest, Provider, model, and effort. A process restart may reuse that
+  exact attempt, but evidence from an older attempt is diagnostic only;
+- immediately before adoption, PAO must still report the source Run as
+  `superseded` and the distinct successor as `running` with that exact source
+  Run as its parent. Ordinary reconnects and terminal successors cannot adopt
+  private continuation state or dispatch another Provider call;
 - exposed Provider reasoning fields and completed Tool results remain part of
   that private context;
 - replay requires the same Provider, model, and HERV3 stage;
@@ -128,12 +135,24 @@ without a mid-task wrapper.
 1. All frontends reach the same typed operation.
 2. Native Codex steer targets the exact active Turn and creates no second Run.
 3. Unsupported native steer uses the linked successor path.
-4. HERV3 preserves complete private Provider context and does not expose raw
-   reasoning.
+4. HERV3 preserves complete private Provider context, fences it to the exact
+   PAO source/successor attempts, and does not expose raw reasoning.
 5. Receipts identify old Run, continuing/new Run, and continuation evidence.
 6. READY is cleared only for the affected Session and delayed FUTURE work remains.
 7. Runtime adoption and live frontend delivery are verified separately from
    source and offline tests.
+
+## 2026-10-21 PAO attempt-fencing correction
+
+- Approval: the user authorised the HASHI main-audit repair on the isolated
+  HASHI3 repair branch, with independent testing before any main integration.
+- Implementation: HERV3 continuation checkpoints now include effective effort
+  and bind the private recovery receipt to the canonical PAO source attempt.
+  Adoption re-reads both source and successor Runs and fails closed before a
+  Turn or Provider call when the attempt, fence, digest, relationship, state,
+  Provider, model, or effort is stale.
+- Runtime adoption and external frontend acceptance remain separate from this
+  source/offline correction and are not claimed here.
 
 ## 2026-10-18 HASHI3 correction record
 

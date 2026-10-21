@@ -115,6 +115,7 @@ class HerBackendSessionCoordinator:
             turn_id=accepted.turn_id,
             provider=str(checkpoint.get("provider") or ""),
             model=str(checkpoint.get("model") or ""),
+            effort=str(checkpoint.get("effort") or ""),
             stage=str(checkpoint.get("stage") or ""),
             boundary=str(checkpoint.get("boundary") or ""),
             messages=tuple(checkpoint.get("messages") or ()),

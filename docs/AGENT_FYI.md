@@ -115,7 +115,10 @@ synthetic readiness does not activate privacy or prove Worker adoption.
 Model/provider cards share a contract; chat-only has no tools. Fallback is opt-in
 and never replays uncertain effects. Codex `/steer` keeps its Run; HERV3 links one
 verified successor. Command frontend stays primary; receipts omit reasoning and
-recovery grants no authority.
+recovery grants no authority. HERV3 private continuation is valid only for the
+exact PAO source attempt/fence/input and a currently running, parent-linked
+successor; a newer attempt, ordinary reconnect, or terminal Run fails closed
+before Provider work.
 
 ## UI, media, and Phone
 
