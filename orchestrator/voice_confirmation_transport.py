@@ -243,8 +243,12 @@ def _current_binding(
     runtime: Any, *, surface: str
 ) -> tuple[dict[str, Any], str] | None:
     try:
+        # AP owns the local confirmation presentation, not a parallel
+        # Conversation. Its confirmation is fenced against HASHI's current
+        # primary Conversation while retaining the AP-only confirmation scope.
+        binding_surface = "workbench" if surface == "agentpresence" else surface
         session = runtime_session.current_session(
-            runtime, surface=surface, channel_key="default"
+            runtime, surface=binding_surface, channel_key="default"
         )
         return session, runtime_session.owner_id(runtime)
     except Exception:

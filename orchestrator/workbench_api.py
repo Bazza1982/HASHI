@@ -10310,6 +10310,48 @@ class WorkbenchApiServer:
             )
         return str(getattr(runtime, "name", None) or agent_name), runtime, None
 
+    def _agentpresence_current_session_metadata(self, request, runtime):
+        """Freeze HASHI's current Conversation without accepting an AP route."""
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence Session owner is unavailable",
+                    "error_code": "agentpresence_session_unavailable",
+                },
+                status=503,
+            )
+        try:
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner_id,
+                agent_id=str(getattr(runtime, "name", "") or ""),
+                establish=True,
+            )
+        except (OSError, TypeError, ValueError, SessionConflict, SessionNotFound):
+            logger.warning("Agent Presence current Session resolution failed")
+            return None, web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "The current Agent Session is unavailable",
+                    "error_code": "agentpresence_session_unavailable",
+                },
+                status=503,
+            )
+        return {
+            "session_id": str(session["session_id"]),
+            "owner_id": owner_id,
+            # Keep AP as the authenticated Connector identity while the exact
+            # HASHI-owned primary Conversation is frozen above.
+            "session_surface": "agentpresence",
+            "session_channel_key": "default",
+            "session_context_generation": int(session["context_generation"]),
+            AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
+            MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
+        }, None
+
     async def _agentpresence_voice_confirmation_transport(
         self,
         runtime,
@@ -10431,7 +10473,13 @@ class WorkbenchApiServer:
                 )
                 if route_rejection is not None:
                     return route_rejection
+                agentpresence_session_metadata, route_rejection = (
+                    self._agentpresence_current_session_metadata(request, runtime)
+                )
+                if route_rejection is not None:
+                    return route_rejection
             else:
+                agentpresence_session_metadata = None
                 agent_name = fields.get("agent") or fields.get("agentId")
                 runtime = runtime_map.get(agent_name)
                 if runtime is None:
@@ -10453,15 +10501,7 @@ class WorkbenchApiServer:
                     else fields.get("client_id") or "default"
                 ),
             }
-            if agentpresence_ingress:
-                session_metadata.update(
-                    {
-                        "session_id": None,
-                        AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
-                        MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
-                    }
-                )
-            if fields.get("session_context_generation"):
+            if not agentpresence_ingress and fields.get("session_context_generation"):
                 try:
                     generation = int(fields["session_context_generation"])
                     if generation < 1:
@@ -10470,6 +10510,8 @@ class WorkbenchApiServer:
                 except ValueError:
                     return web.json_response({"ok": False, "accepted": False,
                         "error_code": "voice_session_changed"}, status=409)
+            if agentpresence_session_metadata is not None:
+                session_metadata.update(agentpresence_session_metadata)
             source_declaration_text = str(fields.get("message_source") or "").strip()
             if source_declaration_text and not agentpresence_ingress:
                 try:
@@ -10718,7 +10760,13 @@ class WorkbenchApiServer:
             )
             if route_rejection is not None:
                 return route_rejection
+            agentpresence_session_metadata, route_rejection = (
+                self._agentpresence_current_session_metadata(request, runtime)
+            )
+            if route_rejection is not None:
+                return route_rejection
         else:
+            agentpresence_session_metadata = None
             agent_name = payload.get("agent") or payload.get("agentId")
             runtime = runtime_map.get(agent_name)
         if runtime is None:
@@ -10800,16 +10848,8 @@ class WorkbenchApiServer:
                 session_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
                     connector_evidence
                 )
-        if agentpresence_ingress:
-            session_metadata.update(
-                {
-                    "session_id": None,
-                    "session_surface": "agentpresence",
-                    "session_channel_key": "default",
-                    AGENTPRESENCE_AUTHENTICATED_METADATA_KEY: True,
-                    MESSAGE_SOURCE_RESERVED_METADATA_KEY: "agentpresence",
-                }
-            )
+        if agentpresence_session_metadata is not None:
+            session_metadata.update(agentpresence_session_metadata)
         telegram_mirror = True
         supplied_delivery_policy = payload.get("delivery_policy")
         if agentpresence_ingress:

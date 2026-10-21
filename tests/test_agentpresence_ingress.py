@@ -16,6 +16,7 @@ from orchestrator.message_context import (
     build_message_context_snapshot,
 )
 from orchestrator.runtime_media import VoiceIngressError
+from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -122,10 +123,21 @@ async def test_agentpresence_reserved_source_requires_token_and_exact_instance(
 
 
 @pytest.mark.asyncio
-async def test_agentpresence_text_and_voice_use_one_isolated_default_session_route(
+async def test_agentpresence_text_and_voice_use_hashi_selected_agent_current_session(
     tmp_path, monkeypatch
 ):
     server, runtime = _server(tmp_path)
+    owner_id = SessionStore.owner_id_for(server.global_config)
+    current = server.session_store.create_session(
+        owner_id=owner_id,
+        agent_id="agent1",
+        title="Visible Workbench conversation",
+    )
+    server.session_store.bind_primary_session(
+        owner_id=owner_id,
+        agent_id="agent1",
+        session_id=current["session_id"],
+    )
     monkeypatch.setattr(
         agent_presence_notify, "token_matches", lambda value: value == "ap-secret"
     )
@@ -142,6 +154,13 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
                 "session_id": "attempted-other-session",
                 "instance_id": "TEST",
                 "idempotency_key": "agentpresence:text-1",
+                "request_metadata": {
+                    "owner_id": "caller-cannot-select-owner",
+                    "session_id": "caller-cannot-select-session",
+                    "session_surface": "caller-cannot-select-surface",
+                    "session_channel_key": "caller-cannot-select-channel",
+                    "session_context_generation": 999,
+                },
             },
             headers=headers,
         )
@@ -150,7 +169,12 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
         text_kwargs = runtime.enqueue_api_text.await_args.kwargs
         assert text_kwargs["source"] == "agentpresence"
         assert text_kwargs["idempotency_key"] == "agentpresence:text-1"
-        assert text_kwargs["request_metadata"]["session_id"] is None
+        assert text_kwargs["request_metadata"]["owner_id"] == owner_id
+        assert text_kwargs["request_metadata"]["session_id"] == current["session_id"]
+        assert (
+            text_kwargs["request_metadata"]["session_context_generation"]
+            == current["context_generation"]
+        )
         assert text_kwargs["request_metadata"]["session_surface"] == "agentpresence"
         assert text_kwargs["request_metadata"]["session_channel_key"] == "default"
         assert (
@@ -172,6 +196,7 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
             "instance_id": "TEST",
             "media_type": "voice",
             "idempotency_key": "agentpresence:voice-1",
+            "session_context_generation": "999",
         }.items():
             form.add_field(key, value)
         form.add_field(
@@ -184,7 +209,12 @@ async def test_agentpresence_text_and_voice_use_one_isolated_default_session_rou
         assert voice_kwargs["media_kind"] == "voice"
         assert voice_kwargs["source"] == "agentpresence"
         assert voice_kwargs["idempotency_key"] == "agentpresence:voice-1:0"
-        assert voice_kwargs["request_metadata"]["session_id"] is None
+        assert voice_kwargs["request_metadata"]["owner_id"] == owner_id
+        assert voice_kwargs["request_metadata"]["session_id"] == current["session_id"]
+        assert (
+            voice_kwargs["request_metadata"]["session_context_generation"]
+            == current["context_generation"]
+        )
         assert voice_kwargs["request_metadata"]["session_surface"] == "agentpresence"
         assert voice_kwargs["request_metadata"]["session_channel_key"] == "default"
         assert (

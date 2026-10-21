@@ -3,6 +3,8 @@
 > Historical implementation/adoption record. Its combined AP-owned
 > `instance + Agent` routing decision is superseded by
 > [Agent Presence routing ownership](AGENTPRESENCE_ROUTING_OWNERSHIP_20261021.md).
+> Its AP-only Conversation was also superseded: current ingress uses the
+> HASHI-selected Agent's current primary Conversation.
 
 ## Decision
 
@@ -14,10 +16,12 @@ binding stored by AP.
 No binding means no send. AP never derives a target from the character pack,
 the focused window, an Agent list, or a previous conversation. Button-down
 freezes the route; button-up submits one in-memory PCM/WAV recording through the
-existing HASHI voice/STT/Safe Voice path. Text uses the same target and isolated
-`agentpresence/default` Session. Slash-prefixed text follows the same registered
-Frontend Connector command adapter rather than falling outside that contract. A
-write with an ambiguous outcome is not retried.
+existing HASHI voice/STT/Safe Voice path. At this historical checkpoint, text
+used the same target and an isolated `agentpresence/default` Session; the current
+decision instead resolves the HASHI-selected Agent's primary Conversation.
+Slash-prefixed text follows the same registered Frontend Connector command
+adapter rather than falling outside that contract. A write with an ambiguous
+outcome is not retried.
 
 HASHI admits the reserved source only when `source=surface=agentpresence`, the
 local AP token matches, and the requested instance is the current instance.

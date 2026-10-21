@@ -126,12 +126,28 @@ async def test_safe_voice_transcribes_but_admits_only_after_confirm(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_agentpresence_safe_voice_uses_its_own_confirmable_session(
+async def test_agentpresence_safe_voice_uses_current_primary_session_with_ap_only_confirmation(
     tmp_path, monkeypatch
 ):
-    target, session, metadata, _clock = _runtime(
-        tmp_path, surface="agentpresence"
+    target, _default_session, _metadata, _clock = _runtime(tmp_path)
+    owner_id = runtime_session.owner_id(target)
+    session = target.session_store.create_session(
+        owner_id=owner_id,
+        agent_id=target.name,
+        title="Visible Workbench conversation",
     )
+    target.session_store.bind_primary_session(
+        owner_id=owner_id,
+        agent_id=target.name,
+        session_id=session["session_id"],
+    )
+    metadata = {
+        "session_id": session["session_id"],
+        "owner_id": owner_id,
+        "session_surface": "agentpresence",
+        "session_channel_key": "default",
+        "session_context_generation": session["context_generation"],
+    }
     await _upload(
         tmp_path,
         monkeypatch,

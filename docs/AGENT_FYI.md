@@ -217,12 +217,14 @@ AP text/PTT ingress is separately fail-closed. AP's tray menu persists exactly
 one explicit `instance + Backend API` binding. Each HASHI instance separately
 owns its default Agent through `/agentpresence default <agent>`. AP never stores
 or submits an Agent name. HASHI requires the AP token and matching instance,
-ignores caller Agent/Session/channel values, resolves an enabled running Agent
-from its own setting, forces an independent `agentpresence/default` Session,
-and routes WAV PTT through the ordinary voice STT/Safe Voice path. Safe Voice
-returns a reviewable transcript to AP; AP must explicitly confirm or discard it
-on the same authenticated Session before HASHI creates a Run. Either missing
-setting blocks the write, so neither side guesses a route.
+ignores caller Agent/owner/Session/generation/channel values, resolves an enabled
+running Agent from its own setting, and freezes that Agent's current primary
+Conversation for each incoming text/PTT request. The transcript, Run and reply
+are therefore visible in the same Workbench chat history. WAV PTT follows the
+ordinary voice STT/Safe Voice path. Safe Voice returns a reviewable transcript
+to AP; AP must explicitly confirm or discard it against the same frozen Session
+and generation before HASHI creates a Run. Either missing setting blocks the
+write, so neither side guesses a route.
 
 AP desktop releases retain full .NET globalization data. WPF resolves the
 active keyboard layout through `CultureInfo` when its text box receives focus;

@@ -308,13 +308,17 @@ identity. An ambiguous write timeout is not retried.
 
 The Backend API accepts the reserved `agentpresence` source only with the same
 local token and exact instance ID. It ignores any caller-selected Agent and
-discards caller-selected Session/channel values. HASHI resolves its configured
-default Agent, verifies that it is enabled and running, binds every AP message to
-the connector's independent `default` Session, and sends voice through the
-existing STT, Safe Voice and PAO admission path. When Safe Voice is enabled,
-HASHI returns the transcript without admitting a Run; AP presents an explicit
-confirm/discard choice, and only an authenticated decision bound to the same
-`agentpresence/default` Session can admit it. AP never silently confirms.
+discards caller-selected owner, Session, generation and channel values. HASHI
+resolves its configured default Agent, verifies that it is enabled and running,
+then freezes that Agent's owner-scoped current primary Conversation Session and
+context generation for the AP message. Text, voice transcript, Run and reply
+therefore share the Conversation projected by Workbench instead of creating an
+AP-only chat history. Voice uses the existing STT, Safe Voice and PAO admission
+path. When Safe Voice is enabled, HASHI returns the transcript without admitting
+a Run; AP presents an explicit confirm/discard choice, and only an authenticated
+AP decision bound to the same frozen Conversation Session and generation can
+admit it. A primary-Session change invalidates the pending confirmation. AP
+never silently confirms, and Workbench cannot decide an AP-held transcript.
 AgentPresence owns capture, its instance binding and this local presentation,
 not HASHI Agent, Session, Message, Run, Event, call, STT or voice authority.
 Ingress authentication/routing fails closed; this is separate from the egress
