@@ -387,6 +387,20 @@ def _selected_policy_rows(rows, selected):
     result = [selected]
     providers = (selected.get("her_v2") or {}).get("v3_provider_allowlist", [])
     result.extend(deepcopy(row) for row in rows if row["engine"] in providers and not is_selectable_backend(row["engine"]))
+    if providers:
+        from orchestrator.agent_creation_policy import selection_row
+        from orchestrator.runtime_effort_options import provider_backend_rows
+
+        # A Provider may also offer a standalone Engine. Retain only its model
+        # policy inside HER when that Engine was not selected for this Agent.
+        retained = {canonical_model_provider(row.get("engine")) for row in result}
+        policies = [
+            selection_row(row) for row in provider_backend_rows(rows)
+            if canonical_model_provider(row.get("engine")) in providers
+            and canonical_model_provider(row.get("engine")) not in retained
+        ]
+        if policies:
+            selected["her_v2"]["provider_policies"] = policies
     return result
 
 

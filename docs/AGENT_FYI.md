@@ -40,6 +40,7 @@ Configuration owns identity, ports, Workzones, endpoints and models; exclude
 secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
 shared compatibility uses the qualified registry. Unknown capability/price is
 neither unsupported nor zero; explicit choices persist.
+HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md) without Engine grants.
 
 Agent name/Emoji come from revisioned config; failed post-save refresh cannot reverse durable success.
 

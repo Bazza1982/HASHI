@@ -248,3 +248,31 @@ async def test_live_provider_resolves_shared_and_agent_reasoning_choices(
     # Projection must not rewrite the actual inference adapter or instance policy.
     assert main.engine == target.provider == engine
     assert rows[-1]["her_v2"]["main"]["provider"] == engine
+
+
+def test_offline_herv3_metadata_preserves_provider_model_policy(tmp_path):
+    server = _server(tmp_path)
+    model = "client-thinking"
+    policy = {
+        "engine": "ollama-api", "models": [model, "client-fixed"],
+        "available_models": [model, "client-fixed"],
+        "model_efforts": {model: ["enabled", "off"], "client-fixed": []},
+    }
+    her = {
+        "engine": "her-v2", "model": model, "effort": "enabled",
+        "her_v2": {
+            "main": {"provider": "ollama", "model": model},
+            "v3_provider_allowlist": ["ollama-api"], "provider_policies": [policy],
+        },
+    }
+    metadata = server._metadata_for_agent({
+        "name": "offline-local", "type": "flex", "workspace_dir": "workspaces/offline-local",
+        "active_backend": "her-v2", "allowed_backends": [her],
+    }, None)
+    public = metadata["allowed_backends"][0]
+    assert public["engine"] == "her-v3"
+    assert public["provider"] == "ollama"
+    assert public["models"] == [model, "client-fixed"]
+    assert public["efforts"] == ["enabled", "off"]
+    assert public["effort"] == "enabled"
+    assert "her_v2" not in public
