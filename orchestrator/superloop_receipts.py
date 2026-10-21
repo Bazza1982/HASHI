@@ -98,7 +98,8 @@ class SuperloopReceiptService:
         if activity is not None:
             self.reconcile(enqueue, activity)
         receipts = [receipt for receipt in receipts
-            if receipt.get("state") == "reply_delivered_locally" and receipt.get("request_id")
+            if receipt.get("state") == "reply_delivered_locally"
+            and (receipt.get("session_id") or receipt.get("request_id"))
             and all(receipt.get(key) for key in (
                 "message_id", "in_reply_to", "conversation_id", "from_agent", "from_instance", "to_agent", "to_instance",
             ))]
@@ -450,16 +451,22 @@ class SuperloopReceiptService:
                     "idempotency_key": key, "task_id": task_id,
                     "dispatch_instance_id": receipt["in_reply_to"],
                     "receipt_message_id": receipt["message_id"],
-                    "receipt_request_id": receipt["request_id"],
+                    "receipt_request_id": receipt.get("request_id"),
                     "controller_agent": state["controller"]["agent"],
                     "review_verified": False, "attempts": 0,
                 }
                 rows.append(row)
             row.update(status="pending", attempts=int(row["attempts"]) + 1, retry_at=now + RETRY_SECONDS)
             self.store.save_loop_json_list(path, rows)
-            session_id = (row.get("request") or {}).get("session_id") or resolve_session(
-                state["controller"]["agent"], receipt["request_id"],
+            session_id = (
+                (row.get("request") or {}).get("session_id")
+                or receipt.get("session_id")
             )
+            receipt_request_id = str(receipt.get("request_id") or "").strip()
+            if not session_id and receipt_request_id:
+                session_id = resolve_session(
+                    state["controller"]["agent"], receipt_request_id,
+                )
             if not session_id:
                 row.update(status="pending", last_error="Receipt session unavailable")
                 self.store.save_loop_json_list(path, rows)

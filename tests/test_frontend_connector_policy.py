@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.frontend_delivery import (
+    configured_owner_mirror_destinations,
     delivery_intent_from_run_route,
     freeze_run_delivery_route,
     normalize_tui_run_delivery_policy,
@@ -14,6 +16,7 @@ from orchestrator.frontend_delivery import (
     tui_request_metadata,
     tui_run_delivery_policy,
 )
+from orchestrator.connector_delivery_preferences import set_connector_preference
 from orchestrator.frontend_status import runtime_presentation_status
 
 
@@ -81,10 +84,15 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
     )
     monkeypatch.setattr(runtime_module, "_print_user_message", lambda *_args: None)
 
-    message = SimpleNamespace(text="hello from Telegram")
+    message = SimpleNamespace(
+        message_id=123,
+        text="hello from Telegram",
+        date=datetime.now(timezone.utc),
+    )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=42),
         effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
         message=message,
     )
 
@@ -260,6 +268,50 @@ def test_legacy_run_route_projects_to_endpoint_level_delivery_intent():
         (item["connector_id"], item["role"])
         for item in intent["destinations"]
     ] == [("backend_api", "primary"), ("telegram", "mirror")]
+
+
+def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
+    set_connector_preference(tmp_path, "owner-a", "agentpresence", "mirror", True)
+    additional = configured_owner_mirror_destinations(
+        request_metadata={"owner_id": "owner-a"},
+        state_root=tmp_path,
+    )
+    assert additional == ({"surface": "agentpresence", "channel_key": "owner-a"},)
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        chat_id=123,
+        telegram_requested=False,
+        additional_mirrors=additional,
+    )
+
+    set_connector_preference(tmp_path, "owner-a", "agentpresence", "mirror", False)
+    text_intent = delivery_intent_from_run_route(
+        route,
+        event_id="evt-text",
+        session_id="ses-1",
+        idempotency_key="text",
+        content_modes=["text"],
+    )
+    assert [item["connector_id"] for item in text_intent["destinations"]] == [
+        "backend_api"
+    ]
+
+    media_intent = delivery_intent_from_run_route(
+        route,
+        event_id="evt-media",
+        session_id="ses-1",
+        idempotency_key="media",
+        content_modes=["text", "media"],
+    )
+    agentpresence = next(
+        item
+        for item in media_intent["destinations"]
+        if item["connector_id"] == "agentpresence"
+    )
+    assert agentpresence["role"] == "mirror"
+    assert agentpresence["content_modes"] == ["media"]
 
 
 def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():

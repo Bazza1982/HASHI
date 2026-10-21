@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -32,7 +33,10 @@ from adapters.stream_events import (
 )
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
-from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.multimodal_contract import (
+    MultimodalContractError,
+    canonical_request_content,
+)
 from tools.registry import ToolRegistry, ToolResult
 
 
@@ -97,6 +101,63 @@ def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
     adapter = DeepSeekAdapter(cfg, global_config or SimpleNamespace(), api_key="test-key")
     adapter.tool_registry = _DummyToolRegistry()
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_deepseek_rejects_terminal_response_while_run_question_is_pending(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+
+    class QuestionGuardRegistry(_DummyToolRegistry):
+        def __init__(self):
+            super().__init__()
+            self.waits = 0
+
+        async def wait_before_terminal_response(self):
+            self.waits += 1
+            if self.waits > 1:
+                return None
+            return {
+                "type": "hashi.run_question.resolution",
+                "questions": [
+                    {
+                        "question_id": "que-1",
+                        "state": "consumed",
+                        "answer": {
+                            "option_id": "yes",
+                            "text": "",
+                            "author": "authenticated_user",
+                            "grants_permissions": False,
+                        },
+                    }
+                ],
+            }
+
+    registry = QuestionGuardRegistry()
+    adapter.tool_registry = registry
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("premature", None, "stop", 10, 2),
+            _APIResult("answered result", None, "stop", 10, 2),
+        ]
+    )
+
+    response = await adapter.generate_response("Choose first", "request-question")
+
+    assert response.is_success is True
+    assert response.text == "answered result"
+    assert registry.waits == 2
+    assert adapter._call_api_once.call_count == 2
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    resolution_messages = [
+        message
+        for message in second_payload["messages"]
+        if "HASHI_RUN_QUESTION_RESOLUTION" in str(message.get("content") or "")
+    ]
+    assert len(resolution_messages) == 1
+    assert resolution_messages[0]["role"] == "user"
+    assert "authenticated_user" in resolution_messages[0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -197,6 +258,45 @@ async def test_deepseek_vision_model_receives_native_image_content(tmp_path, mod
         item["function"]["name"] for item in outbound.get("tools", [])
     }
     assert tool_names.isdisjoint({"media_read", "vision_inspect"})
+
+
+@pytest.mark.asyncio
+async def test_deepseek_receives_recent_live_frames_as_labeled_structured_images(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("seen", None, "stop", 10, 2)
+    )
+    frames = (
+        {
+            "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+            "frame_sequence": 4,
+            "captured_at": "2026-10-17T06:20:00+11:00",
+        },
+        {
+            "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+            "frame_sequence": 9,
+            "captured_at": "2026-10-17T06:20:05+11:00",
+        },
+    )
+
+    response = await adapter.generate_response(
+        "What am I holding?", "request-live-vision", transient_images=frames
+    )
+
+    assert response.is_success is True
+    outbound = adapter._call_api_once.call_args.args[0]
+    user_content = outbound["messages"][1]["content"]
+    assert [part["type"] for part in user_content] == [
+        "text",
+        "text",
+        "image_url",
+        "text",
+        "image_url",
+    ]
+    assert "recent live camera frame 1/2" in user_content[1]["text"].lower()
+    assert user_content[-1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
 
 
 def _init_org(tmp_path, org_id: str = "ORG-001") -> None:
@@ -989,6 +1089,39 @@ def test_commentary_prefixed_text_tool_intent_requires_native_repair(
     assert inspected.tool_calls == ()
 
 
+
+
+def test_text_tool_repair_retains_the_full_large_rejected_response(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    envelope = (
+        "<｜DSML｜ calls>"
+        '<｜DSML｜ invoke name="file_list">'
+        '<｜DSML｜ parameter name="path" string="true">/tmp'
+        "</｜DSML｜ parameter>"
+        "</｜DSML｜ invoke>"
+        "</｜DSML｜ calls>"
+    )
+    raw_text = ("progress evidence " * 2_000) + "\n" + envelope
+    payload = adapter._build_payload(
+        [{"role": "user", "content": "Inspect the directory."}]
+    )
+    result = adapter._apply_text_tool_compatibility(
+        _APIResult(
+            raw_text,
+            None,
+            "stop",
+            provider_response_id="response-long-text-tool",
+        ),
+        payload,
+        actual_model="deepseek-flash",
+        system_fingerprint="",
+    )
+
+    assert len(raw_text) > 16 * 1024
+    assert result.provider_compatibility["status"] == "repair_required"
+    assert result.tool_calls[0]["function"]["arguments"] == (
+        "HASHI rejected DeepSeek textual tool intent:\n" + raw_text
+    )
 def test_stream_gate_delivers_commentary_and_blocks_following_antml():
     gate = DeepSeekToolMarkupStreamGate(enabled=True)
 
@@ -1160,9 +1293,170 @@ async def test_cancelled_tool_forwards_cleanup_before_propagating_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_deepseek_tool_screenshot_is_native_image_not_base64_text(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+
+    async def execute_screenshot(tool_name, arguments, tool_call_id=""):
+        del tool_name, arguments
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=json.dumps(
+                {
+                    "data": (
+                        "Windows screenshot OK — provider=helper-native, 1KB\n"
+                        f"{data_url}"
+                    ),
+                    "effect": "observed",
+                    "error": None,
+                    "status": "success",
+                    "warning": None,
+                }
+            ),
+        )
+
+    adapter.tool_registry.execute = execute_screenshot
+    messages = []
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_screenshot",
+                "type": "function",
+                "function": {"name": "windows_screenshot", "arguments": "{}"},
+            }
+        ],
+        messages,
+        on_stream_event=None,
+    )
+
+    assert [message["role"] for message in messages] == ["tool", "user"]
+    assert messages[0]["tool_call_id"] == "call_screenshot"
+    assert "Windows screenshot OK" in messages[0]["content"]
+    assert "base64" not in messages[0]["content"]
+    assert messages[1]["content"][0]["type"] == "text"
+    assert messages[1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": data_url},
+    }
+
+
+def test_deepseek_payload_requires_structured_image_content():
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+    deepseek_api._validate_deepseek_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect it."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(MultimodalContractError) as exc_info:
+        deepseek_api._validate_deepseek_payload(
+            {
+                "messages": [
+                    {"role": "tool", "content": f"screenshot follows: {data_url}"}
+                ]
+            }
+        )
+
+    assert exc_info.value.code == "INVALID_MULTIMODAL_CONTENT"
+
+
+def test_deepseek_payload_accepts_reported_screenshot_byte_size():
+    reported_size = 2_821_918
+    payload = b"\x89PNG\r\n\x1a\n" + b"\0" * (reported_size - 8)
+    data_url = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
+
+    deepseek_api._validate_deepseek_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect it."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert len(data_url) > reported_size
+
+
+def test_deepseek_payload_enforces_actual_serialized_body_limit(monkeypatch):
+    monkeypatch.setattr(deepseek_api, "DEEPSEEK_MAX_REQUEST_BODY_BYTES", 128)
+
+    with pytest.raises(MultimodalContractError) as exc_info:
+        deepseek_api._validate_deepseek_payload(
+            {"messages": [{"role": "user", "content": "x" * 256}]}
+        )
+
+    assert exc_info.value.code == "MEDIA_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_tool_batch_defers_image_followup_until_all_tool_results(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+
+    async def execute(tool_name, arguments, tool_call_id=""):
+        del arguments
+        output = data_url if tool_name == "windows_screenshot" else "listed"
+        return ToolResult(tool_call_id=tool_call_id, output=output)
+
+    adapter.tool_registry.execute = execute
+    messages = []
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_screenshot",
+                "type": "function",
+                "function": {"name": "windows_screenshot", "arguments": "{}"},
+            },
+            {
+                "id": "call_list",
+                "type": "function",
+                "function": {"name": "file_list", "arguments": "{}"},
+            },
+        ],
+        messages,
+        on_stream_event=None,
+    )
+
+    assert [message["role"] for message in messages] == ["tool", "tool", "user"]
+    assert [message["tool_call_id"] for message in messages[:2]] == [
+        "call_screenshot",
+        "call_list",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     seen_messages = []
+    checkpoints = []
+    adapter.set_provider_context_observer(checkpoints.append)
     tool_calls = [
         {
             "id": "call_1",
@@ -1207,6 +1501,24 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+    assert [item["boundary"] for item in checkpoints] == [
+        "completed_tool_batch",
+        "completed_provider_response",
+    ]
+    tool_boundary = checkpoints[0]
+    checkpoint_assistant = next(
+        item
+        for item in tool_boundary["messages"]
+        if item.get("role") == "assistant"
+    )
+    assert (
+        checkpoint_assistant["reasoning_content"]
+        == "Need to inspect the directory."
+    )
+    assert any(item.get("role") == "tool" for item in tool_boundary["messages"])
+    assert tool_boundary["reasoning"][0]["content"] == (
+        "Need to inspect the directory."
+    )
     provider_calls = response.stream_metadata["meter"]["provider_calls"]
     usage_fields = {
         "input",
@@ -1257,6 +1569,34 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
         "completed",
     ]
     assert len({call["provider_request_id"] for call in provider_calls}) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_context_observer_never_checkpoints_partial_reasoning(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path)
+    checkpoints = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+    adapter.set_provider_context_observer(checkpoints.append)
+
+    async def incomplete_call(payload, headers, on_stream_event):
+        del payload, headers, on_stream_event
+        started.set()
+        await release.wait()
+        raise AssertionError("cancelled call must not complete")
+
+    monkeypatch.setattr(adapter, "_call_api_once", incomplete_call)
+    task = asyncio.create_task(
+        adapter.generate_response("inspect safely", "req-partial-reasoning")
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert checkpoints == []
 
 
 @pytest.mark.asyncio
@@ -3015,3 +3355,386 @@ async def test_cancelled_stream_audits_observed_tool_fragment_without_execution(
     assert observed[0]["transport_state"] == "cancelled"
     assert observed[0]["tool_calls"][0]["id"] == "call-cancelled"
     assert observed[0]["tool_calls"][0]["complete"] is False
+
+
+def _typed_stream_inactivity_timeout(*, meaningful_response_started: bool):
+    from adapters.openrouter_api import _ProviderStreamInactivityGuard
+
+    guard = _ProviderStreamInactivityGuard(timeout_s=300.0)
+    guard.meaningful_response_started = bool(meaningful_response_started)
+    # Deterministic: the guard has already consumed its read-wait budget, so
+    # the real detector raises its typed timeout without waiting for 300s.
+    guard.waited_without_meaningful_s = guard.timeout_s
+    return guard._timeout_error(SimpleNamespace())
+
+
+def _checkpoint_evidence_registry(tmp_path, *, request_id: str, invocation_id: str, tools):
+    from orchestrator.her_v2.audit import DurableAuditLog
+
+    base = ToolRegistry(
+        list(tools),
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={"request_id": request_id},
+    )
+    return _EvidenceRecordingToolRegistry(
+        base,
+        StageRequest(
+            turn_id=f"turn-{invocation_id}",
+            request_ref=request_id,
+            invocation_id=invocation_id,
+            stage=Stage.EXECUTION,
+            role="primary",
+            attempt=1,
+            goal="Exercise the bounded stream-timeout continuation.",
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        audit_log=DurableAuditLog(
+            tmp_path / "recovery.jsonl", tmp_path / "fallback.jsonl"
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "meaningful_response_started",
+    [True, False],
+    ids=["stream-idle", "response-start"],
+)
+async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoints(
+    monkeypatch, tmp_path, meaningful_response_started
+):
+    from orchestrator.flexible_backend_registry import public_backend_engine
+
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    observed_calls = []
+    adapter.set_provider_call_observer(observed_calls.append)
+    evidence = _checkpoint_evidence_registry(
+        tmp_path,
+        request_id="req-stream-checkpoint",
+        invocation_id="invocation-stream",
+        tools=["file_read", "file_write"],
+    )
+    adapter.tool_registry = evidence
+    executed = []
+    real_execute = evidence.execute
+
+    async def execute_with_receipts(tool_name, arguments, tool_call_id=""):
+        executed.append(tool_name)
+        if tool_name == "file_read":
+            digest = hashlib.sha256(b"tool output").hexdigest()
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output="tool output",
+                details={
+                    "receipt_completed": True,
+                    "receipt_status": "success",
+                    "effect_receipt": {
+                        "kind": "read",
+                        "tool_name": tool_name,
+                        "evidence_ref": f"tool:{tool_call_id}:sha256:{digest}",
+                        "revision": f"sha256:{digest}",
+                    },
+                },
+            )
+        return await real_execute(tool_name, arguments, tool_call_id)
+
+    monkeypatch.setattr(evidence, "execute", execute_with_receipts)
+    seen = []
+    timeout = _typed_stream_inactivity_timeout(
+        meaningful_response_started=meaningful_response_started
+    )
+    assert timeout.hashi_error_code == (
+        "PROVIDER_STREAM_IDLE_TIMEOUT"
+        if meaningful_response_started
+        else "PROVIDER_RESPONSE_START_TIMEOUT"
+    )
+    tool_calls = [
+        {
+            "id": "call-read",
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "arguments": json.dumps({"path": "observed.txt"}),
+            },
+        },
+        {
+            "id": "call-write",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps(
+                    {"path": "checkpoint.txt", "content": "saved exactly once"}
+                ),
+            },
+        },
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        if len(seen) == 2:
+            await on_stream_event(
+                StreamEvent(kind=KIND_THINKING, summary="incomplete internal draft")
+            )
+            raise timeout
+        return _APIResult("continued final answer", None, "stop")
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "inspect and save once",
+        "req-stream-checkpoint",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True, response.error
+    assert response.text == "continued final answer"
+    assert len(seen) == 3
+    assert seen[1] == seen[2], "the continuation reuses the assembled messages"
+    assert "incomplete internal draft" not in seen[2]
+    assert "call-read" in seen[2] and "call-write" in seen[2]
+    assert executed == ["file_read", "file_write"]
+    assert (tmp_path / "checkpoint.txt").read_text(
+        encoding="utf-8"
+    ) == "saved exactly once"
+    assert response.stream_metadata["provider_transport_retry_count"] == 1
+    assert response.stream_metadata["provider_local_recovery_count"] == 1
+    assert response.stream_metadata["provider_local_recovery_limit"] == 3
+    calls = response.stream_metadata["meter"]["provider_calls"]
+    assert calls == observed_calls
+    assert [call["retry_count"] for call in calls] == [0, 0, 1]
+    failed_call = calls[1]
+    assert failed_call["decision"] == "retry_current_call_checkpoint"
+    assert failed_call["effect_recovery"]["safe_current_call_continuation"] is True
+    assert failed_call["effect_recovery"]["tools_replayed"] is False
+    assert failed_call["effect_recovery"]["completed_checkpoint_count"] == 1
+    assert calls[2]["recovery_kind"] == "current_call_checkpoint"
+    assert public_backend_engine("her-v2") == "her-v3"
+    assert "her-v2" not in json.dumps(failed_call, default=str)
+
+
+@pytest.mark.asyncio
+async def test_herv3_stream_inactivity_continuation_stops_at_the_shared_budget(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    observed_calls = []
+    adapter.set_provider_call_observer(observed_calls.append)
+    evidence = _checkpoint_evidence_registry(
+        tmp_path,
+        request_id="req-stream-exhaustion",
+        invocation_id="invocation-exhaustion",
+        tools=["file_write"],
+    )
+    adapter.tool_registry = evidence
+    executed = []
+    real_execute = evidence.execute
+
+    async def execute_once(tool_name, arguments, tool_call_id=""):
+        executed.append(tool_name)
+        return await real_execute(tool_name, arguments, tool_call_id)
+
+    monkeypatch.setattr(evidence, "execute", execute_once)
+    seen = []
+    tool_calls = [
+        {
+            "id": "call-write-once",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps(
+                    {"path": "once.txt", "content": "saved once"}
+                ),
+            },
+        }
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        await on_stream_event(StreamEvent(kind=KIND_THINKING, summary="still idle"))
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "save once",
+        "req-stream-exhaustion",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert len(seen) == 5
+    assert len(set(seen[1:])) == 1
+    assert executed == ["file_write"]
+    assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "saved once"
+    metadata = response.stream_metadata
+    assert metadata["provider_transport_retry_count"] == 3
+    assert metadata["provider_local_recovery_count"] == 3
+    assert metadata["provider_local_recovery_limit"] == 3
+    assert metadata["provider_local_recovery_exhausted"] is True
+    assert response.error_retryable is False
+    calls = metadata["meter"]["provider_calls"]
+    assert calls == observed_calls
+    assert [call["decision"] for call in calls[1:]] == [
+        "retry_current_call_checkpoint",
+        "retry_current_call_checkpoint",
+        "retry_current_call_checkpoint",
+        "return_provider_failure",
+    ]
+    assert calls[-1]["effect_recovery"]["tools_replayed"] is False
+    assert calls[-1]["effect_recovery"]["safe_current_call_continuation"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "proof", ["missing", "changed-output", "pending", "foreign-tool"]
+)
+async def test_herv3_stream_inactivity_requires_complete_checkpoint_evidence(
+    monkeypatch, tmp_path, proof
+):
+    from orchestrator.her_v2.audit import DurableAuditLog
+
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    registry = ToolRegistry(
+        ["file_write"],
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={"request_id": "req-stream-proof"},
+    )
+    evidence = _EvidenceRecordingToolRegistry(
+        registry,
+        StageRequest(
+            turn_id="turn-proof",
+            request_ref="req-stream-proof",
+            invocation_id="invocation-proof",
+            stage=Stage.EXECUTION,
+            role="primary",
+            attempt=1,
+            goal="Write one canary.",
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        audit_log=DurableAuditLog(
+            tmp_path / "recovery.jsonl", tmp_path / "fallback.jsonl"
+        ),
+    )
+    adapter.tool_registry = evidence
+    actual_execute = registry.execute
+    writes = []
+
+    async def execute_once(name, arguments, tool_call_id="", **kwargs):
+        writes.append(tool_call_id)
+        return await actual_execute(name, arguments, tool_call_id, **kwargs)
+
+    monkeypatch.setattr(registry, "execute", execute_once)
+    actual_evidence_execute = evidence.execute
+
+    async def execute_with_proof(name, arguments, tool_call_id="", **kwargs):
+        result = await actual_evidence_execute(name, arguments, tool_call_id, **kwargs)
+        if proof == "missing":
+            result.details.pop("continuation_checkpoint", None)
+        elif proof == "changed-output":
+            result.output += " altered after checkpoint"
+        elif proof == "pending":
+            result.details["receipt_completed"] = False
+        elif proof == "foreign-tool":
+            result.details["continuation_checkpoint"]["tool_name"] = "other-tool"
+        return result
+
+    monkeypatch.setattr(evidence, "execute", execute_with_proof)
+    seen = []
+
+    async def provider(payload, headers, callback):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult(
+                "",
+                [
+                    {
+                        "id": "write-once",
+                        "type": "function",
+                        "function": {
+                            "name": "file_write",
+                            "arguments": json.dumps(
+                                {
+                                    "path": "checkpoint.txt",
+                                    "content": "saved exactly once",
+                                }
+                            ),
+                        },
+                    }
+                ],
+                "tool_calls",
+            )
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", provider)
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "Write once", "req-stream-proof", on_stream_event=capture
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert len(seen) == 2, (
+        "unproven or mismatched results prohibit automatic continuation"
+    )
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert response.stream_metadata["provider_local_recovery_count"] == 0
+    assert writes == ["write-once"]
+    failed_call = response.stream_metadata["meter"]["provider_calls"][-1]
+    assert failed_call["decision"] == "return_provider_failure"
+    assert failed_call["effect_recovery"]["safe_current_call_continuation"] is False
+
+
+@pytest.mark.asyncio
+async def test_herv3_stream_inactivity_does_not_retry_after_partial_answer_text(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    calls = 0
+
+    async def fake_stream(payload, headers, on_stream_event):
+        nonlocal calls
+        calls += 1
+        await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="partial"))
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "answer",
+        "req-partial-timeout",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert calls == 1

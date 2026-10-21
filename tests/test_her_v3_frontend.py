@@ -83,24 +83,39 @@ def _runtime():
         _get_current_effort=lambda: "high",
         _configuration_followup=lambda _source: ("choose effort", None),
     )
+    runtime._is_binary_reasoning = lambda: FlexibleAgentRuntime._is_binary_reasoning(runtime)
+    runtime._effort_display_value = lambda value: FlexibleAgentRuntime._effort_display_value(runtime, value)
     runtime.get_current_provider = lambda: FlexibleAgentRuntime.get_current_provider(runtime)
     runtime.get_current_model = lambda: FlexibleAgentRuntime.get_current_model(runtime)
     return runtime
 
 
 @pytest.mark.asyncio
-async def test_model_menu_reports_the_actual_single_main_model():
+@pytest.mark.parametrize(
+    "engine,provider,model",
+    [
+        ("ollama-api", "ollama", "local-qwen:27b"),
+        ("deepseek-api", "deepseek", "deepseek-v4-pro"),
+    ],
+)
+async def test_model_menu_reports_the_actual_single_main_model(engine, provider, model):
     runtime = _runtime()
+    target = HERv3ModelTarget(engine, model)
+    runtime.backend_manager.apply_her_v3_target(target)
     update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
 
     await cmd_model(runtime, update, SimpleNamespace(args=[]))
 
     text = runtime._reply_text.await_args.args[1]
     assert "HERV3" in text
-    assert "deepseek-v4-pro" in text
+    assert f"<code>{provider} / {model}</code>" in text
     assert "old-fast" not in text
     assert "old-pro" not in text
     assert runtime._reply_text.await_args.kwargs["reply_markup"] is not None
+
+    await cmd_provider(runtime, update, SimpleNamespace(args=[]))
+    assert f"<code>{provider}</code>" in runtime._reply_text.await_args.args[1]
+    assert f"<code>{provider}</code>" in FlexibleAgentRuntime._build_effort_followup_text(runtime)
 
 
 @pytest.mark.asyncio

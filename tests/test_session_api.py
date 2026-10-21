@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,9 @@ class _Request:
         body=b"",
     ):
         self._payload = payload or {}
+        if isinstance(self._payload, dict) and "message" in self._payload and "originated_at" not in self._payload:
+            from datetime import datetime, timezone
+            self._payload.setdefault("originated_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self.query = query or {}
         self.match_info = match_info or {}
         self.headers = headers or {}
@@ -1013,7 +1017,7 @@ async def test_tui_session_ingress_capability_is_explicit_when_ready(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
+async def test_session_api_command_invocation_dispatches_with_bound_session_metadata(
     tmp_path, monkeypatch
 ):
     from orchestrator import command_interaction_bridge, slash_command_audit
@@ -1035,7 +1039,17 @@ async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
         dispatch_calls.append(1)
         seen["payload"] = payload
         seen["metadata"] = metadata
-        return {"ok": True, "http_status": 200}
+        return {
+            "ok": True,
+            "http_status": 200,
+            "result": {
+                "type": "hashi.steer-receipt",
+                "version": 2,
+                "old_run": {"run_id": "run-old"},
+                "new_run": {"run_id": "run-new", "parent_run_id": "run-old"},
+                "continuation": {"evidence_ref": "herv3:turn-old"},
+            },
+        }
 
     monkeypatch.setattr(
         command_interaction_bridge, "dispatch_command_interaction", dispatch
@@ -1043,7 +1057,7 @@ async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
     request_payload = {
         "command": "model",
         "arguments": ["balanced"],
-        "client_id": "tui-window-client-7",
+        "client_id": "session-api-client-7",
         "request_id": "command-request-123456",
         "ui_locale": "zh-CN",
         "context_generation": session["context_generation"],
@@ -1061,11 +1075,18 @@ async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
     assert result["session_id"] == session["session_id"]
     assert seen["payload"]["op"] == "open"
     assert seen["payload"]["command"] == "/model balanced"
-    assert seen["metadata"]["connector_id"] == "tui"
-    assert seen["metadata"]["ingress_transport"] == "tui-session-command"
-    assert seen["metadata"]["source_channel"] == "tui_session_command"
+    assert seen["metadata"]["connector_id"] == "session_api"
+    assert seen["metadata"]["session_surface"] == "session-api"
+    assert seen["metadata"]["ingress_transport"] == "session-api-command"
+    assert seen["metadata"]["source_channel"] == "session_api_command"
+    assert seen["metadata"]["fc_compatibility_adapter_id"] == "session_api.command"
     assert seen["metadata"]["context_generation"] == session["context_generation"]
     assert result["command_invocation"]["type"] == "hashi.frontend-command"
+    assert result["command_invocation"]["connector_id"] == "session_api"
+    assert result["result"]["type"] == "hashi.steer-receipt"
+    assert result["result"]["old_run"]["run_id"] == "run-old"
+    assert result["result"]["new_run"]["parent_run_id"] == "run-old"
+    assert result["result"]["continuation"]["evidence_ref"] == "herv3:turn-old"
     assert result["replayed"] is False
     events = server.session_store.events(
         session["session_id"], owner_id="user:7"
@@ -1091,6 +1112,81 @@ async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
     assert replayed["replayed"] is True
     assert replayed["command_event_id"] == result["command_event_id"]
     assert dispatch_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_signed_tui_command_relay_retains_tui_connector_identity(
+    tmp_path, monkeypatch
+):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    monkeypatch.setattr(
+        slash_command_audit,
+        "is_supported_slash_command",
+        lambda _runtime, command: command == "model",
+    )
+    seen = {}
+
+    async def dispatch(_runtime, payload, metadata):
+        seen["payload"] = payload
+        seen["metadata"] = metadata
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", dispatch
+    )
+    arguments = ["balanced"]
+    prompt_binding = json.dumps(
+        {"command": "model", "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    evidence = seal_connector_evidence(
+        tmp_path,
+        claims={
+            "_message_source_reserved": "tui",
+            "_origin_instance_evidence": {
+                "id": "HASHI2",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=prompt_binding,
+    )
+
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "model",
+                "arguments": arguments,
+                "client_id": "tui-window-client-7",
+                "request_id": "tui-command-request-123456",
+                "ui_locale": "en",
+                "context_generation": session["context_generation"],
+                "request_metadata": {"_connector_evidence": evidence},
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    result = json.loads(response.text)
+    assert response.status == 200, response.text
+    assert seen["metadata"]["connector_id"] == "tui"
+    assert seen["metadata"]["session_surface"] == "tui"
+    assert seen["metadata"]["ingress_transport"] == "tui-session-command"
+    assert seen["metadata"]["source_channel"] == "tui_session_command"
+    assert seen["metadata"]["fc_compatibility_adapter_id"] == "tui.command"
+    assert seen["metadata"]["origin_instance"] == "HASHI2"
+    assert result["command_invocation"]["connector_id"] == "tui"
 
 
 @pytest.mark.asyncio
@@ -1809,7 +1905,10 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-attachment-1",
+            "message_id": "wire-attachment-1",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-attachment-1",
         }
     )
     request.content_type = "application/json"
@@ -1902,7 +2001,10 @@ async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-transfer-document",
+            "message_id": "wire-transfer-document",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-transfer-document",
         }
     )
     request.content_type = "application/json"
@@ -2022,7 +2124,10 @@ async def test_protocol_hchat_attachment_batch_rolls_back_if_one_file_changes(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-attachment-rollback",
+            "message_id": "wire-attachment-rollback",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-attachment-rollback",
         }
     )
     request.content_type = "application/json"
@@ -2927,3 +3032,48 @@ async def test_agent_history_api_reads_archived_session_before_new_session(tmp_p
             owner_id="user:8",
             agent_id="lily",
         )
+
+@pytest.mark.asyncio
+async def test_session_patch_archives_and_restores_without_deleting_records(tmp_path):
+    server, _runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.create_session(
+        owner_id=owner,
+        agent_id="lily",
+        title="Keep this Session",
+    )
+    server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="archive-api",
+        text="Persistent message",
+        source="workbench",
+        idempotency_key="archive-api",
+    )
+    current = server.session_store.get_session(session["session_id"], owner_id=owner)
+
+    archived_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "archived", "expected_revision": current["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    archived = json.loads(archived_response.text)["session"]
+    assert archived_response.status == 200
+    assert archived["status"] == "archived"
+    assert archived_response.headers["ETag"] == f'"{archived["revision"]}"'
+
+    restored_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "active", "expected_revision": archived["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    restored = json.loads(restored_response.text)["session"]
+    assert restored_response.status == 200
+    assert restored["status"] == "active"
+    assert [
+        message["text"]
+        for message in server.session_store.messages(session["session_id"], owner_id=owner)
+    ] == ["Persistent message"]

@@ -287,6 +287,8 @@ def _fake_runtime(tmp_path: Path, *, allowed: bool = True) -> SimpleNamespace:
         global_config=SimpleNamespace(
             bridge_home=str(tmp_path),
             authorized_id=12345,
+            instance_id="TEST",
+            workbench_port=18804,
         ),
         _is_command_allowed=(lambda _cmd: True) if allowed else (lambda _cmd: False),
     )
@@ -409,6 +411,113 @@ def test_whatsapp_switch_is_central_and_independent(tmp_path, no_transport_dispa
     ))
     assert status["whatsapp_mirror"] is True
     assert _run_command(runtime, "/telegram")["telegram_mirror"] is True
+
+
+def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
+    tmp_path, no_transport_dispatch, monkeypatch
+):
+    from orchestrator.commands import agentpresence as agentpresence_command_module
+    from orchestrator.command_registry import load_runtime_commands
+    from orchestrator.connector_delivery_preferences import get_connector_preference
+
+    monkeypatch.setattr(
+        agentpresence_command_module, "get_hashi_instance_binding", lambda: None
+    )
+    runtime = _fake_runtime(tmp_path)
+    initial = _run_command(runtime, "/agentpresence")
+    assert initial["ok"] is True
+    assert initial["messages"]
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-a", "agentpresence", "mirror", default=False
+        )
+        is False
+    )
+    changed = _run_command(runtime, "/agentpresence on")
+    assert changed["ok"] is True
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-a", "agentpresence", "mirror", default=False
+        )
+        is True
+    )
+    assert _run_command(runtime, "/agentpresence", owner="owner-b")["ok"] is True
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-b", "agentpresence", "mirror", default=False
+        )
+        is False
+    )
+    english = asyncio.run(
+        alt.try_execute_slash_command_text(
+            runtime,
+            "/agentpresence",
+            source_channel="remote",
+            session_metadata={"owner_id": "owner-a", "ui_locale": "en"},
+        )
+    )
+    chinese = asyncio.run(
+        alt.try_execute_slash_command_text(
+            runtime,
+            "/agentpresence",
+            source_channel="api_chat",
+            session_metadata={"owner_id": "owner-a", "ui_locale": "zh-CN"},
+        )
+    )
+    assert "AGENT PRESENCE" in english["messages"][0]["text"]
+    assert "智能体在场" in chinese["messages"][0]["text"]
+    command = next(
+        item for item in load_runtime_commands() if item.name == "agentpresence"
+    )
+    assert command.callback.__module__ == "orchestrator.commands.agentpresence"
+
+
+def test_agentpresence_default_agent_is_hashi_owned_and_instance_scoped(
+    tmp_path, no_transport_dispatch, monkeypatch
+):
+    from orchestrator.commands import agentpresence as agentpresence_command_module
+    from orchestrator.agent_presence_settings import get_default_agent
+
+    (tmp_path / "agents.json").write_text(
+        json.dumps(
+            {
+                "global": {"instance_id": "TEST"},
+                "agents": [
+                    {"name": "agent1", "is_active": True},
+                    {"name": "disabled", "is_active": False},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        agentpresence_command_module,
+        "get_hashi_instance_binding",
+        lambda: {
+            "configured": True,
+            "instance_id": "TEST",
+            "base_url": "http://127.0.0.1:18804",
+        },
+    )
+    runtime = _fake_runtime(tmp_path)
+
+    changed = _run_command(runtime, "/agentpresence default agent1")
+    assert changed["ok"] is True
+    assert get_default_agent(tmp_path) == "agent1"
+    assert "agent1" in changed["messages"][0]["text"]
+    assert "TEST" in changed["messages"][0]["text"]
+
+    invalid = _run_command(runtime, "/agentpresence default agent1@HASHI4")
+    assert invalid["ok"] is True
+    assert get_default_agent(tmp_path) == "agent1"
+
+    disabled = _run_command(runtime, "/agentpresence default disabled")
+    assert disabled["ok"] is True
+    assert get_default_agent(tmp_path) == "agent1"
+
+    cleared = _run_command(runtime, "/agentpresence default off")
+    assert cleared["ok"] is True
+    assert get_default_agent(tmp_path) == ""
 
 
 @pytest.mark.asyncio

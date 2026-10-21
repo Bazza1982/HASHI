@@ -653,6 +653,79 @@ async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_rejects_terminal_response_while_run_question_is_pending(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+
+    class QuestionGuardRegistry:
+        def __init__(self):
+            self.waits = 0
+
+        def get_tool_definitions(self, tiers=None):
+            del tiers
+            return []
+
+        async def wait_before_terminal_response(self):
+            self.waits += 1
+            if self.waits > 1:
+                return None
+            return {
+                "type": "hashi.run_question.resolution",
+                "questions": [
+                    {
+                        "question_id": "que-1",
+                        "state": "consumed",
+                        "answer": {
+                            "option_id": "yes",
+                            "text": "",
+                            "author": "authenticated_user",
+                            "grants_permissions": False,
+                        },
+                    }
+                ],
+            }
+
+    registry = QuestionGuardRegistry()
+    adapter.tool_registry = registry
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("premature", None, "stop", 10, 2),
+            _APIResult("answered result", None, "stop", 10, 2),
+        ]
+    )
+
+    response = await adapter.generate_response("Choose first", "request-question")
+
+    assert response.is_success is True
+    assert response.text == "answered result"
+    assert registry.waits == 2
+    assert adapter._call_api_once.call_count == 2
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    assert [message["role"] for message in second_payload["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "user",
+    ]
+    assert "session_id" not in second_payload
+    second_headers = adapter._call_api_once.call_args_list[1].args[1]
+    assert "X-Hashi-External-Tool-Session" not in second_headers
+    assert "HASHI_RUN_QUESTION_TERMINAL_GUARD" in second_payload["messages"][-2][
+        "content"
+    ]
+    assert "HASHI_RUN_QUESTION_RESOLUTION" in second_payload["messages"][-1][
+        "content"
+    ]
+    assert "authenticated_user" in second_payload["messages"][-1]["content"]
+    assert response.stream_metadata["gateway_continuation"]["enabled"] is False
+    assert response.stream_metadata["gateway_continuation"][
+        "full_prompt_send_count"
+    ] == 2
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
     tmp_path,
 ):
@@ -714,6 +787,44 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
         2,
         1,
     ]
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_transient_images_disable_gateway_continuation(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("finished", None, "stop", 20, 5)
+    )
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    transient_images = (
+        {
+            "data_url": "data:image/jpeg;base64,"
+            + base64.b64encode(jpeg).decode("ascii"),
+            "frame_sequence": 7,
+            "captured_at": "2026-10-17T06:00:00+00:00",
+        },
+    )
+
+    response = await adapter.generate_response(
+        "What changed?",
+        "request-live-image",
+        transient_images=transient_images,
+    )
+
+    assert response.is_success is True
+    payload = adapter._call_api_once.call_args.args[0]
+    headers = adapter._call_api_once.call_args.args[1]
+    assert "session_id" not in payload
+    assert "x-hashi-external-tool-session" not in {
+        key.casefold() for key in headers
+    }
+    user_content = payload["messages"][1]["content"]
+    assert user_content[-1]["image_url"]["url"] == transient_images[0]["data_url"]
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is False
 
 
 @pytest.mark.asyncio

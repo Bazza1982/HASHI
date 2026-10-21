@@ -125,6 +125,7 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
     normalize_model,
     public_backend_engine,
+    public_model_provider,
 )
 from orchestrator.runtime_effort_options import (
     backend_model_view,
@@ -376,6 +377,8 @@ class FlexibleAgentRuntime:
             ffmpeg_cmd="ffmpeg",
             secrets=self.secrets,
             native_capabilities=list(config.allowed_backends or ()),
+            catalog_path=Path(self.global_config.project_root) / "voice_catalog.json",
+            project_root=Path(self.global_config.project_root),
         )
         self.phone_manager = PhoneManager(self.workspace_dir)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
@@ -668,9 +671,27 @@ class FlexibleAgentRuntime:
                     ).strip().casefold()
                     if surface == "telegram":
                         from orchestrator.frontend_connector_registry import (
+                            get_compatibility_adapter,
+                            require_connector_operation,
                             require_connector_presentation_override,
                         )
 
+                        adapter = get_compatibility_adapter(
+                            "telegram.native_callback"
+                        )
+                        if (
+                            adapter["connector_id"] != "telegram"
+                            or adapter["direction"] != "ingress"
+                            or adapter["operation"] != "action"
+                            or adapter["route"] != "standard_fc"
+                        ):
+                            raise ValueError(
+                                "Telegram callback adapter is not a standard "
+                                "FC action route"
+                            )
+                        require_connector_operation(
+                            "telegram", "ingress", "action"
+                        )
                         # Command/action identity and side effects are standard
                         # FC operations.  Telegram may still edit the existing
                         # inline card in place as an explicitly registered
@@ -729,13 +750,26 @@ class FlexibleAgentRuntime:
                     with bind_slash_command_audit_session(session):
                         handler_result = await handler(update, context)
                     if ticket is not None:
+                        is_ok = True
+                        error_code = None
+                        if isinstance(handler_result, Mapping):
+                            if "ok" in handler_result:
+                                is_ok = bool(handler_result["ok"])
+                            if not is_ok:
+                                error_code = str(
+                                    handler_result.get("error_code")
+                                    or handler_result.get("error")
+                                    or "callback_failed"
+                                )
                         response = {
-                            "ok": True,
+                            "ok": is_ok,
                             "command": command_name,
-                            "execution_state": "completed",
+                            "execution_state": "completed" if is_ok else "failed",
                             "connector_id": "telegram",
                             "transport_delivery_state": "not_observed",
                         }
+                        if not is_ok and error_code:
+                            response["error_code"] = error_code
                         if isinstance(handler_result, Mapping):
                             response["result"] = dict(handler_result)
                         ticket.complete(response)
@@ -775,6 +809,16 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
+                    from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+                    if await check_telegram_message_freshness(
+                        self,
+                        update,
+                        handler_kind="command",
+                        command_name=cmd,
+                        args=args,
+                    ):
+                        session.block("stale_confirmation_required")
+                        return
                     self._record_active_chat(update)
                     message = getattr(update, "effective_message", None) or getattr(
                         update, "message", None
@@ -787,22 +831,11 @@ class FlexibleAgentRuntime:
                         source="telegram.command",
                         content_format="plain-text",
                     )
-                    if not self._is_command_allowed(cmd):
-                        session.block("command_disabled")
-                        await self._reply_text(
-                            update,
-                            ui_language.tr("command.disabled", command=cmd),
-                        )
-                        return
-
                     from orchestrator.frontend_command_admission import (
-                        reserve_telegram_command_invocation,
+                        execute_telegram_command_invocation,
                     )
                     from orchestrator.session_store import IdempotencyConflict
 
-                    message = getattr(update, "effective_message", None) or getattr(
-                        update, "message", None
-                    )
                     transport_id = getattr(update, "update_id", None)
                     if transport_id is None:
                         transport_id = getattr(message, "message_id", None)
@@ -819,8 +852,13 @@ class FlexibleAgentRuntime:
                         "arguments": args,
                         "text": str(getattr(message, "text", "") or ""),
                     }
+
+                    async def invoke():
+                        with bind_slash_command_audit_session(session):
+                            return await handler(update, context)
+
                     try:
-                        ticket = reserve_telegram_command_invocation(
+                        outcome = await execute_telegram_command_invocation(
                             self,
                             update,
                             command_name=cmd,
@@ -828,6 +866,8 @@ class FlexibleAgentRuntime:
                             transport_id=transport_id,
                             ingress_transport="telegram.command",
                             request_payload=invocation_request,
+                            invoke_handler=invoke if handler is not None else None,
+                            command_known=True if handler is not None else False,
                         )
                     except IdempotencyConflict:
                         command_logger = getattr(
@@ -843,47 +883,71 @@ class FlexibleAgentRuntime:
                         )
                         raise
 
-                    if ticket.state == "completed":
+                    command_logger = getattr(
+                        self,
+                        "logger",
+                        logging.getLogger("FlexRuntime.TelegramCommand"),
+                    )
+
+                    if outcome.get("replayed"):
+                        if outcome.get("outcome_unknown"):
+                            session.block("command_outcome_unknown")
+                            command_logger.warning(
+                                "Telegram command outcome is unknown; refusing replay: "
+                                "agent=%s command=%s state=%s",
+                                self.name,
+                                cmd,
+                                outcome.get("execution_state") or "unknown",
+                            )
+                            return outcome
                         session.block("duplicate_command_replay")
-                        command_logger = getattr(
-                            self,
-                            "logger",
-                            logging.getLogger("FlexRuntime.TelegramCommand"),
-                        )
                         command_logger.info(
                             "Ignored completed Telegram command replay: "
                             "agent=%s command=%s",
                             self.name,
                             cmd,
                         )
-                        return
-                    if ticket.state != "reserved":
-                        session.block("command_outcome_unknown")
-                        command_logger = getattr(
-                            self,
-                            "logger",
-                            logging.getLogger("FlexRuntime.TelegramCommand"),
-                        )
-                        command_logger.warning(
-                            "Telegram command outcome is unknown; refusing replay: "
-                            "agent=%s command=%s state=%s",
-                            self.name,
-                            cmd,
-                            ticket.state or "unknown",
-                        )
-                        return
+                        return outcome
 
-                    with bind_slash_command_audit_session(session):
-                        await handler(update, context)
-                    ticket.complete(
-                        {
-                            "ok": True,
-                            "command": cmd,
-                            "execution_state": "completed",
-                            "connector_id": "telegram",
-                            "transport_delivery_state": "not_observed",
-                        }
-                    )
+                    if not outcome.get("ok"):
+                        error_code = str(outcome.get("error_code") or "command_failed")
+                        if error_code == "command_disabled":
+                            session.block("command_disabled")
+                            await self._reply_text(
+                                update,
+                                ui_language.tr("command.disabled", command=cmd),
+                            )
+                        elif error_code == "command_not_found":
+                            session.fail("command_not_found")
+                            await self._reply_text(
+                                update,
+                                ui_language.tr(
+                                    "command.unknown",
+                                    command=cmd,
+                                    default=f"Unknown command: /{cmd}",
+                                ),
+                            )
+                        elif error_code == "connector_local_command":
+                            session.block("connector_local_command")
+                            if cmd == "logo":
+                                await self._reply_text(
+                                    update,
+                                    ui_language.tr("runtime.logo_terminal_only"),
+                                )
+                            else:
+                                await self._reply_text(
+                                    update,
+                                    ui_language.tr(
+                                        "runtime.connector_local_unsupported",
+                                        command=cmd,
+                                        default=f"/{cmd} is not available on Telegram.",
+                                    ),
+                                )
+                        else:
+                            session.fail(error_code)
+                        return outcome
+
+                    return outcome
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -1019,7 +1083,33 @@ class FlexibleAgentRuntime:
         from orchestrator import runtime_session
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
-        admission_metadata = dict(request_metadata or {})
+        from orchestrator.frontend_call.transient_live_media import (
+            bind_live_frames,
+            discard_live_frames,
+            pop_live_frames_metadata,
+        )
+
+        request_metadata = dict(request_metadata or {})
+        transient_live_frames = pop_live_frames_metadata(request_metadata)
+        admission_metadata = dict(request_metadata)
+        # A delayed Telegram Update may only pass the freshness gate while the
+        # connector is replaying the immutable server-side record.  Bind that
+        # release to the original idempotency key so a callback retry, worker
+        # restart, or transport replay cannot create a second Run.
+        from orchestrator.telegram_freshness_gate import current_telegram_release
+
+        confirmed_telegram = current_telegram_release()
+        if confirmed_telegram is not None:
+            idempotency_key = str(confirmed_telegram["idempotency_key"])
+            admission_metadata.update(
+                {
+                    "ingress_confirmation_id": confirmed_telegram["confirmation_id"],
+                    "source_message_id": confirmed_telegram["source_message_id"],
+                    "originated_at": confirmed_telegram.get("originated_at"),
+                    "freshness_received_at": confirmed_telegram.get("received_at"),
+                    "ingress_transport": "telegram",
+                }
+            )
         admission_metadata.setdefault("owner_id", runtime_session.owner_id(self))
         telegram_requested = telegram_delivery_for_admission(
             source=source,
@@ -1094,8 +1184,10 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            configured_owner_mirror_destinations,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
+            normalize_run_delivery_route,
             owner_mirror_for_admission,
             route_destination,
         )
@@ -1202,7 +1294,7 @@ class FlexibleAgentRuntime:
             request_metadata=metadata,
             state_root=getattr(self.global_config, "bridge_home", None),
         )
-        from orchestrator.session_store import SessionConflict
+        from orchestrator.session_store import SessionConflict, SessionNotFound
 
         reply_reference = None
         reply_event_id = str(metadata.get("reply_to_event_id") or "").strip()
@@ -1284,9 +1376,13 @@ class FlexibleAgentRuntime:
             connector_id="whatsapp",
             default=False,
         )
+        owner_mirror_destinations = configured_owner_mirror_destinations(
+            request_metadata={**metadata, "owner_id": resolved_owner},
+            state_root=getattr(self.global_config, "bridge_home", None),
+        )
         if source_fact["id"] == "whatsapp" and telegram_requested:
             chat_id = int(getattr(self.global_config, "authorized_id", 0) or 0)
-        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = freeze_run_delivery_route(
+        delivery_route = freeze_run_delivery_route(
             message_source_id=str(source_fact["id"]),
             session_surface=resolved_surface,
             session_channel_key=resolved_channel_key,
@@ -1296,7 +1392,66 @@ class FlexibleAgentRuntime:
             whatsapp_channel_key=whatsapp_channel,
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
+            additional_mirrors=owner_mirror_destinations,
         )
+        parent_run_id = str(metadata.get("parent_run_id") or "").strip()
+        parent_request_id = str(
+            metadata.get("steer_parent_request_id") or ""
+        ).strip()
+        if (
+            str(source or "").strip().casefold() in {"steer", "focus"}
+            and parent_run_id
+            and parent_request_id
+        ):
+            try:
+                parent_run = await asyncio.to_thread(
+                    runtime_session.ensure_store(self).get_run,
+                    parent_run_id,
+                    owner_id=resolved_owner,
+                )
+            except SessionNotFound:
+                parent_run = None
+            if (
+                parent_run is not None
+                and str(parent_run.get("session_id") or "")
+                == str(resolved_session["session_id"])
+                and str(parent_run.get("agent_id") or "").strip().casefold()
+                == str(self.name).strip().casefold()
+                and str(parent_run.get("request_id") or "") == parent_request_id
+            ):
+                try:
+                    parent_delivery_route = normalize_run_delivery_route(
+                        parent_run.get("delivery_route")
+                    )
+                except ValueError:
+                    self.error_logger.error(
+                        "Rejected invalid parent Run delivery route for %s",
+                        parent_run_id,
+                    )
+                else:
+                    parent_primary = parent_delivery_route.get("primary")
+                    current_primary = delivery_route.get("primary")
+                    if (
+                        isinstance(parent_primary, Mapping)
+                        and isinstance(current_primary, Mapping)
+                        and parent_primary.get("surface")
+                        == current_primary.get("surface")
+                    ):
+                        delivery_route = freeze_run_delivery_route(
+                            message_source_id=str(source_fact["id"]),
+                            session_surface=resolved_surface,
+                            session_channel_key=resolved_channel_key,
+                            chat_id=chat_id,
+                            telegram_requested=telegram_requested,
+                            whatsapp_requested=whatsapp_requested,
+                            whatsapp_channel_key=whatsapp_channel,
+                            primary_channel_key=parent_primary.get("channel_key"),
+                            terminal_exchange=bool(
+                                metadata.get("system_exchange_terminal")
+                            ),
+                            additional_mirrors=owner_mirror_destinations,
+                        )
+        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the
         # Telegram Connector. Other connector callbacks use the same frozen
         # route and cannot be enabled or disabled by this boolean.
@@ -1377,6 +1532,10 @@ class FlexibleAgentRuntime:
                 idempotency_key=idempotency_key,
             )
         )
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import attachment_manifest
+
+            manifest = attachment_manifest(normalized_request_content)
         if accepted is not None and accepted.replayed:
             self.message_logger.info(
                 "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id
@@ -1496,7 +1655,13 @@ class FlexibleAgentRuntime:
             )
             from orchestrator import runtime_execution
             self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
-            await self.queue.put(item)
+            if transient_live_frames:
+                bind_live_frames(self, item.request_id, transient_live_frames)
+            try:
+                await self.queue.put(item)
+            except BaseException:
+                discard_live_frames(self, item.request_id)
+                raise
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
 
@@ -2213,6 +2378,7 @@ class FlexibleAgentRuntime:
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
         public_backend = public_backend_engine(self.config.active_backend)
+        public_provider = public_model_provider(self.get_current_provider()) or None
         public_allowed_backends: list[dict[str, Any]] = []
         for configured in self.config.allowed_backends:
             row = dict(configured)
@@ -2240,7 +2406,7 @@ class FlexibleAgentRuntime:
                 row.update(
                     {
                         "engine": "her-v3",
-                        "provider": target.provider,
+                        "provider": public_model_provider(target.provider),
                         "model": target.model,
                         "models": list(option.get("models") or []) if option else [],
                         "effort": effort,
@@ -2263,11 +2429,11 @@ class FlexibleAgentRuntime:
             "engine": public_backend,
             "active_backend": public_backend,
             "model": self.get_current_model(),
-            "provider": self.get_current_provider(),
+            "provider": public_provider,
             "allowed_backends": public_allowed_backends,
             "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
             "backend_catalogue": runtime_backend_catalogue(self),
-            "active_provider": self.get_current_provider(),
+            "active_provider": public_provider,
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -2961,9 +3127,10 @@ class FlexibleAgentRuntime:
             raise ValueError("speech text is required")
         if len(spoken) > 20_000:
             raise ValueError("speech text is too long")
+        resolved_request_id = str(request_id or f"tui-say-{uuid4().hex}")
         asset = await self.voice_manager.synthesize_reply(
             self.name,
-            str(request_id or f"tui-say-{uuid4().hex}"),
+            resolved_request_id,
             spoken,
             force=True,
             source_language=source_language or ui_language.preferred_locale(self),
@@ -2979,10 +3146,34 @@ class FlexibleAgentRuntime:
             raise RuntimeError("the TTS provider returned malformed Ogg audio")
         if len(content) > 3 * 1024 * 1024:
             raise RuntimeError("the generated speech asset exceeds the TUI limit")
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        publication_key = hashlib.sha256(
+            f"{resolved_request_id}\n{content_sha256}".encode("utf-8")
+        ).hexdigest()
+        try:
+            runtime_session.publish_owner_mirror_media_notification(
+                self,
+                filename=f"voice-reply-{content_sha256[:16]}.ogg",
+                media_type="audio/ogg",
+                payload=content,
+                sha256=content_sha256,
+                caption="",
+                publication_id=f"tui-speech:{publication_key}",
+                semantic_role="voice_message",
+                presentation_role="voice",
+            )
+        except Exception as exc:
+            warning = getattr(getattr(self, "logger", None), "warning", None)
+            if callable(warning):
+                warning(
+                    "Optional owner-mirror speech delivery failed safely for %s (%s)",
+                    resolved_request_id,
+                    type(exc).__name__,
+                )
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": content_sha256,
             "media_type": "audio/ogg",
             "profile": self.voice_manager.get_voice_profile_id(),
             "provider": asset.provider,
@@ -3531,15 +3722,68 @@ class FlexibleAgentRuntime:
             media_kind = "photo"
         prompt, summary = self._build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
-        return await self.enqueue_request(
-            self._primary_chat_id(),
-            rendered_prompt,
-            source,
-            summary,
-            deliver_to_telegram=deliver_to_telegram,
-            request_metadata=request_metadata,
-            idempotency_key=idempotency_key,
-        )
+        request_content = None
+        staged_attachment_ids: tuple[str, ...] = ()
+        if media_kind.lower() == "photo":
+            request_content, manifest = runtime_media._single_attachment_request(
+                rendered_prompt,
+                media_kind=media_kind,
+                filename=filename,
+                local_path=local_path,
+                transport={"caption": caption},
+            )
+            request_metadata = {
+                **dict(request_metadata or {}),
+                **runtime_media._single_attachment_metadata(
+                    request_content,
+                    manifest,
+                ),
+            }
+            from orchestrator.telegram_media_admission import admit_session_media
+
+            (
+                rendered_prompt,
+                request_content,
+                request_metadata,
+                staged_attachment_ids,
+            ) = await asyncio.to_thread(
+                admit_session_media,
+                self,
+                source=source,
+                chat_id=self._primary_chat_id(),
+                prompt=rendered_prompt,
+                request_content=request_content,
+                request_metadata=request_metadata,
+                idempotency_key=idempotency_key,
+            )
+        try:
+            request_id = await self.enqueue_request(
+                self._primary_chat_id(),
+                rendered_prompt,
+                source,
+                summary,
+                deliver_to_telegram=deliver_to_telegram,
+                request_metadata=request_metadata,
+                request_content=request_content,
+                idempotency_key=idempotency_key,
+            )
+        except BaseException:
+            if staged_attachment_ids:
+                await asyncio.to_thread(
+                    self.session_store.discard_unbound_attachments,
+                    session_id=request_metadata["session_id"],
+                    owner_id=request_metadata["owner_id"],
+                    attachment_ids=staged_attachment_ids,
+                )
+            raise
+        if not request_id and staged_attachment_ids:
+            await asyncio.to_thread(
+                self.session_store.discard_unbound_attachments,
+                session_id=request_metadata["session_id"],
+                owner_id=request_metadata["owner_id"],
+                attachment_ids=staged_attachment_ids,
+            )
+        return request_id
 
     def bind_handlers(self):
         runtime_command_binding.bind_flexible_runtime_handlers(self)
@@ -3848,8 +4092,21 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self, view: str = "main") -> InlineKeyboardMarkup:
-        if view == "voices":
+        if view == "voices" or view.startswith("voices:"):
+            try:
+                requested_page = int(view.partition(":")[2] or "0")
+            except ValueError:
+                requested_page = 0
             active_alias = self.voice_manager.get_active_preset_alias()
+            available = [
+                (alias, preset)
+                for alias, preset, availability in self.voice_manager.get_voice_presets()
+                if availability == "ready"
+            ]
+            page_size = 12
+            total_pages = max(1, (len(available) + page_size - 1) // page_size)
+            page = min(max(0, requested_page), total_pages - 1)
+            visible = available[page * page_size : (page + 1) * page_size]
             rows = [
                 [
                     InlineKeyboardButton(
@@ -3860,9 +4117,25 @@ class FlexibleAgentRuntime:
                         callback_data=f"voice:use:{alias}",
                     )
                 ]
-                for alias, _preset, availability in self.voice_manager.get_voice_presets()
-                if availability == "ready"
+                for alias, _preset in visible
             ]
+            navigation = []
+            if page:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.previous"),
+                        callback_data=f"voice:page:{page - 1}",
+                    )
+                )
+            if page + 1 < total_pages:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.next"),
+                        callback_data=f"voice:page:{page + 1}",
+                    )
+                )
+            if navigation:
+                rows.append(navigation)
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -4526,6 +4799,18 @@ class FlexibleAgentRuntime:
             )
             await query.answer()
             return
+        if action == "page":
+            try:
+                page = max(0, int(value))
+            except ValueError:
+                page = 0
+            await query.edit_message_text(
+                self.voice_manager.voice_choice_menu_text(),
+                reply_markup=self._voice_keyboard(f"voices:{page}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
         if action == "back":
             await query.edit_message_text(
                 self.voice_manager.voice_menu_text(),
@@ -4555,7 +4840,16 @@ class FlexibleAgentRuntime:
                 )
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
-                render_view = "voices"
+                aliases = [
+                    alias
+                    for alias, _preset, availability in self.voice_manager.get_voice_presets()
+                    if availability == "ready"
+                ]
+                try:
+                    page = aliases.index(value) // 12
+                except ValueError:
+                    page = 0
+                render_view = f"voices:{page}"
                 preview_preset = value
         except Exception as e:
             await query.answer(str(e), show_alert=True)
@@ -4582,7 +4876,7 @@ class FlexibleAgentRuntime:
             )
         text = (
             self.voice_manager.voice_choice_menu_text()
-            if render_view == "voices"
+            if render_view.startswith("voices")
             else self.voice_manager.voice_menu_text()
         )
         await query.edit_message_text(
@@ -5846,6 +6140,7 @@ class FlexibleAgentRuntime:
                     pending["prompt"],
                     "voice_transcript",
                     pending["summary"],
+                    request_metadata={"ingress_transport": "telegram"},
                 )
         elif action == "no":
             if pending and pending.get("native_audio"):
@@ -8553,6 +8848,14 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{model}")])
         return InlineKeyboardMarkup(buttons)
 
+    def _is_binary_reasoning(self) -> bool:
+        return set(self._get_available_efforts()) == {"enabled", "off"}
+
+    def _effort_display_value(self, effort: str) -> str:
+        if self._is_binary_reasoning() and effort in {"enabled", "off"}:
+            return ui_language.tr(f"menu.her.reasoning.level.{effort}")
+        return effort
+
     def _effort_keyboard(
         self,
         current_effort: Optional[str] = None,
@@ -8562,7 +8865,7 @@ class FlexibleAgentRuntime:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
-            visible_effort = effort
+            visible_effort = self._effort_display_value(effort)
             label = selected_label(visible_effort, effort == active)
             callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
             buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
@@ -8572,7 +8875,7 @@ class FlexibleAgentRuntime:
                     InlineKeyboardButton(
                         ui_language.tr(
                             "menu.effort.keep",
-                            effort=active or ui_language.tr("common.default"),
+                            effort=self._effort_display_value(active) if active else ui_language.tr("common.default"),
                         ),
                         callback_data=f"effort:{source}:keep",
                     )
@@ -8585,7 +8888,9 @@ class FlexibleAgentRuntime:
     def _build_effort_followup_text(self) -> str:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            consequence = ui_language.tr("menu.effort.binary_effect")
+        elif self.config.active_backend == HER_V2_ENGINE:
             consequence = ui_language.tr("menu.effort.her_effect")
         else:
             consequence = ui_language.tr("menu.effort.standard_effect")
@@ -8597,7 +8902,7 @@ class FlexibleAgentRuntime:
         if provider:
             facts.append(
                 f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
-                f"<code>{html.escape(provider)}</code>"
+                f"<code>{html.escape(public_model_provider(provider))}</code>"
             )
         if self.config.active_backend == HER_V2_ENGINE:
             facts.extend(
@@ -8611,7 +8916,11 @@ class FlexibleAgentRuntime:
                 f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
                 f"<code>{html.escape(self.get_current_model())}</code>"
             )
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            current_display = self._effort_display_value(current)
+            title = ui_language.tr("menu.effort.binary_title")
+            action = ui_language.tr("menu.effort.binary_action")
+        elif self.config.active_backend == HER_V2_ENGINE:
             current_display = current
             title = ui_language.tr("menu.effort.her_title")
             action = ui_language.tr("menu.effort.her_action")
@@ -8848,7 +9157,9 @@ class FlexibleAgentRuntime:
             return
 
         current_effort = self._get_current_effort() or available[0]
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            consequence = ui_language.tr("menu.effort.binary_effect")
+        elif self.config.active_backend == HER_V2_ENGINE:
             consequence = ui_language.tr("menu.effort.her_effect")
         else:
             consequence = ui_language.tr("menu.effort.standard_effect_direct")
@@ -8862,7 +9173,10 @@ class FlexibleAgentRuntime:
                 f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
                 f"<code>{html.escape(self.get_current_model())}</code>"
             ]
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            effort_title = ui_language.tr("menu.effort.binary_title")
+            current_display = self._effort_display_value(current_effort)
+        elif self.config.active_backend == HER_V2_ENGINE:
             effort_title = ui_language.tr("menu.effort.her_title")
             current_display = current_effort
         else:
@@ -10891,10 +11205,10 @@ class FlexibleAgentRuntime:
         await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_steer(self, update: Update, context: Any):
-        await runtime_control.cmd_steer(self, update, context)
+        return await runtime_control.cmd_steer(self, update, context)
 
     async def cmd_focus(self, update: Update, context: Any):
-        await runtime_control.cmd_focus(self, update, context)
+        return await runtime_control.cmd_focus(self, update, context)
 
     async def cmd_recall(self, update: Update, context: Any):
         await runtime_control.cmd_recall(self, update, context)
@@ -11242,6 +11556,9 @@ class FlexibleAgentRuntime:
             return
         if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
             return
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(self, update, handler_kind="text"):
+            return
         self._record_active_chat(update)
         if self._should_redirect_after_transfer():
             await self._reply_text(update, self._transfer_redirect_text())
@@ -11272,7 +11589,23 @@ class FlexibleAgentRuntime:
     async def download_media(self, file_id: str, filename: str) -> Path:
         return await runtime_media.download_media(self, file_id, filename)
 
+    async def callback_ingress_confirm(self, update: Update, context: Any):
+        from orchestrator.telegram_freshness_gate import handle_telegram_confirmation_callback
+        await handle_telegram_confirmation_callback(self, update)
+
     async def _handle_media_message(self, update, media_kind: str, filename: str, file_id: str, prompt: str, summary: str):
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind=media_kind,
+            filename=filename,
+            file_id=file_id,
+            prompt=prompt,
+            summary=summary,
+        ):
+            return
         await runtime_media.handle_media_message(self, update, media_kind, filename, file_id, prompt, summary)
 
     async def handle_document(self, update: Update, context: Any):
@@ -11288,12 +11621,38 @@ class FlexibleAgentRuntime:
         await runtime_media.handle_audio(self, update, context)
 
     async def _handle_voice_or_audio(self, update: Update, media_kind: str, filename: str, file_id: str, caption: str = ""):
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind=media_kind,
+            filename=filename,
+            file_id=file_id,
+            caption=caption,
+        ):
+            return
         await runtime_media.handle_voice_or_audio(self, update, media_kind, filename, file_id, caption=caption)
 
     async def handle_video(self, update: Update, context: Any):
         await runtime_media.handle_video(self, update, context)
 
     async def handle_sticker(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not await FlexibleAgentRuntime._telegram_channel_allowed(
+            self, update, source_channel="telegram"
+        ):
+            return
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind="Sticker",
+            filename="sticker",
+        ):
+            return
         await runtime_media.handle_sticker(self, update, context)
 
     async def send_long_message(
@@ -12552,6 +12911,11 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            from orchestrator.frontend_call.transient_live_media import (
+                discard_live_frames,
+            )
+
+            discard_live_frames(self, item.request_id)
             await runtime_lifecycle.release_capability_task(self, item.request_id)
             return
 
@@ -13097,6 +13461,11 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            from orchestrator.frontend_call.transient_live_media import (
+                discard_live_frames,
+            )
+
+            discard_live_frames(self, item.request_id)
             runtime_pipeline.clear_context_compaction_request_state(
                 self,
                 item.request_id,

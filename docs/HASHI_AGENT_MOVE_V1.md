@@ -11,6 +11,26 @@ authentication, transaction journal, and registry-writing implementation.
 The source sends a platform-neutral `agent-move-v1` archive to a target-owned
 receiver. The source never writes a target filesystem path directly.
 
+## Forward-only Move decision (2026-10-19)
+
+PAO owns this Functions-layer rule. Package staging is the single mutable-state
+qualification gate for a new Move: it verifies the package, compatibility,
+credentials, target policy and target ID, and reserves that ID. Explicit
+confirmation then durably records forward-only intent before cutover begins.
+
+After that intent exists, neither peer requalifies the transfer by hashing live
+source or target files. Normal runtime changes such as Memory+ index rollover,
+configuration publication, schedule state or transaction-marker cleanup cannot
+veto the Move. Target online status is an execution receipt: an unavailable
+runtime leaves the transaction pending and retries forward; it does not make the
+already accepted package invalid.
+
+A new Move cannot be cancelled after forward intent. Network, process-start and
+cleanup failures remain in the durable manager and retry idempotently without
+reactivating the source or rolling back the target. If the Agent must return, the
+operator completes this Move and starts a separate reverse Move. Clone and
+historical legacy-transfer rollback behavior are unchanged.
+
 ## HASHI1 repair decision (2026-10-05)
 
 The user authorized immediate repair on HASHI1 and Function reboot to apply it,
@@ -255,13 +275,13 @@ not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
    full-workspace mode also carries referenced undelivered response files. A
    schema-5 receiver validates the continuity owner, mode, digest, summary, and
    provenance before accepting the stage.
-4. An explicit operator confirmation persists an execution intent; the shared
-   Functions manager atomically imports target configuration/workspace and the
-   continuity batch while the target Agent remains inactive.
-5. Before a move cutover, the source rebuilds a disposable durable-state
-   snapshot and compares it to the staged package. If memory, configuration,
-   schedules, permissions, or Agent-owned credentials changed, the target is
-   rolled back and a fresh prepare is required.
+4. An explicit operator confirmation durably commits forward-only execution
+   intent before any cutover action. Cancellation remains available only while
+   the transaction is still staged and has no forward intent.
+5. The shared Functions manager atomically imports target
+   configuration/workspace and the continuity batch while the target Agent
+   remains inactive. The staged target ID is a reservation, so another
+   preflight cannot select it.
 6. For a clone, the target is activated and hot-started through the Workbench
    lifecycle API, then verified as usable. The source remains active. Telegram
    is unconfigured and imported schedules stay disabled.
@@ -269,13 +289,12 @@ not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
    target remains inactive until the source Worker and Telegram ingress are
    demonstrably stopped. The background manager then continues the transaction
    to activate and hot-start the target.
-8. The receiver verifies target identity, canonical PCM, durable workspace and
-   memory digests, remapped Agent credentials, portable paths, disabled
-   schedules, capability declaration, and live Workbench availability.
-   It also verifies continuity digest, owner, target Agent, mode, and satisfied
-   message count. It proves lifecycle/Bot ownership before adopting delivery state; a
-   mismatched target residue is quarantined and Clone imports none.
-9. Only after verification does the source archive/unbind its formal
+8. The receiver requires a live Workbench runtime receipt, then removes its
+   transaction markers. It does not compare mutable target workspace, PCM,
+   memory, configuration, credential or schedule hashes after activation.
+   Lifecycle/Bot ownership is established during import before delivery state
+   is adopted; Clone imports no source delivery state.
+9. Only after the runtime receipt does the source archive/unbind its formal
    conversation Sessions as the first destructive cleanup boundary. If that
    retirement succeeds, it deletes the registry entry, workspace, Agent-only
    secrets, schedules, capability declaration, and temporary package. It
@@ -284,11 +303,14 @@ not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
    already verified target remains authoritative and the source is never
    re-enabled.
 
-During the final freshness check the source Agent is briefly quiesced. Once
-its source configuration is disabled, the still-running process refuses new
-work. The shared manager stops the source Worker and continues automatically,
-including self-moves. It persists retry state and delivery receipts independently
-of the initiating Worker; shared Functions recovery resumes accepted work.
+Before confirmation, the UI preflight may refuse a busy source and leave the
+staged transfer cancellable. Once confirmation records forward intent, the
+source is quiesced and the transfer has no further mutable-state qualification
+gate. Once its source configuration is disabled, the still-running process
+refuses new work. The shared manager stops the source Worker and continues
+automatically, including self-moves. It persists retry state and delivery
+receipts independently of the initiating Worker; shared Functions recovery
+resumes accepted work.
 `/move continue` and CLI `--continue` remain explicit recovery actions. CLI
 `--status` reads the persisted background receipt. Normal confirmation does not
 require an operator to stop, start, or continue the transfer manually.
@@ -310,12 +332,12 @@ uses `_1`, then `_2`, and so on, while `--as` accepts a legal explicit free ID.
 and every supplied target must resolve to one real, unique instance ID/name.
 
 Request and response HMACs bind every state-changing Remote exchange. Both
-sides keep journals so interrupted commit, source-disable, source-restore, and
-target-rollback operations are retryable. A failed cutover restores the source
-and rolls back the target when both peers remain reachable. If target rollback
-cannot be confirmed, the source remains disabled rather than risking two live
-copies; the same confirmation can be retried idempotently, or cancellation can
-reconcile target rollback before restoring the source.
+sides keep journals so interrupted staging, commit, source-disable, activation,
+verification and cleanup operations are retryable. For a new Move, failures
+after forward intent always retry toward completion. Source restoration and
+target rollback are not recovery paths, preventing the recovery mechanism from
+creating a second live copy or invalidating a package through its own runtime
+writes. Historical legacy transfers retain their compatibility recovery path.
 
 The complete archive is carried inside an AES-256-GCM application-layer
 envelope bound to the authenticated source, target, and package digest. This
@@ -369,7 +391,8 @@ The tombstone is audit/routing metadata, not a retained Agent copy.
   and disable the source registry entry.
 - `python scripts/move_agent.py --continue <move-id>` — after the source Worker
   stops, activate, verify, and finish cleanup.
-- `python scripts/move_agent.py --cancel <move-id>` — roll back a staged move.
+- `python scripts/move_agent.py --cancel <move-id>` — roll back only a staged
+  move that has not recorded forward intent.
 
 Legacy `--sync` is rejected. `--keep-source` produces a compatibility message
 directing users to `/clone` and prepares nothing. Plaintext direct-move

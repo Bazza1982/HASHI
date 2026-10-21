@@ -163,10 +163,12 @@ async def test_optional_telegram_rejects_missing_owner_before_any_network(tmp_pa
 
 async def test_connection_adoption_requires_authenticated_durable_single_agent_receipt(tmp_path):
     import asyncio
-    from types import SimpleNamespace
+    from types import MethodType, SimpleNamespace
     from aiohttp import web, ClientSession
     from onboarding.connection import adopt_if_running
+    from orchestrator.admin_local_testing import execute_local_command
     from orchestrator.config import GlobalConfig
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.reboot_manager import RebootManager
     from orchestrator.function_worker_supervisor import AgentRuntimeHandle
     from orchestrator.workbench_api import WorkbenchApiServer
@@ -175,13 +177,53 @@ async def test_connection_adoption_requires_authenticated_durable_single_agent_r
     kernel = SimpleNamespace(paths=SimpleNamespace(bridge_home=tmp_path),
         runtimes=handles, shutdown_event=asyncio.Event(),
         configured_agent_names=lambda: ['hashiko', 'keep'],
-        _runtime_map=lambda: {h.name: h for h in handles})
-    activity={'is_generating':False,'queue_depth':0}
-    async def metadata(*args, **kwargs):
-        return dict(activity)
+        _runtime_map=lambda: {h.name: h for h in handles}, _restart_request=None)
+    def make_handle(name):
+        workspace = tmp_path / 'workspaces' / name
+        workspace.mkdir(parents=True)
+        worker = SimpleNamespace(
+            name=name,
+            orchestrator=kernel,
+            workspace_dir=workspace,
+            global_config=SimpleNamespace(
+                authorized_id=42,
+                bridge_home=tmp_path,
+                project_root=tmp_path,
+                instance_id='CONNECTION-TEST',
+                ui_language='en',
+            ),
+            _is_authorized_user=lambda actor: actor == 42,
+            _is_command_allowed=lambda command: command == 'reboot',
+        )
+
+        async def reply_text(_self, update, text, **kwargs):
+            return await update.message.reply_text(text, **kwargs)
+
+        worker._reply_text = MethodType(reply_text, worker)
+        worker.cmd_reboot = MethodType(FlexibleAgentRuntime.cmd_reboot, worker)
+
+        async def call(method, params=None, **_kwargs):
+            params = dict(params or {})
+            if method == 'runtime.slash':
+                return await execute_local_command(
+                    worker,
+                    str(params.get('text') or ''),
+                    source_channel=str(params.get('source_channel') or 'api_chat'),
+                    chat_id=params.get('chat_id'),
+                    session_metadata=params.get('session_metadata'),
+                )
+            if method == 'worker.metadata':
+                return {'is_generating': False, 'queue_depth': 0}
+            raise AssertionError(f'unexpected Worker call: {method}')
+
+        client = SimpleNamespace(agent_name=name, call=call)
+        return AgentRuntimeHandle(kernel, client, {
+            'name':name, 'display_name':name,
+            'worker_phase':'ACTIVE', 'worker_accepting':True,
+        })
+
     for name in ('hashiko','keep'):
-        handles.append(AgentRuntimeHandle(kernel,SimpleNamespace(agent_name=name,call=metadata),
-            {'name':name,'display_name':name,'worker_phase':'ACTIVE','worker_accepting':True}))
+        handles.append(make_handle(name))
     manager = RebootManager(kernel, None)
     kernel.reboot_manager=manager
     async def request_reboot(**request):
@@ -204,7 +246,7 @@ async def test_connection_adoption_requires_authenticated_durable_single_agent_r
             async with client.post(base+'/api/admin/reboot-agent',json={'agent':'hashiko','request_key':'unauthorized'}) as response:
                 assert response.status==403
         assert manager.receipts.records()==[]
-        activity['is_generating']=True
+        manager.active_operation='existing-reboot'
         async with ClientSession() as client:
             async with client.post(base+'/api/admin/reboot-agent',
                     headers={'X-Workbench-Token':'local-owner'},
@@ -212,7 +254,7 @@ async def test_connection_adoption_requires_authenticated_durable_single_agent_r
                 assert response.status==409
                 assert (await response.json())['error']=='AGENT_BUSY'
         assert manager.receipts.records()==[]
-        activity['is_generating']=False
+        manager.active_operation=None
         admission=asyncio.create_task(adopt_if_running(tmp_path))
         for _ in range(100):
             if manager.receipts.records():break

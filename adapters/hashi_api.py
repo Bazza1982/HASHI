@@ -32,7 +32,7 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
-    HASHI_COMPACTION_CAPABILITIES,
+    HASHI_COMPACTION_CAPABILITIES,  # noqa: F401 - reflected by Phone isolation gate
     INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
@@ -942,7 +942,17 @@ class HashiApiAdapter(OpenRouterAdapter):
         silent: bool = False,
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
+        continuation_messages: list[dict[str, Any]] | None = None,
+        provider_call_limit: int | None = None,
+        before_provider_call: Any = None,
+        transient_images=None,
     ) -> BackendResponse:
+        if continuation_messages is not None:
+            # The gateway keeps its own session/continuation contract; an
+            # HERV3 cross-Provider continuation cannot be represented here.
+            raise ValueError(
+                "hashi-api does not accept an assembled HERV3 continuation"
+            )
         started = time.perf_counter()
         self._ensure_client()
 
@@ -974,7 +984,11 @@ class HashiApiAdapter(OpenRouterAdapter):
 
         try:
             self._touch_activity()
-            messages, media_routing = self._initial_messages(prompt, request_content)
+            messages, media_routing = self._initial_messages(
+                prompt,
+                request_content,
+                transient_images=transient_images,
+            )
             outbound_messages = messages
             self._last_media_routing = media_routing
             normalized_request_content = normalize_request_content(request_content)
@@ -993,7 +1007,11 @@ class HashiApiAdapter(OpenRouterAdapter):
             )
             # Gateway sessions intentionally exclude inline media. Text-only
             # tool stages qualify for the request-local continuation protocol.
-            if self.tool_registry is not None and not media_routing:
+            if (
+                self.tool_registry is not None
+                and not media_routing
+                and not transient_images
+            ):
                 gateway_session_id = f"hashi-tool-{uuid.uuid4().hex}"
 
             for loop_idx in count():
@@ -1384,6 +1402,41 @@ class HashiApiAdapter(OpenRouterAdapter):
                     active_forensic_path = None
 
                 if not bool(decision.get("execute_tools")):
+                    if bool(decision.get("success")):
+                        question_resolution = (
+                            await self._wait_before_terminal_response()
+                        )
+                        if question_resolution is not None:
+                            withheld_assistant: dict[str, Any] = {
+                                "role": "assistant",
+                                "content": (
+                                    result.text
+                                    if result.text
+                                    else (
+                                        json.dumps(
+                                            result.structured_data,
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        )
+                                        if result.structured_data is not None
+                                        else ""
+                                    )
+                                ),
+                            }
+                            messages.append(withheld_assistant)
+                            resolution_messages = (
+                                self._run_question_resolution_messages(
+                                    question_resolution
+                                )
+                            )
+                            messages.extend(resolution_messages)
+                            # The Gateway's external-tool continuation accepts
+                            # only tool-result deltas. A resolved PAO question is
+                            # an authenticated user-level continuation, so replay
+                            # the complete local conversation in a fresh request.
+                            gateway_session_id = None
+                            outbound_messages = messages
+                            continue
                     terminal_decision = dict(decision)
                     break
 

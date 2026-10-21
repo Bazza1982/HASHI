@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -21,7 +21,8 @@ from typing import Callable
 from orchestrator import ui_language
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_routing import fallback_providers, normalize_language, resolve_tts_route
-from orchestrator.tts_providers import build_provider, list_provider_names
+from orchestrator.tts_providers import build_provider
+from orchestrator.voice_catalog import VoiceCatalog, VoiceCatalogError
 from orchestrator.tts_voice_previews import (
     DEFAULT_TTS_VOICE_PREVIEW_ASSET_ROOT,
     get_tts_voice_preview_assets as resolve_tts_voice_preview_assets,
@@ -47,6 +48,14 @@ from orchestrator.voice_synthesizer import (
 from orchestrator.command_ui import setting_card
 
 
+def _optional_module_available(module_name: str) -> bool:
+    """Probe an optional provider without trusting partially loaded test/plugin stubs."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _default_tts_provider() -> str:
     if sys.platform == "win32":
         return "windows"
@@ -55,20 +64,18 @@ def _default_tts_provider() -> str:
     return "edge"
 
 
-def _provider_label(provider_name: str) -> str:
-    return {
-        "edge": "Edge TTS",
-        "windows": "Windows TTS",
-        "macos": "macOS TTS",
-        "piper": "Piper TTS",
-        "kokoro": "Kokoro TTS",
-        "coqui": "Coqui TTS",
-    }.get(str(provider_name or "").strip().casefold(), f"{provider_name or 'TTS'} provider")
+def _provider_label(provider_name: str, configured_label: str | None = None) -> str:
+    return str(configured_label or "").strip() or f"{provider_name or 'TTS'} provider"
 
 
-def _provider_failure(provider_name: str, exc: Exception) -> VoiceProviderFailure:
+def _provider_failure(
+    provider_name: str,
+    exc: Exception,
+    *,
+    configured_label: str | None = None,
+) -> VoiceProviderFailure:
     provider = str(provider_name or "unknown").strip().casefold() or "unknown"
-    label = _provider_label(provider)
+    label = _provider_label(provider, configured_label)
     detail = safe_voice_error_detail(exc)
     lowered = detail.casefold()
     declared_code = str(getattr(exc, "code", "") or "").strip().casefold()
@@ -179,14 +186,34 @@ def _installed_windows_voice_names() -> frozenset[str]:
     return frozenset(line.strip() for line in completed.stdout.splitlines() if line.strip())
 
 
+@dataclass(frozen=True)
+class ConfiguredTTSResult:
+    """One shared TTS execution result for /voice or another PAO consumer."""
+
+    asset: VoiceAsset
+    selected_provider: str
+    effective_provider: str
+    effective_voice_name: str | None
+    effective_provider_options: dict[str, object]
+    fallback_chain: tuple[str, ...]
+    attempts: tuple[dict[str, object], ...]
+
+
+_SOURCE_ROOT = Path(
+    os.environ.get("HASHI_SOURCE_ROOT")
+    or os.environ.get("BRIDGE_HOME")
+    or Path(__file__).resolve().parent.parent
+).resolve()
+_DEFAULT_VOICE_CATALOG = VoiceCatalog.load(project_root=_SOURCE_ROOT)
+_DEFAULT_MACOS_VOICE_CATALOG = VoiceCatalog.load(
+    project_root=_SOURCE_ROOT,
+    platform="darwin",
+)
+
+
 class VoiceManager:
     PROVIDER_FAILURE_COOLDOWN_SECONDS = 300.0
-    PROJECT_ROOT = Path(
-        os.environ.get("HASHI_SOURCE_ROOT")
-        or os.environ.get("BRIDGE_HOME")
-        or Path(__file__).resolve().parent.parent
-    ).resolve()
-    PIPER_MODEL_DIR = PROJECT_ROOT / "voice_models" / "piper"
+    PROJECT_ROOT = _SOURCE_ROOT
     VOICE_PREVIEW_VERSION = PRODUCT_VOICE_PREVIEW_VERSION
     VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
@@ -219,273 +246,7 @@ class VoiceManager:
             "terminal_overrides": {},
         },
     }
-    VOICE_PRESETS = {
-        "eus": {
-            "provider": "edge",
-            "voice_name": "en-US-EmmaNeural",
-            "label": "Emma [US Edge]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "female",
-        },
-        "eusm": {
-            "provider": "edge",
-            "voice_name": "en-US-GuyNeural",
-            "label": "Guy [US Edge]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "male",
-        },
-        "euk": {
-            "provider": "edge",
-            "voice_name": "en-GB-SoniaNeural",
-            "label": "Sonia [UK Edge]",
-            "language": "English",
-            "locale": "en-GB",
-            "gender": "female",
-        },
-        "eukm": {
-            "provider": "edge",
-            "voice_name": "en-GB-RyanNeural",
-            "label": "Ryan [UK Edge]",
-            "language": "English",
-            "locale": "en-GB",
-            "gender": "male",
-        },
-        "ecn": {
-            "provider": "edge",
-            "voice_name": "zh-CN-XiaoxiaoNeural",
-            "label": "Xiaoxiao [CN Edge]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-        },
-        "ecny": {
-            "provider": "edge",
-            "voice_name": "zh-CN-XiaoyiNeural",
-            "label": "Xiaoyi [CN Edge]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-        },
-        "ecnm": {
-            "provider": "edge",
-            "voice_name": "zh-CN-YunxiNeural",
-            "label": "Yunxi [CN Edge]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "male",
-        },
-        # XiaochenNeural and XiaohanNeural discontinued by Microsoft (2026-03)
-        "ectc": {
-            "provider": "edge",
-            "voice_name": "zh-TW-HsiaoChenNeural",
-            "label": "HsiaoChen [TW Edge]",
-            "language": "Chinese",
-            "locale": "zh-TW",
-            "gender": "female",
-        },
-        "ecty": {
-            "provider": "edge",
-            "voice_name": "zh-TW-HsiaoYuNeural",
-            "label": "HsiaoYu [TW Edge]",
-            "language": "Chinese",
-            "locale": "zh-TW",
-            "gender": "female",
-        },
-        "ectm": {
-            "provider": "edge",
-            "voice_name": "zh-TW-YunJheNeural",
-            "label": "YunJhe [TW Edge]",
-            "language": "Chinese",
-            "locale": "zh-TW",
-            "gender": "male",
-        },
-        "echm": {
-            "provider": "edge",
-            "voice_name": "zh-HK-HiuMaanNeural",
-            "label": "HiuMaan [HK Edge]",
-            "language": "Chinese",
-            "locale": "zh-HK",
-            "gender": "female",
-        },
-        "echg": {
-            "provider": "edge",
-            "voice_name": "zh-HK-HiuGaaiNeural",
-            "label": "HiuGaai [HK Edge]",
-            "language": "Chinese",
-            "locale": "zh-HK",
-            "gender": "female",
-        },
-        "echkm": {
-            "provider": "edge",
-            "voice_name": "zh-HK-WanLungNeural",
-            "label": "WanLung [HK Edge]",
-            "language": "Chinese",
-            "locale": "zh-HK",
-            "gender": "male",
-        },
-        "eja": {
-            "provider": "edge",
-            "voice_name": "ja-JP-NanamiNeural",
-            "label": "Nanami [JP Edge]",
-            "language": "Japanese",
-            "locale": "ja-JP",
-            "gender": "female",
-        },
-        "ejam": {
-            "provider": "edge",
-            "voice_name": "ja-JP-KeitaNeural",
-            "label": "Keita [JP Edge]",
-            "language": "Japanese",
-            "locale": "ja-JP",
-            "gender": "male",
-        },
-        "us": {
-            "provider": "piper",
-            "voice_name": str(PIPER_MODEL_DIR / "en_US-lessac-high.onnx"),
-            "label": "Lessac [Piper-US]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "female",
-        },
-        "uk": {
-            "provider": "piper",
-            "voice_name": str(PIPER_MODEL_DIR / "en_GB-cori-high.onnx"),
-            "label": "Cori [Piper-UK]",
-            "language": "English",
-            "locale": "en-GB",
-            "gender": "female",
-        },
-        "pcn": {
-            "provider": "piper",
-            "voice_name": str(PIPER_MODEL_DIR / "zh_CN-huayan-medium.onnx"),
-            "label": "Huayan [Piper-CN]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-        },
-        "cn": {
-            "provider": "windows",
-            "voice_name": "Microsoft Huihui Desktop",
-            "label": "Huihui [Win-CN]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-        },
-        "wus": {
-            "provider": "windows",
-            "voice_name": "Microsoft Zira Desktop",
-            "label": "Zira [Win-US]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "female",
-        },
-        "wusm": {
-            "provider": "windows",
-            "voice_name": "Microsoft David Desktop",
-            "label": "David [Win-US]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "male",
-        },
-        # Kokoro local TTS presets — runs on CPU, no API key needed
-        "ko_bella": {
-            "provider": "kokoro",
-            "voice_name": "af_bella",
-            "label": "Bella [Kokoro EN]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "female",
-            "provider_options": {"lang_code": "a"},
-        },
-        "ko_heart": {
-            "provider": "kokoro",
-            "voice_name": "af_heart",
-            "label": "Heart [Kokoro EN]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "female",
-            "provider_options": {"lang_code": "a"},
-        },
-        "ko_michael": {
-            "provider": "kokoro",
-            "voice_name": "am_michael",
-            "label": "Michael [Kokoro EN-US]",
-            "language": "English",
-            "locale": "en-US",
-            "gender": "male",
-            "provider_options": {"lang_code": "a"},
-        },
-        "ko_emma": {
-            "provider": "kokoro",
-            "voice_name": "bf_emma",
-            "label": "Emma [Kokoro EN-GB]",
-            "language": "English",
-            "locale": "en-GB",
-            "gender": "female",
-            "provider_options": {"lang_code": "b"},
-        },
-        "ko_george": {
-            "provider": "kokoro",
-            "voice_name": "bm_george",
-            "label": "George [Kokoro EN-GB]",
-            "language": "English",
-            "locale": "en-GB",
-            "gender": "male",
-            "provider_options": {"lang_code": "b"},
-        },
-        "ko_xiaoxiao": {
-            "provider": "kokoro",
-            "voice_name": "zf_xiaoxiao",
-            "label": "Xiaoxiao [Kokoro ZH]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-            "provider_options": {"lang_code": "z"},
-        },
-        "ko_xiaobei": {
-            "provider": "kokoro",
-            "voice_name": "zf_xiaobei",
-            "label": "Xiaobei [Kokoro ZH]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "female",
-            "provider_options": {"lang_code": "z"},
-        },
-        "ko_yunxi": {
-            "provider": "kokoro",
-            "voice_name": "zm_yunxi",
-            "label": "Yunxi [Kokoro ZH]",
-            "language": "Chinese",
-            "locale": "zh-CN",
-            "gender": "male",
-            "provider_options": {"lang_code": "z"},
-        },
-        "ko_alpha": {
-            "provider": "kokoro",
-            "voice_name": "jf_alpha",
-            "label": "Alpha [Kokoro JA]",
-            "language": "Japanese",
-            "locale": "ja-JP",
-            "gender": "female",
-            "provider_options": {"lang_code": "j"},
-        },
-        "ko_kumo": {
-            "provider": "kokoro",
-            "voice_name": "jm_kumo",
-            "label": "Kumo [Kokoro JA]",
-            "language": "Japanese",
-            "locale": "ja-JP",
-            "gender": "male",
-            "provider_options": {"lang_code": "j"},
-        },
-    }
-
-    # Keep the main /voice surface provider-neutral and deliberately small.
-    # These IDs and TTS mappings align with Aptenra's four voice profiles.  The
-    # native candidate lists are ordered preferences: capability declarations
-    # decide which concrete provider voice is safe to persist.
+    VOICE_PRESETS = copy.deepcopy(_DEFAULT_VOICE_CATALOG.presets)
     VOICE_PROFILES = {
         "warm_female": {
             "label": "👩 Warm",
@@ -524,52 +285,11 @@ class VoiceManager:
             },
         },
     }
-
     MACOS_VOICE_PRESETS = {
-        "maus_ava": {
-            "provider": "macos",
-            "voice_name": "Ava",
-            "label": "Ava [macOS EN-US]",
-            "language": "en-US",
-            "locale": "en-US",
-            "gender": "female",
-        },
-        "maus_samantha": {
-            "provider": "macos",
-            "voice_name": "Samantha",
-            "label": "Samantha [macOS EN-US]",
-            "language": "en-US",
-            "locale": "en-US",
-            "gender": "female",
-        },
-        "maus_alex": {
-            "provider": "macos",
-            "voice_name": "Alex",
-            "label": "Alex [macOS EN-US male]",
-            "language": "en-US",
-            "locale": "en-US",
-            "gender": "male",
-        },
-        "maus_daniel": {
-            "provider": "macos",
-            "voice_name": "Daniel",
-            "label": "Daniel [macOS EN-GB]",
-            "language": "en-GB",
-            "locale": "en-GB",
-            "gender": "male",
-        },
-        "maus_moira": {
-            "provider": "macos",
-            "voice_name": "Moira",
-            "label": "Moira [macOS EN-IE]",
-            "language": "en-IE",
-            "locale": "en-IE",
-            "gender": "female",
-        },
+        alias: copy.deepcopy(preset)
+        for alias, preset in _DEFAULT_MACOS_VOICE_CATALOG.presets.items()
+        if preset.get("provider") == "macos"
     }
-
-    if sys.platform == "darwin":
-        VOICE_PRESETS.update(MACOS_VOICE_PRESETS)
 
     def __init__(
         self,
@@ -580,9 +300,15 @@ class VoiceManager:
         native_capabilities: list[dict] | None = None,
         preview_asset_root: Path | None = None,
         tts_preview_asset_root: Path | None = None,
+        catalog_path: Path | None = None,
+        project_root: Path | None = None,
     ):
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
+        self.project_root = Path(project_root or self.PROJECT_ROOT).resolve()
+        self.catalog_path = (
+            Path(catalog_path).resolve() if catalog_path is not None else None
+        )
         self.state_path = workspace_dir / "voice_state.json"
         self.output_dir = media_dir / "voice"
         self.ffmpeg_cmd = ffmpeg_cmd
@@ -596,11 +322,76 @@ class VoiceManager:
         self._native_capabilities = tuple(
             dict(item) for item in (native_capabilities or ()) if isinstance(item, dict)
         )
+        try:
+            self.voice_catalog = VoiceCatalog.load(
+                instance_path=self.catalog_path,
+                project_root=self.project_root,
+            )
+            self._voice_catalog_error: VoiceCatalogError | None = None
+        except VoiceCatalogError as exc:
+            # A malformed optional declaration must not take the whole Agent
+            # Worker down. Voice actions fail closed until the file is repaired.
+            self.voice_catalog = VoiceCatalog.load(project_root=self.project_root)
+            self._voice_catalog_error = exc
+        self._voice_catalog_signature = self._catalog_signature()
+        self.VOICE_PRESETS = self.voice_catalog.presets
         self._provider_cooldowns: dict[str, tuple[float, VoiceProviderFailure]] = {}
         self.voice_audit_path = self.workspace_dir / "logs" / "voice_synthesis.jsonl"
         self._voice_audit_lock = threading.Lock()
 
-    def _active_provider_failure(self, provider_name: str) -> VoiceProviderFailure | None:
+    def _catalog_signature(self) -> tuple[int, int] | None:
+        if self.catalog_path is None:
+            return None
+        try:
+            stat = self.catalog_path.stat()
+        except FileNotFoundError:
+            return (0, 0)
+        except OSError:
+            return (-1, -1)
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+
+    def _refresh_voice_catalog(self) -> None:
+        signature = self._catalog_signature()
+        if signature == self._voice_catalog_signature:
+            return
+        try:
+            catalog = VoiceCatalog.load(
+                instance_path=self.catalog_path,
+                project_root=self.project_root,
+            )
+        except VoiceCatalogError as exc:
+            self._voice_catalog_error = exc
+            self._voice_catalog_signature = signature
+            return
+        self.voice_catalog = catalog
+        self.VOICE_PRESETS = catalog.presets
+        self._voice_catalog_error = None
+        self._voice_catalog_signature = signature
+
+    def _require_voice_catalog(self) -> None:
+        self._refresh_voice_catalog()
+        if self._voice_catalog_error is not None:
+            raise RuntimeError(
+                "Voice catalog is unreadable; no voice setting was changed: "
+                f"{self._voice_catalog_error}"
+            ) from self._voice_catalog_error
+
+    def _service(self, service_id: str) -> dict[str, object]:
+        self._require_voice_catalog()
+        return self.voice_catalog.service(service_id)
+
+    def _service_label(self, service_id: str) -> str:
+        return self.voice_catalog.service_label(service_id)
+
+    def _service_menu_label(self, service_id: str) -> str:
+        return self.voice_catalog.service_menu_label(service_id)
+
+    def _active_provider_failure(
+        self,
+        provider_name: str,
+        *,
+        configured_label: str | None = None,
+    ) -> VoiceProviderFailure | None:
         name = str(provider_name or "").strip().casefold()
         current = self._provider_cooldowns.get(name)
         if current is None:
@@ -612,7 +403,11 @@ class VoiceManager:
         return VoiceProviderFailure(
             name,
             failure.code,
-            f"{failure.reason} {_provider_label(name)} is temporarily bypassed after that failure.",
+            (
+                f"{failure.reason} "
+                f"{_provider_label(name, configured_label)} is temporarily "
+                "bypassed after that failure."
+            ),
             False,
         )
 
@@ -636,46 +431,70 @@ class VoiceManager:
 
     def _provider_status(self, provider_name: str) -> str:
         name = (provider_name or "").strip().lower()
-        if name == "windows":
+        try:
+            service = self._service(name)
+        except (VoiceCatalogError, RuntimeError):
+            return "not configured"
+        adapter = str(service.get("adapter") or "").strip().casefold()
+        if adapter == "windows":
             return "installed" if self._available_windows_voice_names() else "not installed"
-        if name == "edge":
+        if adapter == "edge":
             return (
                 "installed"
-                if isolated_tts_configured() or importlib.util.find_spec("edge_tts")
+                if isolated_tts_configured() or _optional_module_available("edge_tts")
                 else "not installed"
             )
-        if name == "piper":
+        if adapter == "piper":
             exe = self._default_piper_exe()
             executable_available = Path(exe).is_file() or shutil.which(exe) is not None
             return (
                 "installed"
-                if importlib.util.find_spec("piper") or executable_available
+                if _optional_module_available("piper") or executable_available
                 else "not installed"
             )
-        if name == "kokoro":
+        if adapter == "kokoro":
             return (
                 "installed"
-                if isolated_tts_supports("kokoro") or importlib.util.find_spec("kokoro")
+                if isolated_tts_supports("kokoro") or _optional_module_available("kokoro")
                 else "not installed"
             )
-        if name == "coqui":
+        if adapter == "coqui":
             return f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
+        if adapter == "macos":
+            return "installed" if sys.platform == "darwin" else "not installed"
+        if adapter == "openai_compatible":
+            reference = str(service.get("credential_ref") or "")
+            environment = str(service.get("credential_env") or "")
+            if reference.startswith("env://"):
+                available = bool(os.environ.get(reference.removeprefix("env://")))
+            elif reference.startswith("secrets://"):
+                available = bool(
+                    self._secrets.get(reference.removeprefix("secrets://"))
+                )
+            elif environment:
+                available = bool(os.environ.get(environment))
+            else:
+                available = True
+            return "configured" if available else "missing credential"
         return "unknown"
 
     def _preset_payload(self, alias: str) -> dict | None:
+        self._require_voice_catalog()
         key = (alias or "").strip().lower()
         preset = self.VOICE_PRESETS.get(key)
         if not preset:
             return None
         payload = dict(preset)
+        service = self._service(str(payload.get("provider") or ""))
+        adapter = str(service.get("adapter") or "").strip().casefold()
         provider_options = dict(payload.get("provider_options") or {})
-        if payload.get("provider") == "piper":
+        if adapter == "piper":
             provider_options.setdefault("exe", self._default_piper_exe())
             provider_options.setdefault("python_exe", self._default_python_exe())
             provider_options.setdefault(
-                "module_mode", importlib.util.find_spec("piper") is not None
+                "module_mode", _optional_module_available("piper")
             )
-        if payload.get("provider") == "kokoro":
+        if adapter == "kokoro":
             try:
                 python = resolve_tts_python()
             except RuntimeError:
@@ -714,6 +533,7 @@ class VoiceManager:
         return "\n".join(lines)
 
     def get_voice_presets(self) -> list[tuple[str, dict, str]]:
+        self._require_voice_catalog()
         rows: list[tuple[str, dict, str]] = []
         windows_voices = self._available_windows_voice_names()
         provider_status = {
@@ -722,16 +542,18 @@ class VoiceManager:
             if provider not in {"piper", "windows"}
         }
         for alias, preset in self.VOICE_PRESETS.items():
+            service = self._service(str(preset["provider"]))
+            adapter = str(service.get("adapter") or "").strip().casefold()
             available = "ready"
-            if preset["provider"] == "piper":
+            if adapter == "piper":
                 available = "ready" if Path(preset["voice_name"]).exists() else "missing model"
-            elif preset["provider"] == "windows":
+            elif adapter == "windows":
                 available = (
                     "ready"
                     if str(preset["voice_name"]) in windows_voices
                     else "missing system voice"
                 )
-            elif provider_status[preset["provider"]] != "installed":
+            elif provider_status[preset["provider"]] not in {"installed", "configured"}:
                 available = provider_status[preset["provider"]]
             rows.append((alias, dict(preset), available))
         return rows
@@ -998,87 +820,21 @@ class VoiceManager:
         self._update(mutate)
         return f"Voice mode set to {normalized.upper()}."
 
-    _VOICE_LOCAL_NAMES = {
-        "ecnm": "云希",
-        "ecn": "晓晓",
-        "ecny": "晓伊",
-        "ectc": "曉臻",
-        "ecty": "曉雨",
-        "ectm": "雲哲",
-        "echm": "曉曼",
-        "echg": "曉佳",
-        "echkm": "雲龍",
-        "eja": "七海",
-        "ejam": "圭太",
-        "pcn": "华妍",
-        "cn": "慧慧",
-        "ko_xiaoxiao": "晓晓",
-        "ko_xiaobei": "晓蓓",
-        "ko_yunxi": "云希",
-    }
-    _VOICE_LANGUAGE_ANNOTATIONS = {
-        "eus": ("English (US)", "美式英语"),
-        "eusm": ("English (US)", "美式英语"),
-        "euk": ("English (UK)", "英式英语"),
-        "eukm": ("English (UK)", "英式英语"),
-        "ecn": ("Simplified Chinese", "简中"),
-        "ecny": ("Simplified Chinese", "简中"),
-        "ecnm": ("Simplified Chinese", "简中"),
-        "ectc": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
-        "ecty": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
-        "ectm": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
-        "echm": ("Cantonese (Hong Kong)", "粤语·香港"),
-        "echg": ("Cantonese (Hong Kong)", "粤语·香港"),
-        "echkm": ("Cantonese (Hong Kong)", "粤语·香港"),
-        "eja": ("Japanese", "日语"),
-        "ejam": ("Japanese", "日语"),
-        "us": ("English (US)", "美式英语"),
-        "uk": ("English (UK)", "英式英语"),
-        "pcn": ("Simplified Chinese", "简中"),
-        "cn": ("Simplified Chinese", "简中"),
-        "wus": ("English (US)", "美式英语"),
-        "wusm": ("English (US)", "美式英语"),
-        "ko_bella": ("English (US)", "美式英语"),
-        "ko_heart": ("English (US)", "美式英语"),
-        "ko_michael": ("English (US)", "美式英语"),
-        "ko_emma": ("English (UK)", "英式英语"),
-        "ko_george": ("English (UK)", "英式英语"),
-        "ko_xiaoxiao": ("Simplified Chinese", "简中"),
-        "ko_xiaobei": ("Simplified Chinese", "简中"),
-        "ko_yunxi": ("Simplified Chinese", "简中"),
-        "ko_alpha": ("Japanese", "日语"),
-        "ko_kumo": ("Japanese", "日语"),
-    }
-    _VOICE_PROVIDER_SHORT = {
-        "edge": "Edge",
-        "windows": "Windows",
-        "macos": "macOS",
-        "piper": "Piper",
-        "kokoro": "Kokoro",
-        "coqui": "Coqui",
-    }
-
     def voice_preset_menu_label(self, alias: str, *, locale: str | None = None) -> str:
+        self._require_voice_catalog()
         key = str(alias or "").strip().casefold()
         preset = self.VOICE_PRESETS.get(key)
         if not preset:
             return key
         selected_locale = ui_language.normalize_locale(locale or ui_language.current_locale())
         raw_name = str(preset.get("label") or key).split("[", 1)[0].strip()
-        name = (
-            self._VOICE_LOCAL_NAMES.get(key, raw_name)
-            if selected_locale == "zh-CN"
-            else raw_name
+        name = str((preset.get("display_names") or {}).get(selected_locale) or raw_name)
+        language = str(
+            (preset.get("language_labels") or {}).get(selected_locale)
+            or preset.get("language")
+            or "Auto"
         )
-        annotations = self._VOICE_LANGUAGE_ANNOTATIONS.get(key)
-        if annotations:
-            language = annotations[1] if selected_locale == "zh-CN" else annotations[0]
-        else:
-            language = str(preset.get("language") or "Auto")
-        provider = self._VOICE_PROVIDER_SHORT.get(
-            str(preset.get("provider") or "").strip().casefold(),
-            str(preset.get("provider") or "TTS"),
-        )
+        provider = self._service_menu_label(str(preset.get("provider") or ""))
         gender_id = str(preset.get("gender") or "").strip().casefold()
         gender = (
             ui_language.tr(f"voice.gender.{gender_id}", locale=selected_locale)
@@ -1595,7 +1351,8 @@ class VoiceManager:
         return str(self._load().get("provider") or "windows")
 
     def list_providers(self) -> list[str]:
-        return list_provider_names()
+        self._require_voice_catalog()
+        return list(self.voice_catalog.service_ids)
 
     def describe(self) -> str:
         state = self._load()
@@ -1653,20 +1410,24 @@ class VoiceManager:
         return f"Voice rate set to {int(rate)}."
 
     def provider_hints(self) -> str:
-        return (
-            "Providers\n"
-            f"- windows: built-in Windows voice fallback [{self._provider_status('windows')}]\n"
-            f"- edge: Microsoft Edge online neural voices [{self._provider_status('edge')}]\n"
-            f"- piper: local Piper CLI/model [{self._provider_status('piper')}]\n"
-            f"- kokoro: Kokoro Python package [{self._provider_status('kokoro')}]\n"
-            f"- coqui: Coqui TTS Python package [{self._provider_status('coqui')}]\n"
-        )
+        self._require_voice_catalog()
+        lines = ["Providers"]
+        for service_id in self.voice_catalog.service_ids:
+            lines.append(
+                f"- {service_id}: {self._service_label(service_id)} "
+                f"[{self._provider_status(service_id)}]"
+            )
+        return "\n".join(lines) + "\n"
 
     def apply_voice_preset(self, alias: str) -> str:
         preset = self._preset_payload(alias)
         if not preset:
             raise RuntimeError(f"Unknown voice preset: {alias}. Use /voice voices.")
-        if preset["provider"] == "piper" and not Path(preset["voice_name"]).exists():
+        service = self._service(str(preset["provider"]))
+        if (
+            service["adapter"] == "piper"
+            and not Path(preset["voice_name"]).exists()
+        ):
             raise RuntimeError(f"Voice preset {alias} is not ready on disk: {preset['voice_name']}")
         def mutate(state: dict) -> None:
             state["provider"] = preset["provider"]
@@ -1709,9 +1470,11 @@ class VoiceManager:
         voice_name: str | None,
         *,
         locale: str | None,
+        catalog: VoiceCatalog | None = None,
     ) -> str:
+        selected_catalog = catalog or self.voice_catalog
         folded_voice = str(voice_name or "").strip().casefold()
-        for alias, preset in self.VOICE_PRESETS.items():
+        for alias, preset in selected_catalog.presets.items():
             if (
                 str(preset.get("provider") or "").strip().casefold() == provider
                 and str(preset.get("voice_name") or "").strip().casefold() == folded_voice
@@ -1719,7 +1482,7 @@ class VoiceManager:
                 return self.voice_preset_menu_label(alias, locale=locale)
         if voice_name:
             return str(voice_name)
-        return _provider_label(provider)
+        return _provider_label(provider, selected_catalog.service_label(provider))
 
     def _routing_notice(
         self,
@@ -1730,7 +1493,9 @@ class VoiceManager:
         fallback_from: str | None,
         fallback_reason: str | None,
         locale: str | None,
+        catalog: VoiceCatalog | None = None,
     ) -> str | None:
+        selected_catalog = catalog or self.voice_catalog
         chinese = str(locale or "").strip().casefold().startswith("zh")
         notices: list[str] = []
         if final_route.adapted_from_voice:
@@ -1738,11 +1503,13 @@ class VoiceManager:
                 final_route.provider,
                 final_route.adapted_from_voice,
                 locale=locale,
+                catalog=selected_catalog,
             )
             new_voice = self._runtime_voice_label(
                 final_route.provider,
                 final_voice_name or final_route.voice_name,
                 locale=locale,
+                catalog=selected_catalog,
             )
             language = self._notice_language_name(
                 final_route.language.language,
@@ -1759,8 +1526,13 @@ class VoiceManager:
                     f"“{old_voice}” to “{new_voice}”; your default voice was not changed."
                 )
         if fallback_from:
-            primary = _provider_label(fallback_from)
-            fallback = _provider_label(final_route.provider)
+            primary = _provider_label(
+                fallback_from, selected_catalog.service_label(fallback_from)
+            )
+            fallback = _provider_label(
+                final_route.provider,
+                selected_catalog.service_label(final_route.provider),
+            )
             reason = safe_voice_error_detail(fallback_reason or "")[:240]
             if chinese:
                 notices.append(
@@ -1785,16 +1557,109 @@ class VoiceManager:
         source_language: str | None = None,
         source_surface: str = "unknown",
     ) -> VoiceAsset | None:
-        import asyncio
-
-        logger = logging.getLogger(f"Runtime.{agent_name}.voice")
         state = self._load()
         if not force and not state.get("enabled"):
             return None
+        result = await self._synthesize_configured_state(
+            agent_name=agent_name,
+            request_id=request_id,
+            text=text,
+            state=state,
+            max_retries=max_retries,
+            max_chars_override=max_chars_override,
+            source_language=source_language,
+            source_surface=source_surface,
+        )
+        return result.asset
+
+    async def synthesize_configured(
+        self,
+        *,
+        agent_name: str,
+        request_id: str,
+        text: str,
+        provider: str,
+        voice_name: str | None,
+        provider_options: dict | None = None,
+        requested_style: str | None = None,
+        rate: int = 0,
+        max_chars: int = 1200,
+        max_retries: int = 2,
+        source_language: str | None = None,
+        source_surface: str = "shared_tts",
+        catalog: VoiceCatalog | None = None,
+        provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
+        output_dir: Path | None = None,
+    ) -> ConfiguredTTSResult:
+        """Synthesize one explicit selection through the shared TTS platform.
+
+        Consumers keep their own selection and lifecycle. This method owns the
+        common catalogue, language routing, provider adapters, cooldown and
+        monotonic fallback behavior.
+        """
+
+        state = {
+            "provider": str(provider or "").strip().casefold(),
+            "voice_name": voice_name,
+            "provider_options": dict(provider_options or {}),
+            "voice_profile": requested_style,
+            "rate": int(rate),
+            "max_chars": max(1, int(max_chars)),
+        }
+        return await self._synthesize_configured_state(
+            agent_name=agent_name,
+            request_id=request_id,
+            text=text,
+            state=state,
+            max_retries=max_retries,
+            max_chars_override=max_chars,
+            source_language=source_language,
+            source_surface=source_surface,
+            catalog=catalog,
+            provider_allowed=provider_allowed,
+            output_dir=output_dir,
+        )
+
+    async def _synthesize_configured_state(
+        self,
+        *,
+        agent_name: str,
+        request_id: str,
+        text: str,
+        state: dict,
+        max_retries: int,
+        max_chars_override: int | None,
+        source_language: str | None,
+        source_surface: str,
+        catalog: VoiceCatalog | None = None,
+        provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
+        output_dir: Path | None = None,
+    ) -> ConfiguredTTSResult:
+        import asyncio
+
+        logger = logging.getLogger(f"Runtime.{agent_name}.voice")
+        if catalog is None:
+            self._require_voice_catalog()
+            selected_catalog = self.voice_catalog
+        else:
+            selected_catalog = catalog
+
+        def service(service_id: str) -> dict[str, object]:
+            return selected_catalog.service(service_id)
+
+        def service_label(service_id: str) -> str:
+            return selected_catalog.service_label(service_id)
+
+        def allowed(service_id: str) -> bool:
+            return provider_allowed is None or bool(
+                provider_allowed(service_id, service(service_id))
+            )
 
         primary_name = str(
             state.get("provider") or _default_tts_provider()
         ).strip().casefold()
+        service(primary_name)
+        routing_profiles = selected_catalog.routing_profiles()
         style_id = self._voice_profile_from_state(state)
         max_attempts = max(0, int(max_retries)) + 1
         max_chars = (
@@ -1809,11 +1674,19 @@ class VoiceManager:
             requested_style=style_id,
             text=text,
             source_language=source_language,
-            presets=self.VOICE_PRESETS,
+            presets=selected_catalog.presets,
             profiles=self.VOICE_PROFILES,
+            provider_profiles=routing_profiles,
         )
-        available_providers = set(self.list_providers())
-        fallback_chain = fallback_providers(primary_name, available_providers)
+        available_providers = set(selected_catalog.service_ids)
+        declared_fallback_chain = fallback_providers(
+            primary_name,
+            available_providers,
+            routing_profiles,
+        )
+        fallback_chain = tuple(
+            candidate for candidate in declared_fallback_chain if allowed(candidate)
+        )
         attempts: list[dict[str, object]] = []
         audit: dict[str, object] = {
             "event": "tts_synthesis",
@@ -1843,7 +1716,8 @@ class VoiceManager:
                     "style_reason": primary_route.style_reason,
                     "capability_source": primary_route.capability_source,
                 },
-                "fallback_candidates": list(fallback_chain),
+                "fallback_candidates": list(declared_fallback_chain),
+                "eligible_fallback_candidates": list(fallback_chain),
             },
             "attempts": attempts,
         }
@@ -1854,7 +1728,8 @@ class VoiceManager:
                 route.provider,
                 "tts_language_unsupported",
                 (
-                    f"{_provider_label(route.provider)} has no configured voice "
+                    f"{_provider_label(route.provider, service_label(route.provider))} "
+                    "has no configured voice "
                     f"that supports language: {language}."
                 ),
                 False,
@@ -1895,10 +1770,16 @@ class VoiceManager:
                 f"_{route.provider}_{attempt}"
             )
             try:
-                provider = build_provider(route.provider, ffmpeg_cmd=self.ffmpeg_cmd)
+                provider = build_provider(
+                    route.provider,
+                    ffmpeg_cmd=self.ffmpeg_cmd,
+                    provider_config=service(route.provider),
+                    secrets=self._secrets,
+                    bridge_home=self.project_root,
+                )
                 asset = await provider.synthesize(
                     text=text,
-                    output_dir=self.output_dir,
+                    output_dir=Path(output_dir or self.output_dir),
                     stem=stem,
                     voice_name=route.voice_name,
                     rate=int(state.get("rate", 0)),
@@ -1906,7 +1787,11 @@ class VoiceManager:
                     provider_options=route.provider_options,
                 )
             except Exception as exc:
-                failure = _provider_failure(route.provider, exc)
+                failure = _provider_failure(
+                    route.provider,
+                    exc,
+                    configured_label=service_label(route.provider),
+                )
                 attempts.append(
                     {
                         "phase": phase,
@@ -1947,7 +1832,19 @@ class VoiceManager:
                 None,
             )
 
-        primary_failure = self._active_provider_failure(primary_name)
+        primary_failure = (
+            VoiceProviderFailure(
+                primary_name,
+                "tts_privacy_blocked",
+                f"{service_label(primary_name)} is not allowed by the current privacy level.",
+                False,
+            )
+            if not allowed(primary_name)
+            else self._active_provider_failure(
+                primary_name,
+                configured_label=service_label(primary_name),
+            )
+        )
         primary_asset: VoiceAsset | None = None
         if primary_failure is None:
             for attempt in range(max_attempts):
@@ -1965,6 +1862,7 @@ class VoiceManager:
                         fallback_from=None,
                         fallback_reason=None,
                         locale=source_language,
+                        catalog=selected_catalog,
                     )
                     primary_asset = replace(primary_asset, notice=notice)
                     audit["result"] = {
@@ -1974,7 +1872,15 @@ class VoiceManager:
                         "notice": notice,
                     }
                     self._write_voice_audit(audit, logger)
-                    return primary_asset
+                    return ConfiguredTTSResult(
+                        asset=primary_asset,
+                        selected_provider=primary_name,
+                        effective_provider=primary_route.provider,
+                        effective_voice_name=primary_asset.voice_name,
+                        effective_provider_options=dict(primary_route.provider_options),
+                        fallback_chain=tuple(fallback_chain),
+                        attempts=tuple(copy.deepcopy(attempts)),
+                    )
                 assert primary_failure is not None
                 if not primary_failure.retryable or attempt + 1 >= max_attempts:
                     break
@@ -2002,7 +1908,10 @@ class VoiceManager:
 
         assert primary_failure is not None
         failures: list[VoiceProviderFailure] = [primary_failure]
-        if primary_failure.code != "tts_language_unsupported":
+        if primary_failure.code not in {
+            "tts_language_unsupported",
+            "tts_privacy_blocked",
+        }:
             self._remember_provider_failure(primary_failure)
 
         for fallback_name in fallback_chain:
@@ -2020,10 +1929,14 @@ class VoiceManager:
                 requested_style=style_id,
                 text=text,
                 source_language=primary_route.language.language or source_language,
-                presets=self.VOICE_PRESETS,
+                presets=selected_catalog.presets,
                 profiles=self.VOICE_PROFILES,
+                provider_profiles=routing_profiles,
             )
-            active_failure = self._active_provider_failure(fallback_name)
+            active_failure = self._active_provider_failure(
+                fallback_name,
+                configured_label=service_label(fallback_name),
+            )
             if active_failure is not None:
                 failures.append(active_failure)
                 attempts.append(
@@ -2058,6 +1971,7 @@ class VoiceManager:
                 fallback_from=primary_name,
                 fallback_reason=primary_failure.reason,
                 locale=source_language,
+                catalog=selected_catalog,
             )
             fallback_asset = replace(
                 fallback_asset,
@@ -2075,7 +1989,15 @@ class VoiceManager:
                 "notice": notice,
             }
             self._write_voice_audit(audit, logger)
-            return fallback_asset
+            return ConfiguredTTSResult(
+                asset=fallback_asset,
+                selected_provider=primary_name,
+                effective_provider=fallback_route.provider,
+                effective_voice_name=fallback_asset.voice_name,
+                effective_provider_options=dict(fallback_route.provider_options),
+                fallback_chain=tuple(fallback_chain),
+                attempts=tuple(copy.deepcopy(attempts)),
+            )
 
         code = (
             primary_failure.code

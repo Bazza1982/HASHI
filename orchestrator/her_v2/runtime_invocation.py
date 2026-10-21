@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -50,7 +51,6 @@ from .provider_fallback import (
     fallback_failure_eligible,
     fallback_model_class,
     fallback_warning_text,
-    next_fallback_profile,
 )
 from .prompts import json_repair_schema_for_stage
 from .runtime_support import _payload_hash
@@ -174,6 +174,40 @@ def _used_typed_media_fallback(value: Any) -> bool:
 
 
 class RuntimeInvocationMixin:
+    async def _resolve_stage_fallback(
+        self,
+        *,
+        request: StageRequest,
+        selected: ProviderProfile,
+        provider_activity: ProviderActivityTracker,
+    ) -> Mapping[str, Any] | None:
+        """Resolve the pre-effect stage fallback without restarting the Turn."""
+
+        resolve = getattr(self.provider, "resolve_stage_provider_fallback", None)
+        if not callable(resolve):
+            return None
+        snapshot = (
+            provider_activity.snapshot()
+            if hasattr(provider_activity, "snapshot")
+            else {}
+        )
+        visible_partial = bool(
+            isinstance(snapshot, Mapping)
+            and int(snapshot.get("text_event_count") or 0) > 0
+        )
+        try:
+            decision = resolve(
+                request=request,
+                selected=selected,
+                tool_started=bool(getattr(provider_activity, "tool_started", False)),
+                visible_partial_answer=visible_partial,
+            )
+            if inspect.isawaitable(decision):
+                decision = await decision
+            return decision
+        except Exception:
+            return None
+
     @_measure_stage_runtime
     async def _invoke_stage(
         self,
@@ -368,6 +402,7 @@ class RuntimeInvocationMixin:
         fallback_level = 0
         media_fallback_consumed = False
         attempt = 0
+        turn_local_recovery_total = 0
         while True:
             attempt += 1
             if state.control.stopped:
@@ -788,6 +823,10 @@ class RuntimeInvocationMixin:
                     human_description="The provider stage failed unexpectedly.",
                 )
             assert isinstance(last_error, StageInvocationError)
+            turn_local_recovery_total += max(
+                0,
+                int(last_error.details.get("provider_local_recovery_count") or 0),
+            )
             unobserved_side_effects = bool(
                 last_error.side_effects_possible and not provider_activity.tool_started
             )
@@ -798,6 +837,7 @@ class RuntimeInvocationMixin:
             retry_kind = "provider_recovery"
             retry_reason = "eligible"
             fallback_choice: tuple[int, ProviderProfile] | None = None
+            fallback_decision: Mapping[str, Any] | None = None
             if not retry_on_failure:
                 retry_reason = "retry_disabled_for_call"
             elif not last_error.retryable:
@@ -812,18 +852,51 @@ class RuntimeInvocationMixin:
             elif not fallback_failure_eligible(last_error):
                 retry_reason = "fallback_failure_ineligible"
             else:
-                fallback_choice = next_fallback_profile(
-                    self.config,
-                    primary=primary_selected,
-                    current=selected,
-                    current_level=fallback_level,
-                    model_class=selected_model_class,
+                fallback_decision = await self._resolve_stage_fallback(
+                    request=request,
+                    selected=selected,
+                    provider_activity=provider_activity,
                 )
-                if fallback_choice is None:
-                    retry_reason = "fallback_unavailable_or_exhausted"
-                else:
-                    retry_kind = f"model_fallback_l{fallback_choice[0]}"
+                if (
+                    fallback_decision is not None
+                    and fallback_decision.get("allowed") is True
+                    and str(fallback_decision.get("target_label") or "").strip()
+                    and fallback_decision.get("tool_started") is not True
+                    and fallback_decision.get("visible_partial_answer") is not True
+                ):
+                    target_engine, _separator, target_model = str(
+                        fallback_decision.get("target_label") or ""
+                    ).partition("/")
+                    target_model = target_model.strip()
+                    if (
+                        str(fallback_decision.get("target_kind") or "")
+                        == "codex_cli"
+                    ):
+                        from orchestrator.flexible_backend_registry import (
+                            get_default_model,
+                        )
+
+                        target_model = target_model or str(
+                            get_default_model("codex-cli") or ""
+                        )
+                    fallback_choice = (
+                        fallback_level + 1,
+                        replace(
+                            primary_selected,
+                            engine=target_engine.strip() or primary_selected.engine,
+                            model=target_model or primary_selected.model,
+                        ),
+                    )
+                    retry_kind = "provider_fallback"
                     retry_reason = "fallback_eligible"
+                elif fallback_decision is not None and fallback_decision.get(
+                    "reason"
+                ):
+                    retry_reason = (
+                        f"fallback_blocked:{fallback_decision.get('reason')}"
+                    )
+                else:
+                    retry_reason = "fallback_unavailable_or_exhausted"
             same_target_retry = retry_reason == "eligible"
             will_retry = same_target_retry or fallback_choice is not None
             possible_side_effects = bool(
@@ -910,6 +983,10 @@ class RuntimeInvocationMixin:
                         side_effects_possible=possible_side_effects,
                         details={
                             "retry_reason": retry_reason,
+                            "provider_turn_recovery_total": (
+                                max(0, attempt - 1)
+                                + turn_local_recovery_total
+                            ),
                             "recovery_decision": recovery_decision,
                             "foreground_cleanup": cleanup or None,
                         },
@@ -917,7 +994,18 @@ class RuntimeInvocationMixin:
                 raise last_error.terminal_copy(
                     f"{stage.value} failed after {attempt} attempt(s): {last_error}",
                     attempts=attempt,
-                    details={"retry_reason": retry_reason},
+                    details={
+                        "retry_reason": retry_reason,
+                        "provider_turn_recovery_total": (
+                            max(0, attempt - 1)
+                            + turn_local_recovery_total
+                        ),
+                        **(
+                            {"fallback_decision": fallback_decision}
+                            if fallback_decision
+                            else {}
+                        ),
+                    },
                 ) from last_error
             if fallback_choice is not None:
                 next_level, next_selected = fallback_choice

@@ -360,12 +360,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "fallback",
         "cmd_fallback",
-        "Configure HERV3 provider fallback",
+        "Configure the consented model fallback policy",
         "models",
         guide=CommandGuide(
-            "/fallback [on|off|clear|[l1|l2] <provider> <model> <light|pro>]",
-            ("on", "off", "clear", "l1", "l2"),
-            example="/fallback openrouter-api deepseek/deepseek-v4-flash light",
+            "/fallback [status]",
+            ("status",),
+            example="/fallback",
         ),
     ),
     CommandSpec(

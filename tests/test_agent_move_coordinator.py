@@ -339,7 +339,7 @@ def test_source_guard_supports_legacy_list_agents_file(tmp_path):
     }
 
 
-def test_activation_failure_restores_source_and_rolls_back_target(
+def test_activation_failure_keeps_forward_move_and_retries_without_rollback(
     tmp_path, monkeypatch
 ):
     root = _source(tmp_path)
@@ -362,7 +362,7 @@ def test_activation_failure_restores_source_and_rolls_back_target(
     )
     assert first_phase["status"] == "source_disabled_target_committed"
 
-    with pytest.raises(AgentMoveError, match="activation failed"):
+    with pytest.raises(AgentMoveError, match="forward retry"):
         coordinator.continue_outbound_move(
             root, {"hashi2": {}}, prepared["package_id"]
         )
@@ -371,19 +371,30 @@ def test_activation_failure_restores_source_and_rolls_back_target(
         "stage",
         "commit",
         "activate",
-        "rollback",
     ]
     source_agent = json.loads((root / "agents.json").read_text())["agents"][0]
-    assert source_agent["is_active"] is True
-    assert "transfer_package_id" not in source_agent
+    assert source_agent["is_active"] is False
+    assert source_agent["transfer_package_id"] == prepared["package_id"]
     assert (
         json.loads((root / "tasks.json").read_text())["heartbeats"][0]["enabled"]
-        is True
+        is False
     )
     assert session_path.read_bytes() == original_session
+    pending = coordinator.get_outbound_move(root, prepared["package_id"])
+    assert pending["status"] == "activating_target"
+    assert pending["source_disabled"] is True
+
+    receiver.fail_activate = False
+    completed = coordinator.continue_outbound_move(
+        root, {"hashi2": {}}, prepared["package_id"]
+    )
+    assert completed["status"] == "completed"
+    assert "rollback" not in [call[0] for call in receiver.calls]
 
 
-def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):
+def test_repeated_activation_failure_never_attempts_target_rollback(
+    tmp_path, monkeypatch
+):
     root = _source(tmp_path)
     receiver = _Receiver(fail_activate=True, fail_rollback=True)
     _install_receiver(monkeypatch, receiver)
@@ -401,7 +412,7 @@ def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):
         {"hashi2": {}},
         prepared["package_id"],
     )
-    with pytest.raises(AgentMoveError, match="source remains disabled"):
+    with pytest.raises(AgentMoveError, match="forward retry"):
         coordinator.continue_outbound_move(
             root,
             {"hashi2": {}},
@@ -412,7 +423,6 @@ def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):
         "stage",
         "commit",
         "activate",
-        "rollback",
     ]
     source_agent = json.loads((root / "agents.json").read_text())["agents"][0]
     assert source_agent["is_active"] is False
@@ -423,13 +433,12 @@ def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):
     }
 
     receiver.fail_activate = False
-    receiver.fail_rollback = False
     recovered = coordinator.confirm_outbound_move(
         root,
         {"hashi2": {}},
         prepared["package_id"],
     )
-    assert recovered["status"] == "source_disabled_target_committed"
+    assert recovered["status"] == "activating_target"
     completed = coordinator.continue_outbound_move(
         root,
         {"hashi2": {}},
@@ -438,7 +447,7 @@ def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):
     assert completed["status"] == "completed"
 
 
-def test_cancel_reconciles_uncertain_cutover_before_restoring_source(
+def test_cancel_is_rejected_after_forward_move_intent_is_committed(
     tmp_path, monkeypatch
 ):
     root = _source(tmp_path)
@@ -457,25 +466,26 @@ def test_cancel_reconciles_uncertain_cutover_before_restoring_source(
         {"hashi2": {}},
         prepared["package_id"],
     )
-    with pytest.raises(AgentMoveError):
+    with pytest.raises(AgentMoveError, match="forward retry"):
         coordinator.continue_outbound_move(
             root,
             {"hashi2": {}},
             prepared["package_id"],
         )
 
-    receiver.fail_rollback = False
-    cancelled = coordinator.cancel_outbound_move(
-        root,
-        {"hashi2": {}},
-        prepared["package_id"],
-    )
-
-    assert cancelled["status"] == "cancelled"
+    with pytest.raises(AgentMoveError, match="must continue forward"):
+        coordinator.cancel_outbound_move(
+            root,
+            {"hashi2": {}},
+            prepared["package_id"],
+        )
     source_agent = json.loads((root / "agents.json").read_text())["agents"][0]
-    assert source_agent["is_active"] is True
-    assert "transfer_package_id" not in source_agent
-    assert source_move_guard_state(root, "zelda") is None
+    assert source_agent["is_active"] is False
+    assert source_agent["transfer_package_id"] == prepared["package_id"]
+    assert source_move_guard_state(root, "zelda") == {
+        "status": "moved_out_pending_reboot",
+        "target_instance": "HASHI2",
+    }
 
 
 def test_copy_mode_never_disables_source_or_activates_target(tmp_path, monkeypatch):
@@ -761,7 +771,7 @@ def test_source_cleanup_failure_never_reactivates_verified_move_source(
     assert "rollback" not in [call[0] for call in receiver.calls]
 
 
-def test_lost_target_start_response_is_stopped_before_source_restore(
+def test_lost_target_start_response_stays_forward_only_until_retry(
     tmp_path,
     monkeypatch,
 ):
@@ -770,9 +780,16 @@ def test_lost_target_start_response_is_stopped_before_source_restore(
     _install_receiver(monkeypatch, receiver)
     _install_local_lifecycle(monkeypatch)
 
+    original_start = receiver.start
+    lost_once = True
+
     def start_with_lost_response(package_id):
+        nonlocal lost_once
         receiver.calls.append(("start", package_id))
-        raise AgentMoveError("start response lost")
+        if lost_once:
+            lost_once = False
+            raise AgentMoveError("start response lost")
+        return {"status": receiver.remote_status}
 
     receiver.start = start_with_lost_response
     prepared = coordinator.prepare_outbound_move(
@@ -786,7 +803,7 @@ def test_lost_target_start_response_is_stopped_before_source_restore(
         root, {"hashi2": {}}, prepared["package_id"]
     )
 
-    with pytest.raises(AgentMoveError, match="activation failed"):
+    with pytest.raises(AgentMoveError, match="forward retry"):
         coordinator.continue_outbound_move(
             root, {"hashi2": {}}, prepared["package_id"]
         )
@@ -796,12 +813,18 @@ def test_lost_target_start_response_is_stopped_before_source_restore(
         "commit",
         "activate",
         "start",
-        "stop",
-        "rollback",
     ]
     source = json.loads((root / "agents.json").read_text())["agents"][0]
-    assert source["is_active"] is True
-    assert "transfer_package_id" not in source
+    assert source["is_active"] is False
+    assert source["transfer_package_id"] == prepared["package_id"]
+
+    receiver.start = original_start
+    completed = coordinator.continue_outbound_move(
+        root, {"hashi2": {}}, prepared["package_id"]
+    )
+    assert completed["status"] == "completed"
+    assert "stop" not in [call[0] for call in receiver.calls]
+    assert "rollback" not in [call[0] for call in receiver.calls]
 
 
 def test_lost_finalize_response_never_rolls_back_completed_move_target(
@@ -879,7 +902,7 @@ def test_lost_finalize_response_is_reconciled_as_completed_clone(
 
 
 @pytest.mark.parametrize("changed_kind", ["memory", "history"])
-def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
+def test_confirm_does_not_revalidate_source_after_preflight(
     tmp_path, monkeypatch, changed_kind
 ):
     from orchestrator.session_store import SessionStore
@@ -911,19 +934,22 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
             idempotency_key="new-business-history", history_eligible=True,
         )
 
-    with pytest.raises(AgentMoveError, match="durable state changed"):
-        coordinator.confirm_outbound_move(
-            root,
-            {"hashi2": {}},
-            prepared["package_id"],
-        )
+    result = coordinator.confirm_outbound_move(
+        root,
+        {"hashi2": {}},
+        prepared["package_id"],
+    )
 
-    assert [call[0] for call in receiver.calls] == ["stage", "commit", "rollback"]
+    assert result["status"] == "source_disabled_target_committed"
+    assert [call[0] for call in receiver.calls] == ["stage", "commit"]
     assert (
         json.loads((root / "agents.json").read_text())["agents"][0]["is_active"]
-        is True
+        is False
     )
-    assert source_move_guard_state(root, "zelda") is None
+    assert source_move_guard_state(root, "zelda") == {
+        "status": "moved_out_pending_reboot",
+        "target_instance": "HASHI2",
+    }
 
 
 def test_confirm_ignores_append_only_slash_audit_written_by_callback(
@@ -980,7 +1006,7 @@ def test_confirm_ignores_append_only_slash_audit_written_by_callback(
     os.name == "nt",
     reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
 )
-def test_confirm_rejects_changed_retained_identity_and_rolls_back_target(
+def test_confirm_does_not_revalidate_retained_identity_after_preflight(
     tmp_path, monkeypatch
 ):
     root = _source(tmp_path)
@@ -997,16 +1023,19 @@ def test_confirm_rejects_changed_retained_identity_and_rolls_back_target(
     )
     retained.write_text("historical identity two", encoding="utf-8")
 
-    with pytest.raises(AgentMoveError, match="durable state changed"):
-        coordinator.confirm_outbound_move(
-            root,
-            {"hashi2": {}},
-            prepared["package_id"],
-        )
+    result = coordinator.confirm_outbound_move(
+        root,
+        {"hashi2": {}},
+        prepared["package_id"],
+    )
 
-    assert [call[0] for call in receiver.calls] == ["stage", "commit", "rollback"]
+    assert result["status"] == "source_disabled_target_committed"
+    assert [call[0] for call in receiver.calls] == ["stage", "commit"]
     assert (
         json.loads((root / "agents.json").read_text())["agents"][0]["is_active"]
-        is True
+        is False
     )
-    assert source_move_guard_state(root, "zelda") is None
+    assert source_move_guard_state(root, "zelda") == {
+        "status": "moved_out_pending_reboot",
+        "target_instance": "HASHI2",
+    }

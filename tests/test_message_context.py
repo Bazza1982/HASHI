@@ -16,6 +16,7 @@ from orchestrator.message_context import (
     SOURCE_CAPABILITIES,
     build_message_context_snapshot,
     normalize_external_source,
+    resolve_message_source_fact,
     resolve_private_authorizations,
     render_message_context_section,
     seal_connector_evidence,
@@ -162,6 +163,41 @@ def test_legacy_media_source_maps_without_changing_legacy_source_semantics(tmp_p
     assert unknown["message_source"]["id"] == "unknown"
 
 
+def test_workbench_command_continuation_keeps_api_source_with_telegram_mirror(tmp_path):
+    metadata = {
+        "session_surface": "workbench",
+        "session_channel_key": "hashi-workbench-v2:hashi3",
+    }
+    source = resolve_message_source_fact(
+        source="steer",
+        chat_id=7430217666,
+        metadata=metadata,
+    )
+    route = freeze_run_delivery_route(
+        message_source_id=source["id"],
+        session_surface=metadata["session_surface"],
+        session_channel_key=metadata["session_channel_key"],
+        chat_id=7430217666,
+        telegram_requested=True,
+    )
+    snapshot = build_message_context_snapshot(
+        _runtime(tmp_path),
+        source="steer",
+        chat_id=7430217666,
+        prompt="continue with the correction",
+        metadata={**metadata, RUN_DELIVERY_ROUTE_METADATA_KEY: route},
+    )
+
+    assert source["id"] == "api"
+    assert snapshot["message_source"]["id"] == "api"
+    assert snapshot["output_destination"] == {
+        "surface": "workbench",
+        "mirrors": ["telegram"],
+        "automatic": True,
+        "telegram_mirror": True,
+    }
+
+
 def test_background_job_with_chat_id_is_system_with_automatic_telegram_route(tmp_path):
     route = freeze_run_delivery_route(
         message_source_id="hashi.internal",
@@ -218,6 +254,11 @@ def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_pat
             "from_instance": "HASHI2",
             "to_agent": "lily",
             "to_instance": "HASHI1",
+            "message_id": "exchange-message-01",
+            "originated_at": "2026-10-16T01:02:03Z",
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:exchange-message-01",
+            "payload_digest": "sha256:" + "a" * 64,
             "sender_assurance": "exchange_verified",
             "network_authentication": "exchange_wss",
             "authenticated_peer": "HASHI2",
@@ -266,6 +307,13 @@ def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_pat
     assert snapshot["network_authentication"] == "exchange_wss"
     assert snapshot["origin_instance"]["assurance"] == "exchange_verified"
     assert snapshot["relay_chain"] == ["remote-agent@HASHI2"]
+    assert snapshot["hchat_message"] == {
+        "message_id": "exchange-message-01",
+        "originated_at": "2026-10-16T01:02:03Z",
+        "message_type": "agent_message",
+        "idempotency_key": "hchat:exchange-message-01",
+        "payload_digest": "sha256:" + "a" * 64,
+    }
 
 
 def test_snapshot_does_not_trust_forged_runtime_result_or_mutate_inputs(tmp_path):

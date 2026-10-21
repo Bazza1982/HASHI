@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import math
 import re
+from ipaddress import ip_address, ip_network
+from pathlib import Path
 from urllib.parse import urlsplit
 from orchestrator.config_json import (
     read_config_json,
@@ -13,6 +15,7 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     new_config_json,
 )
+from orchestrator.voice_catalog import VoiceCatalog, VoiceCatalogError
 from .contract import CallError, digest, identifier
 
 RESERVED = {
@@ -35,6 +38,19 @@ OPENROUTER_GEMINI_TTS_MODELS = {
     "google/gemini-3.8-flash-lite-tts",
     "google/gemini-3.8-flash-tts",
 }
+PRIVATE_LAN_NETWORKS = tuple(
+    ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def _is_private_lan_literal(host):
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    return address.version == 4 and any(
+        address in network for network in PRIVATE_LAN_NETWORKS
+    )
 
 
 def options_for(target, value):
@@ -93,14 +109,20 @@ def validate_target(target):
         or not parsed.hostname
     ):
         raise CallError("call_target_invalid", 503)
-    if target.get("location") == "local":
+    location = target.get("location")
+    if location == "local":
         if parsed.scheme not in ("http", "https") or parsed.hostname not in (
             "127.0.0.1",
             "localhost",
             "::1",
         ):
             raise CallError("call_local_target_not_loopback", 503)
-    elif target.get("location") != "cloud" or parsed.scheme != "https":
+    elif location == "lan":
+        if parsed.scheme not in ("http", "https") or not _is_private_lan_literal(
+            parsed.hostname
+        ):
+            raise CallError("call_lan_target_not_private", 503)
+    elif location != "cloud" or parsed.scheme != "https":
         raise CallError("call_target_invalid", 503)
     if not isinstance(target.get("model"), str) or not 1 <= len(target["model"]) <= 200:
         raise CallError("call_model_required", 503)
@@ -162,8 +184,111 @@ def validate_target(target):
 
 
 class CallConfig:
-    def __init__(self, path):
-        self.path = path
+    def __init__(
+        self,
+        path,
+        *,
+        voice_catalog_path=None,
+        project_root=None,
+        platform=None,
+    ):
+        self.path = Path(path)
+        self.voice_catalog_path = (
+            Path(voice_catalog_path) if voice_catalog_path is not None else None
+        )
+        self.project_root = Path(project_root or self.path.parent)
+        self.platform = platform
+
+    def _voice_catalog(self):
+        if self.voice_catalog_path is None:
+            return None
+        try:
+            return VoiceCatalog.load(
+                instance_path=self.voice_catalog_path,
+                project_root=self.project_root,
+                platform=self.platform,
+            )
+        except VoiceCatalogError as exc:
+            raise CallError("call_tts_catalog_invalid", 503) from exc
+
+    @staticmethod
+    def _catalog_target(catalog, service_id):
+        service = catalog.service(service_id)
+        voice_ids = list(catalog.voice_ids(service_id))
+        metadata = {
+            voice_id: {
+                key: copy.deepcopy(value)
+                for key, value in catalog.preset(voice_id).items()
+                if key
+                in {
+                    "label",
+                    "display_names",
+                    "language",
+                    "language_labels",
+                    "locale",
+                    "gender",
+                    "style",
+                    "voice_name",
+                    "provider_options",
+                }
+            }
+            for voice_id in voice_ids
+        }
+        return {
+            "id": service_id,
+            "kind": "tts",
+            "label": service["label"],
+            "menu_label": service["menu_label"],
+            "adapter": service["adapter"],
+            "location": service["location"],
+            "model": service.get("model") or service["adapter"],
+            "base_url": service.get("base_url"),
+            "audio_format": service.get("audio_format") or "ogg",
+            "voices": voice_ids,
+            "voice_metadata": metadata,
+            "fallbacks": list(catalog.fallbacks(service_id)),
+            "options": {},
+            "catalog_revision": catalog.revision,
+        }
+
+    def _read_bundle(self):
+        try:
+            doc = read_config_json(self.path)
+        except FileNotFoundError as exc:
+            raise CallError("call_not_configured", 503) from exc
+        except Exception as exc:
+            raise CallError("call_configuration_invalid", 503) from exc
+        if doc.get("version") != 1 or doc.get("enabled") is not True:
+            raise CallError("call_disabled", 503)
+        rows = doc.get("targets", [])
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 30:
+            raise CallError("call_targets_invalid", 503)
+        if any(not isinstance(row, dict) for row in rows):
+            raise CallError("call_configuration_invalid", 503)
+        catalog = self._voice_catalog()
+        selected_rows = (
+            rows
+            if catalog is None
+            else [row for row in rows if row.get("kind") != "tts"]
+        )
+        targets = {row["id"]: row for row in map(validate_target, selected_rows)}
+        if len(targets) != len(selected_rows):
+            raise CallError("call_duplicate_target", 503)
+        if catalog is not None:
+            for service_id in catalog.service_ids:
+                if not catalog.voice_ids(service_id):
+                    continue
+                if service_id in targets:
+                    raise CallError("call_duplicate_target", 503)
+                targets[service_id] = self._catalog_target(catalog, service_id)
+            if not any(row["kind"] == "tts" for row in targets.values()):
+                raise CallError("call_tts_catalog_empty", 503)
+        revision = (
+            doc.revision
+            if catalog is None
+            else digest([doc.revision, catalog.revision])
+        )
+        return doc, targets, catalog, revision
 
     def initialize(self):
         """Create an absent declaration during setup, never replace a saved choice."""
@@ -172,7 +297,12 @@ class CallConfig:
         except FileNotFoundError:
             from .defaults import default_call_configuration
 
-            self._write(new_config_json(self.path, default_call_configuration()))
+            self._write(
+                new_config_json(
+                    self.path,
+                    default_call_configuration(voice_catalog=self._voice_catalog()),
+                )
+            )
         except Exception:
             # A bad optional media declaration fails at the call boundary,
             # without taking the authenticated chat/command API down with it.
@@ -180,6 +310,7 @@ class CallConfig:
 
     def route(self, owner, agent, doc=None, targets=None):
         """Project independent /call readiness and the legacy client choice."""
+        revision = None
         if doc is None:
             try:
                 doc = read_config_json(self.path)
@@ -191,7 +322,11 @@ class CallConfig:
                 }
             except Exception as exc:
                 raise CallError("call_configuration_invalid", 503) from exc
-        route = doc.get("routes", {}).get(digest([owner, agent]), "phone")
+            if doc.get("enabled") is True:
+                doc, targets, _catalog, revision = self._read_bundle()
+        # New and future (owner, agent) pairs default to the /call entrance;
+        # explicitly saved "phone" selections remain authoritative.
+        route = doc.get("routes", {}).get(digest([owner, agent]), "call")
         if route not in ("phone", "call"):
             raise CallError("call_configuration_invalid", 503)
         ready = doc.get("enabled") is True
@@ -209,7 +344,7 @@ class CallConfig:
             "route": route,
             "camera_available": camera,
             "call_ready": ready,
-            "revision": doc.revision,
+            "revision": revision or doc.revision,
         }
 
     def select_route(self, owner, agent, revision, route):
@@ -222,9 +357,13 @@ class CallConfig:
                 raise CallError("call_configuration_invalid", 503) from exc
             if doc.get("version") != 1:
                 raise CallError("call_configuration_invalid", 503)
+            if doc.get("enabled") is True:
+                doc, _targets, _catalog, effective_revision = self._read_bundle()
+            else:
+                effective_revision = doc.revision
         else:
-            doc, _ = self.read()
-        if doc.revision != revision:
+            doc, _targets, _catalog, effective_revision = self._read_bundle()
+        if effective_revision != revision:
             raise CallError("call_configuration_changed", 409)
         routes = doc.setdefault("routes", {})
         key = digest([owner, agent])
@@ -238,11 +377,11 @@ class CallConfig:
         if doc is None:
             doc, _ = self.read()
         policy = {
-            "interval_ms": 2000,
+            "interval_ms": 500,
             "freshness_seconds": 20,
             "responsive_seconds": 12,
             "startup_timeout_seconds": 8,
-            "max_observations_per_minute": 20,
+            "max_observations_per_minute": 120,
         }
         supplied = doc.get("video_policy", {})
         if not isinstance(supplied, dict) or set(supplied) - set(policy):
@@ -256,11 +395,11 @@ class CallConfig:
                 policy["responsive_seconds"], policy["freshness_seconds"]
             )
         bounds = {
-            "interval_ms": (1000, 10000),
+            "interval_ms": (500, 10000),
             "freshness_seconds": (3, 30),
             "responsive_seconds": (3, 30),
             "startup_timeout_seconds": (3, 20),
-            "max_observations_per_minute": (1, 60),
+            "max_observations_per_minute": (1, 120),
         }
         if any(
             type(policy[k]) is not int or not low <= policy[k] <= high
@@ -280,20 +419,7 @@ class CallConfig:
             raise CallError("call_configuration_outcome_unknown", 503) from exc
 
     def read(self):
-        try:
-            doc = read_config_json(self.path)
-        except FileNotFoundError as exc:
-            raise CallError("call_not_configured", 503) from exc
-        except Exception as exc:
-            raise CallError("call_configuration_invalid", 503) from exc
-        if doc.get("version") != 1 or doc.get("enabled") is not True:
-            raise CallError("call_disabled", 503)
-        rows = doc.get("targets", [])
-        if not isinstance(rows, list) or not 1 <= len(rows) <= 30:
-            raise CallError("call_targets_invalid", 503)
-        targets = {row["id"]: row for row in map(validate_target, rows)}
-        if len(targets) != len(rows):
-            raise CallError("call_duplicate_target", 503)
+        doc, targets, _catalog, _revision = self._read_bundle()
         return doc, targets
 
     def profile(self, owner, agent, doc=None, targets=None):
@@ -350,7 +476,7 @@ class CallConfig:
                 "video_policy": self.video_policy(disabled),
                 **self.route(owner, agent, disabled),
             }
-        doc, targets = self.read()
+        doc, targets, _catalog, revision = self._read_bundle()
         public = [
             {
                 k: copy.deepcopy(v)
@@ -359,39 +485,51 @@ class CallConfig:
                 in {
                     "id",
                     "label",
+                    "menu_label",
                     "kind",
                     "adapter",
                     "location",
                     "model",
                     "voices",
+                    "voice_metadata",
                     "voice_styles",
+                    "fallbacks",
+                    "catalog_revision",
                     "options",
                 }
             }
             for row in targets.values()
         ]
         return {
-            "revision": doc.revision,
+            "revision": revision,
             "targets": public,
             "profile": self.profile(owner, agent, doc, targets),
             "video_policy": self.video_policy(doc),
-            **self.route(owner, agent, doc, targets),
+            **{
+                key: value
+                for key, value in self.route(owner, agent, doc, targets).items()
+                if key != "revision"
+            },
         }
 
     def freeze(self, owner, agent, revision):
-        doc, targets = self.read()
-        if revision != doc.revision:
+        profile, selected, _catalog = self.freeze_runtime(owner, agent, revision)
+        return profile, selected
+
+    def freeze_runtime(self, owner, agent, revision):
+        doc, targets, catalog, effective_revision = self._read_bundle()
+        if revision != effective_revision:
             raise CallError("call_configuration_changed", 409)
         profile = self.profile(owner, agent, doc, targets)
         selected = {
             kind: copy.deepcopy(targets[slot["target_id"]]) if slot else None
             for kind, slot in profile.items()
         }
-        return profile, selected
+        return profile, selected, catalog
 
     def save(self, owner, agent, revision, profile):
-        doc, targets = self.read()
-        if revision != doc.revision:
+        doc, targets, _catalog, effective_revision = self._read_bundle()
+        if revision != effective_revision:
             raise CallError("call_configuration_changed", 409)
         profile = self.validate_profile(profile, targets)
         profiles = doc.setdefault("profiles", {})

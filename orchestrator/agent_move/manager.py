@@ -41,7 +41,7 @@ _MAX_STATE_BYTES = 512 * 1024
 _WATCH_INTERVAL_SECONDS = 0.25
 _MAX_DELIVERY_ATTEMPTS = 5
 _MAX_EXECUTION_ATTEMPTS = 5
-_EMPTY_LOCK_STALE_SECONDS = 1.0
+_LOCK_STALE_SECONDS = 1.0
 
 
 class AgentMoveManager:
@@ -354,14 +354,22 @@ class AgentMoveManager:
                 failed_outbound = await asyncio.to_thread(get_outbound_move, self.root, package_id)
             except Exception:
                 failed_outbound = {}
-            retry = attempts < _MAX_EXECUTION_ATTEMPTS and not failed_outbound.get("rollback_completed")
+            failed_operation = str(
+                failed_outbound.get("operation") or record.get("operation") or ""
+            )
+            retry = not failed_outbound.get("rollback_completed") and (
+                failed_operation == "move"
+                or attempts < _MAX_EXECUTION_ATTEMPTS
+            )
             self._update(
                 package_id,
                 status="retry_wait" if retry else "needs_recovery",
                 failed_at=utc_now_iso(),
                 last_error=str(exc),
                 next_attempt_at=(
-                    time.time() + 3 ** (attempts - 1) if retry else None
+                    time.time() + min(60, 3 ** min(attempts - 1, 4))
+                    if retry
+                    else None
                 ),
             )
             bridge_logger.warning(
@@ -554,13 +562,15 @@ def _already_stopped(message: str) -> bool:
 
 def _orphaned_lock(path: Path) -> bool:
     try:
+        if time.time() - path.stat().st_mtime >= _LOCK_STALE_SECONDS:
+            return True
+    except OSError:
+        return False
+    try:
         parts = path.read_text(encoding="utf-8", errors="replace").split()
         pid = int(next(part.removeprefix("pid=") for part in parts if part.startswith("pid=")))
     except (OSError, StopIteration, TypeError, ValueError):
-        try:
-            return time.time() - path.stat().st_mtime >= _EMPTY_LOCK_STALE_SECONDS
-        except OSError:
-            return False
+        return False
     return not process_is_alive(pid)
 
 

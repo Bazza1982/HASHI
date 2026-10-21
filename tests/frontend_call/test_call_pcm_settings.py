@@ -353,4 +353,4 @@ def test_retired_route_commands_and_callbacks_leave_configuration_untouched(tmp_
     doc = json.loads(path.read_text())
     doc["enabled"] = True
     path.write_text(json.dumps(doc))
-    assert settings.config.route(settings.owner, "arale")["route"] == "phone"
+    assert settings.config.route(settings.owner, "arale")["route"] == "call"

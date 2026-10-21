@@ -5,9 +5,6 @@ import json
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.wip_journal import (
     CONTEXT_HEADER,
-    MAX_CONTEXT_CHARS,
-    MAX_FILE_BYTES,
-    MAX_RECORDS,
     WIPJournal,
 )
 
@@ -142,14 +139,14 @@ def test_full_request_audit_is_never_copied_back_or_recursively_expanded(tmp_pat
                 },
             }
         )
-        assert len(prior) <= MAX_CONTEXT_CHARS
+        assert "current user request remains authoritative" in prior or not prior
 
-    assert path.stat().st_size <= MAX_FILE_BYTES
+    assert len(journal.records()) == 24
     assert all(row.get("event") != "request_received" for row in journal.records())
     assert oversized_request not in path.read_text(encoding="utf-8")
 
 
-def test_bounded_rewrite_retains_first_unfinished_request_boundary(tmp_path):
+def test_journal_retains_every_record_and_first_unfinished_request_boundary(tmp_path):
     journal = WIPJournal(tmp_path / "wip.jsonl")
     journal.begin_turn(request_id="req-first", prompt="first unfinished task")
 
@@ -163,7 +160,7 @@ def test_bounded_rewrite_retains_first_unfinished_request_boundary(tmp_path):
         )
 
     snapshot = journal.snapshot()
-    assert snapshot.record_count <= MAX_RECORDS
+    assert snapshot.record_count == 301
     assert snapshot.first_request_id == "req-first"
     assert "first unfinished task" in journal.render_context(snapshot.records)
 

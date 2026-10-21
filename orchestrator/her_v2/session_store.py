@@ -22,6 +22,9 @@ from typing import Any
 from orchestrator.storage_profile import removable_storage_profile
 
 
+_PROVIDER_CONTEXT_STORAGE = "segmented-json-items-v1"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -46,6 +49,28 @@ def _array(value: str | bytes | None) -> list[Any]:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _provider_context_digest(
+    metadata: Mapping[str, Any],
+    *,
+    message_digests: Sequence[str],
+    reasoning_digests: Sequence[str],
+) -> str:
+    """Digest an arbitrarily long continuation without one aggregate JSON blob."""
+
+    digest = hashlib.sha256()
+    digest.update(b"herv3-provider-context-segmented-v1\0")
+    digest.update(_json(dict(metadata)).encode("utf-8"))
+    for kind, values in (
+        (b"message\0", message_digests),
+        (b"reasoning\0", reasoning_digests),
+    ):
+        digest.update(kind)
+        for value in values:
+            digest.update(str(value).encode("ascii"))
+            digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def _binding_workzone_identity(
@@ -268,6 +293,8 @@ class HerSessionStore:
                     plan_json TEXT NOT NULL DEFAULT '{}',
                     tool_receipts_json TEXT NOT NULL DEFAULT '[]',
                     side_effects_json TEXT NOT NULL DEFAULT '[]',
+                    provider_context_json TEXT NOT NULL DEFAULT '{}',
+                    provider_context_digest TEXT NOT NULL DEFAULT '',
                     remaining_work_json TEXT NOT NULL DEFAULT '{}',
                     safe_to_resume INTEGER NOT NULL DEFAULT 1,
                     recovery_disposition TEXT NOT NULL DEFAULT '',
@@ -276,6 +303,19 @@ class HerSessionStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(session_id, turn_id),
+                    FOREIGN KEY(session_id, turn_id)
+                        REFERENCES her_turns(session_id, turn_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS her_provider_context_items (
+                    session_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    PRIMARY KEY(session_id, turn_id, item_kind, ordinal),
+                    CHECK(item_kind IN ('message', 'reasoning')),
                     FOREIGN KEY(session_id, turn_id)
                         REFERENCES her_turns(session_id, turn_id) ON DELETE CASCADE
                 );
@@ -378,6 +418,8 @@ class HerSessionStore:
                 },
                 "her_active_turn_recovery": {
                     "recovery_source_turn_id": "TEXT NOT NULL DEFAULT ''",
+                    "provider_context_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "provider_context_digest": "TEXT NOT NULL DEFAULT ''",
                 },
             }
             for table, declarations in migrations.items():
@@ -529,18 +571,14 @@ class HerSessionStore:
             ).fetchone()
         return self._turn_dict(row)
 
-    def recent_completed_turns(
-        self, session_id: str, *, limit: int = 8
-    ) -> list[dict[str, Any]]:
+    def recent_completed_turns(self, session_id: str) -> list[dict[str, Any]]:
+        query = """
+            SELECT * FROM her_turns
+            WHERE session_id = ? AND status = 'completed'
+            ORDER BY sequence DESC
+        """
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM her_turns
-                WHERE session_id = ? AND status = 'completed'
-                ORDER BY sequence DESC LIMIT ?
-                """,
-                (str(session_id), max(0, int(limit))),
-            ).fetchall()
+            rows = connection.execute(query, (str(session_id),)).fetchall()
         result: list[dict[str, Any]] = []
         for row in reversed(rows):
             turn = self._turn_dict(row)
@@ -1009,6 +1047,7 @@ class HerSessionStore:
             ("plan_json", "plan", "object"),
             ("tool_receipts_json", "tool_receipts", "array"),
             ("side_effects_json", "side_effects", "array"),
+            ("provider_context_json", "provider_context", "object"),
             ("remaining_work_json", "remaining_work", "object"),
         ):
             raw = result.pop(source, "{}" if kind == "object" else "[]")
@@ -1029,6 +1068,487 @@ class HerSessionStore:
         with self._lock, self._connect() as connection:
             row = connection.execute(query, arguments).fetchone()
         return self._recovery_dict(row)
+
+    @staticmethod
+    def _provider_context_metadata(
+        context: Mapping[str, Any] | None,
+        *,
+        digest: str = "",
+    ) -> dict[str, Any]:
+        value = dict(context or {})
+        return {
+            "available": bool(value),
+            "format": str(value.get("format") or ""),
+            "provider": str(value.get("provider") or ""),
+            "model": str(value.get("model") or ""),
+            "stage": str(value.get("stage") or ""),
+            "boundary": str(value.get("boundary") or ""),
+            "message_count": int(value.get("message_count") or 0),
+            "reasoning_count": int(value.get("reasoning_count") or 0),
+            "digest": str(digest or ""),
+        }
+
+    @staticmethod
+    def _serialise_provider_context_items(
+        items: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        values: list[dict[str, Any]] = []
+        encoded_rows: list[str] = []
+        digests: list[str] = []
+        for item in items:
+            try:
+                encoded = _json(dict(item))
+                value = json.loads(encoded)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise HerSessionStoreError(
+                    "invalid_provider_context",
+                    "Provider context contains a value that is not valid JSON.",
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise HerSessionStoreError(
+                    "invalid_provider_context",
+                    "Every provider context item must be an object.",
+                )
+            values.append(dict(value))
+            encoded_rows.append(encoded)
+            digests.append(
+                "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            )
+        return values, encoded_rows, digests
+
+    @staticmethod
+    def _sync_provider_context_items(
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        item_kind: str,
+        encoded_rows: Sequence[str],
+        digests: Sequence[str],
+    ) -> None:
+        """Append the common continuation suffix; rebuild only on divergence."""
+
+        existing = connection.execute(
+            """
+            SELECT ordinal, payload_digest
+            FROM her_provider_context_items
+            WHERE session_id = ? AND turn_id = ? AND item_kind = ?
+            ORDER BY ordinal
+            """,
+            (session_id, turn_id, item_kind),
+        ).fetchall()
+        prefix_matches = len(existing) <= len(digests) and all(
+            int(row["ordinal"]) == index
+            and str(row["payload_digest"] or "") == str(digests[index])
+            for index, row in enumerate(existing)
+        )
+        if not prefix_matches:
+            connection.execute(
+                """
+                DELETE FROM her_provider_context_items
+                WHERE session_id = ? AND turn_id = ? AND item_kind = ?
+                """,
+                (session_id, turn_id, item_kind),
+            )
+            start = 0
+        else:
+            start = len(existing)
+        if start < len(encoded_rows):
+            connection.executemany(
+                """
+                INSERT INTO her_provider_context_items(
+                    session_id, turn_id, item_kind, ordinal,
+                    payload_json, payload_digest
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        session_id,
+                        turn_id,
+                        item_kind,
+                        index,
+                        encoded_rows[index],
+                        digests[index],
+                    )
+                    for index in range(start, len(encoded_rows))
+                ],
+            )
+        if len(existing) > len(encoded_rows):
+            connection.execute(
+                """
+                DELETE FROM her_provider_context_items
+                WHERE session_id = ? AND turn_id = ? AND item_kind = ?
+                  AND ordinal >= ?
+                """,
+                (session_id, turn_id, item_kind, len(encoded_rows)),
+            )
+
+    @staticmethod
+    def _read_segmented_provider_context(
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        metadata: Mapping[str, Any],
+        expected_digest: str,
+    ) -> dict[str, Any]:
+        values: dict[str, list[dict[str, Any]]] = {}
+        item_digests: dict[str, list[str]] = {}
+        for item_kind, count_key in (
+            ("message", "message_count"),
+            ("reasoning", "reasoning_count"),
+        ):
+            rows = connection.execute(
+                """
+                SELECT ordinal, payload_json, payload_digest
+                FROM her_provider_context_items
+                WHERE session_id = ? AND turn_id = ? AND item_kind = ?
+                ORDER BY ordinal
+                """,
+                (session_id, turn_id, item_kind),
+            ).fetchall()
+            expected_count = int(metadata.get(count_key) or 0)
+            if len(rows) != expected_count or any(
+                int(row["ordinal"]) != index for index, row in enumerate(rows)
+            ):
+                raise HerSessionStoreError(
+                    "provider_context_digest_conflict",
+                    "Private provider context has an incomplete item sequence.",
+                )
+            decoded: list[dict[str, Any]] = []
+            digests: list[str] = []
+            for row in rows:
+                encoded = str(row["payload_json"] or "")
+                digest = str(row["payload_digest"] or "")
+                observed = (
+                    "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                )
+                try:
+                    value = json.loads(encoded)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise HerSessionStoreError(
+                        "provider_context_digest_conflict",
+                        "Private provider context contains invalid JSON.",
+                    ) from exc
+                if digest != observed or not isinstance(value, Mapping):
+                    raise HerSessionStoreError(
+                        "provider_context_digest_conflict",
+                        "Private provider context item failed its integrity check.",
+                    )
+                decoded.append(dict(value))
+                digests.append(digest)
+            values[item_kind] = decoded
+            item_digests[item_kind] = digests
+        observed_digest = _provider_context_digest(
+            metadata,
+            message_digests=item_digests["message"],
+            reasoning_digests=item_digests["reasoning"],
+        )
+        if not expected_digest or observed_digest != expected_digest:
+            raise HerSessionStoreError(
+                "provider_context_digest_conflict",
+                "Private provider context failed its integrity check.",
+            )
+        return {
+            **dict(metadata),
+            "messages": values["message"],
+            "reasoning": values["reasoning"],
+        }
+
+    def record_provider_context_checkpoint(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        provider: str,
+        model: str,
+        stage: str,
+        boundary: str,
+        messages: Sequence[Mapping[str, Any]],
+        reasoning: Sequence[Mapping[str, Any]] = (),
+        provider_request_id: str = "",
+        invocation_id: str = "",
+        execution_owner_id: str = "",
+    ) -> dict[str, Any]:
+        """Persist one complete provider boundary for exact private continuation."""
+
+        clean_boundary = str(boundary or "").strip()
+        if clean_boundary not in {
+            "completed_tool_batch",
+            "completed_provider_response",
+        }:
+            raise HerSessionStoreError(
+                "invalid_provider_context",
+                "Provider context must end at a complete response or Tool batch.",
+            )
+        if any(not isinstance(item, Mapping) for item in messages):
+            raise HerSessionStoreError(
+                "invalid_provider_context",
+                "Every provider context message must be an object.",
+            )
+        if any(not isinstance(item, Mapping) for item in reasoning):
+            raise HerSessionStoreError(
+                "invalid_provider_context",
+                "Every provider reasoning segment must be an object.",
+            )
+        clean_messages, encoded_messages, message_digests = (
+            self._serialise_provider_context_items(messages)
+        )
+        clean_reasoning, encoded_reasoning, reasoning_digests = (
+            self._serialise_provider_context_items(reasoning)
+        )
+        context_metadata = {
+            "format": "herv3-provider-context-v1",
+            "storage": _PROVIDER_CONTEXT_STORAGE,
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+            "stage": str(stage or ""),
+            "boundary": clean_boundary,
+            "provider_request_id": str(provider_request_id or ""),
+            "invocation_id": str(invocation_id or ""),
+            "message_count": len(clean_messages),
+            "reasoning_count": len(clean_reasoning),
+        }
+        encoded_metadata = _json(context_metadata)
+        digest = _provider_context_digest(
+            context_metadata,
+            message_digests=message_digests,
+            reasoning_digests=reasoning_digests,
+        )
+        now = _utc_now()
+        with self._transaction() as connection:
+            turn = connection.execute(
+                "SELECT * FROM her_turns WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
+            self._assert_execution_owner(dict(turn), execution_owner_id)
+            if str(turn["status"]) != "active":
+                raise HerSessionStoreError(
+                    "turn_not_active",
+                    "Provider context can be checkpointed only for an active Turn.",
+                )
+            recovery = connection.execute(
+                """
+                SELECT * FROM her_active_turn_recovery
+                WHERE session_id = ? AND turn_id = ? AND status = 'active'
+                """,
+                (session_id, turn_id),
+            ).fetchone()
+            if recovery is None:
+                raise HerSessionStoreError(
+                    "unknown_active_turn",
+                    "Provider context has no active recovery projection.",
+                )
+            if str(recovery["provider_context_digest"] or "") == digest:
+                return self._provider_context_metadata(
+                    context_metadata, digest=digest
+                )
+            self._sync_provider_context_items(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                item_kind="message",
+                encoded_rows=encoded_messages,
+                digests=message_digests,
+            )
+            self._sync_provider_context_items(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                item_kind="reasoning",
+                encoded_rows=encoded_reasoning,
+                digests=reasoning_digests,
+            )
+            sequence = self._next_event(
+                connection,
+                session_id=session_id,
+                event_id=(
+                    f"{turn_id}:provider-context:"
+                    f"{digest.removeprefix('sha256:')[:24]}"
+                ),
+                kind="provider_context_checkpointed",
+                payload={
+                    "turn_id": turn_id,
+                    **self._provider_context_metadata(
+                        context_metadata, digest=digest
+                    ),
+                },
+            )
+            connection.execute(
+                """
+                UPDATE her_active_turn_recovery
+                SET provider_context_json = ?, provider_context_digest = ?,
+                    last_event_sequence = ?, updated_at = ?
+                WHERE session_id = ? AND turn_id = ?
+                """,
+                (
+                    encoded_metadata,
+                    digest,
+                    sequence,
+                    now,
+                    session_id,
+                    turn_id,
+                ),
+            )
+            if execution_owner_id:
+                connection.execute(
+                    """
+                    UPDATE her_turns SET execution_lease_updated_at = ?
+                    WHERE session_id = ? AND turn_id = ?
+                      AND execution_owner_id = ?
+                    """,
+                    (now, session_id, turn_id, execution_owner_id),
+                )
+        return self._provider_context_metadata(context_metadata, digest=digest)
+
+    def provider_context_for_turn(
+        self, session_id: str, turn_id: str
+    ) -> dict[str, Any] | None:
+        """Read one private provider continuation after verifying its digest."""
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT provider_context_json, provider_context_digest
+                FROM her_active_turn_recovery
+                WHERE session_id = ? AND turn_id = ?
+                """,
+                (str(session_id), str(turn_id)),
+            ).fetchone()
+            if row is None:
+                return None
+            context = _object(row["provider_context_json"])
+            digest = str(row["provider_context_digest"] or "")
+            if not context:
+                return None
+            if str(context.get("storage") or "") == _PROVIDER_CONTEXT_STORAGE:
+                return self._read_segmented_provider_context(
+                    connection,
+                    session_id=str(session_id),
+                    turn_id=str(turn_id),
+                    metadata=context,
+                    expected_digest=digest,
+                )
+            if not digest or _digest(context) != digest:
+                raise HerSessionStoreError(
+                    "provider_context_digest_conflict",
+                    "Private provider context failed its integrity check.",
+                )
+            return context
+
+    def interruption_evidence_for_request(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Return a privacy-safe receipt for one interrupted provider Turn."""
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recovery.*, turn.request_id AS source_request_id,
+                       turn.status AS turn_status
+                FROM her_active_turn_recovery AS recovery
+                JOIN her_turns AS turn
+                  ON turn.session_id = recovery.session_id
+                 AND turn.turn_id = recovery.turn_id
+                WHERE turn.request_id = ?
+                ORDER BY turn.accepted_at DESC LIMIT 1
+                """,
+                (str(request_id),),
+            ).fetchone()
+        state = self._recovery_dict(row)
+        if state is None:
+            return None
+        evidence = {
+            "kind": "herv3_active_turn_recovery",
+            "source_request_id": str(state.get("source_request_id") or ""),
+            "turn_id": str(state.get("turn_id") or ""),
+            "turn_status": str(state.get("turn_status") or ""),
+            "recovery_status": str(state.get("status") or ""),
+            "recovery_disposition": str(
+                state.get("recovery_disposition") or ""
+            ),
+            "safe_to_resume": bool(state.get("safe_to_resume")),
+            "tool_receipt_count": len(state.get("tool_receipts") or []),
+            "side_effect_count": len(state.get("side_effects") or []),
+            "provider_context": self._provider_context_metadata(
+                state.get("provider_context")
+                if isinstance(state.get("provider_context"), Mapping)
+                else None,
+                digest=str(state.get("provider_context_digest") or ""),
+            ),
+            "evidence_ref": (
+                f"herv3:{state.get('session_id')}:{state.get('turn_id')}"
+            ),
+        }
+        evidence["evidence_digest"] = _digest(evidence)
+        return evidence
+
+    def verified_steer_session_id(
+        self,
+        evidence: Mapping[str, Any] | None,
+        *,
+        instance_id: str,
+        agent_id: str,
+        owner_id: str,
+        hashi_conversation_id: str,
+        context_generation: int,
+        workzone_identity: str,
+    ) -> str | None:
+        """Resolve one /steer receipt under its authoritative HASHI binding."""
+
+        candidate = dict(evidence or {})
+        if str(candidate.get("kind") or "") != "herv3_active_turn_recovery":
+            return None
+        source_request_id = str(candidate.get("source_request_id") or "")
+        if not source_request_id:
+            return None
+        canonical = self.interruption_evidence_for_request(source_request_id)
+        if canonical is None:
+            return None
+        if (
+            str(canonical.get("turn_status") or "") != "steered"
+            or str(canonical.get("recovery_status") or "") != "terminated"
+            or str(canonical.get("recovery_disposition") or "")
+            not in {"steered", "stopped"}
+            or not bool(canonical.get("safe_to_resume"))
+        ):
+            return None
+        for key in ("evidence_ref", "evidence_digest", "turn_id"):
+            supplied = str(candidate.get(key) or "")
+            if not supplied or supplied != str(canonical.get(key) or ""):
+                return None
+        reference = str(canonical.get("evidence_ref") or "")
+        prefix = "herv3:"
+        if not reference.startswith(prefix):
+            return None
+        identity = reference[len(prefix) :]
+        session_id, separator, turn_id = identity.partition(":")
+        if (
+            not separator
+            or not session_id
+            or turn_id != str(canonical.get("turn_id") or "")
+        ):
+            return None
+        with self._lock, self._connect() as connection:
+            session = connection.execute(
+                "SELECT * FROM her_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if session is None or str(session["status"] or "") != "open":
+            return None
+        self._assert_binding(
+            session,
+            instance_id=instance_id,
+            agent_id=agent_id,
+            owner_id=owner_id,
+            hashi_conversation_id=hashi_conversation_id,
+            context_generation=context_generation,
+            workzone_identity=workzone_identity,
+        )
+        return session_id
+
 
     def unresolved_side_effects_for_turn(
         self,
@@ -1118,8 +1638,15 @@ class HerSessionStore:
                 "recovery_disposition": str(
                     state.get("recovery_disposition") or ""
                 ),
+                "provider_context_checkpoint": self._provider_context_metadata(
+                    state.get("provider_context")
+                    if isinstance(state.get("provider_context"), Mapping)
+                    else None,
+                    digest=str(state.get("provider_context_digest") or ""),
+                ),
                 "limitations": [
-                    "This records externally observable work, not hidden reasoning.",
+                    "Complete provider context is retained privately when the API supplies it.",
+                    "Partial or uncommitted streamed reasoning is never replayed as complete context.",
                     "UNKNOWN_SIDE_EFFECT entries must be investigated, never replayed automatically.",
                 ],
             }
@@ -1141,11 +1668,22 @@ class HerSessionStore:
                 ]
                 current_effects = list(current_state.get("side_effects") or [])
                 current_remaining = dict(current_state.get("remaining_work") or {})
+                inherited_provider_context = (
+                    current_state.get("provider_context")
+                    or state.get("provider_context")
+                    or {}
+                )
+                inherited_provider_context_digest = str(
+                    current_state.get("provider_context_digest")
+                    or state.get("provider_context_digest")
+                    or ""
+                )
                 connection.execute(
                     """
                     UPDATE her_active_turn_recovery
                     SET strategy_json = ?, plan_json = ?, tool_receipts_json = ?,
-                        side_effects_json = ?, remaining_work_json = ?,
+                        side_effects_json = ?, provider_context_json = ?,
+                        provider_context_digest = ?, remaining_work_json = ?,
                         safe_to_resume = ?, recovery_source_turn_id = ?,
                         updated_at = ?
                     WHERE session_id = ? AND turn_id = ?
@@ -1154,16 +1692,18 @@ class HerSessionStore:
                         _json(current_state.get("strategy") or state.get("strategy") or {}),
                         _json(current_state.get("plan") or state.get("plan") or {}),
                         _json(
-                            self._bounded_tool_receipts(
+                            self._recovery_tool_receipts(
                                 [*source_receipts, *current_receipts],
                                 [*source_effects, *current_effects],
                             )
                         ),
                         _json(
-                            self._bounded_side_effects(
+                            self._recovery_side_effects(
                                 [*source_effects, *current_effects]
                             )
                         ),
+                        _json(inherited_provider_context),
+                        inherited_provider_context_digest,
                         _json(
                             {
                                 **current_remaining,
@@ -1181,6 +1721,34 @@ class HerSessionStore:
                         current_turn_id,
                     ),
                 )
+                if (
+                    not current_state.get("provider_context")
+                    and state.get("provider_context")
+                ):
+                    connection.execute(
+                        """
+                        DELETE FROM her_provider_context_items
+                        WHERE session_id = ? AND turn_id = ?
+                        """,
+                        (session_id, current_turn_id),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO her_provider_context_items(
+                            session_id, turn_id, item_kind, ordinal,
+                            payload_json, payload_digest
+                        )
+                        SELECT session_id, ?, item_kind, ordinal,
+                               payload_json, payload_digest
+                        FROM her_provider_context_items
+                        WHERE session_id = ? AND turn_id = ?
+                        """,
+                        (
+                            current_turn_id,
+                            session_id,
+                            str(state.get("turn_id") or ""),
+                        ),
+                    )
             self._next_event(
                 connection,
                 session_id=session_id,
@@ -1417,33 +1985,12 @@ class HerSessionStore:
             }
 
     @staticmethod
-    def _bounded_rows(rows: list[Any], *, limit: int = 256) -> list[Any]:
-        return rows[-max(1, int(limit)) :]
-
-    @staticmethod
-    def _bounded_side_effects(
-        rows: list[Mapping[str, Any]], *, limit: int = 256
+    def _recovery_side_effects(
+        rows: list[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Bound settled evidence without ever dropping unresolved effects."""
+        """Retain every effect needed for an arbitrarily long active Turn."""
 
-        normalized = [dict(item) for item in rows if isinstance(item, Mapping)]
-        cap = max(1, int(limit))
-        if len(normalized) <= cap:
-            return normalized
-        unresolved = {
-            index
-            for index, item in enumerate(normalized)
-            if item.get("state") in {"pending", "unknown"}
-        }
-        resolved_budget = max(0, cap - len(unresolved))
-        resolved_indices = [
-            index for index in range(len(normalized)) if index not in unresolved
-        ]
-        resolved = (
-            resolved_indices[-resolved_budget:] if resolved_budget else []
-        )
-        keep = unresolved | set(resolved)
-        return [item for index, item in enumerate(normalized) if index in keep]
+        return [dict(item) for item in rows if isinstance(item, Mapping)]
 
     @staticmethod
     def _unresolved_side_effects(rows: list[Any]) -> list[dict[str, Any]]:
@@ -1455,52 +2002,15 @@ class HerSessionStore:
         ]
 
     @classmethod
-    def _bounded_tool_receipts(
+    def _recovery_tool_receipts(
         cls,
         rows: list[Mapping[str, Any]],
         effects: list[Mapping[str, Any]],
-        *,
-        limit: int = 256,
     ) -> list[dict[str, Any]]:
-        """Bound settled receipts while retaining every unresolved counterpart."""
+        """Retain every receipt; persistence is segmented elsewhere as needed."""
 
-        normalized = [dict(item) for item in rows if isinstance(item, Mapping)]
-        cap = max(1, int(limit))
-        if len(normalized) <= cap:
-            return normalized
-        unresolved_effects = cls._unresolved_side_effects(list(effects))
-        unresolved_operations = {
-            str(item.get("operation_id") or "")
-            for item in unresolved_effects
-            if str(item.get("operation_id") or "")
-        }
-        unresolved_legacy_calls = {
-            str(item.get("tool_call_id") or "")
-            for item in unresolved_effects
-            if not str(item.get("operation_id") or "")
-            and str(item.get("tool_call_id") or "")
-        }
-        keep_unresolved: set[int] = set()
-        for index, receipt in enumerate(normalized):
-            operation_id = str(receipt.get("operation_id") or "")
-            call_id = str(receipt.get("tool_call_id") or "")
-            status = str(receipt.get("status") or "").casefold()
-            if (
-                operation_id in unresolved_operations
-                or not operation_id
-                and call_id in unresolved_legacy_calls
-                or not bool(receipt.get("completed"))
-                or status not in {"success", "completed"}
-            ):
-                keep_unresolved.add(index)
-        settled_budget = max(0, cap - len(keep_unresolved))
-        settled_indices = [
-            index for index in range(len(normalized)) if index not in keep_unresolved
-        ]
-        keep = keep_unresolved | set(
-            settled_indices[-settled_budget:] if settled_budget else []
-        )
-        return [item for index, item in enumerate(normalized) if index in keep]
+        del effects
+        return [dict(item) for item in rows if isinstance(item, Mapping)]
 
     @classmethod
     def _project_runtime_event(
@@ -1536,7 +2046,7 @@ class HerSessionStore:
                 plan = dict(output) if isinstance(output, Mapping) else {"text": str(output or "")}
             raw_receipts = payload.get("tool_receipts")
             if isinstance(raw_receipts, list):
-                receipts = cls._bounded_tool_receipts(
+                receipts = cls._recovery_tool_receipts(
                     [
                         *receipts,
                         *(
@@ -1549,7 +2059,7 @@ class HerSessionStore:
                 )
         elif event == "tool_intent":
             if not bool(payload.get("read_only", False)):
-                effects = cls._bounded_side_effects(
+                effects = cls._recovery_side_effects(
                     [
                         *effects,
                         {
@@ -1600,7 +2110,7 @@ class HerSessionStore:
                     else:
                         effect["state"] = "unknown"
                     effect["receipt_status"] = receipt_status
-            receipts = cls._bounded_tool_receipts(receipts, effects)
+            receipts = cls._recovery_tool_receipts(receipts, effects)
         elif event == "transition":
             target = str(payload.get("to") or "")
             remaining = {**remaining, "lifecycle": target}
@@ -1615,7 +2125,7 @@ class HerSessionStore:
                 disposition = target.casefold()
                 remaining["status"] = "terminated"
 
-        effects = cls._bounded_side_effects(effects)
+        effects = cls._recovery_side_effects(effects)
         unresolved = cls._unresolved_side_effects(effects)
         safe = not unresolved
         remaining["unresolved_side_effects"] = unresolved
@@ -2082,9 +2592,9 @@ class HerSessionStore:
                 "canonical_event_count": len(canonical_ids),
                 "wip_event_count": len(shadow_ids),
                 "missing_from_wip_count": len(missing),
-                "missing_from_wip": missing[:24],
+                "missing_from_wip": missing,
                 "extra_in_wip_count": len(extra),
-                "extra_in_wip": extra[:24],
+                "extra_in_wip": extra,
                 "parity": not missing and not extra,
                 "authority_phase": "canonical_primary_wip_shadow",
             }
@@ -2128,7 +2638,7 @@ class HerSessionStore:
                    routing_revision, status
             FROM her_turns
             WHERE session_id = ? AND status = 'completed'
-            ORDER BY sequence DESC LIMIT 8
+            ORDER BY sequence DESC
             """,
             (session_id,),
         ).fetchall()
@@ -2159,8 +2669,8 @@ class HerSessionStore:
                 {
                     "sequence": int(item["sequence"]),
                     "turn_id": str(item["turn_id"]),
-                    "user": str(item["user_message"] or "")[-12000:],
-                    "assistant": str(item["assistant_text"] or "")[-12000:],
+                    "user": str(item["user_message"] or ""),
+                    "assistant": str(item["assistant_text"] or ""),
                     "routing_revision": int(item["routing_revision"] or 0),
                 }
                 for item in reversed(recent)
@@ -2553,7 +3063,7 @@ class HerSessionStore:
             effects = _array(recovery["side_effects_json"]) if recovery else []
             unresolved = self._unresolved_side_effects(effects)
             turn_status = str(turn["status"])
-            if turn_status in {"completed", "cancelled"}:
+            if turn_status in {"completed", "cancelled", "steered"}:
                 return self._turn_dict(turn) or {}
             if turn_status == "failed":
                 same_execution_repair = bool(
@@ -2594,7 +3104,7 @@ class HerSessionStore:
             remaining_work.update(
                 {
                     "status": "failed" if effective_error else "completed",
-                    "error": effective_error[:2000],
+                    "error": effective_error,
                     "unresolved_side_effects": unresolved,
                 }
             )
@@ -2649,7 +3159,7 @@ class HerSessionStore:
                 """,
                 (
                     recovery_status,
-                    _json(self._bounded_side_effects(effects)),
+                    _json(self._recovery_side_effects(effects)),
                     _json(remaining_work),
                     0 if unresolved else 1,
                     disposition,
@@ -2681,8 +3191,12 @@ class HerSessionStore:
         turn_id: str,
         reason: str,
         execution_owner_id: str = "",
+        _terminal_status: str = "cancelled",
     ) -> dict[str, Any]:
-        """Cancel one active turn without closing its durable session."""
+        """Close an interrupted Turn without closing its durable session."""
+
+        if _terminal_status not in {"cancelled", "steered"}:
+            raise ValueError("_terminal_status must be cancelled or steered")
 
         now = _utc_now()
         with self._transaction() as connection:
@@ -2693,9 +3207,11 @@ class HerSessionStore:
             if turn is None:
                 raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
             self._assert_execution_owner(dict(turn), execution_owner_id)
-            if str(turn["status"]) in {"completed", "failed", "cancelled"}:
+            if str(turn["status"]) in {
+                "completed", "failed", "cancelled", "steered"
+            }:
                 return self._turn_dict(turn) or {}
-            clean_reason = str(reason or "HER turn was cancelled.")
+            clean_reason = str(reason or f"HER turn was {_terminal_status}.")
             recovery = connection.execute(
                 """
                 SELECT * FROM her_active_turn_recovery
@@ -2710,19 +3226,19 @@ class HerSessionStore:
             )
             remaining_work.update(
                 {
-                    "status": "cancelled",
-                    "reason": clean_reason[:2000],
+                    "status": _terminal_status,
+                    "reason": clean_reason,
                     "unresolved_side_effects": unresolved,
                 }
             )
             connection.execute(
                 """
                 UPDATE her_turns
-                SET assistant_text = '', error_text = ?, status = 'cancelled',
+                SET assistant_text = '', error_text = ?, status = ?,
                     completed_at = ?
                 WHERE session_id = ? AND turn_id = ?
                 """,
-                (clean_reason, now, session_id, turn_id),
+                (clean_reason, _terminal_status, now, session_id, turn_id),
             )
             row = connection.execute(
                 "SELECT state_version FROM her_sessions WHERE session_id = ?",
@@ -2736,8 +3252,8 @@ class HerSessionStore:
             self._next_event(
                 connection,
                 session_id=session_id,
-                event_id=f"{turn_id}:cancelled",
-                kind="turn_cancelled",
+                event_id=f"{turn_id}:{_terminal_status}",
+                kind=f"turn_{_terminal_status}",
                 payload={
                     "turn_id": turn_id,
                     "state_version": state_version,
@@ -2745,7 +3261,9 @@ class HerSessionStore:
                     "unresolved_side_effect_count": len(unresolved),
                 },
             )
-            disposition = "UNKNOWN_SIDE_EFFECT" if unresolved else "cancelled"
+            disposition = (
+                "UNKNOWN_SIDE_EFFECT" if unresolved else _terminal_status
+            )
             connection.execute(
                 """
                 UPDATE her_active_turn_recovery
@@ -2762,7 +3280,7 @@ class HerSessionStore:
                     turn_id,
                 ),
             )
-            if not unresolved:
+            if _terminal_status == "cancelled" and not unresolved:
                 self._archive_recovery_ancestors(
                     connection,
                     session_id=session_id,
@@ -2774,6 +3292,24 @@ class HerSessionStore:
                 (session_id, turn_id),
             ).fetchone()
             return self._turn_dict(updated) or {}
+
+    def steer_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        reason: str,
+        execution_owner_id: str = "",
+    ) -> dict[str, Any]:
+        """End one Turn for /steer while retaining its canonical continuation."""
+
+        return self.cancel_turn(
+            session_id=session_id,
+            turn_id=turn_id,
+            reason=reason,
+            execution_owner_id=execution_owner_id,
+            _terminal_status="steered",
+        )
 
     def reconcile_interrupted_turns(
         self,

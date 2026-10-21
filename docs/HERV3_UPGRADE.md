@@ -1,5 +1,59 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-10-19 long-running execution invariant
+
+HERV3 foreground work has no HASHI total token, message, Turn, model-call,
+tool-call, elapsed-time, output, continuation-history, receipt, WIP, or task-state
+ceiling. Long work ends only through normal completion, explicit cancellation,
+a genuine failure, or a scoped safety boundary that is not a total-work budget.
+This invariant applies equally at every privacy level; privacy classification
+changes inspection and routing, never the permitted size of the model/tool loop.
+
+Durable continuation is lossless rather than merely assigned a larger constant.
+Provider messages use an ordered segmented store with per-item and aggregate
+integrity verification. Receipts, task state, WIP, checkpoint evidence and
+completed Session history retain every item. Large Privacy Level 2 inspection
+is internally paged through the detector without rejecting the request because
+of aggregate text size. Per-tool cursors and source paging may bound one
+response frame, but they keep a continuation route to all authorised source
+data and do not cap the Engine Turn.
+
+The retained finite boundaries are semantically separate: explicit
+cancellation; meaningful-progress idle detection; provider transport
+inactivity/protocol guards; an explicitly requested timeout for one Tool call;
+official external Provider media/body limits; retry/replay safety after a
+failure; and small rolling observation windows used only to detect cycles or
+rate-limit commentary. None expires, truncates, or counts down healthy total
+work. The source repair is recorded in
+[the October 19 repair decision](repairs/HERV3_LONG_RUNNING_LIMIT_REMOVAL_20261019.md).
+Source verification, Worker adoption and live acceptance remain separate.
+
+The [Ollama context pilot](HERV3_OLLAMA_CONTEXT_PILOT.md) began on 2026-10-15
+as an Agent6-only `feature-ollama` experiment and is explicitly approved for
+main promotion on 2026-10-18. It remains an instance opt-in: exact configured
+native context, no server truncation, native protocol evidence and GPU
+qualification. The current configuration guide, capacity/admission repairs,
+binary reasoning and measured acceptance limits are in its owning decision. It does
+not change PCM design or other providers; source and live adoption are separate.
+The October 16 continuation selects a 48K baseline and 8K output reserve,
+adds optional short idle residency/native timing evidence, and tests Qwen
+without forced CPU offload. Agent6 subsequently adopted committed source
+through a verified Agent-only hot reboot; its active profile publishes 48K/8K
+and 90-second idle residency. User task testing and actual voice contention
+remain separate acceptance items; the original 64K results stay historical.
+
+The October 16 Ollama-only presentation experiment bypasses auxiliary Persona
+commentary, clarification rendering and optional final-style inference when
+the resolved Model Provider is `ollama`. Public configuration and status name
+the Provider separately from its model; `ollama-api` is an internal adapter
+compatibility ID. Registered Provider names and legacy IDs both resolve through
+the registry. Neutral progress and required
+questions still cross their typed delivery boundaries; the exact main-model
+final answer and its PCM Persona remain intact. Other Model Providers retain
+their presentation calls. This is not the downstream `/commentary` visibility
+switch. See the [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
+Source verification and Agent6 Worker adoption must be reported separately.
+
 The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
 the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.
@@ -56,16 +110,18 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
-Prior WIP Journal evidence remains bounded, quoted context for a new turn when
+Prior WIP Journal evidence remains complete, quoted context for a new turn when
 canonical recovery is absent. It no longer sends a proactive recovery card
-before that turn: the current user request is processed first, and recovery
+before that turn: the current user request is processed first, and all recovery
 facts are available to the model without claiming authority to replay effects.
 
-HASHI3 source now bounds ordinary text Tool results before they re-enter the
-model loop (including structured text content); native image blocks remain
-media, not truncated text. File reads and directory listings also have local
-read/enumeration limits. For OpenAI-compatible Provider calls with a declared
-target capacity, a clearly oversized serialized text request is rejected
+Individual Tool response frames may be paged before they re-enter the model
+loop (including structured text content); native image blocks remain media.
+File reads, searches and directory listings expose offsets or cursors so the
+model can retrieve all authorised source data across as many calls as needed;
+these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible
+Provider calls with a declared target capacity, a clearly oversized serialized
+text request is rejected
 before HTTP with the existing typed capacity code. Unknown capacities and
 native-media accounting still depend on Provider rejection; the preflight
 does not promise that every request will fit. A capacity rejection after tool
@@ -178,11 +234,29 @@ Provider, `/model` selects one of that Provider's real model IDs, and both chang
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
 
+Public Provider identity is consistent across shared, creation and per-Agent
+catalogues, offline metadata and live presentation: the `providers` dictionary
+key and its entry's `engine` use the same public name, such as `deepseek` or
+`ollama`, as the current runtime Provider. Clients can resolve that exact
+Provider/model pair without guessing adapter suffixes or adding duplicate
+model options. Model and reasoning choices still derive from the effective
+resolver, including instance overrides and explicit empty restrictions.
+Registered `-api` adapter IDs remain accepted as legacy input; creation
+normalizes them at the Provider boundary and retains canonical adapter IDs in
+internal configuration and grants. No identity migration or configuration
+rewrite is needed for existing Agents.
+
 `/effort` is model reasoning only and is derived from the selected Provider/model.
 DeepSeek exposes exactly `off`, `high`, and `max`; those values control the
 DeepSeek request's thinking mode and never select a HASHI workflow. The Backend
 catalogue exposes Provider-specific models and effort choices rather than copied
 HER-wide placeholders.
+
+HERV3 Provider menus and target validation derive model choices through
+`runtime_effort_options`. An instance's `allowed_backends.available_models`
+restriction also applies inside HERV3, including an empty list. Shared defaults
+and Provider metadata cannot reintroduce excluded models; a Provider's default
+selection must be one of its effective models.
 
 Some Provider/model pairs use a binary reasoning option, such as `off` or
 `enabled`. The selected value must reach that Provider unchanged, including
@@ -393,3 +467,34 @@ duplicates. Luna did not produce a finding in its earlier canaries, so prompt
 guidance is not claimed to force every model to report progress. The temporary
 QA target was restored afterward. See
 [current nightly delivery](repairs/NIGHTLY_20261008_HASHI3.md).
+
+## HASHI3 offline repair, 2026-10-16: safe stream-timeout continuation, consented fallback, truthful failure reporting
+
+Branch `debug-herv3` on HASHI3 (base `main` = `52181d1e`).  Source and offline
+evidence only; adoption and live verification have not happened.
+
+- A typed `PROVIDER_STREAM_IDLE_TIMEOUT` / `PROVIDER_RESPONSE_START_TIMEOUT`
+  may now use the existing bounded current-call continuation when
+  `safe_current_call_continuation` is already proven by checkpoint evidence.
+  The generic `hashi_disable_inplace_retry` guard still blocks every blind
+  retry; the no-Tool and partial-answer fences are unchanged; the shared
+  three-request local recovery budget is used, not duplicated.
+- Ordinary general-model fallback is now a user-consented policy (default
+  OFF) with an ordered allowlist, per-source rules, privacy narrowing, and an
+  explicit additional-call budget.  HERV3 consumes the resolved decision for
+  same-model Provider continuation; the HER stage layer consumes it for the
+  pre-effect HERV3/Codex CLI switch.  See
+  [model fallback policy](HASHI_MODEL_FALLBACK_POLICY.md).
+- A consent/cost entry authorises one fallback route handover; it does not cap
+  the selected target at one physical Provider request. Once selected, the
+  target runs the normal unbounded HERV3 model/tool continuation and ordinary
+  scoped transport recovery. Completed Tool IDs reuse their durable result
+  binding and changed/concurrent repeats fail closed. The target inherits the
+  source request's privacy, Tool, invocation, reasoning, parameter, and
+  stream-inactivity contract. ASK confirmation, both source directions, route
+  ordering, revision-safe saves, and configured finite cost estimates are
+  wired through the same policy.
+- Terminal public failure reporting separates same-target retries, the
+  interaction recovery used/limit, the Turn-wide cumulative count, and the
+  fallback disposition, and says "already retried, but still failed" in the
+  selected language.

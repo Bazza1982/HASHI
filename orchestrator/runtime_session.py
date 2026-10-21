@@ -306,6 +306,7 @@ def accept_request(
             if isinstance(metadata.get("_run_delivery_route"), Mapping)
             else None
         ),
+        agent_workspace=getattr(runtime, "workspace_dir", None),
     )
     return session, accepted, resolved_owner, surface, channel_key
 
@@ -414,7 +415,10 @@ def publish_frontend_message(
             channel_key=str(channel_key),
             explicit_session_id=explicit_session_id,
         )
-    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+        freeze_run_delivery_route,
+    )
 
     delivery_route = freeze_run_delivery_route(
         message_source_id=normalized_surface,
@@ -422,6 +426,10 @@ def publish_frontend_message(
         session_channel_key=str(channel_key),
         chat_id=str(channel_key),
         telegram_requested=normalized_surface == "telegram",
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata={"owner_id": resolved_owner},
+            state_root=getattr(runtime.global_config, "bridge_home", None),
+        ),
     )
     message = store.append_presentation_message(
         session_id=session["session_id"],
@@ -540,7 +548,10 @@ def publish_frontend_media_notification(
         owner_id=resolved_owner,
         attachment_id=str(attachment["attachment_id"]),
     )
-    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+        freeze_run_delivery_route,
+    )
     from orchestrator.frontend_projection import (
         build_frontend_presentation_context,
     )
@@ -551,6 +562,10 @@ def publish_frontend_media_notification(
         session_channel_key=str(channel_key),
         chat_id=str(channel_key),
         telegram_requested=normalized_surface == "telegram",
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata={"owner_id": resolved_owner},
+            state_root=getattr(runtime.global_config, "bridge_home", None),
+        ),
     )
     message = store.append_presentation_message(
         session_id=str(session["session_id"]),
@@ -585,13 +600,81 @@ def publish_frontend_media_notification(
         outbox=True,
         delivery_route=route,
     )
-    return {
+    publication = {
         **message,
         "owner_id": resolved_owner,
         "surface": normalized_surface,
         "channel_key": str(channel_key),
         "attachment_id": str(attachment["attachment_id"]),
     }
+    from orchestrator.frontend_optional_egress import (
+        schedule_persisted_frontend_media_event,
+    )
+
+    schedule_persisted_frontend_media_event(
+        runtime,
+        target={
+            "session_id": str(message["session_id"]),
+            "event_id": str(message["delivery_event_id"]),
+        },
+        owner_id=resolved_owner,
+        source_event_id=str(message["delivery_event_id"]),
+    )
+    return publication
+
+
+def publish_owner_mirror_media_notification(
+    runtime: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+    explicit_owner_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Publish media only to enabled registry-declared owner mirrors.
+
+    The durable event lives in the Agent's internal activity Session so an
+    optional mirror cannot create a duplicate row in the active conversation.
+    Its route has no primary destination; configured owner mirrors are frozen
+    by ``publish_frontend_media_notification`` before any Connector I/O.
+    """
+
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+    )
+
+    destinations = configured_owner_mirror_destinations(
+        request_metadata={"owner_id": resolved_owner},
+        state_root=getattr(runtime.global_config, "bridge_home", None),
+    )
+    if not destinations:
+        return None
+    store = ensure_store(runtime)
+    session = store.ensure_agent_activity_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+    )
+    return publish_frontend_media_notification(
+        runtime,
+        filename=filename,
+        media_type=media_type,
+        payload=payload,
+        sha256=sha256,
+        caption=caption,
+        publication_id=publication_id,
+        surface="hashi.internal",
+        channel_key="owner-mirror-media",
+        semantic_role=semantic_role,
+        presentation_role=presentation_role,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=str(session["session_id"]),
+    )
 
 
 def publish_frontend_media_notification_for_update(
@@ -1231,6 +1314,16 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
+    interrupt_reason = str(payload.get("interrupt_reason") or "")
+    interrupted = not success and payload.get("interrupted") is True
+    failure_state = "failed"
+    if interrupted and interrupt_reason == "user_stop":
+        failure_state = "stopped"
+    elif interrupted and interrupt_reason in {"user_steer", "user_focus"}:
+        # A typed course correction replaces this Run with its linked
+        # successor.  PAO records that lifecycle boundary as superseded;
+        # HERV3 separately records the interrupted Turn as STEERED.
+        failure_state = "superseded"
     completed_run = store.finish_request(
         request_id,
         success=success,
@@ -1243,12 +1336,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
         error_context=failure_context,
-        failure_state=(
-            "stopped"
-            if not success and payload.get("interrupted") is True
-            and payload.get("interrupt_reason") == "user_stop"
-            else "failed"
-        ),
+        failure_state=failure_state,
     )
     if completed_run is not None and completed_run.get("state") == "completed":
         try:

@@ -56,14 +56,31 @@ SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
 
 def response_has_deliverable_content(response: Any) -> bool:
+    """Return whether a successful response has user-deliverable content.
+
+    Provider-level declarations may reject delivery, but a positive declaration
+    cannot make an internal Memory Plus control envelope user-visible. Text is
+    therefore classified only after the control block is removed.
+    """
     declared = getattr(response, "has_deliverable_content", None)
-    if isinstance(declared, bool):
-        return declared
-    if str(getattr(response, "text", "") or "").strip():
-        return True
+    if declared is False:
+        return False
+
+    response_text = str(getattr(response, "text", "") or "")
+    if response_text.strip():
+        extracted = extract_memory_plus_update_details(response_text)
+        if extracted.visible_text.strip():
+            return True
+
     from orchestrator.native_audio_delivery import audio_parts
 
-    return bool(audio_parts(getattr(response, "content", ())))
+    if audio_parts(getattr(response, "content", ())):
+        return True
+
+    # Preserve provider-neutral typed content declarations when there was no
+    # raw text to classify. With raw text present, only visible text or typed
+    # audio above can make the response deliverable.
+    return declared is True and not response_text.strip()
 
 
 def observe_terminal_response(runtime, item, response) -> None:
@@ -2138,6 +2155,14 @@ def wrap_her_persona_stream(
     )
     provisional_messages: dict[str, _ProvisionalTelegramMessage] = {}
     provisional_audio_events: set[str] = set()
+    workbench_activity_delivery = bool(
+        activity_store is not None
+        and str(getattr(item, "session_surface", "") or "").strip().casefold()
+        == "workbench"
+    )
+    activity_presented_event_ids: set[str] = set()
+    presentation_requested = bool(delivery_requested or workbench_activity_delivery)
+    presentation_blocked = bool(delivery_blocked and not workbench_activity_delivery)
     bot = getattr(getattr(runtime, "app", None), "bot", None)
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
@@ -2293,6 +2318,16 @@ def wrap_her_persona_stream(
         return bool(transport_accepted or audio_accepted)
 
     async def _commentary_presenter(event):
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        activity_accepted = bool(
+            workbench_activity_delivery
+            and event_id
+            and event_id in activity_presented_event_ids
+        )
+        if activity_accepted and (
+            not delivery_requested or bool(getattr(event, "required", False))
+        ):
+            return True
         if getattr(event, "kind", None) == "voice_warning":
             return await _send_event(
                 event, purpose="native_audio_fallback_warning", commentary=False
@@ -2309,6 +2344,14 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose=purpose, commentary=True)
 
     async def _control_presenter(event):
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        if (
+            workbench_activity_delivery
+            and event_id
+            and event_id in activity_presented_event_ids
+            and (not delivery_requested or bool(getattr(event, "required", False)))
+        ):
+            return True
         return await _send_event(event, purpose="her_control")
 
     async def _initial_resolution_presenter(event):
@@ -2444,9 +2487,9 @@ def wrap_her_persona_stream(
         delivery_class = str(getattr(event, "delivery_class", "") or "")
         suppression_reason = event_suppression_reason
         if not suppression_reason and delivery_class == "user_commentary":
-            if not delivery_requested:
+            if not presentation_requested:
                 suppression_reason = "delivery_not_requested"
-            elif delivery_blocked:
+            elif presentation_blocked:
                 suppression_reason = "delivery_blocked"
             elif (
                 not bool(getattr(event, "required", False))
@@ -2456,7 +2499,7 @@ def wrap_her_persona_stream(
         elif (
             delivery_class == "control"
             and bool(getattr(event, "required", False))
-            and not delivery_requested
+            and not presentation_requested
         ):
             suppression_reason = "delivery_not_requested"
         if suppression_reason:
@@ -2483,7 +2526,10 @@ def wrap_her_persona_stream(
                     f"error_type={type(exc).__name__}"
                 )
         if activity_store is not None:
-            activity_store.publish_stream(item.request_id, event)
+            activity_presented = activity_store.publish_stream(item.request_id, event)
+            event_id = str(getattr(event, "event_id", "") or "").strip()
+            if workbench_activity_delivery and activity_presented is True and event_id:
+                activity_presented_event_ids.add(event_id)
 
     router = HERMessageRouter(
         request_id=item.request_id,
@@ -2499,8 +2545,8 @@ def wrap_her_persona_stream(
         think_enabled=lambda: bool(getattr(runtime, "_think", False)),
         commentary_enabled=lambda: bool(getattr(runtime, "_commentary", True)),
         persist_event=_persist_event,
-        delivery_requested=delivery_requested,
-        delivery_blocked=delivery_blocked,
+        delivery_requested=presentation_requested,
+        delivery_blocked=presentation_blocked,
     )
 
     async def callback(event):
@@ -3803,7 +3849,53 @@ def backend_failure_fields(response: Any) -> dict[str, Any]:
         fields["tool_call_count"] = tool_call_count
     if bool(getattr(response, "side_effects_possible", False)):
         fields["side_effects_possible"] = True
+    metadata = getattr(response, "stream_metadata", None)
+    metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    chain_details: Mapping[str, Any] = {}
+    her = metadata.get("her_v2")
+    if isinstance(her, Mapping):
+        chain = her.get("failure_chain")
+        primary_failure = (
+            chain.get("primary_failure") if isinstance(chain, Mapping) else None
+        )
+        details = (
+            primary_failure.get("details")
+            if isinstance(primary_failure, Mapping)
+            else None
+        )
+        if isinstance(details, Mapping):
+            chain_details = details
+    for source in (metadata, chain_details):
+        for source_key, public_key in (
+            ("provider_transport_retry_count", "same_target_retries"),
+            ("provider_local_recovery_count", "interaction_recovery_used"),
+            ("provider_local_recovery_limit", "interaction_recovery_limit"),
+            ("provider_turn_recovery_total", "turn_recovery_total"),
+            ("provider_tool_repair_count", "tool_repair_count"),
+        ):
+            parsed = _optional_counter(source.get(source_key))
+            if parsed is not None:
+                fields.setdefault(public_key, parsed)
+        if source.get("provider_local_recovery_exhausted") is True:
+            fields.setdefault("recovery_exhausted", True)
+        fallback = source.get("provider_fallback") or source.get("fallback_decision")
+        if isinstance(fallback, Mapping) and fallback:
+            fields.setdefault("fallback", dict(fallback))
+            primary = fallback.get("primary_failure")
+            if isinstance(primary, Mapping) and primary:
+                fields.setdefault("fallback_primary_failure", dict(primary))
     return fields
+
+
+def _optional_counter(value: Any) -> int | None:
+    """Return one bounded public counter, or None when it is not present."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
@@ -4273,14 +4365,35 @@ async def handle_backend_error(
             completion_path="foreground",
         )
         return
-    send_elapsed_s, chunk_count = await runtime.send_long_message(
-        chat_id=item.chat_id,
-        text=err_msg,
-        request_id=item.request_id,
-        purpose="error",
-        error_context=failure_context,
-        frontend_outbox=True,
-    )
+    try:
+        send_elapsed_s, chunk_count = await runtime.send_long_message(
+            chat_id=item.chat_id,
+            text=err_msg,
+            request_id=item.request_id,
+            purpose="error",
+            error_context=failure_context,
+            frontend_outbox=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as delivery_exc:
+        # The backend terminal was already persisted above. A connector failure
+        # is secondary and must not escape into RUNTIME_EXCEPTION closeout.
+        runtime.error_logger.error(
+            "Backend error delivery failed for %s (primary_code=%s, delivery=%s): %s",
+            item.request_id, failure_fields.get("error_code") or "untyped",
+            type(delivery_exc).__name__, _safe_excerpt(str(delivery_exc), 300),
+        )
+        runtime._log_maintenance(
+            item, "send_error_failed", primary_error_code=failure_fields.get("error_code"),
+            delivery_error_type=type(delivery_exc).__name__,
+            delivery_error_excerpt=_safe_excerpt(str(delivery_exc), 300),
+        )
+        runtime_cross_session.record_turn_result(
+            runtime, item, response=response, error=err_msg,
+            delivered=False, completion_path="foreground",
+        )
+        return
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
         if queued_monotonic is not None

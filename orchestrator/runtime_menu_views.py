@@ -7,6 +7,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import ui_language
+from orchestrator.flexible_backend_registry import public_model_provider
 from orchestrator.command_ui import (
     card_title,
     confirm_card,
@@ -579,7 +580,7 @@ def her_v3_model_menu_text(*, provider: str, model: str, effort: str) -> str:
     return setting_card(
         "🧠",
         _tr("menu.her_v3.title"),
-        current=f"<code>{html.escape(provider)} / {html.escape(model)}</code>",
+        current=f"<code>{html.escape(public_model_provider(provider))} / {html.escape(model)}</code>",
         facts=[
             _fact("common.effort", f"<code>{html.escape(effort)}</code>"),
             _fact("common.backend", "<code>her-v3</code>"),
@@ -614,7 +615,7 @@ def her_v3_provider_menu_text(
     return setting_card(
         "🔌",
         _tr("menu.her_v3.provider_title"),
-        current=f"<code>{html.escape(current_provider)}</code>",
+        current=f"<code>{html.escape(public_model_provider(current_provider))}</code>",
         facts=facts,
         consequence=_tr("menu.her_v3.provider_effect"),
         action=(
@@ -803,7 +804,7 @@ def backend_switch_notice_text(
     """Plain result for command consumers; selection menus use HTML cards."""
     lines = [_tr("backend.switch.success", backend=backend)]
     if provider:
-        lines.append(f"{_tr('common.provider')}: {provider}")
+        lines.append(f"{_tr('common.provider')}: {public_model_provider(provider)}")
     lines.extend([
         f"{_tr('common.model')}: {model}",
         f"{_tr('common.mode')}: {mode}",
@@ -1345,6 +1346,48 @@ def whatsapp_menu_text(*, enabled: bool) -> str:
             _tr("menu.whatsapp.enabled") if enabled else _tr("menu.whatsapp.disabled")
         ),
         action=_tr("menu.whatsapp.action"),
+    )
+
+
+def agentpresence_menu_text(
+    *,
+    enabled: bool,
+    ap_instance_id: str = "",
+    binding_available: bool = True,
+    default_agent: str = "",
+    settings_available: bool = True,
+    notice: str | None = None,
+) -> str:
+    if not binding_available:
+        instance_value = html.escape(_tr("menu.agentpresence.api_unavailable"))
+    elif ap_instance_id:
+        instance_value = f"<code>{html.escape(ap_instance_id)}</code>"
+    else:
+        instance_value = html.escape(_tr("menu.agentpresence.unbound"))
+    if not settings_available:
+        agent_value = html.escape(_tr("menu.agentpresence.config_unavailable"))
+    elif default_agent:
+        agent_value = f"<code>{html.escape(default_agent)}</code>"
+    else:
+        agent_value = html.escape(_tr("menu.agentpresence.agent_unbound"))
+    facts = [
+        _fact("menu.agentpresence.hashi_instance", instance_value),
+        _fact("menu.agentpresence.default_agent", agent_value),
+        _fact("common.scope", html.escape(_tr("menu.agentpresence.scope")))
+    ]
+    if notice:
+        facts.insert(0, f"✅ {html.escape(str(notice))}")
+    return setting_card(
+        "🖥️",
+        _tr("menu.agentpresence.title"),
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=facts,
+        consequence=(
+            _tr("menu.agentpresence.enabled")
+            if enabled
+            else _tr("menu.agentpresence.disabled")
+        ),
+        action=_tr("menu.agentpresence.action"),
     )
 
 

@@ -240,14 +240,14 @@ async def test_backend_catalogue_http_effective_sunny_template_uses_real_availab
         assert "gpt-5.4" in codex["models"]
         assert codex["model_efforts"]["gpt-5.4"] == ["high"]
         her = creation["backends"]["her-v3"]
-        provider = her["providers"]["deepseek-api"]
+        provider = her["providers"]["deepseek"]
         assert provider["available"] is secret_present
         assert her["available"] is secret_present
         assert creation["allowed_backends"] == (["codex-cli", "her-v3"] if secret_present else ["codex-cli"])
         if not secret_present:
             assert provider["reason"] == "credential_missing"
             # Shared registry entry is not authority for a creation permission.
-            assert payload["backends"]["her-v3"]["providers"]["deepseek-api"]["available"] is True
+            assert payload["backends"]["her-v3"]["providers"]["deepseek"]["available"] is True
             denied = await client.post("/api/admin/add-agent",
                 headers={"X-Workbench-Token": ADMIN_TOKEN}, json={"name": "unavailable-child",
                 "backend": "her-v3", "provider": "deepseek-api", "model": "deepseek-v4-pro"})

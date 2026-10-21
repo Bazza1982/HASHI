@@ -15,7 +15,6 @@ from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from orchestrator.agent_move.manager import record_agent_move_admin_outcome
 from orchestrator.agent_move.coordinator import (
     cancel_outbound_move,
-    confirm_outbound_move,
     continue_outbound_move,
     get_outbound_move,
     prepare_outbound_move,
@@ -191,23 +190,29 @@ def _render_transfer_accepted(package_id: str, *, clone: bool = False) -> str:
     )
 
 
-def _move_recovery_markup(package_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def _move_recovery_markup(
+    package_id: str,
+    *,
+    allow_cancel: bool = True,
+) -> InlineKeyboardMarkup:
+    rows = [
         [
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("remote.move.retry_recovery"),
-                    callback_data=f"move:commit:{package_id}",
-                )
-            ],
+            InlineKeyboardButton(
+                ui_language.tr("remote.move.retry_recovery"),
+                callback_data=f"move:commit:{package_id}",
+            )
+        ]
+    ]
+    if allow_cancel:
+        rows.append(
             [
                 InlineKeyboardButton(
                     ui_language.tr("remote.move.reconcile_cancel"),
                     callback_data=f"move:abort:{package_id}",
                 )
-            ],
-        ]
-    )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 class InstanceConfigurationError(ValueError):
@@ -1464,11 +1469,34 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                 project_root, str(getattr(selected_runtime, "name", "") or "")
             ) is None:
                 selected_runtime._agent_move_quiesced = False
+            allow_cancel = action == "abort"
+            if action in {"commit", "continue"}:
+                try:
+                    latest = await asyncio.to_thread(
+                        get_outbound_move,
+                        project_root,
+                        package_id,
+                    )
+                    allow_cancel = not bool(
+                        latest.get("forward_only")
+                        or latest.get("commit_intent_at")
+                        or (
+                            str(latest.get("operation") or "") == "move"
+                            and latest.get("status") != "staged_remote"
+                        )
+                    )
+                except Exception:
+                    # A lost response may mean forward intent was already
+                    # persisted. Offer only the idempotent forward retry.
+                    allow_cancel = False
             await query.edit_message_text(
                 f"{ui_language.tr('remote.move.failed', error=html.escape(str(exc)))}\n\n"
                 f"{ui_language.tr('remote.move.recovery_hint')}",
                 parse_mode="HTML",
-                reply_markup=_move_recovery_markup(package_id),
+                reply_markup=_move_recovery_markup(
+                    package_id,
+                    allow_cancel=allow_cancel,
+                ),
             )
 
 

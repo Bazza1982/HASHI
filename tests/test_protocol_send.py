@@ -11,6 +11,14 @@ from tools import protocol_send
 @pytest.fixture(autouse=True)
 def isolate_outbound_state(tmp_path, monkeypatch):
     monkeypatch.setattr(protocol_send.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: (
+            {"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"},
+            None,
+        ),
+    )
 
 
 class _FakeResponse:
@@ -84,7 +92,7 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -103,9 +111,52 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert headers["x-hashi-from-instance"] == "HASHI1"
     assert request["body"]["body"]["text"] == "hello there"
     assert request["body"]["to_agent"] == "lily"
+    assert request["body"]["idempotency_key"] == (
+        f"hchat:{request['body']['message_id']}"
+    )
     output = capsys.readouterr().out
     assert "Protocol message queued" in output
     assert "Message:\nhello there" in output
+
+
+def test_protocol_confirmation_terminal_is_handled_without_transport_failover(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        protocol_send.urllib_request,
+        "urlopen",
+        lambda req, timeout=0: _FakeResponse(
+            {"ok": True, "state": "discarded"}
+        ),
+    )
+    monkeypatch.setattr(
+        protocol_send,
+        "_load_config",
+        lambda: {"global": {"instance_id": "HASHI1"}},
+    )
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {
+            "remote_host": "10.0.0.9",
+            "remote_port": 8766,
+        },
+    )
+    monkeypatch.setattr(
+        protocol_send, "_probe_remote_http", lambda host, port: True
+    )
+
+    handled = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "old instruction",
+        shared_token="shared-secret",
+    )
+
+    assert handled is True
+    captured = capsys.readouterr()
+    assert "discarded without execution" in captured.err
 
 
 def test_protocol_send_attaches_only_explicit_private_proofs(monkeypatch, capsys):
@@ -178,6 +229,20 @@ def test_protocol_send_attaches_only_explicit_private_proofs(monkeypatch, capsys
         ({"ok": True, "state": "reply_delivered_locally"}, "queued"),
         ({"ok": True, "state": "reply_sent"}, "queued"),
         ({"ok": True, "state": "completed"}, "queued"),
+        (
+            {"ok": True, "state": "awaiting_confirmation"},
+            "pending_confirmation",
+        ),
+        ({"ok": True, "state": "confirming"}, "pending_confirmation"),
+        ({"ok": True, "state": "discarded"}, "discarded"),
+        (
+            {"ok": True, "state": "confirmation_expired"},
+            "confirmation_expired",
+        ),
+        (
+            {"ok": True, "state": "confirmation_superseded"},
+            "confirmation_superseded",
+        ),
         ({"ok": False, "state": "reply_failed"}, "failed"),
         ({"ok": True, "state": "reply_failed"}, "failed"),
         ({"ok": True, "state": "timed_out"}, "failed"),
@@ -202,6 +267,29 @@ def test_protocol_lifecycle_terminal_receipt_stays_queued_and_shows_original_bod
     assert "Protocol message queued" in output
     assert "Protocol terminal message sent" not in output
     assert "Message:\nDone.\nEvidence retained." in output
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("awaiting_confirmation", "waiting for confirmation"),
+        ("discarded", "discarded without execution"),
+        ("confirmation_expired", "confirmation expired"),
+        ("confirmation_superseded", "superseded without execution"),
+    ],
+)
+def test_protocol_confirmation_receipt_names_the_real_state(
+    state, expected, capsys
+):
+    protocol_send._print_delivery_receipt(
+        result={"ok": True, "state": state},
+        from_agent="rika",
+        target="zelda@HASHI1",
+        text="Delayed instruction",
+    )
+
+    captured = capsys.readouterr()
+    assert expected in (captured.out + captured.err)
 
 
 def test_send_protocol_message_failure_state_overrides_ok(monkeypatch, tmp_path, capsys):
@@ -233,7 +321,7 @@ def test_send_protocol_message_failure_state_overrides_ok(monkeypatch, tmp_path,
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -271,7 +359,7 @@ def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_pat
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -310,7 +398,7 @@ def test_send_protocol_message_prefers_local_sidecar_outbound_registration(monke
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -348,7 +436,7 @@ def test_send_protocol_message_falls_back_to_file_when_local_sidecar_unavailable
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -405,7 +493,7 @@ def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -476,7 +564,7 @@ def test_send_protocol_message_streams_v2_chunks_before_atomic_commit(
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v2_streaming"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v2_streaming"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -533,7 +621,7 @@ def test_send_protocol_message_cancels_staged_uploads_after_partial_failure(monk
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -581,7 +669,7 @@ def test_send_protocol_message_cancels_staged_uploads_after_commit_failure(monke
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -616,7 +704,7 @@ def test_send_protocol_message_rejects_attachment_send_when_live_peer_lacks_capa
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"protocol_message_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "protocol_message_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(

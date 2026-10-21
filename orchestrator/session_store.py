@@ -37,6 +37,10 @@ from orchestrator.frontend_contracts import (
     normalize_delivery_receipt,
     normalize_media_group,
 )
+from orchestrator.session_titles import (
+    automatic_session_title,
+    is_system_session_title,
+)
 from orchestrator.storage_profile import removable_storage_profile
 
 TERMINAL_RUN_STATES = frozenset(
@@ -363,7 +367,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 23
+    SCHEMA_VERSION = 24
 
     def __init__(
         self,
@@ -898,6 +902,8 @@ class SessionStore:
                     retention_indefinite INTEGER NOT NULL DEFAULT 0,
                     upload_required INTEGER NOT NULL DEFAULT 0,
                     asset_id TEXT,
+                    workspace_path TEXT,
+                    bound_message_id TEXT,
                     uploaded_at TEXT,
                     created_at TEXT NOT NULL,
                     committed_at TEXT,
@@ -1216,6 +1222,8 @@ class SessionStore:
             )
             from orchestrator.phone_context_handoff import initialize_schema as initialize_phone_context_schema
             initialize_phone_context_schema(connection)
+            from orchestrator.ingress_confirmation import initialize_schema as initialize_ingress_confirmation_schema
+            initialize_ingress_confirmation_schema(connection)
             # Upgrade older split inboxes into one sequence so transcript and
             # delegation replay keeps the Provider's per-call receive order.
             connection.execute(
@@ -1520,6 +1528,8 @@ class SessionStore:
                 "retention_indefinite": "INTEGER NOT NULL DEFAULT 0",
                 "upload_required": "INTEGER NOT NULL DEFAULT 0",
                 "asset_id": "TEXT",
+                "workspace_path": "TEXT",
+                "bound_message_id": "TEXT",
                 "uploaded_at": "TEXT",
             }
             for column, declaration in attachment_migrations.items():
@@ -2427,6 +2437,7 @@ class SessionStore:
         owner_id: str,
         agent_id: str,
         title: str | None = None,
+        title_source: str | None = None,
         is_default: bool = False,
         session_kind: str = SESSION_KIND_CONVERSATION,
     ) -> dict[str, Any]:
@@ -2435,6 +2446,10 @@ class SessionStore:
         session_kind = str(session_kind or "").strip().casefold()
         if not owner_id or not agent_id:
             raise ValueError("owner_id and agent_id are required")
+        if title_source is not None:
+            title_source = str(title_source).strip().casefold()
+            if title_source not in {"system", "user", "maintenance"}:
+                raise ValueError("unsupported Session title source")
         if session_kind not in SESSION_KINDS:
             raise ValueError("unsupported Session kind")
         if is_default and session_kind != SESSION_KIND_CONVERSATION:
@@ -2479,12 +2494,15 @@ class SessionStore:
                     else "New session"
                 )
             ).strip()
+            resolved_title_source = title_source or (
+                "system" if is_system_session_title(resolved_title) else "user"
+            )
             connection.execute(
                 """
                 INSERT INTO sessions(
                     session_id, instance_id, owner_id, agent_id, title,
-                    session_kind, is_default, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    title_source, session_kind, is_default, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -2492,6 +2510,7 @@ class SessionStore:
                     owner_id,
                     agent_id,
                     resolved_title,
+                    resolved_title_source,
                     session_kind,
                     int(is_default),
                     now,
@@ -2532,6 +2551,7 @@ class SessionStore:
             owner_id=owner_id,
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} default",
+            title_source="system",
             is_default=True,
         )
 
@@ -2547,6 +2567,7 @@ class SessionStore:
             owner_id=owner_id,
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} activity",
+            title_source="system",
             session_kind=SESSION_KIND_AGENT_ACTIVITY,
         )
 
@@ -2603,6 +2624,65 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            changed = False
+            for row in rows:
+                if (
+                    str(row["title_source"]) != "system"
+                    or not is_system_session_title(str(row["title"]))
+                ):
+                    continue
+                message = connection.execute(
+                    """
+                    SELECT text, display_text FROM messages
+                    WHERE session_id = ? AND role = 'user' AND visibility = 'visible'
+                    ORDER BY ordinal ASC LIMIT 1
+                    """,
+                    (str(row["session_id"]),),
+                ).fetchone()
+                if message is None:
+                    continue
+                title_input = (
+                    str(message["display_text"])
+                    if message["display_text"] is not None
+                    and str(message["display_text"]).strip()
+                    else str(message["text"])
+                )
+                automatic_title = automatic_session_title(title_input)
+                if not automatic_title:
+                    continue
+                updated = connection.execute(
+                    """
+                    UPDATE sessions SET title = ?, title_source = 'maintenance',
+                        revision = revision + 1
+                    WHERE session_id = ? AND title_source = 'system' AND title = ?
+                    """,
+                    (automatic_title, str(row["session_id"]), str(row["title"])),
+                )
+                if updated.rowcount != 1:
+                    continue
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=None,
+                    kind="session.title_updated",
+                    status=str(row["status"]),
+                    phase="control",
+                    summary="Session title updated",
+                    detail={
+                        "source": "maintenance",
+                        "reason": "placeholder_backfill",
+                    },
+                    outbox=False,
+                )
+                changed = True
+            if changed:
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM sessions WHERE {" AND ".join(clauses)}
+                    ORDER BY is_default DESC, updated_at DESC, session_id ASC LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
         return [self._session_dict(row) for row in rows]
 
     def set_memory_policy(
@@ -2715,16 +2795,14 @@ class SessionStore:
             marks = ",".join("?" for _ in session_ids)
             attachments = connection.execute(
                 f"""
-                SELECT attachment_id, filename FROM session_attachments
+                SELECT * FROM session_attachments
                 WHERE session_id IN ({marks})
                 """,
                 session_ids,
             ).fetchall()
             for row in attachments:
                 removed_files.append(
-                    self._attachment_file_path(
-                        str(row["attachment_id"]), str(row["filename"])
-                    )
+                    self._attachment_storage_path(dict(row))
                 )
 
             run_rows = connection.execute(
@@ -2754,6 +2832,7 @@ class SessionStore:
                 "runtime_event_correlations",
                 "run_approvals",
                 "delivery_outbox",
+                "connector_delivery_tasks",
                 "connector_delivery_receipts",
                 "frontend_message_events",
                 "event_consumers",
@@ -2832,6 +2911,7 @@ class SessionStore:
         for file_path in removed_files:
             try:
                 file_path.unlink(missing_ok=True)
+                self._prune_empty_attachment_directories(file_path)
             except OSError:
                 # Database authority is already removed. A later media sweeper can
                 # retry orphan bytes; never restore the purged Session graph.
@@ -3093,6 +3173,7 @@ class SessionStore:
         message_context: Mapping[str, Any] | None = None,
         delivery_route: Mapping[str, Any] | None = None,
         expected_context_generation: int | None = None,
+        agent_workspace: Path | str | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
         if display_text is not None and not isinstance(display_text, str):
@@ -3112,6 +3193,7 @@ class SessionStore:
                 and str(block.get("text") or "").strip()
             ).strip()
         now = _utc_now()
+        staging_files_to_remove: list[Path] = []
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
@@ -3129,6 +3211,7 @@ class SessionStore:
             audio_rows: list[sqlite3.Row] = []
             attachment_rows: list[sqlite3.Row] = []
             attachment_fingerprints: list[dict[str, Any]] = []
+            legacy_attachment_fingerprints: list[dict[str, Any]] = []
             normalized_blocks: list[dict[str, Any]] = []
             attachment_ids: set[str] = set()
             total_attachment_bytes = 0
@@ -3138,7 +3221,7 @@ class SessionStore:
                 if block_type == "text":
                     if not isinstance(block.get("text"), str):
                         raise ValueError("text content parts require text")
-                elif block_type in {"attachment", "audio"}:
+                elif block_type in {"attachment", "audio", "media"}:
                     attachment_id = str(block.get("attachment_id") or "").strip()
                     if not attachment_id:
                         raise SessionConflict(
@@ -3205,27 +3288,19 @@ class SessionStore:
                         raise SessionConflict(
                             "message exceeds the configured total attachment size limit"
                         )
-                    attachment_fingerprints.append(
-                        {
-                            "attachment_id": attachment_id,
-                            "sha256": str(attachment["sha256"]),
-                            "size_bytes": int(attachment["size_bytes"]),
-                            **(
-                                {"semantic_role": semantic_role}
-                                if semantic_role
-                                else {}
-                            ),
-                        }
-                    )
-                elif block_type == "media":
-                    # Trusted Connector ingress already supplies a canonical
-                    # media part.  Keep that established internal contract
-                    # while the public Frontend Connector uses staged
-                    # ``attachment`` references.
-                    if not str(block.get("attachment_id") or "").strip():
-                        raise SessionConflict(
-                            "media content requires attachment identity"
-                        )
+                    fingerprint = {
+                        "attachment_id": attachment_id,
+                        "sha256": str(attachment["sha256"]),
+                        "size_bytes": int(attachment["size_bytes"]),
+                        **(
+                            {"semantic_role": semantic_role}
+                            if semantic_role
+                            else {}
+                        ),
+                    }
+                    attachment_fingerprints.append(fingerprint)
+                    if block_type != "media":
+                        legacy_attachment_fingerprints.append(fingerprint)
                 elif block_type == "reply_ref":
                     event_id = str(block.get("event_id") or "").strip()
                     if not event_id or len(event_id) > 512:
@@ -3268,8 +3343,17 @@ class SessionStore:
                 for block in normalized_blocks
             ):
                 raise ValueError("message requires text or a committed attachment")
+            digest_blocks = []
+            for block in blocks:
+                digest_block = dict(block)
+                if str(digest_block.get("type") or "").strip().casefold() == "media":
+                    # A managed local path changes when the attachment is bound
+                    # into its Agent workspace. It is storage state, not request
+                    # identity.
+                    digest_block.pop("local_ref", None)
+                digest_blocks.append(digest_block)
             digest_payload = {
-                "content": blocks,
+                "content": digest_blocks,
                 "attachments": attachment_fingerprints,
                 "display_text": display_text,
                 "execution_mode": str(execution_mode or ""),
@@ -3278,8 +3362,14 @@ class SessionStore:
                 "message_context": dict(message_context or {}),
                 "delivery_route": dict(delivery_route or {}),
             }
+            legacy_digest_payload = dict(digest_payload)
+            legacy_digest_payload["content"] = blocks
+            legacy_digest_payload["attachments"] = legacy_attachment_fingerprints
             digest = hashlib.sha256(
                 _json(digest_payload).encode("utf-8")
+            ).hexdigest()
+            legacy_digest = hashlib.sha256(
+                _json(legacy_digest_payload).encode("utf-8")
             ).hexdigest()
             existing = connection.execute(
                 """
@@ -3290,9 +3380,55 @@ class SessionStore:
                 (session_id, str(idempotency_key)),
             ).fetchone()
             if existing is not None:
-                if str(existing["request_digest"]) != digest:
+                stored_digest = str(existing["request_digest"])
+                legacy_request_matches = stored_digest == legacy_digest
+                request_matches = stored_digest == digest or legacy_request_matches
+                if not request_matches and str(idempotency_key).startswith("hchat:"):
+                    try:
+                        existing_context = json.loads(
+                            str(existing["message_context_json"] or "{}")
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        existing_context = {}
+                    incoming_hchat = (
+                        dict(message_context or {}).get("hchat_message")
+                        if isinstance(message_context, Mapping)
+                        else None
+                    )
+                    existing_hchat = (
+                        existing_context.get("hchat_message")
+                        if isinstance(existing_context, Mapping)
+                        else None
+                    )
+                    request_matches = bool(
+                        isinstance(incoming_hchat, Mapping)
+                        and isinstance(existing_hchat, Mapping)
+                        and str(incoming_hchat.get("idempotency_key") or "")
+                        == str(idempotency_key)
+                        == str(existing_hchat.get("idempotency_key") or "")
+                        and str(incoming_hchat.get("message_id") or "")
+                        == str(existing_hchat.get("message_id") or "")
+                        and str(incoming_hchat.get("payload_digest") or "")
+                        == str(existing_hchat.get("payload_digest") or "")
+                    )
+                if not request_matches:
                     raise IdempotencyConflict(
                         "idempotency key is already bound to a different request"
+                    )
+                if legacy_request_matches and stored_digest != digest:
+                    # Upgrade pre-workspace media digests in place. Older
+                    # digests included the central staging path; the current
+                    # digest deliberately excludes managed storage location.
+                    connection.execute(
+                        """
+                        UPDATE idempotency_records SET request_digest=?
+                        WHERE session_id=? AND idempotency_key=?
+                        """,
+                        (digest, session_id, str(idempotency_key)),
+                    )
+                    connection.execute(
+                        "UPDATE runs SET request_digest=? WHERE run_id=?",
+                        (digest, str(existing["run_id"])),
                     )
                 return AcceptedRun(
                     session_id=session_id,
@@ -3427,13 +3563,101 @@ class SessionStore:
                 detail={"message_id": message_id, "request_id": request_id},
                 outbox=True,
             )
-            connection.execute(
-                """
-                UPDATE sessions SET updated_at = ?, revision = revision + 1
-                WHERE session_id = ?
-                """,
-                (now, session_id),
-            )
+            automatic_title = None
+            if (
+                str(session["session_kind"]) == SESSION_KIND_CONVERSATION
+                and str(session["title_source"]) == "system"
+                and is_system_session_title(str(session["title"]))
+            ):
+                title_input = (
+                    display_text
+                    if isinstance(display_text, str) and display_text.strip()
+                    else clean
+                )
+                automatic_title = automatic_session_title(title_input)
+            if automatic_title:
+                connection.execute(
+                    """
+                    UPDATE sessions SET title = ?, title_source = 'maintenance',
+                        updated_at = ?, revision = revision + 1
+                    WHERE session_id = ?
+                    """,
+                    (automatic_title, now, session_id),
+                )
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind="session.title_updated",
+                    status="active",
+                    phase="control",
+                    summary="Session title updated",
+                    detail={"source": "maintenance"},
+                    outbox=True,
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions SET updated_at = ?, revision = revision + 1
+                    WHERE session_id = ?
+                    """,
+                    (now, session_id),
+                )
+            if attachment_rows and agent_workspace is not None:
+                rebound_rows: dict[str, dict[str, Any]] = {}
+                created_targets: list[Path] = []
+                try:
+                    for attachment in attachment_rows:
+                        rebound, staging_path, created_target = (
+                            self._materialize_attachment_for_message(
+                                connection,
+                                attachment=dict(attachment),
+                                agent_workspace=agent_workspace,
+                                session_id=str(session_id),
+                                message_id=message_id,
+                            )
+                        )
+                        rebound_rows[str(rebound["attachment_id"])] = rebound
+                        if staging_path is not None:
+                            staging_files_to_remove.append(staging_path)
+                        if created_target is not None:
+                            created_targets.append(created_target)
+                    for block in blocks:
+                        if str(block.get("type") or "").strip().casefold() != "media":
+                            continue
+                        rebound = rebound_rows.get(
+                            str(block.get("attachment_id") or "")
+                        )
+                        if rebound is not None and not str(
+                            rebound["media_type"]
+                        ).casefold().startswith("audio/"):
+                            block["local_ref"] = str(
+                                self._attachment_storage_path(rebound)
+                            )
+                    rebound_content_json = _json(blocks)
+                    if rebound_content_json != content_json:
+                        connection.execute(
+                            """UPDATE messages SET content_json=?, content_hash=?
+                               WHERE message_id=? AND session_id=?""",
+                            (
+                                rebound_content_json,
+                                hashlib.sha256(
+                                    rebound_content_json.encode("utf-8")
+                                ).hexdigest(),
+                                message_id,
+                                str(session_id),
+                            ),
+                        )
+                except Exception:
+                    for target in created_targets:
+                        target.unlink(missing_ok=True)
+                        self._prune_empty_attachment_directories(target)
+                    raise
+        for staging_path in staging_files_to_remove:
+            try:
+                staging_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return AcceptedRun(
             session_id=session_id,
             run_id=run_id,
@@ -4202,7 +4426,9 @@ class SessionStore:
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
-            error_code = None if success else "run_failed"
+            error_code = None if success else (
+                "run_superseded" if state == "superseded" else "run_failed"
+            )
             connection.execute(
                 """
                 UPDATE runs SET state = ?, final_message_id = ?, error_code = ?,
@@ -4737,10 +4963,19 @@ class SessionStore:
             suffix = ""
         return self.attachment_files_root / f"{safe_id}{suffix}"
 
-    def _validated_attachment_file(self, attachment: Mapping[str, Any]) -> Path:
-        path = self._attachment_file_path(
+    def _attachment_storage_path(self, attachment: Mapping[str, Any]) -> Path:
+        workspace_path = str(attachment.get("workspace_path") or "").strip()
+        if workspace_path:
+            path = Path(workspace_path).expanduser()
+            if not path.is_absolute():
+                raise SessionConflict("attachment workspace path is invalid")
+            return path
+        return self._attachment_file_path(
             str(attachment["attachment_id"]), str(attachment["filename"])
         )
+
+    def _validated_attachment_file(self, attachment: Mapping[str, Any]) -> Path:
+        path = self._attachment_storage_path(attachment)
         try:
             observed_size = path.stat().st_size
         except OSError as exc:
@@ -4760,6 +4995,126 @@ class SessionStore:
         if digest.hexdigest() != str(attachment["sha256"]):
             raise SessionConflict("uploaded attachment digest changed after intake")
         return path
+
+    @staticmethod
+    def _prune_empty_attachment_directories(file_path: Path) -> None:
+        boundary = next(
+            (parent for parent in file_path.parents if parent.name == ".attachments"),
+            None,
+        )
+        if boundary is None:
+            return
+        current = file_path.parent
+        while current != boundary:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+        try:
+            boundary.rmdir()
+        except OSError:
+            pass
+
+    def _materialize_attachment_for_message(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        attachment: Mapping[str, Any],
+        agent_workspace: Path | str,
+        session_id: str,
+        message_id: str,
+    ) -> tuple[dict[str, Any], Path | None, Path | None]:
+        materialized = dict(attachment)
+        if str(materialized["media_type"]).casefold().startswith("audio/"):
+            return materialized, None, None
+        if str(materialized.get("workspace_path") or "").strip():
+            self._validated_attachment_file(materialized)
+            bound_message_id = str(
+                materialized.get("bound_message_id") or ""
+            ).strip()
+            if bound_message_id and bound_message_id != str(message_id):
+                raise SessionConflict(
+                    "attachment is already bound to another Message"
+                )
+            if not str(materialized.get("bound_message_id") or "").strip():
+                connection.execute(
+                    """UPDATE session_attachments SET bound_message_id=?
+                       WHERE attachment_id=? AND bound_message_id IS NULL""",
+                    (str(message_id), str(materialized["attachment_id"])),
+                )
+                materialized["bound_message_id"] = str(message_id)
+            return materialized, None, None
+
+        workspace = Path(agent_workspace).expanduser()
+        if not workspace.is_absolute():
+            raise SessionConflict("Agent workspace path must be absolute")
+        try:
+            workspace = workspace.resolve(strict=True)
+        except OSError as exc:
+            raise SessionConflict("Agent workspace is unavailable") from exc
+        if not workspace.is_dir():
+            raise SessionConflict("Agent workspace is unavailable")
+
+        session_segment = self._safe_attachment_id(session_id)
+        message_segment = self._safe_attachment_id(message_id)
+        attachments_root = workspace / ".attachments"
+        session_root = attachments_root / session_segment
+        message_root = session_root / message_segment
+        for candidate in (attachments_root, session_root, message_root):
+            if candidate.exists() and candidate.is_symlink():
+                raise SessionConflict("Agent attachment workspace cannot use symlinks")
+        try:
+            message_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SessionConflict("Agent attachment workspace is unavailable") from exc
+
+        source = self._validated_attachment_file(materialized)
+        target = message_root / self._attachment_file_path(
+            str(materialized["attachment_id"]), str(materialized["filename"])
+        ).name
+        if not target.resolve(strict=False).is_relative_to(workspace):
+            raise SessionConflict("Agent attachment workspace path escaped its root")
+        partial = target.with_suffix(f"{target.suffix}.{uuid4().hex}.partial")
+        digest = hashlib.sha256()
+        observed_size = 0
+        try:
+            with source.open("rb") as input_handle, partial.open("xb") as output_handle:
+                while chunk := input_handle.read(8 * 1024 * 1024):
+                    observed_size += len(chunk)
+                    digest.update(chunk)
+                    output_handle.write(chunk)
+                output_handle.flush()
+            if observed_size != int(materialized["size_bytes"]):
+                raise SessionConflict("attachment changed while entering Agent workspace")
+            if digest.hexdigest() != str(materialized["sha256"]):
+                raise SessionConflict("attachment changed while entering Agent workspace")
+            try:
+                os.chmod(partial, 0o600)
+            except OSError:
+                pass
+            partial.replace(target)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            self._prune_empty_attachment_directories(partial)
+            raise
+
+        connection.execute(
+            """UPDATE session_attachments
+               SET workspace_path=?, bound_message_id=COALESCE(bound_message_id, ?)
+               WHERE attachment_id=? AND session_id=?""",
+            (
+                str(target.absolute()),
+                str(message_id),
+                str(materialized["attachment_id"]),
+                str(session_id),
+            ),
+        )
+        materialized["workspace_path"] = str(target.absolute())
+        materialized["bound_message_id"] = str(
+            materialized.get("bound_message_id") or message_id
+        )
+        return materialized, source, target
 
     def upload_attachment_bytes(
         self,
@@ -5039,6 +5394,17 @@ class SessionStore:
                             "SELECT 1 FROM voice_transcripts WHERE attachment_id=? LIMIT 1",
                             (attachment_id,),
                         ),
+                        (
+                            "SELECT 1 FROM ingress_confirmations "
+                            "WHERE session_id=? AND owner_id=? "
+                            "AND state IN ('awaiting_confirmation','confirming') "
+                            "AND payload_json LIKE ? LIMIT 1",
+                            (
+                                str(session_id),
+                                str(owner_id),
+                                reference_pattern,
+                            ),
+                        ),
                     )
                 )
                 if bound:
@@ -5060,9 +5426,9 @@ class SessionStore:
                 row.get("media_type") or ""
             ).casefold().startswith("audio/"):
                 try:
-                    self._attachment_file_path(
-                        str(row["attachment_id"]), str(row["filename"])
-                    ).unlink(missing_ok=True)
+                    file_path = self._attachment_storage_path(row)
+                    file_path.unlink(missing_ok=True)
+                    self._prune_empty_attachment_directories(file_path)
                 except OSError:
                     pass
         return [str(row["attachment_id"]) for row in rows]
@@ -5164,6 +5530,42 @@ class SessionStore:
         if detail:
             part["detail"] = str(detail)
         return part
+
+    def rebind_request_content_attachments(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        request_content: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Refresh managed attachment paths after Agent-workspace materialization."""
+
+        rebound = dict(request_content)
+        raw_parts = request_content.get("parts")
+        if not isinstance(raw_parts, (list, tuple)):
+            return rebound
+        parts: list[dict[str, Any]] = []
+        for ordinal, raw_part in enumerate(raw_parts, start=1):
+            if not isinstance(raw_part, Mapping):
+                raise ValueError("request content parts must be objects")
+            part = dict(raw_part)
+            if (
+                str(part.get("type") or "").strip().casefold() == "media"
+                and str(part.get("attachment_id") or "").strip()
+            ):
+                part = self.attachment_canonical_part(
+                    session_id=str(session_id),
+                    owner_id=str(owner_id),
+                    attachment_id=str(part["attachment_id"]),
+                    item_index=int(part.get("item_index") or ordinal),
+                    semantic_role=str(part.get("semantic_role") or "") or None,
+                    presentation_role=str(part.get("presentation_role") or "") or None,
+                    caption=str(part.get("caption") or ""),
+                    detail=str(part.get("detail") or ""),
+                )
+            parts.append(part)
+        rebound["parts"] = parts
+        return rebound
 
     def _run_output_attachment_rows(
         self,
@@ -5964,6 +6366,18 @@ class SessionStore:
                         (attachment_id,),
                     )
                     continue
+                pending_confirmation = connection.execute(
+                    """
+                    SELECT 1 FROM ingress_confirmations
+                    WHERE session_id=?
+                      AND state IN ('awaiting_confirmation','confirming')
+                      AND payload_json LIKE ?
+                    LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                if pending_confirmation is not None:
+                    continue
                 active_delivery = connection.execute(
                     """
                     SELECT 1
@@ -5980,9 +6394,9 @@ class SessionStore:
                     continue
                 if str(row["asset_id"] or ""):
                     try:
-                        self._attachment_file_path(
-                            attachment_id, str(row["filename"])
-                        ).unlink(missing_ok=True)
+                        file_path = self._attachment_storage_path(dict(row))
+                        file_path.unlink(missing_ok=True)
+                        self._prune_empty_attachment_directories(file_path)
                     except OSError:
                         continue
                 expired_at = observed_now.astimezone(timezone.utc).isoformat().replace(
@@ -7177,10 +7591,16 @@ class SessionStore:
         owner_id: str,
         expected_revision: int,
         title: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         clean_title = str(title or "").strip()
         if title is not None and not clean_title:
             raise ValueError("title cannot be empty")
+        clean_status = str(status or "").strip().casefold()
+        if status is not None and clean_status not in {"active", "archived"}:
+            raise ValueError("status must be active or archived")
+        if title is None and status is None:
+            raise ValueError("title or status is required")
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -7195,13 +7615,49 @@ class SessionStore:
                 raise SessionNotFound(str(session_id))
             if int(row["revision"]) != int(expected_revision):
                 raise SessionConflict("Session revision does not match")
-            if title is not None:
+            if str(row["status"]) == "deleted":
+                raise SessionConflict("deleted Session cannot be updated")
+            target_status = (
+                clean_status if status is not None else str(row["status"])
+            )
+            if target_status == "archived" and bool(row["is_default"]):
+                raise SessionConflict(
+                    "the permanent default Session cannot be archived"
+                )
+            target_title = clean_title if title is not None else str(row["title"])
+            target_title_source = "user" if title is not None else str(row["title_source"])
+            status_changed = target_status != str(row["status"])
+            connection.execute(
+                """
+                UPDATE sessions SET title = ?, title_source = ?, status = ?,
+                    deleted_at = NULL, revision = revision + 1, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    target_title,
+                    target_title_source,
+                    target_status,
+                    now,
+                    str(session_id),
+                ),
+            )
+            if status_changed and target_status == "archived":
                 connection.execute(
-                    """
-                    UPDATE sessions SET title = ?, title_source = 'user',
-                        revision = revision + 1, updated_at = ? WHERE session_id = ?
-                    """,
-                    (clean_title, now, str(session_id)),
+                    "DELETE FROM channel_bindings WHERE session_id = ?",
+                    (str(session_id),),
+                )
+            if status_changed:
+                event_action = "restored" if target_status == "active" else target_status
+                self._append_event(
+                    connection,
+                    session_id=str(session_id),
+                    run_id=None,
+                    kind=f"session.{event_action}",
+                    status=target_status,
+                    phase="control",
+                    summary=f"Session {event_action}",
+                    detail={"records_deleted": False},
+                    outbox=True,
                 )
             updated = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (str(session_id),)

@@ -18,8 +18,12 @@ from pathlib import Path
 from typing import Any
 
 
-MAX_PAYLOAD_CHARACTERS = 500_000
-MAX_SIDECAR_BYTES = 2_000_000
+# These bounds apply to one automatically paged sidecar frame, never to a
+# HERV3 request, Turn, or task.  Payloads of any cumulative size are inspected
+# incrementally and previously inspected immutable strings are reused.
+_SIDECAR_FRAME_BYTES = 2_000_000
+_INSPECTION_WINDOW_CHARACTERS = 120_000
+_INSPECTION_WINDOW_OVERLAP = 1_024
 SIDECAR_TIMEOUT_SECONDS = 30
 _LABEL = re.compile(r"^[A-Z][A-Z0-9_]{0,39}$")
 _UNSUPPORTED_MEDIA_KEYS = frozenset(
@@ -32,6 +36,10 @@ _UNSUPPORTED_MEDIA_TYPES = frozenset(
 
 class PrivacyGateError(RuntimeError):
     """A Level 2 request cannot be proven safe for the local model boundary."""
+
+
+class _PrivacyFrameTooLarge(PrivacyGateError):
+    """One internal sidecar frame must be split and inspected again."""
 
 
 Detector = Callable[[list[str]], Awaitable[list[list[dict[str, Any]]]]]
@@ -86,13 +94,14 @@ class OutboundPrivacyGate:
         self._request_id: str | None = None
         self._aliases: dict[tuple[str, str], str] = {}
         self._counts: Counter[str] = Counter()
+        self._sanitized_cache: dict[str, str] = {}
 
     async def _detect_with_sidecar(self, texts: list[str]) -> list[list[dict[str, Any]]]:
         python_path = configured_filter_python(self._python_executable)
         sidecar = configured_filter_script()
         request = json.dumps({"texts": texts}, ensure_ascii=False).encode("utf-8")
-        if len(request) > MAX_SIDECAR_BYTES:
-            raise PrivacyGateError("privacy payload exceeds the pilot limit")
+        if len(request) > _SIDECAR_FRAME_BYTES:
+            raise _PrivacyFrameTooLarge("privacy inspection frame is too large")
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -100,12 +109,16 @@ class OutboundPrivacyGate:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                limit=MAX_SIDECAR_BYTES,
+                limit=_SIDECAR_FRAME_BYTES,
             )
             stdout, _ = await asyncio.wait_for(
                 process.communicate(request), timeout=SIDECAR_TIMEOUT_SECONDS
             )
-            if process.returncode != 0 or len(stdout) > MAX_SIDECAR_BYTES:
+            if len(stdout) > _SIDECAR_FRAME_BYTES:
+                raise _PrivacyFrameTooLarge(
+                    "privacy inspection result frame is too large"
+                )
+            if process.returncode != 0:
                 raise PrivacyGateError("local privacy model failed")
             response = json.loads(stdout)
             if response.get("ok") is not True or not isinstance(
@@ -118,11 +131,113 @@ class OutboundPrivacyGate:
                 process.kill()
                 await process.wait()
             raise
+        except PrivacyGateError:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         except Exception:
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()
             raise PrivacyGateError("local privacy model unavailable") from None
+
+    @staticmethod
+    def _inspection_windows(text: str) -> list[tuple[int, str]]:
+        if len(text) <= _INSPECTION_WINDOW_CHARACTERS:
+            return [(0, text)]
+        windows: list[tuple[int, str]] = []
+        start = 0
+        while start < len(text):
+            end = min(len(text), start + _INSPECTION_WINDOW_CHARACTERS)
+            windows.append((start, text[start:end]))
+            if end >= len(text):
+                break
+            start = max(start + 1, end - _INSPECTION_WINDOW_OVERLAP)
+        return windows
+
+    @staticmethod
+    def _frame_bytes(texts: list[str]) -> int:
+        return len(
+            json.dumps({"texts": texts}, ensure_ascii=False).encode("utf-8")
+        )
+
+    async def _detect_frame(
+        self,
+        windows: list[tuple[int, int, str]],
+    ) -> list[tuple[int, int, dict[str, Any]]]:
+        """Inspect a frame, recursively splitting only its transport envelope."""
+
+        try:
+            detected = await self._detector([window[2] for window in windows])
+        except _PrivacyFrameTooLarge:
+            if len(windows) > 1:
+                middle = len(windows) // 2
+                left = await self._detect_frame(windows[:middle])
+                right = await self._detect_frame(windows[middle:])
+                return [*left, *right]
+            text_index, offset, text = windows[0]
+            if len(text) <= (_INSPECTION_WINDOW_OVERLAP * 2 + 1):
+                raise PrivacyGateError(
+                    "local privacy model cannot inspect one minimal frame"
+                ) from None
+            middle = len(text) // 2
+            left_end = min(len(text), middle + _INSPECTION_WINDOW_OVERLAP)
+            right_start = max(0, middle - _INSPECTION_WINDOW_OVERLAP)
+            left = await self._detect_frame(
+                [(text_index, offset, text[:left_end])]
+            )
+            right = await self._detect_frame(
+                [(text_index, offset + right_start, text[right_start:])]
+            )
+            return [*left, *right]
+        if not isinstance(detected, list) or len(detected) != len(windows):
+            raise PrivacyGateError("invalid local privacy model result")
+        adjusted: list[tuple[int, int, dict[str, Any]]] = []
+        for (text_index, offset, text), matches in zip(windows, detected):
+            for start, end, label in self._spans(text, matches):
+                adjusted.append(
+                    (
+                        text_index,
+                        offset,
+                        {
+                            "start": offset + start,
+                            "end": offset + end,
+                            "label": label,
+                            "score": 1.0,
+                        },
+                    )
+                )
+        return adjusted
+
+    async def _detect_incrementally(
+        self,
+        texts: list[str],
+    ) -> list[list[dict[str, Any]]]:
+        windows = [
+            (text_index, offset, window)
+            for text_index, text in enumerate(texts)
+            for offset, window in self._inspection_windows(text)
+        ]
+        batches: list[list[tuple[int, int, str]]] = []
+        current: list[tuple[int, int, str]] = []
+        for window in windows:
+            candidate = [*current, window]
+            if current and self._frame_bytes([item[2] for item in candidate]) > (
+                _SIDECAR_FRAME_BYTES
+            ):
+                batches.append(current)
+                current = [window]
+            else:
+                current = candidate
+        if current:
+            batches.append(current)
+
+        combined: list[list[dict[str, Any]]] = [[] for _ in texts]
+        for batch in batches:
+            for text_index, _offset, match in await self._detect_frame(batch):
+                combined[text_index].append(match)
+        return combined
 
     @staticmethod
     def _collect(value: Any, values: dict[str, None], keys: set[str]) -> None:
@@ -212,26 +327,31 @@ class OutboundPrivacyGate:
             self._request_id = request_id
             self._aliases.clear()
             self._counts.clear()
+            self._sanitized_cache.clear()
         values: dict[str, None] = {}
         keys: set[str] = set()
         self._collect(payload, values, keys)
         texts = list(values)
-        if sum(len(text) for text in texts) > MAX_PAYLOAD_CHARACTERS:
-            raise PrivacyGateError("privacy payload exceeds the pilot limit")
+        pending = [text for text in texts if text not in self._sanitized_cache]
         try:
-            detected = await self._detector(texts)
+            detected = await self._detect_incrementally(pending)
         except PrivacyGateError:
             raise
         except Exception:
             raise PrivacyGateError("local privacy model unavailable") from None
-        if not isinstance(detected, list) or len(detected) != len(texts):
+        if not isinstance(detected, list) or len(detected) != len(pending):
             raise PrivacyGateError("invalid local privacy model result")
-        replacements = {}
-        for text, matches in zip(texts, detected):
+        for text, matches in zip(pending, detected):
             spans = self._spans(text, matches)
             if text in keys and spans:
                 raise PrivacyGateError("sensitive payload key cannot be changed")
-            replacements[text] = self._replace(text, spans)
+            self._sanitized_cache[text] = self._replace(text, spans)
+        replacements = {
+            text: self._sanitized_cache[text]
+            for text in texts
+        }
+        if any(text in keys and replacements[text] != text for text in texts):
+            raise PrivacyGateError("sensitive payload key cannot be changed")
 
         def copied(value: Any) -> Any:
             if isinstance(value, str):

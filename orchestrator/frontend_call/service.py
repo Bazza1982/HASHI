@@ -19,6 +19,11 @@ from .diagnostics import (
 )
 from .transcription import spoken_transcription
 from .billing import MediaBilling, wav_seconds
+from .transient_live_media import (
+    LIVE_FRAME_BUFFER_LIMIT,
+    LIVE_FRAME_LIMIT,
+    LIVE_FRAME_WINDOW_SECONDS,
+)
 from .contract import (
     CallError,
     PROTOCOL,
@@ -59,6 +64,13 @@ class Call:
     started: float
     allow_cloud: bool = True  # Saved targets and effective privacy own eligibility.
     locale: str = "en"
+    tts_catalog: object | None = None
+    tts_effective_service: str = ""
+    tts_effective_voice: str | None = None
+    tts_effective_options: dict = field(default_factory=dict)
+    tts_fallback_reason_code: str = ""
+    tts_error_code: str = ""
+    tts_error_reason: str = ""
     phase: str = "active"
     sequence: int = 0
     turn: dict = field(default_factory=dict)
@@ -74,11 +86,13 @@ class Call:
     speech_index: int = -1
     speech_requested_index: int = -1
     speech_cache: dict = field(default_factory=dict)
+    speech_routes: dict = field(default_factory=dict)
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
     speech_delivered: set = field(default_factory=set)
     filler_tasks: dict = field(default_factory=dict)
     filler_cache: dict = field(default_factory=dict)
+    filler_routes: dict = field(default_factory=dict)
     rows: list = field(default_factory=list)
     camera_enabled: bool = False
     camera_epoch: int = 0
@@ -90,12 +104,14 @@ class Call:
     frame_digest: str = ""
     vision_task: asyncio.Task | None = None
     vision_pending: dict = field(default_factory=dict)
+    frame_buffer: list = field(default_factory=list)
     observation: dict = field(default_factory=dict)
     observation_changed: asyncio.Event = field(default_factory=asyncio.Event)
     vision_error: str = ""
     vision_launches: list = field(default_factory=list)
     video_policy: dict = field(default_factory=dict)
     billing: MediaBilling = field(default_factory=MediaBilling)
+    frontend_subscribers: tuple[str, ...] = ()
 
 
 class CallService:
@@ -108,8 +124,10 @@ class CallService:
         clock=time.monotonic,
         poll_seconds=0.7,
         startup_video_timeout=None,
+        tts_synthesizer=None,
     ):
         self.config, self.ports, self.adapters = config, ports, adapters
+        self.tts_synthesizer = tts_synthesizer
         self.clock, self.poll_seconds = clock, poll_seconds
         self.startup_video_timeout = (
             max(0.01, float(startup_video_timeout))
@@ -151,17 +169,37 @@ class CallService:
             call.turn_tasks.pop(turn_id, None)
             call.active_turns.pop(turn_id, None)
 
+    def _freeze_configuration(self, owner, agent, revision):
+        freeze_runtime = getattr(self.config, "freeze_runtime", None)
+        if callable(freeze_runtime):
+            return freeze_runtime(owner, agent, revision)
+        profile, targets = self.config.freeze(owner, agent, revision)
+        return profile, targets, None
+
     def _project_readiness(self, owner, agent, projection):
         """Hide Call unless its selected STT/TTS credentials are usable."""
         result = dict(projection)
         available = getattr(self.adapters, "target_available", None)
         if not result.get("call_ready") or not callable(available):
             return result
-        _profile, targets = self.config.freeze(owner, agent, result["revision"])
-        result["call_ready"] = all(
-            targets.get(kind) is not None and available(targets[kind])
-            for kind in ("stt", "tts")
+        profile, targets, catalog = self._freeze_configuration(
+            owner, agent, result["revision"]
         )
+        stt_ready = targets.get("stt") is not None and available(targets["stt"])
+        if self.tts_synthesizer is not None:
+            tts_ready = self.tts_synthesizer.has_eligible_path(
+                catalog,
+                profile.get("tts"),
+                self.ports.privacy_level(agent),
+            )
+        else:
+            tts_ready = targets.get("tts") is not None and available(targets["tts"])
+        result["call_ready"] = bool(stt_ready and tts_ready)
+        if not result["call_ready"]:
+            # The default route may prefer /call, but clients must never enter
+            # an unavailable media surface. Preserve the established safe
+            # fallback until the selected STT and TTS targets are usable.
+            result["route"] = "phone"
         vision = targets.get("vision")
         result["camera_available"] = bool(
             result["call_ready"] and vision and available(vision)
@@ -203,6 +241,7 @@ class CallService:
                 admission_in_flight=call.turn.get("phase") == "submitting",
                 call_duration_ms=elapsed_ms(self.clock, call.started),
             )
+            self._emit_frontend_event(call, "call.ended", reason=reason)
         # Once identity is known, stop exactly this Call-owned PAO Run. During
         # admission its identity is still uncertain, so _run requests the same
         # targeted cancellation immediately after admission resolves.
@@ -251,7 +290,9 @@ class CallService:
                     filler=slot,
                 )
         call.speech_cache.clear()
+        call.speech_routes.clear()
         call.filler_cache.clear()
+        call.filler_routes.clear()
         self._camera_off(call, reason="call_ended")
 
     def _request_run_cancel(self, call, turn, reason):
@@ -325,7 +366,10 @@ class CallService:
 
     def _camera_off(self, call, reason="camera_disabled"):
         changed = (
-            call.camera_enabled or bool(call.vision_pending) or bool(call.observation)
+            call.camera_enabled
+            or bool(call.vision_pending)
+            or bool(call.frame_buffer)
+            or bool(call.observation)
         )
         previous_epoch = call.camera_epoch
         frame_age_ms = (
@@ -350,6 +394,7 @@ class CallService:
                 reason=reason,
             )
         call.vision_pending.clear()
+        call.frame_buffer.clear()
         call.observation.clear()
         call.vision_error = ""
         call.observation_changed.set()
@@ -382,6 +427,31 @@ class CallService:
             camera_epoch=call.camera_epoch,
             reason=reason,
         )
+
+    @staticmethod
+    def _select_turn_frames(call, cutoff_unix):
+        if not call.camera_enabled:
+            return ()
+        oldest = float(cutoff_unix) - LIVE_FRAME_WINDOW_SECONDS
+        eligible = sorted(
+            (
+                frame
+                for frame in call.frame_buffer
+                if oldest <= float(frame.get("captured_unix") or 0) <= cutoff_unix + 3
+            ),
+            key=lambda frame: (
+                float(frame.get("captured_unix") or 0),
+                int(frame.get("frame_sequence") or 0),
+            ),
+        )
+        if len(eligible) <= LIVE_FRAME_LIMIT:
+            return tuple(dict(frame) for frame in eligible)
+        last = len(eligible) - 1
+        indexes = [
+            round(position * last / (LIVE_FRAME_LIMIT - 1))
+            for position in range(LIVE_FRAME_LIMIT)
+        ]
+        return tuple(dict(eligible[index]) for index in indexes)
 
     def _startup_timeout(self, call):
         return (
@@ -429,6 +499,40 @@ class CallService:
             emit("service_closed", generation=self.generation, pending_tasks=0)
         self.calls.clear()
 
+    def _frontend_subscribers(self, owner, binding) -> tuple[str, ...]:
+        resolver = getattr(self.ports, "frontend_subscribers", None)
+        if not callable(resolver):
+            return ()
+        try:
+            return tuple(
+                dict.fromkeys(
+                    str(item).strip().casefold()
+                    for item in resolver(owner, binding)
+                    if str(item).strip()
+                )
+            )
+        except Exception:
+            return ()
+
+    def _emit_frontend_event(self, call, kind: str, **payload) -> None:
+        """Publish through the Call port; no Connector is named by this owner."""
+
+        emitter = getattr(self.ports, "emit_frontend_event", None)
+        if not callable(emitter) or not call.frontend_subscribers:
+            return
+        try:
+            result = emitter(
+                call.owner,
+                call.binding,
+                kind,
+                subscribers=call.frontend_subscribers,
+                payload=payload,
+            )
+            if inspect.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception:
+            return
+
     def _view(self, call):
         turn = {
             k: v
@@ -468,6 +572,39 @@ class CallService:
             "duration_seconds": int(self.clock() - call.started),
             "billing": call.billing.view(call.targets),
             "camera": self._camera_view(call),
+            "tts": self._tts_view(call),
+        }
+
+    @staticmethod
+    def _tts_view(call):
+        catalog = call.tts_catalog
+        slot = call.profile.get("tts") or {}
+        selected = str(slot.get("target_id") or "")
+        effective = str(call.tts_effective_service or selected)
+        if catalog is None:
+            target = call.targets.get("tts") or {}
+            return {
+                "selected_service_id": selected,
+                "selected_service_label": target.get("label") or selected,
+                "effective_service_id": effective,
+                "effective_service_label": target.get("label") or effective,
+                "degraded": False,
+                "reason_code": None,
+                "error_code": call.tts_error_code or None,
+            }
+        try:
+            selected_label = catalog.service_label(selected)
+            effective_label = catalog.service_label(effective)
+        except Exception:
+            selected_label, effective_label = selected, effective
+        return {
+            "selected_service_id": selected,
+            "selected_service_label": selected_label,
+            "effective_service_id": effective,
+            "effective_service_label": effective_label,
+            "degraded": bool(effective and selected and effective != selected),
+            "reason_code": call.tts_fallback_reason_code or None,
+            "error_code": call.tts_error_code or None,
         }
 
     def _camera_view(self, call):
@@ -731,11 +868,32 @@ class CallService:
             raise CallError("call_scope_changed", 409)
         return call
 
-    def _privacy(self, call, kind):
+    def _privacy(self, call, kind, route=None):
         self.ports.validate(call.owner, call.binding)
+        privacy_level = self.ports.privacy_level(call.binding["agent_id"])
+        if kind == "tts" and self.tts_synthesizer is not None:
+            blocked_cached_route = (
+                isinstance(route, dict)
+                and route.get("location") == "cloud"
+                and privacy_level not in (0, 1)
+            )
+            eligible = self.tts_synthesizer.has_eligible_path(
+                call.tts_catalog,
+                call.profile.get("tts"),
+                privacy_level,
+            )
+            if not blocked_cached_route and eligible:
+                return
+            error = CallError("call_cloud_privacy_unqualified", 403)
+            call.speech_errors.update(dict.fromkeys(call.speech_cache, error.code))
+            call.speech_cache.clear()
+            call.speech_routes.clear()
+            call.filler_cache.clear()
+            call.filler_routes.clear()
+            raise error
         target = call.targets[kind]
         if target and target["location"] == "cloud":
-            if self.ports.privacy_level(call.binding["agent_id"]) not in (0, 1):
+            if privacy_level not in (0, 1):
                 error = CallError("call_cloud_privacy_unqualified", 403)
                 if kind == "tts":
                     # Every TTS privacy check invalidates already generated
@@ -744,6 +902,9 @@ class CallService:
                         dict.fromkeys(call.speech_cache, error.code)
                     )
                     call.speech_cache.clear()
+                    call.speech_routes.clear()
+                    call.filler_cache.clear()
+                    call.filler_routes.clear()
                 raise error
 
     async def invoke(self, owner, body):
@@ -844,14 +1005,23 @@ class CallService:
             context = self.config.context(owner, body["agent_id"])
             if context["revision"] != body.get("revision"):
                 raise CallError("call_configuration_changed", 409)
-            profile, targets = self.config.freeze(
+            profile, targets, tts_catalog = self._freeze_configuration(
                 owner, body["agent_id"], body.get("revision")
             )
             available = getattr(self.adapters, "target_available", None)
-            if callable(available) and not all(
-                available(targets[kind]) for kind in ("stt", "tts")
-            ):
-                raise CallError("call_credential_missing", 503)
+            if callable(available):
+                stt_available = available(targets["stt"])
+                tts_available = (
+                    self.tts_synthesizer.has_eligible_path(
+                        tts_catalog,
+                        profile.get("tts"),
+                        self.ports.privacy_level(body["agent_id"]),
+                    )
+                    if self.tts_synthesizer is not None
+                    else available(targets["tts"])
+                )
+                if not stt_available or not tts_available:
+                    raise CallError("call_credential_missing", 503)
             binding = {
                 k: body[k]
                 for k in (
@@ -872,6 +1042,8 @@ class CallService:
                 started=self.clock(),
                 allow_cloud=True,
                 locale=call_locale(body.get("locale")),
+                tts_catalog=tts_catalog,
+                frontend_subscribers=self._frontend_subscribers(owner, binding),
             )
             call.video_policy = context["video_policy"]
             video_requested = body.get("video_requested", False)
@@ -887,6 +1059,7 @@ class CallService:
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
+            self._emit_frontend_event(call, "call.started")
             opening = getattr(self.ports, "opening", None)
             if callable(opening):
                 call.turn = {
@@ -952,13 +1125,29 @@ class CallService:
             pending_replaced = bool(call.vision_pending)
             call.frame_sequence, call.frame_digest = sequence, fingerprint
             call.camera_last_frame_at = self.clock()
-            call.vision_pending = {
+            frame = {
                 "image": image,
                 "image_digest": hashlib.sha256(image).hexdigest(),
                 "frame_sequence": sequence,
                 "captured_at": body["captured_at"],
                 "captured_unix": captured,
             }
+            cutoff = time.time()
+            call.frame_buffer.append(dict(frame))
+            call.frame_buffer = sorted(
+                (
+                    item
+                    for item in call.frame_buffer
+                    if cutoff - LIVE_FRAME_WINDOW_SECONDS
+                    <= float(item.get("captured_unix") or 0)
+                    <= cutoff + 3
+                ),
+                key=lambda item: (
+                    float(item.get("captured_unix") or 0),
+                    int(item.get("frame_sequence") or 0),
+                ),
+            )[-LIVE_FRAME_BUFFER_LIMIT:]
+            call.vision_pending = frame
             emit(
                 "frame_accepted",
                 **self._facts(call),
@@ -1002,6 +1191,7 @@ class CallService:
                     or len(body["captured_at"]) > 40
                 ):
                     raise CallError("call_capture_time_invalid")
+            turn_frames = self._select_turn_frames(call, time.time())
             if call.speech_task:
                 if call.speech_task.cancel():
                     emit(
@@ -1011,6 +1201,7 @@ class CallService:
                         segment=call.speech_index,
                     )
             call.speech_cache.clear()
+            call.speech_routes.clear()
             call.speech_errors.clear()
             call.speech_attempts.clear()
             call.speech_delivered.clear()
@@ -1024,6 +1215,7 @@ class CallService:
                 "phase": "transcribing",
                 "speech_segments": [],
                 "captured_at": body.get("captured_at") if image else None,
+                "live_frame_count": len(turn_frames),
             }
             call.turn = turn
             call.turn_digests[sequence] = fingerprint
@@ -1042,9 +1234,10 @@ class CallService:
                 camera_epoch=call.camera_epoch,
                 camera_enabled=call.camera_enabled,
                 pending_tasks=active_before,
+                live_frame_count=len(turn_frames),
                 reason="user_input_priority" if active_before else "sequential_input",
             )
-            task = asyncio.create_task(self._run(call, turn, audio, image))
+            task = asyncio.create_task(self._run(call, turn, audio, image, turn_frames))
             call.task = task
             call.turn_tasks[turn_id] = task
             call.active_turns[turn_id] = turn
@@ -1058,8 +1251,13 @@ class CallService:
             slot = integer(body.get("slot"), 0, len(filler_phrases(call.locale)) - 1)
             text = filler_phrases(call.locale)[slot]
             cached = call.filler_cache.get(slot)
+            route = call.filler_routes.get(slot)
             if cached is None:
-                cached = self._filler_cache.get(self._filler_key(call, text))
+                shared = self._filler_cache.get(self._filler_key(call, text))
+                if isinstance(shared, tuple) and len(shared) == 2:
+                    cached, route = shared
+                else:
+                    cached = shared
             if cached is None:
                 task = call.filler_tasks.get(slot)
                 if task is None:
@@ -1070,8 +1268,11 @@ class CallService:
                 finally:
                     if task.done() and call.filler_tasks.get(slot) is task:
                         call.filler_tasks.pop(slot, None)
-            self._privacy(call, "tts")
+            route = call.filler_routes.get(slot, route)
+            self._privacy(call, "tts", route)
             call.filler_cache[slot] = cached
+            if route:
+                call.filler_routes[slot] = route
             return {"ok": True, "ready": True, "filler": slot, "text": text, **cached}
         if op == "speech":
             index = integer(body.get("segment"), 0, MAX_SPEECH_SEGMENTS - 1)
@@ -1083,7 +1284,7 @@ class CallService:
             if index >= len(parts):
                 raise CallError("call_speech_index_invalid")
             if index in call.speech_cache:
-                self._privacy(call, "tts")
+                self._privacy(call, "tts", call.speech_routes.get(index))
                 asset = call.speech_cache[index]
                 call.speech_requested_index = max(call.speech_requested_index, index)
                 if index not in call.speech_delivered:
@@ -1139,6 +1340,18 @@ class CallService:
             }
         )
 
+    async def _synthesize_tts(self, call, text, *, request_id):
+        if self.tts_synthesizer is not None:
+            return await self.tts_synthesizer.synthesize(
+                call,
+                text,
+                privacy_level=self.ports.privacy_level(call.binding["agent_id"]),
+                request_id=request_id,
+            )
+        return await self.adapters.synthesize(
+            call.targets["tts"], call.profile["tts"], text
+        )
+
     async def _prepare_filler(self, call, slot, text):
         started = self.clock()
         try:
@@ -1166,23 +1379,29 @@ class CallService:
                 locale=call.locale,
             )
             with diagnostic_context(**self._facts(call), stage="tts", filler=slot):
-                result = await self.adapters.synthesize(
-                    call.targets["tts"], call.profile["tts"], text
+                result = await self._synthesize_tts(
+                    call,
+                    text,
+                    request_id=f"{call.binding['call_id']}-filler-{slot}",
                 )
+            route = result.pop("_tts_route", None)
+            billing_target = result.pop("_billing_target", call.targets["tts"])
             call.billing.record_tts(
-                call.targets["tts"],
+                billing_target,
                 text,
                 result.pop("_billing_usage", None),
             )
             if call.phase != "active":
                 raise CallError("call_ended", 410)
             self.ports.validate(call.owner, call.binding)
-            self._privacy(call, "tts")
+            self._privacy(call, "tts", route)
             key = self._filler_key(call, text)
             while len(self._filler_cache) >= 64:
                 self._filler_cache.pop(next(iter(self._filler_cache)))
-            self._filler_cache[key] = result
+            self._filler_cache[key] = (result, route)
             call.filler_cache[slot] = result
+            if route:
+                call.filler_routes[slot] = route
             emit(
                 "filler_prepare_completed",
                 **self._facts(call),
@@ -1476,7 +1695,7 @@ class CallService:
                 **error_facts(exc, "call_opening_failed"),
             )
 
-    async def _run(self, call, turn, audio, image):
+    async def _run(self, call, turn, audio, image, turn_frames=()):
         start = self.clock()
         stage, stage_started = "stt", start
         try:
@@ -1534,6 +1753,7 @@ class CallService:
                 return
             turn["text"] = text
             observation = ""
+            had_turn_image = bool(image)
             if image:
                 turn["phase"] = "observing"
                 stage, stage_started = "vision", self.clock()
@@ -1576,7 +1796,7 @@ class CallService:
                     duration_ms=elapsed_ms(self.clock, start),
                 )
                 return
-            if not image and call.camera_enabled:
+            if not had_turn_image and call.camera_enabled:
                 # STT runs alongside the continuous observer; do not serially
                 # invoke another vision model for every spoken utterance.
                 if (
@@ -1620,7 +1840,11 @@ class CallService:
                     {
                         **call.binding,
                         "call_context": {
-                            "mode": "video" if call.camera_enabled else "voice",
+                            "mode": (
+                                "video"
+                                if turn_frames or call.camera_enabled
+                                else "voice"
+                            ),
                             "camera": current_camera,
                             "observed_at": datetime.now(timezone.utc).isoformat(),
                             "freshness_seconds": call.video_policy["freshness_seconds"],
@@ -1630,6 +1854,7 @@ class CallService:
                     text,
                     observation,
                     turn.get("captured_at"),
+                    turn_frames,
                 )
             turn.update(result)
             emit(
@@ -1816,11 +2041,17 @@ class CallService:
             with diagnostic_context(
                 **self._facts(call, turn), stage="tts", segment=index
             ):
-                result = await self.adapters.synthesize(
-                    call.targets["tts"], call.profile["tts"], text
+                result = await self._synthesize_tts(
+                    call,
+                    text,
+                    request_id=(
+                        f"{call.binding['call_id']}-{turn.get('turn_id') or 'turn'}-{index}"
+                    ),
                 )
+            route = result.pop("_tts_route", None)
+            billing_target = result.pop("_billing_target", call.targets["tts"])
             call.billing.record_tts(
-                call.targets["tts"],
+                billing_target,
                 text,
                 result.pop("_billing_usage", None),
             )
@@ -1835,12 +2066,14 @@ class CallService:
             self.expire()
             if call.phase == "active" and call.turn is turn:
                 self.ports.validate(call.owner, call.binding)
-                self._privacy(call, "tts")
+                self._privacy(call, "tts", route)
                 if result.get("provider_receipt"):
                     turn.setdefault("provider_receipts", {}).setdefault("tts", {})[
                         str(index)
                     ] = result["provider_receipt"]
                 call.speech_cache[index] = result
+                if route:
+                    call.speech_routes[index] = route
                 emit(
                     "speech_asset_published",
                     **self._facts(call, turn),
@@ -1849,8 +2082,15 @@ class CallService:
                     cached=True,
                     response_bytes=_speech_asset_bytes(result),
                 )
+                self._emit_frontend_event(
+                    call,
+                    "call.speech",
+                    segment=index,
+                    asset=result,
+                )
                 for old in sorted(call.speech_cache)[:-2]:
                     call.speech_cache.pop(old, None)
+                    call.speech_routes.pop(old, None)
                 self._start_queued_speech(call)
             else:
                 emit(

@@ -11,7 +11,86 @@ from orchestrator import runtime_session, runtime_transfer
 from orchestrator import runtime_cross_session, runtime_delivery_order
 from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.frontend_call.transient_live_media import (
+    TRANSIENT_LIVE_FRAMES_METADATA_KEY,
+    encode_live_frames,
+    live_frames_for,
+)
 from orchestrator.session_store import SessionStore
+
+
+def _runtime_for_admission():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace()
+    runtime.backend_manager = SimpleNamespace(_read_state_dict=lambda: {})
+    runtime._execution_admissions = {}
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_live_frames_leave_request_metadata_before_session_admission(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(project_root=None)
+    runtime.next_request_id = lambda: "req-live-frames"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-live",
+                message_id="message-live",
+                request_id="req-live-frames",
+            ),
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    encoded = encode_live_frames(
+        (
+            {
+                "image": bytes.fromhex("ffd8ffc00008080010001000ffd9"),
+                "frame_sequence": 1,
+                "captured_at": "2026-10-17T06:20:00+11:00",
+            },
+        )
+    )
+
+    result = await runtime.enqueue_request(
+        123,
+        "What am I holding?",
+        "api",
+        "live frame privacy",
+        request_metadata={TRANSIENT_LIVE_FRAMES_METADATA_KEY: encoded},
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == item.request_id == "req-live-frames"
+    assert TRANSIENT_LIVE_FRAMES_METADATA_KEY not in item.request_metadata
+    assert "data:image" not in json.dumps(item.request_metadata)
+    assert len(live_frames_for(runtime, result)) == 1
 
 
 @pytest.mark.asyncio
@@ -28,7 +107,7 @@ from orchestrator.session_store import SessionStore
     ],
 )
 async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatch, source):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-visible"
@@ -84,7 +163,7 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
 async def test_transfer_bridge_request_uses_internal_connector(
     tmp_path, monkeypatch, source
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "target"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI3")
     runtime.next_request_id = lambda: "req-transfer"
@@ -163,7 +242,7 @@ async def test_transfer_bridge_request_uses_internal_connector(
 async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
     tmp_path, monkeypatch, transfer_state
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-fenced"
@@ -224,7 +303,7 @@ async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
 
 @pytest.mark.asyncio
 async def test_worker_nonvoice_ingress_preserves_complete_pending_transfer(tmp_path, monkeypatch):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-pending"
@@ -286,7 +365,7 @@ async def test_typed_tui_run_policy_cannot_disable_central_telegram_mirroring(
 ):
     from orchestrator.frontend_delivery import tui_request_metadata
 
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-tui"
@@ -344,7 +423,7 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
     tmp_path,
     monkeypatch,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-live-origin"
@@ -417,7 +496,7 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
 async def test_exchange_source_fails_closed_without_verified_connector_evidence(
     tmp_path,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path / "code",
@@ -478,7 +557,7 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
         ),
         encoding="utf-8",
     )
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,
@@ -596,7 +675,7 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
     mirrors,
     telegram,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,
@@ -656,11 +735,99 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
 
 
 @pytest.mark.asyncio
+async def test_pao_steer_successor_inherits_parent_run_delivery_route(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path,
+        bridge_home=tmp_path,
+        instance_id="HASHI2",
+        authorized_id=123,
+    )
+    request_ids = iter(("req-parent", "req-successor", "req-telegram-successor"))
+    runtime.next_request_id = lambda: next(request_ids)
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        runtime_delivery_order, "register_turn", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runtime_cross_session, "capture_reply_target", lambda *args, **kwargs: None
+    )
+
+    await runtime.enqueue_request(
+        123,
+        "parent task",
+        "session-api",
+        "parent",
+        request_metadata={
+            "session_surface": "workbench",
+            "session_channel_key": "hashi-workbench-v2:hashi3",
+        },
+    )
+    parent_item = runtime.queue.get_nowait()
+    parent_run = runtime.session_store.get_run_by_request(parent_item.request_id)
+    parent_route = parent_run["delivery_route"]
+
+    await runtime.enqueue_request(
+        123,
+        "steered continuation",
+        "steer",
+        "successor",
+        request_metadata={
+            "session_id": parent_run["session_id"],
+            "owner_id": "user:123",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "parent_run_id": parent_run["run_id"],
+            "steer_parent_request_id": parent_item.request_id,
+        },
+    )
+    successor_item = runtime.queue.get_nowait()
+    successor_run = runtime.session_store.get_run_by_request(successor_item.request_id)
+
+    assert successor_run["parent_run_id"] == parent_run["run_id"]
+    assert successor_item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] == parent_route
+    assert successor_run["delivery_route"] == parent_route
+
+    await runtime.enqueue_request(
+        123,
+        "steered from Telegram",
+        "steer",
+        "telegram successor",
+        request_metadata={
+            "session_id": parent_run["session_id"],
+            "owner_id": "user:123",
+            "session_surface": "telegram",
+            "session_channel_key": "123",
+            "parent_run_id": parent_run["run_id"],
+            "steer_parent_request_id": parent_item.request_id,
+        },
+    )
+    telegram_item = runtime.queue.get_nowait()
+    telegram_route = telegram_item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]
+
+    assert telegram_route["primary"] == {
+        "surface": "telegram",
+        "channel_key": "123",
+    }
+
+
+@pytest.mark.asyncio
 async def test_pao_uses_central_mirror_switches_for_tui_admission(tmp_path, monkeypatch):
     from orchestrator.connector_delivery_preferences import set_connector_preference
     from orchestrator.frontend_delivery import tui_request_metadata
 
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path, bridge_home=tmp_path,
@@ -711,7 +878,7 @@ async def test_idempotent_frontend_retry_reuses_the_original_pcm_request_identit
     tmp_path,
     monkeypatch,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,

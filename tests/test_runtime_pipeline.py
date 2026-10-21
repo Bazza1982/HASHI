@@ -2598,6 +2598,45 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
 
 
 @pytest.mark.asyncio
+async def test_required_workbench_fallback_warning_accepts_activity_receipt():
+    from orchestrator.request_activity import RequestActivityStore
+
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start("req-1")
+
+    async def reject_transport(*_args, **_kwargs):
+        raise AssertionError("Workbench activity must own this notice")
+
+    runtime._send_text = reject_transport
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(session_surface="workbench", deliver_to_telegram=False),
+        audit_active=False,
+        audit_collector=None,
+    )
+    delivered = await feedback.on_stream_event(
+        StreamEvent(
+            kind="fallback_warning",
+            summary="The image request is temporarily using a visual model.",
+            event_id="req-1:visual-fallback:warning",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2:visual_fallback",
+            phase="direct",
+            required=True,
+        )
+    )
+
+    assert delivered is True
+    projected = runtime.request_activity.poll("req-1")["events"][-1]
+    assert projected["event_id"] == "req-1:visual-fallback:warning"
+    assert projected["presentation_channel"] == "commentary"
+    assert projected["presentation_enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_required_her_control_is_visible_with_all_optional_channels_off():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"
@@ -3457,6 +3496,26 @@ async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item()
     assert runtime.stream_callbacks == [{"audit_collector": "audit"}]
 
 
+def test_response_deliverability_uses_visible_text_after_memory_plus_strip():
+    from adapters.base import BackendResponse
+
+    control_only = BackendResponse(
+        text='<memory_plus_update>{"write":false}</memory_plus_update>',
+        duration_ms=1,
+    )
+    visible_and_control = BackendResponse(
+        text=(
+            "Finished successfully.\n"
+            '<memory_plus_update>{"write":false}</memory_plus_update>'
+        ),
+        duration_ms=1,
+    )
+
+    assert control_only.has_deliverable_content is True
+    assert runtime_pipeline.response_has_deliverable_content(control_only) is False
+    assert runtime_pipeline.response_has_deliverable_content(visible_and_control) is True
+
+
 @pytest.mark.asyncio
 async def test_handle_empty_success_response_uses_tool_failure_message():
     runtime = _runtime()
@@ -3958,6 +4017,44 @@ def test_persist_success_memory_skips_bridge_memory_and_handoff():
     assert runtime.handoff_builder.transcript == []
     assert runtime.project_chat_logger.exchanges == []
 
+
+
+@pytest.mark.asyncio
+async def test_backend_failure_delivery_exception_preserves_primary_terminal(monkeypatch):
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error="Prepared input exceeds 40960 tokens",
+        error_code="CONTEXT_CAPACITY_REJECTED",
+        error_retryable=False, http_status=400,
+        provider_request_id="capacity-primary", tool_call_count=7,
+        side_effects_possible=False,
+    )
+    recorded = []
+
+    async def broken_delivery(**_kwargs):
+        raise BadRequest("Chat not found")
+
+    runtime.send_long_message = broken_delivery
+    monkeypatch.setattr(
+        runtime_cross_session, "record_turn_result",
+        lambda *args, **kwargs: recorded.append(kwargs),
+    )
+    await runtime_pipeline.handle_backend_error(
+        runtime, item, response, queued_at=datetime.now(),
+        queue_wait_s=0, backend_elapsed_s=0,
+    )
+
+    assert runtime.last_error == response.error
+    assert len(runtime.listener_payloads) == 1
+    terminal = runtime.listener_payloads[0]
+    assert terminal["error_code"] == "CONTEXT_CAPACITY_REJECTED"
+    assert terminal["provider_request_id"] == "capacity-primary"
+    assert terminal["tool_call_count"] == 7
+    assert terminal["error_retryable"] is False
+    assert recorded[0]["error"] == response.error
+    assert recorded[0]["delivered"] is False
+    assert any(event[0] == "send_error_failed" for event in runtime.maintenance_events)
 
 @pytest.mark.asyncio
 async def test_handle_backend_error_notifies_and_delivers_error():

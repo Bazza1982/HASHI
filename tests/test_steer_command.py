@@ -92,7 +92,7 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
         replies.append(text)
 
     async def _enqueue(chat_id, prompt, source, summary, **_kwargs):
-        enqueued.append((chat_id, prompt, source, summary))
+        enqueued.append((chat_id, prompt, source, summary, _kwargs))
         return "req-steer-1"
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -114,13 +114,29 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
             "prompt": "Implement feature X end to end",
             "source": "text",
             "summary": "Feature X",
+            "hashi_run_id": "run-old",
         },
-        last_prompt=SimpleNamespace(prompt="Implement feature X end to end", chat_id=42),
+        last_prompt=SimpleNamespace(
+            prompt="Implement feature X end to end", chat_id=42
+        ),
         is_generating=True,
         _is_authorized_user=lambda _uid: True,
         _reply_text=_reply,
         _notify_right_brain_interrupted=lambda *a, **k: None,
         enqueue_request=_enqueue,
+        session_store=SimpleNamespace(
+            get_run_by_request=lambda request_id, **_kwargs: {
+                "request_id": request_id,
+                "run_id": "run-new",
+            }
+        ),
+    )
+    runtime.backend_manager.current_backend.steer_continuation_evidence = (
+        lambda request_id: {
+            "kind": "herv3_active_turn_recovery",
+            "source_request_id": request_id,
+            "evidence_ref": "herv3:session-1:turn-old",
+        }
     )
     text = "/steer also include xxx in your tasks"
     msg = SimpleNamespace(text=text, chat=SimpleNamespace(id=42))
@@ -130,29 +146,205 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
         effective_message=msg,
         message=msg,
     )
-    await runtime_control.cmd_steer(
-        runtime,
-        update,
-        SimpleNamespace(args=["also", "include", "xxx", "in", "your", "tasks"]),
+    context = SimpleNamespace(
+        args=["also", "include", "xxx", "in", "your", "tasks"]
     )
+    receipt = await runtime_control.cmd_steer(runtime, update, context)
 
     shutdown.assert_awaited()
     assert queue.empty()
     assert len(enqueued) == 1
-    chat_id, prompt, source, summary = enqueued[0]
+    chat_id, prompt, source, summary, options = enqueued[0]
     assert chat_id == 42
     assert source == "steer"
+    assert options["request_metadata"]["parent_run_id"] == "run-old"
+    assert context.derived_request_id == "req-steer-1"
+    assert receipt["type"] == "hashi.steer-receipt"
+    assert receipt["version"] == 2
+    assert receipt["old_run"]["run_id"] == "run-old"
+    assert receipt["new_run"]["run_id"] == "run-new"
+    assert receipt["new_run"]["parent_run_id"] == "run-old"
+    assert receipt["new_run"]["continues_run_id"] == "run-old"
+    assert receipt["new_run"]["relationship"] == "linked_successor"
+    assert receipt["new_run"]["created"] is True
+    assert receipt["continuation"]["old_run_id"] == "run-old"
+    assert receipt["continuation"]["new_run_id"] == "run-new"
+    assert receipt["continuation"]["relationship"] == "linked_successor"
+    assert (
+        receipt["continuation"]["evidence_ref"]
+        == "herv3:session-1:turn-old"
+    )
     assert "also include xxx" in prompt
     assert "Implement feature X end to end" in prompt
     assert "KEEP all interim progress" in prompt
     assert replies and "Steered" in replies[0]
-    assert "req-steer-1" in replies[0]
-    # Intentional kill marker so exit -9 is not shown as ❌ Backend error
+    assert "run-old" in replies[0]
+    assert "run-new" in replies[0]
+    # Intentional kill marker so exit -9 is not shown as backend error.
     assert getattr(runtime, "_user_interrupt", None) is not None
     assert runtime._user_interrupt["reason"] == "user_steer"
     assert runtime._user_interrupt["request_id"] == "req-old"
     assert runtime_control.consume_user_interrupt(runtime, "req-old") == "user_steer"
     assert runtime_control.consume_user_interrupt(runtime, "req-old") is None
+
+
+@pytest.mark.asyncio
+async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
+    from orchestrator.frontend_delivery import (
+        RUN_DELIVERY_ROUTE_METADATA_KEY,
+        freeze_run_delivery_route,
+    )
+
+    enqueue = AsyncMock(return_value="req-new")
+    runtime = SimpleNamespace(enqueue_request=enqueue)
+    monkeypatch.setattr(
+        runtime_control,
+        "_command_request_route",
+        lambda _runtime, _update: (
+            0,
+            {
+                "session_id": "session-1",
+                "owner_id": "user:7",
+                "session_surface": "session-api",
+                "session_channel_key": "client-1",
+            },
+            False,
+        ),
+    )
+    parent_route = freeze_run_delivery_route(
+        message_source_id="session_api",
+        session_surface="session-api",
+        session_channel_key="client-1",
+        chat_id=7430217666,
+        telegram_requested=True,
+    )
+    parent_meta = {
+        "hashi_session_id": "session-1",
+        "chat_id": 7430217666,
+        "request_metadata": {
+            RUN_DELIVERY_ROUTE_METADATA_KEY: parent_route
+        },
+    }
+
+    request_id = await runtime_control._enqueue_command_request(
+        runtime,
+        SimpleNamespace(),
+        "continue",
+        "steer",
+        "Steer: continue",
+        continuation_parent_meta=parent_meta,
+    )
+
+    assert request_id == "req-new"
+    args, kwargs = enqueue.await_args
+    assert args[0] == 7430217666
+    assert kwargs["request_metadata"]["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_steer_and_focus_wrappers_return_typed_receipts(monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    steer_receipt = {"type": "hashi.steer-receipt", "version": 2}
+    focus_receipt = {"type": "hashi.focus-receipt", "version": 2}
+    steer = AsyncMock(return_value=steer_receipt)
+    focus = AsyncMock(return_value=focus_receipt)
+    monkeypatch.setattr(runtime_control, "cmd_steer", steer)
+    monkeypatch.setattr(runtime_control, "cmd_focus", focus)
+    runtime = SimpleNamespace()
+    update = SimpleNamespace()
+    context = SimpleNamespace()
+
+    assert (
+        await FlexibleAgentRuntime.cmd_steer(runtime, update, context)
+        == steer_receipt
+    )
+    assert (
+        await FlexibleAgentRuntime.cmd_focus(runtime, update, context)
+        == focus_receipt
+    )
+
+
+@pytest.mark.asyncio
+async def test_cmd_steer_uses_native_provider_turn_without_rebuilding_run():
+    replies: list[str] = []
+    shutdown = AsyncMock()
+    enqueue = AsyncMock()
+    native_steer = AsyncMock(
+        return_value={
+            "kind": "codex_app_server_native_steer",
+            "method": "turn/steer",
+            "status": "accepted",
+            "source_request_id": "req-old",
+            "provider_thread_id": "thread-old",
+            "provider_turn_id": "turn-old",
+            "accepted_turn_id": "turn-old",
+            "evidence_ref": "codex-app-server:thread-old:turn-old:steer:abc123",
+        }
+    )
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(object())
+    await queue.put(object())
+    backend = SimpleNamespace(shutdown=shutdown, steer_active=native_steer)
+    runtime = SimpleNamespace(
+        name="xishi",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="codex-cli", engine="codex-cli"),
+        queue=queue,
+        backend_manager=SimpleNamespace(current_backend=backend),
+        current_request_meta={
+            "request_id": "req-old",
+            "chat_id": 42,
+            "prompt": "Implement feature X end to end",
+            "source": "text",
+            "summary": "Feature X",
+            "hashi_run_id": "run-old",
+        },
+        last_prompt=SimpleNamespace(
+            prompt="Implement feature X end to end", chat_id=42
+        ),
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+        enqueue_request=enqueue,
+    )
+    msg = SimpleNamespace(
+        text="/steer focus on failing tests first",
+        chat=SimpleNamespace(id=42),
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=msg,
+        message=msg,
+    )
+    context = SimpleNamespace(args=["focus", "on", "failing", "tests", "first"])
+
+    receipt = await runtime_control.cmd_steer(runtime, update, context)
+
+    native_steer.assert_awaited_once_with(
+        "focus on failing tests first", request_id="req-old"
+    )
+    shutdown.assert_not_awaited()
+    enqueue.assert_not_awaited()
+    assert queue.empty()
+    assert getattr(runtime, "_user_interrupt", None) is None
+    assert context.derived_request_id == "req-old"
+    assert receipt["version"] == 2
+    assert receipt["old_run"]["run_id"] == "run-old"
+    assert receipt["old_run"]["terminal"] is None
+    assert receipt["new_run"]["run_id"] == "run-old"
+    assert receipt["new_run"]["created"] is False
+    assert receipt["new_run"]["relationship"] == "continued_in_place"
+    assert receipt["continuation"]["provider_turn_id"] == "turn-old"
+    assert receipt["continuation"]["old_run_id"] == "run-old"
+    assert receipt["continuation"]["continuing_run_id"] == "run-old"
+    assert replies and "Steered in place" in replies[0]
+    assert "same Run" in replies[0]
 
 
 @pytest.mark.asyncio

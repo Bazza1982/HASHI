@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,8 @@ from orchestrator.session_store import (
     SessionStore,
     StaleFencingToken,
 )
+from orchestrator.workzone import build_search_scope
+from tools.registry import ToolRegistry
 
 
 def _store(tmp_path) -> SessionStore:
@@ -417,6 +421,264 @@ def test_message_bound_attachment_becomes_indefinite(tmp_path):
     assert tuple(row) == (1, None)
 
 
+@pytest.mark.asyncio
+async def test_message_attachment_moves_to_private_agent_workspace_and_is_cleaned_with_session(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    agent = "lily"
+    session = store.ensure_default_session(owner_id=owner, agent_id=agent)
+    payload = b"private retained attachment"
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="evidence.txt",
+        media_type="text/plain",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+    )
+    staging_path = store._attachment_file_path(
+        staged["attachment_id"], staged["filename"]
+    )
+    agent_home = tmp_path / "workspaces" / agent
+    agent_home.mkdir(parents=True)
+
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id=agent,
+        request_id="req-private-attachment",
+        text="read this later",
+        source="session_api",
+        idempotency_key="private-attachment",
+        content=[
+            {"type": "text", "text": "read this later"},
+            {"type": "attachment", "attachment_id": staged["attachment_id"]},
+        ],
+        agent_workspace=agent_home,
+    )
+    part = store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        item_index=1,
+    )
+    stored_path = Path(part["local_ref"])
+
+    assert stored_path.parent == (
+        agent_home / ".attachments" / session["session_id"] / accepted.message_id
+    )
+    assert stored_path.read_bytes() == payload
+    assert not staging_path.exists()
+
+    workzone = tmp_path / "project"
+    other_home = tmp_path / "workspaces" / "other"
+    workzone.mkdir()
+    other_home.mkdir(parents=True)
+    state = {
+        "revision": 1,
+        "slots": [{"slot_id": "main", "path": str(workzone), "enabled": True}],
+    }
+
+    def registry_for(agent_id: str, home: Path) -> ToolRegistry:
+        scope = build_search_scope(
+            state,
+            owner_id=owner,
+            agent_id=agent_id,
+            agent_home=home,
+            execution_cwd=workzone,
+            access_roots=(workzone.resolve(),),
+        )
+        return ToolRegistry(
+            allowed_tools=["file_read"],
+            access_root=workzone,
+            workspace_dir=workzone,
+            secrets={},
+            audit_context={"agent_name": agent_id},
+            search_scope=scope,
+        )
+
+    own_read = await registry_for(agent, agent_home).execute(
+        "file_read", {"path": str(stored_path)}
+    )
+    other_read = await registry_for("other", other_home).execute(
+        "file_read", {"path": str(stored_path)}
+    )
+    assert own_read.is_error is False and "private retained attachment" in own_read.output
+    assert other_read.is_error is True
+    assert "outside the allowed access scopes" in other_read.output
+
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id=agent,
+        request_id="req-private-attachment-replay",
+        text="read this later",
+        source="session_api",
+        idempotency_key="private-attachment",
+        content=[
+            {"type": "text", "text": "read this later"},
+            {"type": "attachment", "attachment_id": staged["attachment_id"]},
+        ],
+        agent_workspace=agent_home,
+    )
+    assert replay.replayed is True
+    assert replay.message_id == accepted.message_id
+
+    with pytest.raises(SessionConflict, match="already bound to another Message"):
+        store.accept_run(
+            session_id=session["session_id"],
+            owner_id=owner,
+            agent_id=agent,
+            request_id="req-private-attachment-reuse",
+            text="reuse",
+            source="session_api",
+            idempotency_key="private-attachment-reuse",
+            content=[
+                {"type": "attachment", "attachment_id": staged["attachment_id"]}
+            ],
+            agent_workspace=agent_home,
+        )
+
+    assert store.purge_owner(owner_id=owner, agent_id=agent)["attachments"] == 1
+    assert not stored_path.exists()
+
+
+def test_canonical_media_path_rebinds_without_changing_run_idempotency(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    agent = "lily"
+    session = store.ensure_default_session(owner_id=owner, agent_id=agent)
+    payload = b"image bytes"
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="photo.png",
+        media_type="image/png",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+    )
+    original_part = store.attachment_canonical_part(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        item_index=1,
+    )
+    agent_home = tmp_path / "workspaces" / agent
+    agent_home.mkdir(parents=True)
+
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id=agent,
+        request_id="req-canonical-media",
+        text="inspect",
+        source="telegram",
+        idempotency_key="canonical-media",
+        content=[original_part],
+        agent_workspace=agent_home,
+    )
+    message = store.get_message(
+        accepted.message_id, session_id=session["session_id"], owner_id=owner
+    )
+    rebound = store.rebind_request_content_attachments(
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_content={
+            "type": "hashi.request-content",
+            "version": 1,
+            "parts": [original_part],
+        },
+    )
+    stored_ref = message["content"][0]["local_ref"]
+
+    assert stored_ref != original_part["local_ref"]
+    assert rebound["parts"][0]["local_ref"] == stored_ref
+    assert Path(stored_ref).read_bytes() == payload
+
+    legacy_digest_payload = {
+        "content": [original_part],
+        "attachments": [],
+        "display_text": None,
+        "execution_mode": "",
+        "parent_run_id": "",
+        "response_preferences": {},
+        "message_context": {},
+        "delivery_route": {},
+    }
+    legacy_digest = hashlib.sha256(
+        json.dumps(
+            legacy_digest_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE idempotency_records SET request_digest=?
+            WHERE session_id=? AND idempotency_key=?
+            """,
+            (legacy_digest, session["session_id"], "canonical-media"),
+        )
+        connection.execute(
+            "UPDATE runs SET request_digest=? WHERE run_id=?",
+            (legacy_digest, accepted.run_id),
+        )
+
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id=agent,
+        request_id="req-canonical-media-replay",
+        text="inspect",
+        source="telegram",
+        idempotency_key="canonical-media",
+        content=[original_part],
+        agent_workspace=agent_home,
+    )
+    assert replay.replayed is True
+    assert replay.message_id == accepted.message_id
+    with sqlite3.connect(store.db_path) as connection:
+        idempotency_digest = connection.execute(
+            """
+            SELECT request_digest FROM idempotency_records
+            WHERE session_id=? AND idempotency_key=?
+            """,
+            (session["session_id"], "canonical-media"),
+        ).fetchone()[0]
+        run_digest = connection.execute(
+            "SELECT request_digest FROM runs WHERE run_id=?",
+            (accepted.run_id,),
+        ).fetchone()[0]
+    assert idempotency_digest == run_digest
+    assert idempotency_digest != legacy_digest
+
+
 def test_voice_transcript_decision_is_fenced_to_its_original_session_generation(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
@@ -509,7 +771,7 @@ def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monk
     store = _store(tmp_path)
     owner = "user:7"
     session = store.create_session(owner_id=owner, agent_id="lily")
-    for request_id in ("phone-stop", "backend-error"):
+    for request_id in ("phone-stop", "steered-run", "backend-error"):
         store.accept_run(
             session_id=session["session_id"], owner_id=owner, agent_id="lily",
             request_id=request_id, text="check", source="workbench",
@@ -530,9 +792,21 @@ def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monk
     runtime_session.finish_request_from_listener(runtime, "backend-error", {
         "success": False, "error": "backend failed",
     })
+    runtime_session.finish_request_from_listener(runtime, "steered-run", {
+        "success": False, "error": "Interrupted by user_steer",
+        "interrupted": True, "interrupt_reason": "user_steer",
+    })
 
-    assert store.get_run_by_request("phone-stop", owner_id=owner)["state"] == "stopped"
-    assert store.get_run_by_request("backend-error", owner_id=owner)["state"] == "failed"
+    stopped = store.get_run_by_request("phone-stop", owner_id=owner)
+    steered = store.get_run_by_request("steered-run", owner_id=owner)
+    failed = store.get_run_by_request("backend-error", owner_id=owner)
+    assert stopped["state"] == "stopped"
+    assert steered["state"] == "superseded"
+    assert steered["error_code"] == "run_superseded"
+    assert failed["state"] == "failed"
+    assert failed["error_code"] == "run_failed"
+    events = store.events(session["session_id"], owner_id=owner)
+    assert [event["kind"] for event in events].count("run.superseded") == 1
 
 
 def test_reconcile_durable_user_stop_receipt_marks_only_matching_run_stopped(tmp_path):
@@ -2191,13 +2465,14 @@ def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp
     assert [event["kind"] for event in store.events(session["session_id"])] == [
         "session.created",
         "run.accepted",
+        "session.title_updated",
         "run.started",
         "run.completed",
     ]
     with sqlite3.connect(store.db_path) as connection:
         assert (
             connection.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
-            == 2
+            == 3
         )
 
 
@@ -3441,3 +3716,63 @@ def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(t
     assert [item["summary"] for item in second_page[5:]] == [
         f"event-{i}" for i in range(1, 21)
     ]
+def test_hchat_idempotency_replays_across_transport_specific_envelopes(tmp_path):
+    store = _store(tmp_path)
+    session = store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    logical_message = {
+        "message_id": "hchat-cross-transport-1",
+        "originated_at": "2026-10-16T00:00:00Z",
+        "message_type": "agent_message",
+        "idempotency_key": "hchat:hchat-cross-transport-1",
+        "payload_digest": "sha256:" + "a" * 64,
+    }
+    first = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-hchat-protocol",
+        text="System exchange message from rain@HASHI2:\nreview this",
+        source="protocol:message",
+        idempotency_key=logical_message["idempotency_key"],
+        message_context={
+            "hchat_message": logical_message,
+            "network_authentication": "shared_network_hmac",
+        },
+        delivery_route={"session_surface": "remote"},
+    )
+
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-hchat-exchange-fallback",
+        text="Independent Exchange message from rain: review this",
+        source="hchat-exchange",
+        idempotency_key=logical_message["idempotency_key"],
+        message_context={
+            "hchat_message": dict(logical_message),
+            "network_authentication": "exchange_wss",
+        },
+        delivery_route={"session_surface": "exchange"},
+    )
+
+    assert replay.replayed is True
+    assert replay.run_id == first.run_id
+    assert replay.request_id == first.request_id
+    assert len(store.recent_session_runs(session["session_id"], owner_id="user:7")) == 1
+
+    conflicting = dict(logical_message)
+    conflicting["payload_digest"] = "sha256:" + "b" * 64
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            agent_id="lily",
+            request_id="req-hchat-conflict",
+            text="different body",
+            source="hchat",
+            idempotency_key=logical_message["idempotency_key"],
+            message_context={"hchat_message": conflicting},
+        )

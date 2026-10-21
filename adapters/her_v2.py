@@ -63,11 +63,16 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.her_v2.session_store import HerSessionStoreError
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator import final_style_policy
 from orchestrator.privacy_levels import require_herv3_provider_compatibility
 from orchestrator.her_v2.wip_journal import WIPJournal
+from orchestrator.her_v2.visual_fallback import (
+    configured_same_provider_models,
+    lan_vision_configured,
+)
 from orchestrator.multimodal_contract import (
     media_failure_code,
     native_media_failure_reason,
@@ -246,6 +251,14 @@ class HERv2Adapter(BaseBackend):
 
     def _runtime_context(self) -> Any:
         return getattr(self.config, "_hashi_runtime", None)
+
+    def _compute_services_config_path(self) -> Path | None:
+        root = getattr(self.global_config, "bridge_home", None) or getattr(
+            self.global_config,
+            "project_root",
+            None,
+        )
+        return Path(root) / "compute_services.json" if root else None
 
     def _final_style_enabled(self) -> bool:
         """Resolve the workspace switch at turn start for immediate on/off changes."""
@@ -523,14 +536,20 @@ class HERv2Adapter(BaseBackend):
 
         manager = self._backend_manager()
         select_backend = getattr(manager, "_select_backend_cfg", None)
-        rejected: list[tuple[str, str]] = []
-        for profile in resolved.all_provider_profiles():
+        profiles = tuple(resolved.all_provider_profiles())
+
+        def capability_for(
+            profile: ProviderProfile,
+            *,
+            model: str | None = None,
+        ):
+            target_model = str(model or profile.model)
             capability_config: dict[str, Any] = {}
             if callable(select_backend):
                 try:
                     configured = select_backend(
                         profile.engine,
-                        target_model=profile.model,
+                        target_model=target_model,
                     )
                 except (TypeError, ValueError):
                     configured = None
@@ -540,12 +559,16 @@ class HERv2Adapter(BaseBackend):
                         capability_config.update(dict(nested_extra))
                     capability_config.update(dict(configured))
             capability_config.update(dict(profile.options))
-            capability = resolve_input_capability(
+            return resolve_input_capability(
                 profile.engine,
-                profile.model,
+                target_model,
                 config=capability_config,
                 capability_cache_path=self._model_capability_cache_path(),
             )
+
+        rejected: list[tuple[str, str]] = []
+        for profile in profiles:
+            capability = capability_for(profile)
             transports = capability.input_transports.get(
                 normalized_modality,
                 (),
@@ -569,6 +592,52 @@ class HERv2Adapter(BaseBackend):
                     ),
                 )
             )
+
+        if normalized_modality == "image":
+            checked_candidates: set[tuple[str, str]] = set()
+            for profile in profiles:
+                for candidate_model in configured_same_provider_models(
+                    manager,
+                    profile,
+                ):
+                    candidate_key = (profile.engine, candidate_model)
+                    if (
+                        candidate_model == profile.model
+                        or candidate_key in checked_candidates
+                    ):
+                        continue
+                    checked_candidates.add(candidate_key)
+                    capability = capability_for(
+                        profile,
+                        model=candidate_model,
+                    )
+                    transports = capability.input_transports.get("image", ())
+                    if any(
+                        capability.supports("image", transport)
+                        for transport in transports
+                    ):
+                        return {
+                            "accepted": True,
+                            "reason": "same_provider_visual_fallback_available",
+                            "code": "",
+                            "model": candidate_model,
+                            "fallback_type": "same_provider_visual_model",
+                            "provider": profile.engine,
+                            "failed_model": profile.model,
+                        }
+            try:
+                compute_config_path = self._compute_services_config_path()
+            except (AttributeError, OSError, TypeError, ValueError):
+                compute_config_path = None
+            if lan_vision_configured(compute_config_path):
+                return {
+                    "accepted": True,
+                    "reason": "lan_compute_vision_fallback_configured",
+                    "code": "",
+                    "model": "HASHI Compute",
+                    "fallback_type": "lan_compute_vision",
+                }
+
         priorities = (
             "model_capability_unknown",
             "adapter_transport_unimplemented",
@@ -776,6 +845,37 @@ class HERv2Adapter(BaseBackend):
             return dict(current)
         return {}
 
+    def _close_interrupted_fixed_turn(
+        self,
+        accepted: AcceptedHerTurn,
+        *,
+        request_id: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        """Close a fixed Turn according to the typed user interruption."""
+
+        if self._session_coordinator is None:
+            return {}
+        try:
+            from orchestrator.runtime_control import peek_user_interrupt
+
+            interrupt_reason = peek_user_interrupt(
+                self._runtime_context(), str(request_id or "") or None
+            )
+        except Exception:
+            interrupt_reason = None
+        if interrupt_reason in {"user_steer", "user_focus"}:
+            return self._session_coordinator.steer(
+                accepted,
+                reason=(
+                    "HASHI /steer preserved the active HER turn for continuation."
+                ),
+            )
+        return self._session_coordinator.cancel(
+            accepted,
+            reason=str(fallback_reason or "HASHI cancelled the active HER turn."),
+        )
+
     def _schedule_execution_stage_compaction(self, request_id: str) -> bool:
         runtime = self._runtime_context()
         if runtime is None:
@@ -926,6 +1026,7 @@ class HERv2Adapter(BaseBackend):
                 # A Session handle is an execution owner, not a Worker startup.
                 # Reconciliation and learning lifecycle remain with the owner.
                 for name in (
+                    "_wip_active_journals", "_canonical_active_turns",
                     "_session_coordinator", "_ledger_store", "_wip_journal", "_audit_log", "_learning",
                     "_habit_execution_lock", "_habit_meditation_execution_lock",
                     "_habit_dream_execution_lock", "_habit_dream_run_lock",
@@ -1058,6 +1159,7 @@ class HERv2Adapter(BaseBackend):
             raise HerFixedProtocolError(
                 "session_core_unavailable", "HER fixed-session core is not initialized."
             )
+        self._adopt_verified_steer_session(request_meta)
         if not self._session_id:
             self._session_id = f"her-{uuid.uuid4().hex}"
         snapshot = prompt_payload.get("transport_snapshot")
@@ -1096,8 +1198,6 @@ class HERv2Adapter(BaseBackend):
             revoked_resource_ids=[str(item) for item in revoked_resources],
         )
         self._fixed_transport_audit[str(request_id)] = dict(audit)
-        while len(self._fixed_transport_audit) > 512:
-            self._fixed_transport_audit.pop(next(iter(self._fixed_transport_audit)))
         return encoded, audit
 
     def _fixed_session_binding(
@@ -1122,6 +1222,40 @@ class HERv2Adapter(BaseBackend):
             ),
         }
 
+    def _adopt_verified_steer_session(
+        self, request_meta: Mapping[str, Any]
+    ) -> None:
+        """Restore the interrupted HER Session before opening a successor Turn."""
+
+        request_metadata = request_meta.get("request_metadata")
+        if not isinstance(request_metadata, Mapping):
+            return
+        evidence = request_metadata.get("steer_continuation_evidence")
+        if not isinstance(evidence, Mapping):
+            return
+        if str(evidence.get("kind") or "") != "herv3_active_turn_recovery":
+            return
+        if self._session_coordinator is None:
+            raise HerFixedProtocolError(
+                "session_core_unavailable",
+                "HER fixed-session core is not initialized.",
+            )
+        try:
+            session_id = (
+                self._session_coordinator.store.verified_steer_session_id(
+                    evidence,
+                    **self._fixed_session_binding(request_meta),
+                )
+            )
+        except HerSessionStoreError as exc:
+            raise HerFixedProtocolError(exc.code, str(exc)) from exc
+        if not session_id:
+            raise HerFixedProtocolError(
+                "invalid_steer_continuation",
+                "The /steer continuation receipt is invalid or no longer resumable.",
+            )
+        self._session_id = session_id
+
     def can_resume_fixed_session(self) -> bool:
         """Confirm that an outer HASHI binding has durable HER state behind it."""
 
@@ -1141,6 +1275,18 @@ class HERv2Adapter(BaseBackend):
         # A closed epoch is never resumed under the old ID.
         self._session_id = None
         return False
+
+    def steer_continuation_evidence(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Expose only the durable continuation receipt, never provider reasoning."""
+
+        if self._session_coordinator is None:
+            return None
+        return self._session_coordinator.store.interruption_evidence_for_request(
+            str(request_id or "")
+        )
+
 
     def _new_stage_provider(
         self,
@@ -1165,6 +1311,7 @@ class HERv2Adapter(BaseBackend):
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
             capability_cache_path=self._model_capability_cache_path(),
+            compute_services_config_path=self._compute_services_config_path(),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -1548,6 +1695,7 @@ class HERv2Adapter(BaseBackend):
         frozen_route: dict[str, Any] = {}
         wip_parity: dict[str, Any] = {}
         canonical_recovery_context: dict[str, Any] | None = None
+        private_provider_context: dict[str, Any] | None = None
         pcm_runtime_context: dict[str, Any] = {}
         if (
             not self._initialized
@@ -1712,6 +1860,20 @@ class HERv2Adapter(BaseBackend):
                     error=exc,
                 )
             if canonical_recovery_context:
+                try:
+                    private_provider_context = (
+                        self._session_coordinator.store.provider_context_for_turn(
+                            fixed_turn.session_id,
+                            fixed_turn.turn_id,
+                        )
+                    )
+                except Exception as exc:
+                    return self._fixed_control_failure_response(
+                        accepted=fixed_turn,
+                        started=started,
+                        operation="private provider recovery readback",
+                        error=exc,
+                    )
                 pcm_runtime_context["active_turn_recovery"] = dict(
                     canonical_recovery_context
                 )
@@ -1913,6 +2075,20 @@ class HERv2Adapter(BaseBackend):
                     error=exc,
                 )
             raise
+        if (
+            isinstance(provider, HashiStageProvider)
+            and fixed_turn is not None
+            and self._session_coordinator is not None
+        ):
+            provider.bind_provider_context(
+                observer=lambda checkpoint: (
+                    self._session_coordinator.record_provider_context_checkpoint(
+                        fixed_turn,
+                        checkpoint,
+                    )
+                ),
+                recovery=private_provider_context,
+            )
         runtime_config = replace(
             turn_config,
             # The shared /timeout command is idle-only.  Bind its live value
@@ -2142,9 +2318,10 @@ class HERv2Adapter(BaseBackend):
                 )
             finally:
                 if fixed_turn is not None and self._session_coordinator is not None:
-                    self._session_coordinator.cancel(
+                    self._close_interrupted_fixed_turn(
                         fixed_turn,
-                        reason="HASHI cancelled the active HER turn.",
+                        request_id=request_id,
+                        fallback_reason="HASHI cancelled the active HER turn.",
                     )
             raise
         except BaseException as exc:
@@ -2324,9 +2501,6 @@ class HERv2Adapter(BaseBackend):
                 "text_sha256": "sha256:"
                 + hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
             }
-            while len(self._pending_delivery_receipts) > 512:
-                oldest = next(iter(self._pending_delivery_receipts))
-                self._pending_delivery_receipts.pop(oldest, None)
         technical_error = result.terminal_state is TerminalState.ERROR
         stopped = result.terminal_state is TerminalState.STOPPED
         error = result.error
@@ -2377,9 +2551,10 @@ class HERv2Adapter(BaseBackend):
                     ),
                 }
             if stopped:
-                closed_turn = self._session_coordinator.cancel(
+                closed_turn = self._close_interrupted_fixed_turn(
                     fixed_turn,
-                    reason=error,
+                    request_id=request_id,
+                    fallback_reason=error,
                 )
             else:
                 closed_turn = self._session_coordinator.complete(
@@ -2566,9 +2741,6 @@ class HERv2Adapter(BaseBackend):
         )
         self._pending_delivery_receipts.pop(identifier, None)
         self._recorded_delivery_ids.add(identifier)
-        if len(self._recorded_delivery_ids) > 1024:
-            self._recorded_delivery_ids.clear()
-            self._recorded_delivery_ids.add(identifier)
         return True
 
     def record_maintenance_provider_requests(
@@ -2655,10 +2827,6 @@ class HERv2Adapter(BaseBackend):
                 "HASHI conversation did not durably retain the HER accounting binding"
             )
         self._maintenance_accounting_sessions[request_id] = self._session_id
-        while len(self._maintenance_accounting_sessions) > 512:
-            self._maintenance_accounting_sessions.pop(
-                next(iter(self._maintenance_accounting_sessions))
-            )
         return self.can_record_maintenance_provider_requests()
 
     def can_record_maintenance_provider_requests(self) -> bool:
@@ -2710,20 +2878,30 @@ class HERv2Adapter(BaseBackend):
             "user_stop": "USER_STOP",
             "user_retry": "USER_STOP",
         }.get(raw_reason, "RUNTIME_SHUTDOWN")
-        if reason == "USER_STOP" and self._session_coordinator is not None:
+        if reason in {"USER_STOP", "STEERED"} and self._session_coordinator is not None:
             # /stop must release the durable fixed-session turn before the
             # outer request task can be cancelled. Otherwise cancellation
             # during request-local service cleanup can leave this row active
             # even though the HASHI Run is already durably stopped.
-            for accepted in tuple(self._canonical_active_turns.values()):
+            for request_ref, accepted in tuple(
+                self._canonical_active_turns.items()
+            ):
                 try:
-                    self._session_coordinator.cancel(
+                    self._close_interrupted_fixed_turn(
                         accepted,
-                        reason="HASHI /stop cancelled the active HER turn.",
+                        request_id=str(request_ref).removeprefix(
+                            "hashi-request:"
+                        ),
+                        fallback_reason=(
+                            "HASHI /stop cancelled the active HER turn."
+                            if reason == "USER_STOP"
+                            else "HASHI /steer preserved the active HER turn "
+                            "for continuation."
+                        ),
                     )
                 except HerFixedProtocolError as exc:
                     self.logger.warning(
-                        "HERV3 fixed-turn cancellation during /stop failed: %s",
+                        "HERV3 fixed-turn interruption close failed: %s",
                         exc.code,
                     )
         active = tuple(self._active_runtimes.values())

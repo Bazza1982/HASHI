@@ -1,0 +1,964 @@
+{
+  "services": [
+    {
+      "adapter": "edge",
+      "fallbacks": [
+        "windows",
+        "macos",
+        "piper",
+        "kokoro"
+      ],
+      "id": "edge",
+      "label": "Edge TTS",
+      "location": "cloud",
+      "menu_label": "Edge",
+      "style_support": "unsupported"
+    },
+    {
+      "adapter": "windows",
+      "fallbacks": [],
+      "id": "windows",
+      "label": "Windows TTS",
+      "location": "local",
+      "menu_label": "Windows",
+      "platforms": [
+        "win32"
+      ],
+      "style_support": "unsupported"
+    },
+    {
+      "adapter": "macos",
+      "fallbacks": [],
+      "id": "macos",
+      "label": "macOS TTS",
+      "location": "local",
+      "menu_label": "macOS",
+      "platforms": [
+        "darwin"
+      ],
+      "style_support": "unsupported"
+    },
+    {
+      "adapter": "piper",
+      "fallbacks": [],
+      "id": "piper",
+      "label": "Piper TTS",
+      "location": "local",
+      "menu_label": "Piper",
+      "style_support": "unsupported"
+    },
+    {
+      "adapter": "kokoro",
+      "fallbacks": [],
+      "id": "kokoro",
+      "label": "Kokoro TTS",
+      "location": "local",
+      "menu_label": "Kokoro",
+      "style_support": "unsupported"
+    },
+    {
+      "adapter": "coqui",
+      "fallbacks": [],
+      "id": "coqui",
+      "label": "Coqui TTS",
+      "location": "local",
+      "menu_label": "Coqui",
+      "style_support": "unknown"
+    },
+    {
+      "adapter": "openai_compatible",
+      "audio_format": "pcm",
+      "base_url": "https://openrouter.ai/api/v1",
+      "credential_ref": "secrets://openrouter-api_key",
+      "enabled": false,
+      "fallbacks": [
+        "edge",
+        "windows",
+        "macos",
+        "piper",
+        "kokoro"
+      ],
+      "id": "openrouter-gemini-tts",
+      "label": "Gemini 3.8 Flash-Lite TTS (OpenRouter)",
+      "location": "cloud",
+      "menu_label": "Gemini TTS",
+      "model": "google/gemini-3.8-flash-lite-tts",
+      "pcm_sample_rate_hz": 24000,
+      "style_support": "supported"
+    }
+  ],
+  "version": 1,
+  "voices": [
+    {
+      "gender": "female",
+      "id": "eus",
+      "label": "Emma [US Edge]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "service": "edge",
+      "voice_name": "en-US-EmmaNeural"
+    },
+    {
+      "gender": "male",
+      "id": "eusm",
+      "label": "Guy [US Edge]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "service": "edge",
+      "voice_name": "en-US-GuyNeural"
+    },
+    {
+      "gender": "female",
+      "id": "euk",
+      "label": "Sonia [UK Edge]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (UK)",
+        "zh-CN": "英式英语"
+      },
+      "locale": "en-GB",
+      "service": "edge",
+      "voice_name": "en-GB-SoniaNeural"
+    },
+    {
+      "gender": "male",
+      "id": "eukm",
+      "label": "Ryan [UK Edge]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (UK)",
+        "zh-CN": "英式英语"
+      },
+      "locale": "en-GB",
+      "service": "edge",
+      "voice_name": "en-GB-RyanNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "晓晓"
+      },
+      "gender": "female",
+      "id": "ecn",
+      "label": "Xiaoxiao [CN Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "service": "edge",
+      "voice_name": "zh-CN-XiaoxiaoNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "晓伊"
+      },
+      "gender": "female",
+      "id": "ecny",
+      "label": "Xiaoyi [CN Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "service": "edge",
+      "voice_name": "zh-CN-XiaoyiNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "云希"
+      },
+      "gender": "male",
+      "id": "ecnm",
+      "label": "Yunxi [CN Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "service": "edge",
+      "voice_name": "zh-CN-YunxiNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "曉臻"
+      },
+      "gender": "female",
+      "id": "ectc",
+      "label": "HsiaoChen [TW Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Traditional Chinese (Taiwan)",
+        "zh-CN": "繁中·台湾"
+      },
+      "locale": "zh-TW",
+      "service": "edge",
+      "voice_name": "zh-TW-HsiaoChenNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "曉雨"
+      },
+      "gender": "female",
+      "id": "ecty",
+      "label": "HsiaoYu [TW Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Traditional Chinese (Taiwan)",
+        "zh-CN": "繁中·台湾"
+      },
+      "locale": "zh-TW",
+      "service": "edge",
+      "voice_name": "zh-TW-HsiaoYuNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "雲哲"
+      },
+      "gender": "male",
+      "id": "ectm",
+      "label": "YunJhe [TW Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Traditional Chinese (Taiwan)",
+        "zh-CN": "繁中·台湾"
+      },
+      "locale": "zh-TW",
+      "service": "edge",
+      "voice_name": "zh-TW-YunJheNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "曉曼"
+      },
+      "gender": "female",
+      "id": "echm",
+      "label": "HiuMaan [HK Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Cantonese (Hong Kong)",
+        "zh-CN": "粤语·香港"
+      },
+      "locale": "zh-HK",
+      "service": "edge",
+      "voice_name": "zh-HK-HiuMaanNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "曉佳"
+      },
+      "gender": "female",
+      "id": "echg",
+      "label": "HiuGaai [HK Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Cantonese (Hong Kong)",
+        "zh-CN": "粤语·香港"
+      },
+      "locale": "zh-HK",
+      "service": "edge",
+      "voice_name": "zh-HK-HiuGaaiNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "雲龍"
+      },
+      "gender": "male",
+      "id": "echkm",
+      "label": "WanLung [HK Edge]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Cantonese (Hong Kong)",
+        "zh-CN": "粤语·香港"
+      },
+      "locale": "zh-HK",
+      "service": "edge",
+      "voice_name": "zh-HK-WanLungNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "七海"
+      },
+      "gender": "female",
+      "id": "eja",
+      "label": "Nanami [JP Edge]",
+      "language": "Japanese",
+      "language_labels": {
+        "en": "Japanese",
+        "zh-CN": "日语"
+      },
+      "locale": "ja-JP",
+      "service": "edge",
+      "voice_name": "ja-JP-NanamiNeural"
+    },
+    {
+      "display_names": {
+        "zh-CN": "圭太"
+      },
+      "gender": "male",
+      "id": "ejam",
+      "label": "Keita [JP Edge]",
+      "language": "Japanese",
+      "language_labels": {
+        "en": "Japanese",
+        "zh-CN": "日语"
+      },
+      "locale": "ja-JP",
+      "service": "edge",
+      "voice_name": "ja-JP-KeitaNeural"
+    },
+    {
+      "gender": "female",
+      "id": "us",
+      "label": "Lessac [Piper-US]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "service": "piper",
+      "voice_name": "voice_models/piper/en_US-lessac-high.onnx"
+    },
+    {
+      "gender": "female",
+      "id": "uk",
+      "label": "Cori [Piper-UK]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (UK)",
+        "zh-CN": "英式英语"
+      },
+      "locale": "en-GB",
+      "service": "piper",
+      "voice_name": "voice_models/piper/en_GB-cori-high.onnx"
+    },
+    {
+      "display_names": {
+        "zh-CN": "华妍"
+      },
+      "gender": "female",
+      "id": "pcn",
+      "label": "Huayan [Piper-CN]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "service": "piper",
+      "voice_name": "voice_models/piper/zh_CN-huayan-medium.onnx"
+    },
+    {
+      "display_names": {
+        "zh-CN": "慧慧"
+      },
+      "gender": "female",
+      "id": "cn",
+      "label": "Huihui [Win-CN]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "service": "windows",
+      "voice_name": "Microsoft Huihui Desktop"
+    },
+    {
+      "gender": "female",
+      "id": "wus",
+      "label": "Zira [Win-US]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "service": "windows",
+      "voice_name": "Microsoft Zira Desktop"
+    },
+    {
+      "gender": "male",
+      "id": "wusm",
+      "label": "David [Win-US]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "service": "windows",
+      "voice_name": "Microsoft David Desktop"
+    },
+    {
+      "gender": "female",
+      "id": "ko_bella",
+      "label": "Bella [Kokoro EN]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "provider_options": {
+        "lang_code": "a"
+      },
+      "service": "kokoro",
+      "voice_name": "af_bella"
+    },
+    {
+      "gender": "female",
+      "id": "ko_heart",
+      "label": "Heart [Kokoro EN]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "provider_options": {
+        "lang_code": "a"
+      },
+      "service": "kokoro",
+      "voice_name": "af_heart"
+    },
+    {
+      "gender": "male",
+      "id": "ko_michael",
+      "label": "Michael [Kokoro EN-US]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "provider_options": {
+        "lang_code": "a"
+      },
+      "service": "kokoro",
+      "voice_name": "am_michael"
+    },
+    {
+      "gender": "female",
+      "id": "ko_emma",
+      "label": "Emma [Kokoro EN-GB]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (UK)",
+        "zh-CN": "英式英语"
+      },
+      "locale": "en-GB",
+      "provider_options": {
+        "lang_code": "b"
+      },
+      "service": "kokoro",
+      "voice_name": "bf_emma"
+    },
+    {
+      "gender": "male",
+      "id": "ko_george",
+      "label": "George [Kokoro EN-GB]",
+      "language": "English",
+      "language_labels": {
+        "en": "English (UK)",
+        "zh-CN": "英式英语"
+      },
+      "locale": "en-GB",
+      "provider_options": {
+        "lang_code": "b"
+      },
+      "service": "kokoro",
+      "voice_name": "bm_george"
+    },
+    {
+      "display_names": {
+        "zh-CN": "晓晓"
+      },
+      "gender": "female",
+      "id": "ko_xiaoxiao",
+      "label": "Xiaoxiao [Kokoro ZH]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "provider_options": {
+        "lang_code": "z"
+      },
+      "service": "kokoro",
+      "voice_name": "zf_xiaoxiao"
+    },
+    {
+      "display_names": {
+        "zh-CN": "晓蓓"
+      },
+      "gender": "female",
+      "id": "ko_xiaobei",
+      "label": "Xiaobei [Kokoro ZH]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "provider_options": {
+        "lang_code": "z"
+      },
+      "service": "kokoro",
+      "voice_name": "zf_xiaobei"
+    },
+    {
+      "display_names": {
+        "zh-CN": "云希"
+      },
+      "gender": "male",
+      "id": "ko_yunxi",
+      "label": "Yunxi [Kokoro ZH]",
+      "language": "Chinese",
+      "language_labels": {
+        "en": "Simplified Chinese",
+        "zh-CN": "简中"
+      },
+      "locale": "zh-CN",
+      "provider_options": {
+        "lang_code": "z"
+      },
+      "service": "kokoro",
+      "voice_name": "zm_yunxi"
+    },
+    {
+      "gender": "female",
+      "id": "ko_alpha",
+      "label": "Alpha [Kokoro JA]",
+      "language": "Japanese",
+      "language_labels": {
+        "en": "Japanese",
+        "zh-CN": "日语"
+      },
+      "locale": "ja-JP",
+      "provider_options": {
+        "lang_code": "j"
+      },
+      "service": "kokoro",
+      "voice_name": "jf_alpha"
+    },
+    {
+      "gender": "male",
+      "id": "ko_kumo",
+      "label": "Kumo [Kokoro JA]",
+      "language": "Japanese",
+      "language_labels": {
+        "en": "Japanese",
+        "zh-CN": "日语"
+      },
+      "locale": "ja-JP",
+      "provider_options": {
+        "lang_code": "j"
+      },
+      "service": "kokoro",
+      "voice_name": "jm_kumo"
+    },
+    {
+      "gender": "female",
+      "id": "maus_ava",
+      "label": "Ava [macOS EN-US]",
+      "language": "en-US",
+      "locale": "en-US",
+      "platforms": [
+        "darwin"
+      ],
+      "service": "macos",
+      "voice_name": "Ava"
+    },
+    {
+      "gender": "female",
+      "id": "maus_samantha",
+      "label": "Samantha [macOS EN-US]",
+      "language": "en-US",
+      "locale": "en-US",
+      "platforms": [
+        "darwin"
+      ],
+      "service": "macos",
+      "voice_name": "Samantha"
+    },
+    {
+      "gender": "male",
+      "id": "maus_alex",
+      "label": "Alex [macOS EN-US male]",
+      "language": "en-US",
+      "locale": "en-US",
+      "platforms": [
+        "darwin"
+      ],
+      "service": "macos",
+      "voice_name": "Alex"
+    },
+    {
+      "gender": "male",
+      "id": "maus_daniel",
+      "label": "Daniel [macOS EN-GB]",
+      "language": "en-GB",
+      "locale": "en-GB",
+      "platforms": [
+        "darwin"
+      ],
+      "service": "macos",
+      "voice_name": "Daniel"
+    },
+    {
+      "gender": "female",
+      "id": "maus_moira",
+      "label": "Moira [macOS EN-IE]",
+      "language": "en-IE",
+      "locale": "en-IE",
+      "platforms": [
+        "darwin"
+      ],
+      "service": "macos",
+      "voice_name": "Moira"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_achernar",
+      "label": "Achernar [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Soft",
+      "voice_name": "Achernar"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_achird",
+      "label": "Achird [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Friendly",
+      "voice_name": "Achird"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_algenib",
+      "label": "Algenib [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Gravelly",
+      "voice_name": "Algenib"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_algieba",
+      "label": "Algieba [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Smooth",
+      "voice_name": "Algieba"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_alnilam",
+      "label": "Alnilam [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Alnilam"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_aoede",
+      "label": "Aoede [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Breezy",
+      "voice_name": "Aoede"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_autonoe",
+      "label": "Autonoe [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Bright",
+      "voice_name": "Autonoe"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_callirrhoe",
+      "label": "Callirrhoe [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Easy-going",
+      "voice_name": "Callirrhoe"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_charon",
+      "label": "Charon [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Informative",
+      "voice_name": "Charon"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_despina",
+      "label": "Despina [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Smooth",
+      "voice_name": "Despina"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_enceladus",
+      "label": "Enceladus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Breathy",
+      "voice_name": "Enceladus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_erinome",
+      "label": "Erinome [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Clear",
+      "voice_name": "Erinome"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_fenrir",
+      "label": "Fenrir [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Excitable",
+      "voice_name": "Fenrir"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_gacrux",
+      "label": "Gacrux [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Mature",
+      "voice_name": "Gacrux"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_iapetus",
+      "label": "Iapetus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Clear",
+      "voice_name": "Iapetus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_kore",
+      "label": "Kore [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Kore"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_laomedeia",
+      "label": "Laomedeia [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Upbeat",
+      "voice_name": "Laomedeia"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_leda",
+      "label": "Leda [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Youthful",
+      "voice_name": "Leda"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_orus",
+      "label": "Orus [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Firm",
+      "voice_name": "Orus"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_pulcherrima",
+      "label": "Pulcherrima [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Forward",
+      "voice_name": "Pulcherrima"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_puck",
+      "label": "Puck [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Upbeat",
+      "voice_name": "Puck"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_rasalgethi",
+      "label": "Rasalgethi [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Informative",
+      "voice_name": "Rasalgethi"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_sadachbia",
+      "label": "Sadachbia [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Lively",
+      "voice_name": "Sadachbia"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_sadaltager",
+      "label": "Sadaltager [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Knowledgeable",
+      "voice_name": "Sadaltager"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_schedar",
+      "label": "Schedar [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Even",
+      "voice_name": "Schedar"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_sulafat",
+      "label": "Sulafat [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Warm",
+      "voice_name": "Sulafat"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_umbriel",
+      "label": "Umbriel [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Easy-going",
+      "voice_name": "Umbriel"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_vindemiatrix",
+      "label": "Vindemiatrix [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Gentle",
+      "voice_name": "Vindemiatrix"
+    },
+    {
+      "gender": "female",
+      "id": "or_g_zephyr",
+      "label": "Zephyr [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Bright",
+      "voice_name": "Zephyr"
+    },
+    {
+      "gender": "male",
+      "id": "or_g_zubenelgenubi",
+      "label": "Zubenelgenubi [Gemini TTS]",
+      "language": "Multilingual",
+      "locale": "en-US",
+      "other_languages_unsupported": false,
+      "service": "openrouter-gemini-tts",
+      "style": "Casual",
+      "voice_name": "Zubenelgenubi"
+    }
+  ]
+}

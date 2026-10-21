@@ -138,6 +138,29 @@ PAO is the sole owner of:
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
 
+A successful Engine response is deliverable only after PAO removes recognized
+internal control envelopes. A response containing only a recognized Memory Plus
+control envelope is not a user result: PAO must settle the Run and visible
+request activity through a durable terminal failure before any Frontend
+projection. It must never leave the Run in `running` merely because the raw
+provider text was non-empty. Typed audio remains independently deliverable.
+
+#### Delayed ingress confirmation (implemented 2026-10-16)
+
+PAO owns the durable confirmation ledger for network messages that fail the
+Frontend Connector freshness window. The ledger binds source message ID,
+idempotency key, payload digest, owner, Agent, Session, context generation,
+attachments, original timestamp, receipt timestamp and decision deadline.
+Creating a pending confirmation is not Message or Run admission and cannot
+invoke an Agent, transcription or Tool. Confirming performs the ordinary
+admission path with the saved payload and exactly-once identity; concurrent or
+repeated decisions return the same outcome. Discarded, expired and superseded
+records remain user-visible terminal facts and cannot later be released.
+
+The user approved this policy for HASHI3 and the paired non-production
+Workbench. Automated and live non-production qualification are recorded
+separately; production adoption remains pending.
+
 Cancelling one reply is a PAO Run control operation in shared Functions. The
 caller supplies its exact owner, Agent, Session, Run, and request identity; the
 Agent Worker removes only that ready item or interrupts only its matching live
@@ -712,7 +735,7 @@ Commands are connector entry points into domain contracts.
 | `/handoff` | Session continuity operation | PCM assembles the continuity payload |
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |
-| `/stop`, `/steer` | Agent-wide durable stop epoch, stale-callback fencing, or directed new-Run/Turn coordination | Selected Engine terminates its internal work |
+| `/stop`, `/steer` | Agent-wide durable stop epoch, stale-callback fencing, and typed Run lineage. A native in-flight steer records same-Run continuation; interruption fallback creates a parent-linked successor Run/Turn | Selected Engine either steers its live Turn or terminates internal work for durable reconstruction |
 | `/debug on|off` | Instance-level automatic terminal-failure forwarding preference | HChat transports one diagnosis assignment; the Connector renders status |
 
 HER-specific effort, Habit, Meditation, provider, and model settings reach HER

@@ -7,21 +7,59 @@ import json
 import time
 from pathlib import Path
 from aiohttp import web
+from orchestrator.voice_manager import VoiceManager
 from .adapters import MediaAdapters
 from .config import CallConfig
 from .contract import CallError, MAX_BODY
 from .ports import HashiPorts
 from .service import CallService
+from .tts import CatalogCallTTS
 from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts
 
 
 def register_call_api(api):
-    config = CallConfig(Path(api.config_path).parent / "call_profiles.json")
+    global_config = getattr(api, "global_config", None)
+    bridge_home = Path(
+        getattr(global_config, "bridge_home", None) or Path(api.config_path).parent
+    )
+    project_root = Path(
+        getattr(global_config, "project_root", None)
+        or Path(__file__).resolve().parents[2]
+    )
+    media_root = Path(
+        getattr(global_config, "base_media_dir", None) or bridge_home / "media"
+    )
+    catalog_path = project_root / "voice_catalog.json"
+    catalog_options = (
+        {"voice_catalog_path": catalog_path, "project_root": project_root}
+        if global_config is not None
+        else {}
+    )
+    config = CallConfig(
+        Path(api.config_path).parent / "call_profiles.json",
+        **catalog_options,
+    )
     config.initialize()
+    tts_synthesizer = None
+    if global_config is not None:
+        tts_manager = VoiceManager(
+            bridge_home / "state" / "call_tts",
+            media_root,
+            ffmpeg_cmd="ffmpeg",
+            secrets=getattr(api, "secrets", None),
+            catalog_path=catalog_path,
+            project_root=project_root,
+        )
+        tts_synthesizer = CatalogCallTTS(
+            tts_manager,
+            temp_root=media_root / "call_tts",
+            secrets=getattr(api, "secrets", None),
+        )
     service = CallService(
         config,
         HashiPorts(api),
         MediaAdapters(secret_resolver=getattr(api, "connector_secret_resolver", None)),
+        tts_synthesizer=tts_synthesizer,
     )
     api.call_service = service
     api.live_voice_manager.external_call_busy = service.busy

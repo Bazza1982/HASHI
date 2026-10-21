@@ -448,6 +448,48 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "operation": "command",
         "route": "standard_fc",
     },
+    {
+        "id": "agentpresence.message",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.voice",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.command",
+        "connector_id": "agentpresence",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.call_state",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "state",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.notification",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "notification",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.voice_mirror",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "media",
+        "route": "standard_fc",
+    },
 )
 
 _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
@@ -559,6 +601,16 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "canonical_feed": "persistent_session_events",
         "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
+    {
+        "id": "agentpresence",
+        "class": "desktop_companion",
+        "ingress": ["message", "voice", "command"],
+        "egress": ["message", "state", "notification", "media"],
+        "canonical_feed": "persistent_session_events",
+        "owner_mirror": True,
+        "delivery_content_modes": ["media"],
+        "customizations": (),
+    },
 )
 
 _DYNAMIC_CONNECTORS: dict[str, dict[str, Any]] = {}
@@ -623,6 +675,10 @@ def canonical_connector_id(
         return "remote"
     if _matches(normalized_surface, "hchat") or _matches(transport, "hchat"):
         return "hchat"
+    if _matches(normalized_surface, "agentpresence") or _matches(
+        transport, "agentpresence"
+    ):
+        return "agentpresence"
     if normalized_surface in _DYNAMIC_CONNECTORS:
         return normalized_surface
 
@@ -654,6 +710,8 @@ def canonical_connector_id(
         return "remote"
     if source in {"exchange", "hchat-exchange"}:
         return "exchange"
+    if source == "agentpresence":
+        return "agentpresence"
     if source in {"api", "api_chat", "workbench", "backend-api"}:
         return "backend_api"
     if source in _DYNAMIC_CONNECTORS:
@@ -749,6 +807,14 @@ def _descriptor(connector_id: str) -> Mapping[str, Any]:
         if item["id"] == cid:
             return item
     raise ValueError(f"unknown connector: {cid}")
+
+
+def registered_connector_id(connector_id: str) -> str:
+    """Validate and return an exact registry identity without ingress aliasing."""
+
+    normalized = str(connector_id or "").strip().casefold()
+    _descriptor(normalized)
+    return normalized
 
 
 def _effective_customizations(descriptor: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -984,6 +1050,35 @@ def get_connector_capabilities(
     }
 
 
+def owner_mirror_connector_ids() -> tuple[str, ...]:
+    """Return built-in owner-scoped mirror Connectors declared by the registry."""
+
+    return tuple(
+        str(item["id"])
+        for item in _CONNECTORS
+        if bool(item.get("owner_mirror"))
+    )
+
+
+def connector_delivery_content_modes(connector_id: str) -> tuple[str, ...]:
+    """Return an optional event-content filter for one Connector route."""
+
+    descriptor = _descriptor(str(connector_id or "").strip().casefold())
+    raw = descriptor.get("delivery_content_modes")
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("connector delivery_content_modes must be a list")
+    modes: list[str] = []
+    for item in raw:
+        mode = str(item or "").strip().casefold()
+        if not _CAPABILITY_ID.fullmatch(mode):
+            raise ValueError("connector delivery_content_modes contains an invalid mode")
+        if mode not in modes:
+            modes.append(mode)
+    return tuple(modes)
+
+
 def supports_running_media_delivery(connector_id: str) -> bool:
     """Whether this Connector has a sender or feed consumer during a Run."""
     descriptor = _descriptor(str(connector_id or "").strip().casefold())
@@ -1126,11 +1221,14 @@ __all__ = [
     "STANDARD_EGRESS_SEMANTICS",
     "STANDARD_INGRESS_OPERATIONS",
     "canonical_connector_id",
+    "connector_delivery_content_modes",
     "connector_registry_snapshot",
     "endpoint_id_for",
     "get_compatibility_adapter",
     "get_connector_capabilities",
     "get_connector_customization",
+    "owner_mirror_connector_ids",
+    "registered_connector_id",
     "register_connector",
     "require_connector_event",
     "require_connector_operation",

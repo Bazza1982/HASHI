@@ -1,9 +1,9 @@
-"""Worker-owned Safe Voice confirmation for Workbench voice uploads.
+"""Worker-owned Safe Voice confirmation for authenticated local voice uploads.
 
-The basic Workbench voice path is deliberately transcript-first.  A Worker
-holds a short-lived transcript until an authenticated Workbench decision
-arrives over the existing runtime.slash RPC.  No audio bytes are retained and
-no request is admitted before an explicit confirmation.
+The basic Workbench and Agent Presence voice paths are deliberately
+transcript-first. A Worker holds a short-lived transcript until an authenticated
+decision arrives over the existing runtime.slash RPC. No audio bytes are
+retained and no request is admitted before an explicit confirmation.
 """
 from __future__ import annotations
 
@@ -30,6 +30,10 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}")
 _FIELDS = {
     "read": frozenset({"version", "op", "idempotency_key"}),
     "decide": frozenset({"version", "op", "pending_id", "decision"}),
+}
+_SOURCE_SURFACES = {
+    "workbench_api": "workbench",
+    "agentpresence_api": "agentpresence",
 }
 
 
@@ -73,6 +77,36 @@ def _decode_transport(text: str) -> dict[str, Any]:
         if value.get("decision") not in {"confirm", "discard"}:
             raise ValueError("invalid decision")
     return value
+
+
+def encode_voice_confirmation_request(
+    *,
+    op: str,
+    idempotency_key: str | None = None,
+    pending_id: str | None = None,
+    decision: str | None = None,
+) -> str:
+    """Build the one canonical internal Safe Voice transport envelope."""
+    if op == "read":
+        value = {
+            "version": 1,
+            "op": "read",
+            "idempotency_key": str(idempotency_key or ""),
+        }
+    elif op == "decide":
+        value = {
+            "version": 1,
+            "op": "decide",
+            "pending_id": str(pending_id or ""),
+            "decision": str(decision or ""),
+        }
+    else:
+        raise ValueError("invalid transport operation")
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    request = TRANSPORT_PREFIX + encoded
+    _decode_transport(request)
+    return request
 
 
 def _clock(runtime: Any) -> float:
@@ -129,13 +163,13 @@ def register_pending_voice_confirmation(
         raise ValueError("voice confirmation requires a valid idempotency key")
     metadata = dict(request_metadata)
     expected_owner = runtime_session.owner_id(runtime)
+    surface = str(metadata.get("session_surface") or "").strip().casefold()
     if (
         str(metadata.get("owner_id") or "") != expected_owner
-        or str(metadata.get("session_surface") or "").strip().casefold()
-        != "workbench"
+        or surface not in frozenset(_SOURCE_SURFACES.values())
         or str(metadata.get("session_channel_key") or "").strip() != "default"
     ):
-        raise ValueError("voice confirmation requires the canonical Workbench route")
+        raise ValueError("voice confirmation requires a canonical local voice route")
     _expire(runtime)
     registry = _registry(runtime)
     for entry in registry.values():
@@ -143,6 +177,7 @@ def register_pending_voice_confirmation(
             continue
         if (
             entry.get("audio_digest") != audio_digest
+            or str(entry.get("session_surface") or "workbench") != surface
             or entry.get("session_id") != session.get("session_id")
             or int(entry.get("context_generation", -1))
             != int(session.get("context_generation", -2))
@@ -168,6 +203,7 @@ def register_pending_voice_confirmation(
         "deliver_to_telegram": bool(deliver_to_telegram),
         "request_metadata": metadata,
         "owner_id": expected_owner,
+        "session_surface": surface,
         "session_id": str(session["session_id"]),
         "context_generation": int(session["context_generation"]),
         "lock": asyncio.Lock(),
@@ -203,10 +239,16 @@ def _confirmation(entry: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _current_binding(runtime: Any) -> tuple[dict[str, Any], str] | None:
+def _current_binding(
+    runtime: Any, *, surface: str
+) -> tuple[dict[str, Any], str] | None:
     try:
+        # AP owns the local confirmation presentation, not a parallel
+        # Conversation. Its confirmation is fenced against HASHI's current
+        # primary Conversation while retaining the AP-only confirmation scope.
+        binding_surface = "workbench" if surface == "agentpresence" else surface
         session = runtime_session.current_session(
-            runtime, surface="workbench", channel_key="default"
+            runtime, surface=binding_surface, channel_key="default"
         )
         return session, runtime_session.owner_id(runtime)
     except Exception:
@@ -214,10 +256,11 @@ def _current_binding(runtime: Any) -> tuple[dict[str, Any], str] | None:
 
 
 def _binding_matches(
-    entry: Mapping[str, Any], session: Mapping[str, Any], owner_id: str
+    entry: Mapping[str, Any], session: Mapping[str, Any], owner_id: str, *, surface: str
 ) -> bool:
     return (
         str(entry.get("owner_id") or "") == owner_id
+        and str(entry.get("session_surface") or "workbench") == surface
         and str(entry.get("session_id") or "") == str(session.get("session_id") or "")
         and int(entry.get("context_generation", -1))
         == int(session.get("context_generation", -2))
@@ -231,10 +274,13 @@ async def _decide(
     decision: str,
     session: Mapping[str, Any],
     owner_id: str,
+    surface: str,
 ) -> dict[str, Any]:
     async with entry["lock"]:
         _expire(runtime)
         state = str(entry.get("state") or "")
+        if str(entry.get("session_surface") or "workbench") != surface:
+            return _error("voice_confirmation_forbidden", 403)
         if state == "confirmed":
             if decision == "confirm":
                 return {
@@ -258,7 +304,7 @@ async def _decide(
             return _error("voice_confirmation_discarded", 409)
         if state == "expired":
             return _error("voice_confirmation_expired", 410)
-        if not _binding_matches(entry, session, owner_id):
+        if not _binding_matches(entry, session, owner_id, surface=surface):
             entry["state"] = "discarded"
             entry["terminal_at"] = _clock(runtime)
             entry.pop("prompt", None)
@@ -320,7 +366,9 @@ async def try_dispatch_voice_confirmation_transport(
     """Return None for ordinary text; reserved requests always terminate here."""
     if not isinstance(text, str) or not text.startswith(TRANSPORT_PREFIX):
         return None
-    if str(source_channel or "").strip().lower() != "workbench_api":
+    source_channel = str(source_channel or "").strip().lower()
+    surface = _SOURCE_SURFACES.get(source_channel)
+    if surface is None:
         return _error("voice_confirmation_forbidden", 403)
     try:
         payload = _decode_transport(text)
@@ -335,7 +383,7 @@ async def try_dispatch_voice_confirmation_transport(
     checker = getattr(runtime, "_is_authorized_user", None)
     if type(actor) is not int or actor <= 0 or (callable(checker) and not checker(actor)):
         return _error("voice_confirmation_forbidden", 403)
-    binding = _current_binding(runtime)
+    binding = _current_binding(runtime, surface=surface)
     if binding is None:
         return _error("voice_confirmation_session_unavailable", 503)
     session, owner = binding
@@ -356,7 +404,9 @@ async def try_dispatch_voice_confirmation_transport(
             return _error("voice_confirmation_expired", 410)
         if entry.get("state") != "pending":
             return _error("voice_confirmation_not_pending", 409)
-        if not _binding_matches(entry, session, owner):
+        if str(entry.get("session_surface") or "workbench") != surface:
+            return _error("voice_confirmation_forbidden", 403)
+        if not _binding_matches(entry, session, owner, surface=surface):
             return _error("voice_session_changed", 409)
         return {
             "ok": True,
@@ -374,5 +424,5 @@ async def try_dispatch_voice_confirmation_transport(
         return result
     return await _decide(
         runtime, entry, decision=payload["decision"], session=session,
-        owner_id=owner,
+        owner_id=owner, surface=surface,
     )

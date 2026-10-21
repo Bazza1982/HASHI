@@ -10,6 +10,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -113,9 +114,9 @@ class DesktopController:
             self.expire()
             view = view_options(value)
             rows, _ = self.native.displays()
-            if view["display_id"] not in {r["id"] for r in rows}:
+            if not set(self._view_display_ids(view)).issubset({r["id"] for r in rows}):
                 raise DesktopError("desktop_display_changed", 409)
-            rev = self._display_revision(rows, view["display_id"])
+            rev = self._display_revision(rows, view)
             sess = self._get_session(session_id)
             if view == sess.view and rev == sess.display_revision:
                 return {"view_revision": sess.view_revision}
@@ -133,11 +134,58 @@ class DesktopController:
         return hashlib.sha256(json.dumps([session_id, view, revision], sort_keys=True).encode()).hexdigest()[:24]
 
     @staticmethod
-    def _display_revision(rows, display_id):
-        # Input coordinates depend only on the selected monitor's geometry.
-        # Another monitor waking/sleeping must not revoke this control lease.
-        display = next((row for row in rows if row["id"] == display_id), None)
-        return hashlib.sha256(json.dumps(display, sort_keys=True).encode()).hexdigest()[:24]
+    def _view_display_ids(view):
+        return list(view.get("display_ids") or [view["display_id"]])
+
+    @classmethod
+    def _selected_displays(cls, rows, view):
+        by_id = {row["id"]: row for row in rows}
+        return [by_id[display_id] for display_id in cls._view_display_ids(view) if display_id in by_id]
+
+    @classmethod
+    def _display_revision(cls, rows, view):
+        # Input coordinates depend only on selected monitors. An unselected
+        # monitor waking or sleeping must not revoke the current control lease.
+        selected = cls._selected_displays(rows, view)
+        return hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()[:24]
+
+    @classmethod
+    def _surviving_view(cls, view, rows):
+        available = {row["id"] for row in rows}
+        selected = [display_id for display_id in cls._view_display_ids(view) if display_id in available]
+        if not selected:
+            selected = [rows[0]["id"]]
+        value = {
+            "small": view["small"],
+            "crop": view["crop"],
+            **({"display_id": selected[0]} if len(selected) == 1 else {"display_ids": selected}),
+        }
+        return view_options(value)
+
+    @staticmethod
+    def _view_geometry(selected, crop):
+        left = min(display["x"] for display in selected)
+        top = min(display["y"] for display in selected)
+        right = max(display["x"] + display["width"] for display in selected)
+        bottom = max(display["y"] + display["height"] for display in selected)
+        width, height = right - left, bottom - top
+        x, y = round(crop["x"] * width), round(crop["y"] * height)
+        rect = {
+            "x": left + x,
+            "y": top + y,
+            "width": max(1, min(width - x, round(crop["width"] * width))),
+            "height": max(1, min(height - y, round(crop["height"] * height))),
+        }
+        regions = []
+        for display in selected:
+            region_left = max(rect["x"], display["x"])
+            region_top = max(rect["y"], display["y"])
+            region_right = min(rect["x"] + rect["width"], display["x"] + display["width"])
+            region_bottom = min(rect["y"] + rect["height"], display["y"] + display["height"])
+            if region_right > region_left and region_bottom > region_top:
+                regions.append({"id": display["id"], "x": region_left, "y": region_top,
+                                "width": region_right - region_left, "height": region_bottom - region_top})
+        return rect, regions
 
     def handle(self, operation, args, actor, session_id):
         if not isinstance(actor, str) or not 1 <= len(actor) <= 256:
@@ -209,26 +257,24 @@ class DesktopController:
                 rows, revision = self.native.displays()
                 if sess.view is None:
                     sess.view = view_options({"display_id": rows[0]["id"]})
-                selected_revision = self._display_revision(rows, sess.view["display_id"])
+                selected_revision = self._display_revision(rows, sess.view)
                 if selected_revision != sess.display_revision:
                     if self.owner and self.owner[1] == (session_id or ""):
                         self._release()
-                    if sess.view["display_id"] not in {r["id"] for r in rows}:
-                        sess.view = view_options({"display_id": rows[0]["id"]})
-                    sess.display_revision = self._display_revision(rows, sess.view["display_id"])
+                    sess.view = self._surviving_view(sess.view, rows)
+                    sess.display_revision = self._display_revision(rows, sess.view)
                     sess.view_revision = self._view_id(session_id, sess.view, sess.display_revision)
                     sess.frame_cache = None; sess.frame_history.clear()
                 view = dict(sess.view)
                 view_revision = sess.view_revision
-                display = next(r for r in rows if r["id"] == view["display_id"])
-                c = view["crop"]
-                x, y = round(c["x"]*display["width"]), round(c["y"]*display["height"])
-                rect = {"x": display["x"]+x, "y": display["y"]+y,
-                        "width": max(1, min(display["width"]-x, round(c["width"]*display["width"]))),
-                        "height": max(1, min(display["height"]-y, round(c["height"]*display["height"])))}
+                selected = self._selected_displays(rows, view)
+                display_ids = self._view_display_ids(view)
+                rect, display_regions = self._view_geometry(selected, view["crop"])
             # Encoding never holds the input lock. Sessions have independent views.
             capture_at = self.clock()
             image = self.native.capture(rect, fit_size(rect["width"], rect["height"], view["small"] or refresh_profile == "ultra_smooth"))
+            if len(selected) > 1:
+                image = self._mask_unselected(image, rect, display_regions)
             digest = hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest()
             with self.guard:
                 cached = sess.frame_cache
@@ -253,20 +299,39 @@ class DesktopController:
                 frame_id = f"frame-{view_revision}-{sess.frames}"
                 sess.last_frame_bytes = len(data) if after != frame_id else 0
                 meta = {"frame_id": frame_id, "view_revision": view_revision,
-                        "display_revision": revision, "display_id": view["display_id"],
+                        "display_revision": revision, "display_ids": display_ids,
                         "width": encoded_size[0], "height": encoded_size[1], "rect": rect,
-                        "display": display, "displays": rows, "checked_at": time.time(), "cursor": self.native.cursor()}
+                        "selected_displays": selected, "display_regions": display_regions,
+                        "displays": rows, "checked_at": time.time(), "cursor": self.native.cursor()}
+                if len(selected) == 1:
+                    meta["display_id"] = display_ids[0]
+                    meta["display"] = selected[0]
                 if callable(getattr(self.native, 'desktop_state', None)):
                     status = self.native.desktop_state()
                     meta['windows_locked'] = bool(status.get('locked'))
                     meta['secure_desktop'] = bool(status.get('secure_desktop'))
-                sess.frame_history[frame_id] = (sess.last_capture, rect, view_revision)
+                sess.frame_history[frame_id] = (sess.last_capture, rect, view_revision, display_regions)
                 sess.frame_history.move_to_end(frame_id)
                 while len(sess.frame_history) > 8: sess.frame_history.popitem(last=False)
                 sess.frame_cache = {"meta": meta, "digest": digest, "data": data, "profile": refresh_profile}
                 return self._project(sess.frame_cache, after, sess, refresh_profile)
         finally:
             self.capture_guard.release()
+
+    @staticmethod
+    def _mask_unselected(image, rect, display_regions):
+        """Keep physical layout while blanking gaps and unselected monitors."""
+        from PIL import Image
+        masked = Image.new("RGB", image.size, (8, 13, 18))
+        scale_x, scale_y = image.width / rect["width"], image.height / rect["height"]
+        for region in display_regions:
+            left = max(0, math.floor((region["x"] - rect["x"]) * scale_x))
+            top = max(0, math.floor((region["y"] - rect["y"]) * scale_y))
+            right = min(image.width, math.ceil((region["x"] + region["width"] - rect["x"]) * scale_x))
+            bottom = min(image.height, math.ceil((region["y"] + region["height"] - rect["y"]) * scale_y))
+            if right > left and bottom > top:
+                masked.paste(image.crop((left, top, right, bottom)), (left, top))
+        return masked
 
     def _project(self, cached, after, sess, refresh_profile):
         meta = dict(cached["meta"])
@@ -307,6 +372,7 @@ class DesktopController:
                 return receipt
             if seq != self.last_seq+1: raise DesktopError("desktop_input_out_of_order", 409)
             release = event["kind"] in {"reset", "up", "key_up"}
+            ignored = False
             if not release:
                 record = sess.frame_history.get(event["frame_id"])
                 if not record or event["view_revision"] != sess.view_revision or record[2] != sess.view_revision or self.clock()-record[0] > 3:
@@ -318,7 +384,7 @@ class DesktopController:
                     raise error
                 # Close the display-change race before mapping input coordinates.
                 rows, _ = self.native.displays()
-                if self._display_revision(rows, sess.view["display_id"]) != sess.display_revision:
+                if self._display_revision(rows, sess.view) != sess.display_revision:
                     self._release()
                     raise DesktopError("desktop_display_changed", 409)
                 if self.clock()-self.rate_start >= 1: self.rate_start, self.rate_count = self.clock(), 0
@@ -328,17 +394,22 @@ class DesktopController:
                     r = record[1]
                     event["px"] = r["x"] + round(event["x"]*(r["width"]-1))
                     event["py"] = r["y"] + round(event["y"]*(r["height"]-1))
-            try:
-                self.native.inject(event)
-            except DesktopError:
-                self._release()
-                raise
-            except Exception as exc:
-                self._release()
-                raise DesktopError("desktop_input_failed", 503) from exc
+                    regions = record[3] if len(record) > 3 else [r]
+                    ignored = not any(region["x"] <= event["px"] < region["x"] + region["width"]
+                                      and region["y"] <= event["py"] < region["y"] + region["height"]
+                                      for region in regions)
+            if not ignored:
+                try:
+                    self.native.inject(event)
+                except DesktopError:
+                    self._release()
+                    raise
+                except Exception as exc:
+                    self._release()
+                    raise DesktopError("desktop_input_failed", 503) from exc
             self.last_seq = seq
             self.last_contact = self.last_input = self.clock()
-            receipt = {"seq": seq, "injected": True}
+            receipt = {"seq": seq, "injected": not ignored, **({"ignored": True} if ignored else {})}
             self.results[seq] = (digest, receipt)
             while len(self.results) > 64: self.results.popitem(last=False)
             return receipt

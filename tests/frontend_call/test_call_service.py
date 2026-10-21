@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytest
 from orchestrator.frontend_call.config import CallConfig, validate_target
 from orchestrator.frontend_call.contract import CallError
@@ -51,12 +51,17 @@ def document(location="local"):
 class Ports:
     def __init__(self):
         self.accepted = []
+        self.accepted_bindings = []
+        self.accepted_frames = []
         self.persisted_openings = []
         self.cancelled = []
         self.phone = False
         self.level = 1
         self.valid = True
         self.finished = True
+        self.frontend_subscribers_value = ()
+        self.frontend_events = []
+        self.frontend_error = None
 
     def validate(self, owner, binding):
         if not self.valid or owner != "owner":
@@ -68,8 +73,30 @@ class Ports:
     def phone_busy(self, owner):
         return self.phone
 
-    async def admit(self, owner, binding, turn, text, observation, captured_at):
+    def frontend_subscribers(self, owner, binding):
+        return self.frontend_subscribers_value
+
+    def emit_frontend_event(
+        self, owner, binding, kind, *, subscribers=(), payload=None
+    ):
+        self.frontend_events.append(
+            {
+                "owner": owner,
+                "binding": dict(binding),
+                "kind": kind,
+                "subscribers": tuple(subscribers),
+                "payload": dict(payload or {}),
+            }
+        )
+        if self.frontend_error is not None:
+            raise self.frontend_error
+
+    async def admit(
+        self, owner, binding, turn, text, observation, captured_at, frames=()
+    ):
         self.accepted.append((turn, text, observation, captured_at))
+        self.accepted_bindings.append(dict(binding))
+        self.accepted_frames.append(tuple(dict(frame) for frame in frames))
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
 
     def persist_opening(self, owner, binding, text):
@@ -472,6 +499,60 @@ async def test_camera_falls_back_when_frame_ingress_really_stops(tmp_path):
         await service.close()
 
 
+async def test_video_turn_freezes_ten_evenly_sampled_frames_from_last_ten_seconds(
+    tmp_path,
+):
+    service, ports, adapters, base, clock = setup(tmp_path)
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
+    binding, _, _ = await start(service, base, video_requested=True)
+    newest = datetime.now(timezone.utc)
+    image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
+
+    for sequence in range(1, 22):
+        captured_at = newest - timedelta(seconds=(21 - sequence) * 0.45)
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": sequence,
+                "image_b64": image,
+                "captured_at": captured_at.isoformat(),
+            },
+        )
+        clock[0] += 0.5
+
+    adapters.wait = asyncio.Event()
+    await service.invoke(
+        "owner",
+        {
+            **binding,
+            "operation": "turn",
+            "sequence": 1,
+            "turn_id": "turn-live-frames",
+            "audio_b64": wav(),
+        },
+    )
+    await asyncio.sleep(0)
+    await service.invoke("owner", {**binding, "operation": "camera", "enabled": False})
+    adapters.wait.set()
+    await service.calls["call-1"].task
+
+    frames = ports.accepted_frames[0]
+    sequences = [frame["frame_sequence"] for frame in frames]
+    assert len(frames) == 10
+    assert sequences[0] == 1 and sequences[-1] == 21
+    assert sequences == sorted(set(sequences))
+    assert all(frame["image"].startswith(b"\xff\xd8") for frame in frames)
+    assert ports.accepted_bindings[0]["call_context"]["mode"] == "video"
+    assert service.calls["call-1"].frame_buffer == []
+    await service.close()
+
+
 def test_settings_redact_endpoints_credentials_and_check_revision(tmp_path):
     service, *_ = setup(tmp_path)
     public = service.config.context("owner", "agent-a")
@@ -503,6 +584,29 @@ def test_config_rejects_wrong_locality_and_unsupported_protocol(changes):
     target.update(changes)
     with pytest.raises(CallError):
         validate_target(target)
+
+
+def test_config_allows_literal_private_lan_targets_only():
+    target = document()["targets"][2]
+    target.update(
+        {
+            "location": "lan",
+            "base_url": "http://10.23.45.67:48254/v1",
+            "model": "minicpm-v-4.6",
+        }
+    )
+
+    assert validate_target(target)["base_url"] == "http://10.23.45.67:48254/v1"
+
+    for base_url in (
+        "http://127.0.0.1:48254/v1",
+        "http://169.254.169.254/v1",
+        "http://8.8.8.8/v1",
+        "http://vision.local:48254/v1",
+        "ftp://10.23.45.67:48254/v1",
+    ):
+        with pytest.raises(CallError, match="call_lan_target_not_private"):
+            validate_target({**target, "base_url": base_url})
 
 
 async def test_turn_enters_agent_once_and_duplicate_upload_is_idempotent(tmp_path):
@@ -807,7 +911,8 @@ async def test_uncertain_or_mixed_cloud_evidence_retains_a_short_spoken_word(
 
 
 async def test_verified_media_providers_follow_the_turn_and_speech_result(tmp_path):
-    service, _ports, adapters, base, _clock = setup(tmp_path)
+    service, ports, adapters, base, _clock = setup(tmp_path)
+    ports.frontend_subscribers_value = ("optional-sink",)
     adapters.stt_receipt = {
         "gateway": "OpenRouter",
         "actual_provider": "Groq",
@@ -840,6 +945,12 @@ async def test_verified_media_providers_follow_the_turn_and_speech_result(tmp_pa
     assert (await service.invoke("owner", speech))["provider_receipt"] == (
         adapters.tts_receipt
     )
+    assert [event["kind"] for event in ports.frontend_events] == [
+        "call.started",
+        "call.speech",
+    ]
+    assert ports.frontend_events[-1]["payload"]["segment"] == 0
+    assert ports.frontend_events[-1]["payload"]["asset"]["media_type"] == "audio/wav"
     await service.close()
 
 
@@ -1346,3 +1457,33 @@ async def test_unknown_fields_never_reach_adapters(tmp_path):
                 "owner", {**base, "operation": "context", field: "injected"}
             )
     assert not adapters.stt
+
+
+async def test_call_emits_connector_neutral_frontend_events_fail_open(tmp_path):
+    service, ports, _adapters, base, _clock = setup(tmp_path)
+    ports.frontend_subscribers_value = ("optional-sink",)
+
+    binding, _body, started = await start(service, base)
+    assert started["phase"] == "active"
+    assert ports.frontend_events == [
+        {
+            "owner": "owner",
+            "binding": {
+                "agent_id": "agent-a",
+                "session_id": "sess-a",
+                "context_generation": 1,
+                "client_id": "client-1",
+                "call_id": "call-1",
+            },
+            "kind": "call.started",
+            "subscribers": ("optional-sink",),
+            "payload": {},
+        }
+    ]
+
+    ports.frontend_error = OSError("optional sink disappeared")
+    ended = await service.invoke("owner", {**binding, "operation": "end"})
+    assert ended["phase"] == "ended"
+    assert ports.frontend_events[-1]["kind"] == "call.ended"
+    assert ports.frontend_events[-1]["payload"]["reason"] == "explicit_end"
+    await service.close()

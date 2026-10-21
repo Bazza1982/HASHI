@@ -9,6 +9,8 @@ from adapters.base import BackendResponse
 from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider, _MediaRoutingToolRegistry
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_START, StreamEvent
+from orchestrator import runtime_media
+from orchestrator.config_json import new_config_json, write_config_json
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
 from orchestrator.her_v2.models import (
@@ -22,6 +24,7 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
 )
+from orchestrator.frontend_call.transient_live_media import bind_live_frames
 
 
 _MISSING = object()
@@ -132,6 +135,7 @@ class _Backend:
         silent=False,
         on_stream_event=None,
         request_content=_MISSING,
+        transient_images=_MISSING,
     ):
         del silent
         self.calls.append(
@@ -140,6 +144,7 @@ class _Backend:
                 "request_id": request_id,
                 "is_retry": is_retry,
                 "request_content": request_content,
+                "transient_images": transient_images,
             }
         )
         if self.emit_tool_activity and on_stream_event is not None:
@@ -169,6 +174,76 @@ class _Manager:
     def create_ephemeral_backend(self, engine, target_model=None):
         assert (engine, target_model) == ("fake-api", "native-image-model")
         return self.backend
+
+
+class _VisualFallbackManager:
+    privacy_level = 1
+
+    def __init__(self, backends, models):
+        self.backends = dict(backends)
+        self.models = list(models)
+        self.created = []
+        self.default_model = "text-only-model"
+
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "fake-api"
+        self.created.append((engine, target_model))
+        return self.backends[target_model]
+
+    def get_her_v3_provider_options(self):
+        return [
+            {
+                "engine": "fake-api",
+                "models": list(self.models),
+                "available": True,
+            }
+        ]
+
+
+class _FakeLanVisionProjector:
+    def __init__(self, text="A red bird is sitting on a branch."):
+        self.text = text
+        self.calls = []
+
+    async def project(self, request_content, *, question):
+        self.calls.append({"request_content": request_content, "question": question})
+        return SimpleNamespace(
+            text=self.text,
+            node_id="hashi-compute",
+            service_id="vision",
+            model_id="minicpm-v-4.6",
+        )
+
+
+class _FailingLanVisionProjector:
+    async def project(self, request_content, *, question):
+        del request_content, question
+        error = RuntimeError("LAN vision is unavailable")
+        error.code = "compute_node_unreachable"
+        raise error
+
+
+def test_visual_fallback_candidates_never_cross_provider():
+    class Manager:
+        def get_her_v3_provider_options(self):
+            return [
+                {
+                    "engine": "other-api",
+                    "models": ["other-provider-vision"],
+                    "available": True,
+                },
+                {
+                    "engine": "fake-api",
+                    "models": ["text-only-model", "same-provider-vision"],
+                    "available": True,
+                },
+            ]
+
+    provider = HashiStageProvider(backend_manager=Manager())
+
+    assert provider._configured_same_provider_models(
+        ProviderProfile("test", "fake-api", "text-only-model")
+    ) == ("text-only-model", "same-provider-vision")
 
 
 class _MediaRegistry:
@@ -294,7 +369,7 @@ async def test_allow_tools_false_still_passes_native_media_to_stage_backend():
                     "relevant_habits": [],
                     "clarification": None,
                 },
-            )
+            ),
         ]
     )
     provider = HashiStageProvider(backend_manager=_Manager(backend))
@@ -308,6 +383,51 @@ async def test_allow_tools_false_still_passes_native_media_to_stage_backend():
     assert backend.tool_registry is None
     assert result.media_routing[0]["route"] == "native"
     assert backend.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_primary_direct_passes_current_live_frames_only_to_visual_backend():
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+        "frame_sequence": 8,
+        "captured_at": "2026-10-17T06:20:00+11:00",
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-media", (frame,))
+    backend = _Backend([BackendResponse(text="I can see it.", duration_ms=1)])
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend), runtime_context=runtime
+    )
+
+    await provider.invoke(_profile(), _request(Stage.DIRECT, None))
+
+    assert backend.calls[0]["transient_images"] == (frame,)
+
+
+@pytest.mark.asyncio
+async def test_primary_direct_does_not_pass_live_frames_to_text_only_backend():
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+        "frame_sequence": 8,
+        "captured_at": "2026-10-17T06:20:00+11:00",
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-media", (frame,))
+    backend = _Backend([BackendResponse(text="Text answer.", duration_ms=1)])
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="native-image-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend), runtime_context=runtime
+    )
+
+    await provider.invoke(_profile(), _request(Stage.DIRECT, None))
+
+    assert backend.calls[0]["transient_images"] is _MISSING
 
 
 @pytest.mark.asyncio
@@ -642,6 +762,214 @@ async def test_tool_free_stage_fails_instead_of_silently_dropping_unsupported_me
 
 
 @pytest.mark.asyncio
+async def test_text_only_model_temporarily_uses_same_provider_visual_model_with_warning():
+    content = _content()
+    text_backend = _Backend([])
+    text_backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    visual_backend = _Backend(
+        [
+            BackendResponse(
+                text="",
+                duration_ms=1,
+                structured_data={
+                    "classification": "DIRECT_RESPONSE",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
+            )
+        ]
+    )
+    visual_backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="visual-model",
+        input_modalities=frozenset({"text", "image"}),
+        input_transports={"image": ("data_url",)},
+        source="test",
+    )
+    manager = _VisualFallbackManager(
+        {"text-only-model": text_backend, "visual-model": visual_backend},
+        ["text-only-model", "visual-model"],
+    )
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+    )
+
+    result = await provider.invoke(
+        ProviderProfile("test", "fake-api", "text-only-model"),
+        _request(Stage.TRIAGE, content),
+    )
+
+    assert text_backend.calls == []
+    assert len(visual_backend.calls) == 1
+    assert visual_backend.calls[0]["request_content"] == content
+    assert result.model == "visual-model"
+    assert manager.default_model == "text-only-model"
+    warnings = [event for event in events if event.kind == "fallback_warning"]
+    assert len(warnings) == 1
+    assert warnings[0].required is True
+    assert warnings[0].metadata["fallback_type"] == "same_provider_visual_model"
+    assert warnings[0].metadata["target_model"] == "visual-model"
+    assert result.media_routing[0]["route"] == "same_provider_visual_model"
+
+
+@pytest.mark.asyncio
+async def test_provider_without_visual_model_projects_image_through_lan_compute_once():
+    content = _content()
+    backend = _Backend(
+        [
+            BackendResponse(
+                text="",
+                duration_ms=1,
+                structured_data={
+                    "classification": "DIRECT_RESPONSE",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
+            ),
+            BackendResponse(
+                text="",
+                duration_ms=1,
+                structured_data={
+                    "classification": "DIRECT_RESPONSE",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
+            ),
+        ]
+    )
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    manager = _VisualFallbackManager(
+        {"text-only-model": backend},
+        ["text-only-model"],
+    )
+    projector = _FakeLanVisionProjector()
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+        compute_vision_projector=projector,
+    )
+
+    result = await provider.invoke(
+        ProviderProfile("test", "fake-api", "text-only-model"),
+        _request(Stage.TRIAGE, content),
+    )
+    repeated = await provider.invoke(
+        ProviderProfile("test", "fake-api", "text-only-model"),
+        _request(Stage.TRIAGE, content),
+    )
+
+    assert len(projector.calls) == 1
+    assert len(backend.calls) == 2
+    sent = backend.calls[0]["request_content"]
+    assert all(part["type"] == "text" for part in sent["parts"])
+    assert "A red bird is sitting on a branch." in backend.calls[0]["prompt"]
+    assert manager.default_model == "text-only-model"
+    warnings = [event for event in events if event.kind == "fallback_warning"]
+    assert len(warnings) == 1
+    assert warnings[0].metadata["fallback_type"] == "lan_compute_vision"
+    assert warnings[0].metadata["raw_image_sent_to_selected_provider"] is False
+    assert result.media_routing[0]["route"] == "lan_compute_vision"
+    assert repeated.media_routing[0]["route"] == "lan_compute_vision"
+
+
+@pytest.mark.asyncio
+async def test_visual_fallback_stops_before_provider_when_required_warning_is_rejected():
+    content = _content()
+    text_backend = _Backend([])
+    text_backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    visual_backend = _Backend([])
+    manager = _VisualFallbackManager(
+        {"text-only-model": text_backend, "visual-model": visual_backend},
+        ["text-only-model", "visual-model"],
+    )
+
+    async def reject(_event):
+        return False
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=reject,
+    )
+
+    with pytest.raises(StageInvocationError) as captured:
+        await provider.invoke(
+            ProviderProfile("test", "fake-api", "text-only-model"),
+            _request(Stage.TRIAGE, content),
+        )
+
+    assert captured.value.code is ProviderFailureCode.MEDIA_FALLBACK_UNAVAILABLE
+    assert text_backend.calls == []
+    assert visual_backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lan_vision_failure_preserves_typed_modality_error_without_provider_call():
+    content = _content()
+    backend = _Backend([])
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    manager = _VisualFallbackManager(
+        {"text-only-model": backend},
+        ["text-only-model"],
+    )
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        compute_vision_projector=_FailingLanVisionProjector(),
+    )
+
+    with pytest.raises(StageInvocationError) as captured:
+        await provider.invoke(
+            ProviderProfile("test", "fake-api", "text-only-model"),
+            _request(Stage.TRIAGE, content),
+        )
+
+    assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
+    assert captured.value.details["lan_vision_fallback_error"] == (
+        "compute_node_unreachable"
+    )
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
 async def test_adapter_media_fallback_is_not_replayed_again_by_her():
     content = _content()
     backend = _Backend(
@@ -882,6 +1210,139 @@ def test_her_rejection_names_only_models_matching_selected_reason(monkeypatch):
     assert result["reason"] == "model_capability_unknown"
     assert result["code"] == "MODEL_CAPABILITY_UNKNOWN"
     assert result["model"] == "unknown-model"
+
+
+def test_her_ingress_admits_same_provider_visual_fallback(monkeypatch):
+    profiles = (
+        ProviderProfile("direct", "deepseek-api", "deepseek-v4-pro"),
+    )
+    manager = SimpleNamespace(
+        get_her_v3_provider_options=lambda: [
+            {
+                "engine": "deepseek-api",
+                "models": ["deepseek-v4-pro", "deepseek-flash"],
+                "available": True,
+            }
+        ],
+        _select_backend_cfg=lambda engine, target_model=None: {
+            "engine": engine,
+            "model": target_model,
+        },
+    )
+    adapter = object.__new__(HERv2Adapter)
+    adapter._v2_config = SimpleNamespace(all_provider_profiles=lambda: profiles)
+    adapter._backend_manager = lambda: manager
+    adapter._model_capability_cache_path = lambda: None
+    adapter._compute_services_config_path = lambda: None
+
+    def capability_for(_engine, model, **_kwargs):
+        visual = model == "deepseek-flash"
+        return InputCapability(
+            provider="deepseek-api",
+            model=model,
+            input_modalities=(
+                frozenset({"text", "image"}) if visual else frozenset({"text"})
+            ),
+            input_transports={"image": ("data_url",)} if visual else {},
+            modality_status={
+                "image": "supported" if visual else "unsupported",
+                "text": "supported",
+            },
+            source="explicit_config",
+        )
+
+    monkeypatch.setattr("adapters.her_v2.resolve_input_capability", capability_for)
+
+    result = adapter.media_input_diagnostic("image")
+
+    assert result["accepted"] is True
+    assert result["reason"] == "same_provider_visual_fallback_available"
+    assert result["model"] == "deepseek-flash"
+    assert result["fallback_type"] == "same_provider_visual_model"
+    bridge = runtime_media._backend_media_acceptance(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                engine="her-v2",
+                model="deepseek-v4-pro",
+            ),
+            capabilities=SimpleNamespace(
+                supports_files=True,
+                input_modalities=frozenset({"text"}),
+            ),
+            resolve_input_capability=lambda: capability_for(
+                "deepseek-api",
+                "deepseek-v4-pro",
+            ),
+            media_input_diagnostic=adapter.media_input_diagnostic,
+        ),
+        "photo",
+        "photo.jpg",
+    )
+    assert bridge.accepted is True
+    assert bridge.modality == "image"
+
+
+def test_her_ingress_admits_configured_lan_visual_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    profiles = (
+        ProviderProfile("direct", "text-only-api", "text-only-model"),
+    )
+    manager = SimpleNamespace(
+        get_her_v3_provider_options=lambda: [
+            {
+                "engine": "text-only-api",
+                "models": ["text-only-model"],
+                "available": True,
+            }
+        ],
+        _select_backend_cfg=lambda engine, target_model=None: {
+            "engine": engine,
+            "model": target_model,
+        },
+    )
+    config_path = tmp_path / "compute_services.json"
+    write_config_json(
+        config_path,
+        new_config_json(
+            config_path,
+            {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "lan-vision",
+                        "location": "lan",
+                        "base_url": "http://192.168.1.50:19446",
+                        "manifest_path": "/.well-known/hashi-compute",
+                        "enabled": True,
+                    }
+                ],
+            },
+        ),
+    )
+    adapter = object.__new__(HERv2Adapter)
+    adapter._v2_config = SimpleNamespace(all_provider_profiles=lambda: profiles)
+    adapter._backend_manager = lambda: manager
+    adapter._model_capability_cache_path = lambda: None
+    adapter._compute_services_config_path = lambda: config_path
+    monkeypatch.setattr(
+        "adapters.her_v2.resolve_input_capability",
+        lambda _engine, model, **_kwargs: InputCapability(
+            provider="text-only-api",
+            model=model,
+            input_modalities=frozenset({"text"}),
+            input_transports={},
+            modality_status={"image": "unsupported", "text": "supported"},
+            source="explicit_config",
+        ),
+    )
+
+    result = adapter.media_input_diagnostic("image")
+
+    assert result["accepted"] is True
+    assert result["reason"] == "lan_compute_vision_fallback_configured"
+    assert result["fallback_type"] == "lan_compute_vision"
 
 
 @pytest.mark.asyncio

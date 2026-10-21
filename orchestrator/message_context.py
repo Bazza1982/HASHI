@@ -23,6 +23,7 @@ MESSAGE_CONTEXT_VERSION = 1
 MESSAGE_CONTEXT_METADATA_KEY = "message_context_snapshot"
 MESSAGE_SOURCE_CLAIM_METADATA_KEY = "message_source_claim"
 MESSAGE_SOURCE_RESERVED_METADATA_KEY = "_message_source_reserved"
+AGENTPRESENCE_AUTHENTICATED_METADATA_KEY = "_agentpresence_authenticated"
 HCHAT_CONTEXT_METADATA_KEY = "_hchat_context"
 PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY = "_private_authorization_results"
 PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY = "_private_authorization_proofs"
@@ -31,6 +32,8 @@ PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY = (
     "_private_authorization_content_sha256"
 )
 CONNECTOR_EVIDENCE_METADATA_KEY = "_connector_evidence"
+NETWORK_INGRESS_SCOPE_CLAIM_KEY = "_network_ingress_scope"
+REMOTE_WORKBENCH_INGRESS_SCOPE = "remote_workbench"
 FRONTEND_INGRESS_ENVELOPE_METADATA_KEY = "_frontend_ingress_envelope"
 SOURCE_ID_MAX_LENGTH = 64
 SOURCE_DISPLAY_NAME_MAX_LENGTH = 128
@@ -41,6 +44,7 @@ RESERVED_SOURCE_NAMES = {
     "whatsapp": "WhatsApp",
     "hchat": "HChat",
     "workbench": "Workbench-compatible client",
+    "agentpresence": "Agent Presence",
     "api": "Backend API",
     "unknown": "Unknown frontend",
 }
@@ -281,10 +285,8 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         # Runtime work remains a system source even when the Connector needs a
         # Telegram chat ID for its eventual notification.
         return "hashi.internal"
-    if surface == "whatsapp" or normalized.startswith("wa:"):
+    if normalized.startswith("wa:"):
         return "whatsapp"
-    if surface == "telegram":
-        return "telegram"
     if normalized == "tui":
         return "tui"
     if normalized in {"api", "session-api"}:
@@ -295,10 +297,44 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         ("protocol:message", "protocol:reply", "hchat-reply:")
     ):
         return "hchat"
+    # /steer and /focus are control transports, not frontend identities. Their
+    # successor message stays on the parent Conversation surface even when a
+    # Telegram mirror supplies a non-zero chat ID.
+    if normalized in {"steer", "focus"}:
+        if surface == "whatsapp":
+            return "whatsapp"
+        if surface == "telegram":
+            return "telegram"
+        if surface == "tui":
+            return "tui"
+        if surface in {
+            "workbench",
+            "backend-api",
+            "backend_api",
+            "api",
+            "session-api",
+            "session_api",
+        }:
+            return "api"
+    if surface == "whatsapp":
+        return "whatsapp"
+    if surface == "telegram":
+        return "telegram"
+    if surface == "tui":
+        return "tui"
     if chat_id not in (None, 0, "0", ""):
         # Telegram command/media handlers retain many legacy source labels.
         # Explicit API/HChat/internal cases above take precedence.
         return "telegram"
+    if surface in {
+        "workbench",
+        "backend-api",
+        "backend_api",
+        "api",
+        "session-api",
+        "session_api",
+    }:
+        return "api"
     return "unknown"
 
 
@@ -463,6 +499,11 @@ def build_message_context_snapshot(
         "private_authorizations": authorizations,
         "authorization_scope": "current_message",
     }
+    if (
+        source_fact["id"] == "agentpresence"
+        and inputs.get(AGENTPRESENCE_AUTHENTICATED_METADATA_KEY) is True
+    ):
+        snapshot["network_authentication"] = "local_shared_token"
     hchat = inputs.get(HCHAT_CONTEXT_METADATA_KEY)
     if source_fact["id"] == "hchat" and isinstance(hchat, Mapping):
         from_agent = str(hchat.get("from_agent") or "unknown").strip().casefold()
@@ -507,6 +548,23 @@ def build_message_context_snapshot(
             for item in hchat.get("relay_chain") or ()
             if str(item).strip()
         ]
+        hchat_message_id = str(hchat.get("message_id") or "").strip()
+        hchat_idempotency = str(hchat.get("idempotency_key") or "").strip()
+        hchat_digest = str(hchat.get("payload_digest") or "").strip().casefold()
+        if (
+            hchat_message_id
+            and hchat_idempotency == f"hchat:{hchat_message_id}"
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", hchat_digest)
+        ):
+            snapshot["hchat_message"] = {
+                "message_id": hchat_message_id,
+                "originated_at": str(hchat.get("originated_at") or "").strip(),
+                "message_type": str(
+                    hchat.get("message_type") or "agent_message"
+                ).strip().casefold(),
+                "idempotency_key": hchat_idempotency,
+                "payload_digest": hchat_digest,
+            }
         origin = hchat.get("origin_instance")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
             snapshot["origin_instance"] = {
@@ -734,11 +792,14 @@ def project_root_for_runtime(runtime: Any) -> Path | None:
 __all__ = [
     "HCHAT_CONTEXT_METADATA_KEY",
     "CONNECTOR_EVIDENCE_METADATA_KEY",
+    "NETWORK_INGRESS_SCOPE_CLAIM_KEY",
+    "REMOTE_WORKBENCH_INGRESS_SCOPE",
     "MESSAGE_CONTEXT_METADATA_KEY",
     "MESSAGE_CONTEXT_TYPE",
     "MESSAGE_CONTEXT_VERSION",
     "MESSAGE_SOURCE_CLAIM_METADATA_KEY",
     "MESSAGE_SOURCE_RESERVED_METADATA_KEY",
+    "AGENTPRESENCE_AUTHENTICATED_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY",
     "PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY",

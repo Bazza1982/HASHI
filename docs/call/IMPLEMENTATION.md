@@ -49,7 +49,9 @@ video of the Agent; the Agent uses its existing static avatar.
    and are never returned to the client.
 5. STT is `POST {base_url}/audio/transcriptions` (multipart WAV, `model`, JSON
    response containing `text`). TTS is `POST {base_url}/audio/speech` (JSON
-   `model`, `input`, `voice`, `response_format`), returning MP3 or WAV. OpenRouter
+   `model`, `input`, `voice`, `response_format`), returning a bounded audio asset
+   with its declared MIME type (currently MP3, WAV or Ogg through the shared TTS
+   execution path). OpenRouter
    Gemini 3.8 TTS requires raw 24 kHz mono PCM; its validated response is wrapped
    as WAV by the Function before reaching the browser. Vision is
    `POST {base_url}/chat/completions`, a standard text + `image_url` request.
@@ -112,7 +114,8 @@ OpenRouter exposes a generation ID and the lookup confirms the serving provider;
 otherwise it remains explicitly unverified.
 
 `speech` requests one stable final-answer segment by turn ID/index. The response
-is pending until its task finishes, then carries a private MP3/WAV asset. Failed
+is pending until its task finishes, then carries a private MP3/WAV/Ogg asset and
+declared MIME type. The Call Window is the sole Call audio output. Failed
 speech can be explicitly retried once without rerunning the Agent. The last two
 segments are cached; evicted segments are not silently regenerated. Long answers
 are capped at 12 × 600-character segments; code blocks, large tables and URLs are

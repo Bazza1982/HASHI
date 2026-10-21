@@ -1,7 +1,9 @@
 # HASHI /call Current Behavior Contract
 
 Status: **Authoritative current behavior**
-Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13
+Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13;
+user-directed live-frame experiment on HASHI3 and complete-candidate promotion
+to GitHub `main` on 2026-10-17
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
@@ -30,7 +32,9 @@ numeric response-length requirements are retired.
   returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
 - **CALL-ENTRY-05** — Phone and Call are basic Functions. Phone is available
   when its selected live provider/model and credential are configured. Call is
-  available when its selected STT/TTS targets and credentials are configured.
+  available when its selected STT target is usable and at least one
+  privacy-compliant path in the selected TTS service's configured fallback chain
+  is usable. A failed preferred TTS service alone must not hide Call.
   A Workbench per-instance allowlist is not an availability owner. A global
   opt-out may still disable new Call starts.
 
@@ -70,6 +74,25 @@ numeric response-length requirements are retired.
   failure disables local preview and continues by voice. A single failed upload
   or later observation does not erase the last still-usable observation or send
   extra frames.
+- **CALL-MEDIA-08** — While the camera is on, Call requests one JPEG frame every
+  500 ms. The configured local MiniCPM-V observer remains latest-frame-wins and
+  may produce up to 120 background observations per minute without building a
+  backlog. Accepted frames also enter a bounded in-memory ten-second buffer.
+- **CALL-MEDIA-09** — At each caller-turn boundary, Call freezes and evenly
+  samples at most ten frames across the preceding ten seconds, ordered oldest to
+  newest and including the newest usable frame. A primary answer stage receives
+  those frames as labelled structured images only when its exact provider/model
+  declares image plus data-URL support. Text-only models receive no raw frames.
+  MiniCPM-V text remains auxiliary untrusted context; the raw frames are the
+  primary visual evidence for a vision-capable answer model.
+- **CALL-MEDIA-10** — Turn frames are current-input-only volatile data. They are
+  removed before PAO Session admission and canonical request audit, never enter
+  Message content or history, and are cleared after the Run or on Worker
+  shutdown. Camera-off or hangup clears the live ring immediately, so later
+  turns receive no old frames; it does not revoke a snapshot already frozen for
+  an accepted turn. Provider adapters enforce their declared limits; DeepSeek
+  uses its documented provider limits rather than a smaller invented aggregate
+  budget.
 
 ## Connection sound and opening
 
@@ -154,6 +177,20 @@ numeric response-length requirements are retired.
   Existing PAO semantics remain authoritative for later queueing or explicit
   cancellation. After playback, ordinary listening may update the same-call
   background-noise estimate before the next utterance.
+- **CALL-SPEECH-13** — Call and `/voice` keep separate selections and lifecycles,
+  but derive TTS services, voices, connection details, language routing,
+  adapters, cooldowns, and fallback order from the same validated TTS catalogue.
+  Call configuration must not copy a second TTS target or voice list.
+- **CALL-SPEECH-14** — A Call tries its selected TTS service, then configured
+  candidates in order. Privacy filtering happens before invocation: disallowed
+  cloud candidates are skipped and never contacted. After the first successful
+  fallback, that effective service remains fixed for the call so later segments
+  cannot alternate providers or voices. A new call may retry the saved
+  preference.
+- **CALL-SPEECH-15** — Call Window is the sole Call-audio presenter. Agent
+  Presence handles only answer/leave and return lifecycle animation. If every
+  compliant TTS path fails, Call shows a visible error and transcript rather
+  than claiming speech succeeded or becoming silently successful.
 
 ## Captions and controls
 
@@ -187,6 +224,11 @@ numeric response-length requirements are retired.
   icon on a restrained translucent preview control. Its accessible name and
   44×44 touch target remain intact; it is not added to the three primary
   bottom-row controls.
+- **CALL-UI-10** — The authoritative Call snapshot exposes selected and
+  effective TTS service labels. When they differ, the Call Window renders a
+  localized notice in the notice area, separate from transcript content, in the
+  form “selected → effective”. It remains visible for that call without being
+  repeated as a caption.
 
 ## Voice-media billing
 
@@ -269,7 +311,7 @@ older commit or renderer cannot be carried forward.
 | Camera lifecycle | enable, disable, re-enable, denial, first-frame timeout, delayed/expired observation, server failure, background race |
 | Ring/opening | camera preflight/first-frame ordering tests, silent-visual policy, and live speaker observation |
 | Spoken style | PCM guidance and deterministic Call-cleaning tests |
-| Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests |
+| Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests, shared TTS fallback/privacy/locking |
 | Captions/UI | single rolling transcript, Agent-visible preparing/delayed/current states, voice-only fallback, retained Agent identity, smart-follow, visible/clickable contextual actions, visual/browser tests |
 | Voice cost | Phone per-minute and Call STT/TTS projections, exact/estimate boundary, backend text and vision exclusions |
 | Recovery/hangup | existing noise, network, lifecycle, and settlement regressions |

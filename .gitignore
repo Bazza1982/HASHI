@@ -68,6 +68,7 @@ workspaces/*/.verbose
 workspaces/*/handoff.md
 workspaces/*/voice_state.json
 workspaces/*/temp_audio.ogg
+workspaces/*/.attachments/
 workspaces/*/*_startup.log
 workspaces/*/*_task_prompt.txt
 workspaces/*/journals/
@@ -239,3 +240,7 @@ exp/barry/aonsw_data_analysis/
 
 # Instance-only call target URLs and per-Agent choices.
 call_profiles.json
+# Instance-only TTS services and voice menu entries.
+voice_catalog.json
+# Instance-only local/LAN/internet compute nodes and credential references.
+compute_services.json

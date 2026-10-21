@@ -414,12 +414,64 @@ async def test_dynamic_runtime_command_fallback_dispatches_late_loaded_command(m
 
 
 @pytest.mark.asyncio
-async def test_dynamic_runtime_command_fallback_ignores_unknown_command(monkeypatch):
+async def test_dynamic_runtime_command_fallback_rejects_unknown_command_with_event(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from orchestrator import runtime_session
+
     monkeypatch.setattr(runtime_command_binding, "runtime_command_map", lambda: {})
-    update = SimpleNamespace(effective_message=SimpleNamespace(text="/unknown"))
-    context = SimpleNamespace(args=["old"])
+    replies = []
 
-    handled = await runtime_command_binding._dispatch_dynamic_runtime_command(SimpleNamespace(), update, context)
+    class _MockRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
 
-    assert handled is False
-    assert context.args == ["old"]
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, _cmd):
+            return True
+
+        async def _reply_text(self, update, text, **kwargs):
+            replies.append(text)
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+
+    runtime = _MockRuntime()
+    runtime._wrap_cmd = FlexibleAgentRuntime._wrap_cmd.__get__(runtime)
+    message = SimpleNamespace(message_id=501, text="/unknown_cmd_xyz", date=datetime.now(timezone.utc))
+    update = SimpleNamespace(
+        update_id=800501,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    context = SimpleNamespace(args=[])
+
+    handled = await runtime_command_binding._dispatch_dynamic_runtime_command(runtime, update, context)
+
+    # Red test: old implementation returned False and silently ignored the unknown command.
+    # The new implementation must handle it, reply with a localized error, and persist a
+    # durable frontend.command_result event with ok: False and error_code: 'command_not_found'.
+    assert handled is True
+    assert len(replies) == 1
+    assert "unknown_cmd_xyz" in replies[0]
+
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    cmd_events = [e for e in events if e["kind"] == "frontend.command_result"]
+    assert len(cmd_events) == 1
+    assert cmd_events[0]["status"] == "failed"
+    assert cmd_events[0]["detail"]["result"]["ok"] is False
+    assert cmd_events[0]["detail"]["result"]["error_code"] == "command_not_found"

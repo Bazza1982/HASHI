@@ -1,5 +1,22 @@
 # Asynchronous questions within a Run
 
+## October 20: terminal guard for unanswered cards
+
+A successful provider response can no longer end an HERV3 Run while a question
+created by that Run is still pending. The request-local PAO guard records issued
+question IDs, performs one non-blocking reconciliation followed by one bounded
+30-second long poll, and makes no further provider call while waiting. When the
+question is consumed, expired, or cancelled, the same provider conversation
+continues with a typed resolution. Authenticated answer content remains at user
+authority; the fixed runtime instruction contains no user-controlled text.
+
+This repair does not increase Workbench polling. Visible pending cards retain the
+existing two-second UI refresh and hidden conversations remain paused. HASHI API
+continuations fall back to one complete fresh request after a question resolves,
+because the Gateway's incremental external-tool contract accepts tool-result
+deltas only. Direct OpenRouter-family providers continue in their existing local
+message loop.
+
 ## October 10: complete Engine and frontend round trip
 
 Approved scope: implement in HASHI3 and Workbench, then deploy to HASHI4.

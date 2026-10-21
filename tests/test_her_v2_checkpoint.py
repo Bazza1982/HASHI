@@ -326,7 +326,7 @@ async def test_completed_errors_and_denials_count_but_incomplete_and_duplicates_
 
 
 @pytest.mark.asyncio
-async def test_replan_gets_bounded_latest_evidence_but_audit_payload_excludes_raw_output():
+async def test_replan_gets_complete_window_evidence_but_audit_payload_excludes_raw_output():
     snapshots = []
     audit_payloads = []
 
@@ -351,6 +351,43 @@ async def test_replan_gets_bounded_latest_evidence_but_audit_payload_excludes_ra
     assert admission.admitted is False
     assert "TOP_SECRET_VALUE" in repr(snapshots[0].replan_payload())
     assert "TOP_SECRET_VALUE" not in repr(audit_payloads)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_replan_snapshot_retains_every_receipt_and_full_action_metadata():
+    snapshots = []
+
+    async def evaluator(snapshot):
+        snapshots.append(snapshot)
+        return _directive(snapshot)
+
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-full-evidence",
+        evaluator=evaluator,
+        clock=ControlledClock(),
+    )
+    long_result = "x" * 5_000
+    for index in range(80):
+        await coordinator.record_immediate_result(
+            _receipt(index),
+            result_summary=f"{index}:{long_result}",
+        )
+    arguments = {f"key-{index}": index for index in range(50)}
+
+    admission = await coordinator.before_tool(
+        tool_name="T" * 400,
+        arguments=arguments,
+        tool_call_id="C" * 400,
+    )
+
+    assert admission.admitted is False
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert len(snapshot.receipt_summaries) == 80
+    assert snapshot.receipt_summaries[0]["result_excerpt"] == f"0:{long_result}"
+    assert snapshot.prospective_action["argument_keys"] == sorted(arguments)
+    assert snapshot.prospective_action["tool_name"] == "T" * 400
     await coordinator.close()
 
 

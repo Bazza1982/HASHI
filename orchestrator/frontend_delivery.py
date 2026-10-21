@@ -130,6 +130,7 @@ def freeze_run_delivery_route(
     whatsapp_channel_key: Any | None = None,
     primary_channel_key: Any | None = None,
     terminal_exchange: bool = False,
+    additional_mirrors: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """Resolve the sole Connector route before PAO persists or projects a Run.
 
@@ -199,6 +200,21 @@ def freeze_run_delivery_route(
         and not terminal_exchange
     ):
         mirrors.append(_destination("whatsapp", whatsapp_channel_key))
+    if not terminal_exchange:
+        seen_surfaces = {
+            primary_surface,
+            *(item["surface"] for item in mirrors),
+        }
+        for raw in additional_mirrors:
+            if not isinstance(raw, Mapping):
+                raise ValueError("additional mirror destination must be an object")
+            destination = _destination(raw.get("surface"), raw.get("channel_key"))
+            if destination["surface"] == "unknown":
+                raise ValueError("additional mirror surface is invalid")
+            if destination["surface"] in seen_surfaces:
+                continue
+            seen_surfaces.add(destination["surface"])
+            mirrors.append(destination)
 
     return normalize_run_delivery_route(
         {
@@ -257,11 +273,20 @@ def delivery_intent_from_run_route(
 
     from orchestrator.frontend_connector_registry import (
         canonical_connector_id,
+        connector_delivery_content_modes,
         endpoint_id_for,
+        registered_connector_id,
     )
     from orchestrator.frontend_contracts import normalize_delivery_intent
 
     normalized_route = normalize_run_delivery_route(route)
+    normalized_content_modes = tuple(
+        dict.fromkeys(
+            str(mode or "").strip().casefold()
+            for mode in content_modes
+            if str(mode or "").strip()
+        )
+    )
     raw_destinations = [
         ("primary", normalized_route.get("primary")),
         *[("mirror", item) for item in normalized_route["mirrors"]],
@@ -272,9 +297,20 @@ def delivery_intent_from_run_route(
             continue
         surface = str(item["surface"])
         channel_key = str(item["channel_key"])
-        connector_id = canonical_connector_id(
-            surface, ingress_transport=surface, surface=surface
+        try:
+            connector_id = canonical_connector_id(
+                surface, ingress_transport=surface, surface=surface
+            )
+        except ValueError:
+            connector_id = registered_connector_id(surface)
+        allowed_modes = connector_delivery_content_modes(connector_id)
+        selected_modes = (
+            tuple(mode for mode in normalized_content_modes if mode in allowed_modes)
+            if allowed_modes
+            else normalized_content_modes
         )
+        if allowed_modes and not selected_modes:
+            continue
         destinations.append(
             {
                 "connector_id": connector_id,
@@ -285,7 +321,7 @@ def delivery_intent_from_run_route(
                 ),
                 "channel_key": channel_key,
                 "role": role,
-                "content_modes": list(content_modes),
+                "content_modes": list(selected_modes),
                 # The old Telegram transport cannot prove idempotent retries.
                 "retry_class": "query_before_retry",
             }
@@ -506,6 +542,31 @@ def owner_mirror_for_admission(
         return default
 
 
+def configured_owner_mirror_destinations(
+    *,
+    request_metadata: Mapping[str, Any] | None,
+    state_root: Any | None,
+) -> tuple[dict[str, str], ...]:
+    """Resolve registry-declared owner mirrors for one immutable Run route."""
+
+    metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
+    owner_id = str(metadata.get("owner_id") or "").strip()
+    if state_root is None or not owner_id:
+        return ()
+    from orchestrator.frontend_connector_registry import owner_mirror_connector_ids
+
+    destinations: list[dict[str, str]] = []
+    for connector_id in owner_mirror_connector_ids():
+        if owner_mirror_for_admission(
+            request_metadata=metadata,
+            state_root=state_root,
+            connector_id=connector_id,
+            default=False,
+        ):
+            destinations.append({"surface": connector_id, "channel_key": owner_id})
+    return tuple(destinations)
+
+
 def telegram_delivery_for_admission(
     *,
     source: str,
@@ -557,6 +618,7 @@ __all__ = [
     "RUN_DELIVERY_ROUTE_VERSION",
     "freeze_run_delivery_route",
     "delivery_intent_from_run_route",
+    "configured_owner_mirror_destinations",
     "configured_whatsapp_mirror_channel",
     "frontend_run_delivery_policy",
     "normalize_frontend_run_delivery_policy",

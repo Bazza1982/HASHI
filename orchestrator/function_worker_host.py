@@ -1141,6 +1141,14 @@ class FunctionWorkerHost:
                 await runtime.app.initialize()
                 last_stage = "start"
                 await runtime.app.start()
+                # Restore delayed-message cards only after the Telegram bot is
+                # initialized, but before this Worker reports the connector as
+                # ready. Pending expiry therefore survives a worker reload.
+                from orchestrator.telegram_freshness_gate import (
+                    restore_telegram_confirmation_state,
+                )
+
+                await restore_telegram_confirmation_state(runtime)
                 runtime.telegram_connected = True
                 self.command_menu_task = asyncio.create_task(
                     self._sync_telegram_command_menus(runtime),

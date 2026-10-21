@@ -179,9 +179,11 @@ async def test_shared_function_restart_recovers_running_operation(
 
 
 @pytest.mark.asyncio
-async def test_failure_stays_persistent_for_explicit_recovery(tmp_path, monkeypatch):
+async def test_move_retries_forward_past_legacy_attempt_limit(tmp_path, monkeypatch):
     kernel, _stopped = _kernel(tmp_path)
     monkeypatch.setattr(move_manager, "_MAX_EXECUTION_ATTEMPTS", 1)
+    monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
+    attempts = 0
     monkeypatch.setattr(
         move_manager,
         "get_outbound_move",
@@ -192,20 +194,33 @@ async def test_failure_stays_persistent_for_explicit_recovery(tmp_path, monkeypa
             "status": "staged_remote",
         },
     )
-    monkeypatch.setattr(
-        move_manager,
-        "confirm_outbound_move",
-        lambda *_args: (_ for _ in ()).throw(OSError("network lost")),
-    )
+    def confirm(*_args):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("network lost")
+        return {
+            "package_id": "move-3",
+            "agent_id": "source",
+            "operation": "move",
+            "status": "completed",
+        }
+
+    monkeypatch.setattr(move_manager, "confirm_outbound_move", confirm)
 
     manager = move_manager.AgentMoveManager(kernel)
-    manager.submit("move-3", {"hashi2": {"instance_id": "HASHI2"}})
-    result = await manager.wait("move-3")
+    await manager.start()
+    try:
+        manager.submit("move-3", {"hashi2": {"instance_id": "HASHI2"}})
+        result = await manager.wait("move-3")
+    finally:
+        await manager.stop()
 
-    assert result["status"] == "needs_recovery"
-    assert result["last_error"] == "network lost"
+    assert result["status"] == "completed"
+    assert result["execution_attempts"] == 2
+    assert attempts == 2
     persisted = json.loads(manager.state_path.read_text(encoding="utf-8"))
-    assert persisted["operations"]["move-3"]["status"] == "needs_recovery"
+    assert persisted["operations"]["move-3"]["status"] == "completed"
 
 
 @pytest.mark.parametrize("rollback_completed", [False, True])
@@ -260,9 +275,15 @@ async def test_transient_failure_retries_with_persisted_attempt_count(
 async def test_unconfirmed_source_stop_never_activates_target(tmp_path, monkeypatch):
     kernel, _stopped = _kernel(tmp_path)
     monkeypatch.setattr(move_manager, "_MAX_EXECUTION_ATTEMPTS", 1)
+    monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
+    stop_attempts = 0
 
     async def fail_stop(_agent_name: str, reason: str = ""):
-        return False, "source could not be stopped because Telegram is draining"
+        nonlocal stop_attempts
+        stop_attempts += 1
+        if stop_attempts == 1:
+            return False, "source could not be stopped because Telegram is draining"
+        return True, "stopped"
 
     kernel.stop_agent = fail_stop
     monkeypatch.setattr(
@@ -279,16 +300,21 @@ async def test_unconfirmed_source_stop_never_activates_target(tmp_path, monkeypa
     monkeypatch.setattr(
         move_manager,
         "continue_outbound_move",
-        lambda *_args: continued.append(True),
+        lambda *_args: continued.append(True)
+        or {"package_id": "move-4", "operation": "move", "status": "completed"},
     )
 
     manager = move_manager.AgentMoveManager(kernel)
-    manager.submit("move-4", {})
-    result = await manager.wait("move-4")
+    await manager.start()
+    try:
+        manager.submit("move-4", {})
+        result = await manager.wait("move-4")
+    finally:
+        await manager.stop()
 
-    assert result["status"] == "needs_recovery"
-    assert "could not be stopped" in result["last_error"]
-    assert continued == []
+    assert result["status"] == "completed"
+    assert stop_attempts == 2
+    assert continued == [True]
 
 
 @pytest.mark.asyncio
@@ -415,6 +441,24 @@ def test_empty_lock_left_by_crash_is_reclaimed_after_stale_window(tmp_path):
 
     assert move_manager.AgentMoveManager(kernel).status("missing") is None
     assert not lock_path.exists()
+
+
+def test_stale_lock_from_live_process_is_reclaimed(tmp_path, monkeypatch):
+    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
+    lock_path.write_text("pid=1234\n", encoding="utf-8")
+    old = time.time() - 10
+    os.utime(lock_path, (old, old))
+    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
+
+    assert move_manager._orphaned_lock(lock_path) is True
+
+
+def test_fresh_lock_from_live_process_is_preserved(tmp_path, monkeypatch):
+    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
+    lock_path.write_text("pid=1234\n", encoding="utf-8")
+    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
+
+    assert move_manager._orphaned_lock(lock_path) is False
 
 
 @pytest.mark.asyncio
