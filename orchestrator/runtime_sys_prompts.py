@@ -113,19 +113,19 @@ def _mutate_slot(
 ) -> str:
     before = manager.get_slot(slot)
     if action == "on":
-        manager.activate(slot)
+        manager.activate(slot, expected_slot=before)
         notice_key = "activated"
     elif action == "off":
-        manager.deactivate(slot)
+        manager.deactivate(slot, expected_slot=before)
         notice_key = "deactivated"
     elif action == "delete":
-        manager.delete(slot)
+        manager.delete(slot, expected_slot=before)
         notice_key = "cleared"
     elif action == "save":
-        manager.save(slot, text or "")
+        manager.save(slot, text or "", expected_slot=before)
         notice_key = "saved"
     elif action == "replace":
-        manager.replace(slot, text or "")
+        manager.replace(slot, text or "", expected_slot=before)
         notice_key = "updated"
     else:
         raise ValueError(f"unsupported /sys mutation: {action}")

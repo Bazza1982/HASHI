@@ -18,6 +18,12 @@ from typing import Any, ClassVar
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
+from orchestrator.config_json import (
+    ConfigConflictError,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
@@ -1132,6 +1138,10 @@ class BridgeMemoryStore:
         return status
 
 
+class SysPromptSemanticConflict(RuntimeError):
+    """The target slot changed after the caller observed or confirmed it."""
+
+
 class SysPromptManager:
     """Manage ten local or instance-shared additional system prompt slots."""
 
@@ -1154,7 +1164,7 @@ class SysPromptManager:
         self.scope = "global" if scope == "global" else "local"
         self._lock = _sys_prompt_path_lock(self.state_path)
         with self._lock:
-            self._data: dict = self._load() or self._empty_slots()
+            self._data: dict = self._normalize(self._read_document())
 
     @classmethod
     def for_instance(cls, global_config: Any) -> SysPromptManager:
@@ -1175,73 +1185,105 @@ class SysPromptManager:
         normalized = cls._empty_slots()
         for slot in cls.SLOTS:
             raw = payload.get(slot)
-            if not isinstance(raw, dict):
+            if raw is None:
                 continue
+            if not isinstance(raw, dict):
+                raise TypeError(f"system prompt slot {slot} must be a JSON object")
             text = raw.get("text", "")
+            active = raw.get("active", False)
+            if not isinstance(text, str) or type(active) is not bool:
+                raise TypeError(
+                    f"system prompt slot {slot} text/active has an invalid type"
+                )
             normalized[slot] = {
-                "text": text if isinstance(text, str) else str(text or ""),
-                "active": bool(raw.get("active", False)),
+                "text": text,
+                "active": active,
             }
         return normalized
 
-    def _load(self) -> dict[str, dict[str, object]] | None:
-        if not self.state_path.exists():
-            return self._empty_slots()
+    def _read_document(self):
         try:
-            payload = json.loads(
-                _retry_transient_file_access(
-                    lambda: self.state_path.read_text(encoding="utf-8")
-                )
+            return _retry_transient_file_access(
+                lambda: read_config_json(self.state_path)
             )
-            return self._normalize(payload)
-        except Exception as exc:
-            sys_prompt_logger.error(
-                "Could not load %s system prompt state from %s: %s",
-                self.scope,
-                self.state_path,
-                exc,
-            )
-            return None
+        except FileNotFoundError:
+            return new_config_json(self.state_path)
 
     def _refresh_locked(self) -> None:
-        if not self.shared:
-            return
-        loaded = self._load()
-        if loaded is not None:
-            self._data = loaded
+        self._data = self._normalize(self._read_document())
 
-    def _save_locked(self) -> None:
-        self._data = self._normalize(self._data)
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_name(
-            f".{self.state_path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-        )
-        try:
-            temporary.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            _retry_transient_file_access(
-                lambda: os.replace(temporary, self.state_path)
-            )
-        finally:
-            temporary.unlink(missing_ok=True)
+    @classmethod
+    def _validate_slot_name(cls, n: str) -> None:
+        if n not in cls.SLOTS:
+            raise ValueError("system prompt slot must be 1..10")
 
-    def _save(self) -> None:
-        with self._lock:
-            self._save_locked()
+    def _mutate_locked(
+        self,
+        n: str,
+        command: str,
+        *,
+        text: str | None = None,
+        expected_slot: dict[str, object] | None = None,
+        max_conflicts: int = 4,
+    ) -> dict[str, object]:
+        self._validate_slot_name(n)
+        if command in {"save", "replace"} and not isinstance(text, str):
+            raise TypeError("save/replace requires text")
+        expected = dict(expected_slot) if expected_slot is not None else None
+        if expected is not None:
+            expected = self._normalize({n: expected})[n]
+
+        for attempt in range(max_conflicts + 1):
+            source = self._read_document()
+            current = self._normalize(source)[n]
+            if expected is None:
+                expected = dict(current)
+            if current != expected:
+                raise SysPromptSemanticConflict(
+                    f"system prompt slot {n} changed after it was observed"
+                )
+
+            updated = dict(current)
+            if command == "save":
+                if current["text"]:
+                    raise SysPromptSemanticConflict(
+                        f"system prompt slot {n} is occupied; use confirmed replace"
+                    )
+                updated = {"text": text, "active": False}
+            elif command == "replace":
+                updated["text"] = text
+            elif command == "activate":
+                if not current["text"]:
+                    raise ValueError("cannot activate an empty system prompt slot")
+                updated["active"] = True
+            elif command == "deactivate":
+                updated["active"] = False
+            elif command == "delete":
+                updated = {"text": "", "active": False}
+            else:
+                raise ValueError(f"unsupported system prompt mutation: {command}")
+
+            candidate = source.copy()
+            candidate[n] = updated
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                write_config_json(self.state_path, candidate)
+            except ConfigConflictError:
+                if attempt == max_conflicts:
+                    raise
+                continue
+            self._data = self._normalize(candidate)
+            return updated
+        raise AssertionError("unreachable")
 
     def _slot(self, n: str) -> dict:
-        with self._lock:
-            self._refresh_locked()
-            self._data.setdefault(n, {"text": "", "active": False})
-            return self._data[n]
+        return self.get_slot(n)
 
     def get_slot(self, n: str) -> dict[str, object]:
+        self._validate_slot_name(n)
         with self._lock:
             self._refresh_locked()
-            slot = self._data.setdefault(n, {"text": "", "active": False})
-            return {"text": str(slot.get("text") or ""), "active": bool(slot.get("active"))}
+            return dict(self._data[n])
 
     def display_all(self) -> str:
         lines = ["*System Prompt Slots:*"]
@@ -1260,47 +1302,52 @@ class SysPromptManager:
         text = s["text"] or "(empty)"
         return f"Slot {n} [{status}]:\n{text}"
 
-    def activate(self, n: str) -> str:
+    def activate(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            if not self._data.setdefault(n, {"text": "", "active": False})["text"]:
-                return f"Slot {n} is empty — save a message first."
-            self._data[n]["active"] = True
-            self._save_locked()
+            self._mutate_locked(n, "activate", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} activated."
 
-    def deactivate(self, n: str) -> str:
+    def deactivate(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data.setdefault(n, {"text": "", "active": False})["active"] = False
-            self._save_locked()
+            self._mutate_locked(n, "deactivate", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} deactivated."
 
-    def save(self, n: str, text: str) -> str:
+    def save(
+        self,
+        n: str,
+        text: str,
+        *,
+        expected_slot: dict[str, object] | None = None,
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data[n] = {"text": text, "active": False}
-            self._save_locked()
+            self._mutate_locked(n, "save", text=text, expected_slot=expected_slot)
         if self.scope == "global":
             return f"Global slot {n} saved (inactive). Use /sys global {n} on to activate."
         return f"Slot {n} saved (inactive). Use /sys {n} on to activate."
 
-    def replace(self, n: str, text: str) -> str:
+    def replace(
+        self,
+        n: str,
+        text: str,
+        *,
+        expected_slot: dict[str, object] | None = None,
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            was_active = self._data.setdefault(n, {"text": "", "active": False}).get("active", False)
-            self._data[n] = {"text": text, "active": was_active}
-            self._save_locked()
+            self._mutate_locked(n, "replace", text=text, expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} updated."
 
-    def delete(self, n: str) -> str:
+    def delete(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data[n] = {"text": "", "active": False}
-            self._save_locked()
+            self._mutate_locked(n, "delete", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} cleared."
 
@@ -1715,6 +1762,8 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(global_entries),
             )
+        elif self.global_sys_prompt_manager is not None:
+            removed_section_keys.append("instance_global_sys")
         add_section(
             "instance_path_presentation",
             "INSTANCE PATH PRESENTATION",
@@ -1734,6 +1783,8 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(local_entries),
             )
+        elif self.sys_prompt_manager is not None:
+            removed_section_keys.append("agent_local_sys")
 
         add_section(
             "current_user_request",
@@ -1848,6 +1899,8 @@ class BridgeContextAssembler:
                 "memory",
                 protected=True,
             )
+        elif document is not None:
+            removed_section_keys.append("permanent_memory")
 
         inject_search = (
             not incremental and inject_memory and self.saved_memory_injection_enabled
@@ -2122,7 +2175,7 @@ class BridgeContextAssembler:
             "transport_snapshot": {
                 "version": 1,
                 "sections": transport_sections,
-                "removed_section_keys": removed_section_keys,
+                "removed_section_keys": list(dict.fromkeys(removed_section_keys)),
             },
             "audit": {
                 "hcc": {
