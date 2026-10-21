@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from orchestrator import runtime_delivery_order, runtime_lifecycle, runtime_session
+from orchestrator import (
+    frontend_ingress,
+    runtime_delivery_order,
+    runtime_lifecycle,
+    runtime_session,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
@@ -44,6 +49,115 @@ def _terminal_kinds(store, session_id, owner):
         if str(event["kind"]).startswith("run.")
         and event["kind"] not in {"run.accepted", "run.started"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_real_enqueue_binds_workspace_metadata_and_queue_to_receipt_generation(
+    tmp_path, monkeypatch
+):
+    runtime = _admission_runtime(tmp_path)
+    original_ingress = frontend_ingress.accept_runtime_ingress
+    original_workspace = runtime.session_store.session_workspace
+    workspace_calls = []
+
+    def return_stale_resolved_session(*args, **kwargs):
+        session, accepted, owner, surface, channel = original_ingress(
+            *args, **kwargs
+        )
+        stale = dict(session)
+        stale["context_generation"] = accepted.context_generation + 40
+        return stale, accepted, owner, surface, channel
+
+    def capture_workspace(session_id, context_generation):
+        workspace_calls.append((session_id, context_generation))
+        return original_workspace(session_id, context_generation)
+
+    monkeypatch.setattr(
+        frontend_ingress,
+        "accept_runtime_ingress",
+        return_stale_resolved_session,
+    )
+    monkeypatch.setattr(runtime.session_store, "session_workspace", capture_workspace)
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *_args, **_kwargs: {}
+    )
+
+    request_id = await runtime.enqueue_request(
+        42,
+        "bind every consumer to the canonical receipt",
+        "api",
+        "receipt generation",
+        idempotency_key="receipt-generation",
+        deliver_to_telegram=False,
+    )
+    item = runtime.queue.get_nowait()
+    run = runtime.session_store.find_run_by_idempotency(
+        session_id=item.session_id,
+        owner_id="user:42",
+        idempotency_key="receipt-generation",
+    )
+
+    assert request_id == run["request_id"] == item.request_id
+    assert item.context_generation == run["context_generation"] == 1
+    assert item.request_metadata["context_generation"] == 1
+    assert item.request_metadata["hashi_session_id"] == run["session_id"]
+    assert workspace_calls == [(run["session_id"], 1)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_real_enqueues_share_one_canonical_receipt_and_queue_item(
+    tmp_path, monkeypatch
+):
+    runtime = _admission_runtime(tmp_path)
+    sequence_lock = threading.Lock()
+    sequence = 0
+
+    def next_request_id():
+        nonlocal sequence
+        with sequence_lock:
+            sequence += 1
+            return f"req-concurrent-{sequence}"
+
+    runtime.next_request_id = next_request_id
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *_args, **_kwargs: {}
+    )
+    original_find = runtime.session_store.find_run_by_idempotency
+    lookup_barrier = threading.Barrier(2)
+
+    def concurrent_miss(**kwargs):
+        result = original_find(**kwargs)
+        if kwargs.get("idempotency_key") == "concurrent-client-intent" and result is None:
+            lookup_barrier.wait(timeout=3)
+        return result
+
+    monkeypatch.setattr(
+        runtime.session_store, "find_run_by_idempotency", concurrent_miss
+    )
+
+    async def enqueue():
+        return await runtime.enqueue_request(
+            42,
+            "same concurrent request",
+            "api",
+            "concurrent admission",
+            idempotency_key="concurrent-client-intent",
+            deliver_to_telegram=False,
+        )
+
+    results = await asyncio.gather(enqueue(), enqueue())
+    session = runtime.session_store.ensure_default_session(
+        owner_id="user:42", agent_id=runtime.name
+    )
+    runs = runtime.session_store.recent_session_runs(
+        session["session_id"], owner_id="user:42"
+    )
+
+    assert results[0] == results[1] == runs[0]["request_id"]
+    assert len(runs) == 1
+    assert len(runtime.session_store.messages(session["session_id"])) == 1
+    assert runtime.queue.qsize() == 1
+    assert runtime.queue.get_nowait().request_id == runs[0]["request_id"]
 
 
 @pytest.mark.asyncio

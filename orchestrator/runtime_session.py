@@ -298,6 +298,12 @@ def accept_request(
         if "session_message_text" in metadata
         else prompt
     )
+    explicit_expected_generation = metadata.get("session_context_generation")
+    expected_generation = (
+        explicit_expected_generation
+        if explicit_expected_generation is not None
+        else int(session["context_generation"])
+    )
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
@@ -311,7 +317,7 @@ def accept_request(
             if "session_message_display_text" in metadata
             else None
         ),
-        expected_context_generation=metadata.get("session_context_generation"),
+        expected_context_generation=expected_generation,
         execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
         parent_run_id=str(metadata.get("parent_run_id") or "") or None,

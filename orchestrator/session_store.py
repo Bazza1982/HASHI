@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -94,6 +95,44 @@ def _new_id(prefix: str) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _frontend_intent_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Exclude only the per-attempt server request ID from request intent."""
+
+    normalized = deepcopy(dict(payload))
+    message_context = normalized.get("message_context")
+    if not isinstance(message_context, dict):
+        return normalized
+    frontend_ingress = message_context.get("frontend_ingress")
+    if not isinstance(frontend_ingress, dict):
+        return normalized
+    message = frontend_ingress.get("message")
+    if isinstance(message, dict):
+        message.pop("request_id", None)
+    return normalized
+
+
+def _frontend_intent_digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        _json(_frontend_intent_payload(payload)).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_request_digest(
+    payload: Mapping[str, Any], *, winner_request_id: str
+) -> str:
+    """Reproduce the legacy full-envelope digest for a known winning Run."""
+
+    normalized = deepcopy(dict(payload))
+    message_context = normalized.get("message_context")
+    if isinstance(message_context, dict):
+        frontend_ingress = message_context.get("frontend_ingress")
+        if isinstance(frontend_ingress, dict):
+            message = frontend_ingress.get("message")
+            if isinstance(message, dict) and "request_id" in message:
+                message["request_id"] = str(winner_request_id)
+    return hashlib.sha256(_json(normalized).encode("utf-8")).hexdigest()
 
 
 def _json_object(value: str | None) -> dict[str, Any]:
@@ -3365,12 +3404,8 @@ class SessionStore:
             legacy_digest_payload = dict(digest_payload)
             legacy_digest_payload["content"] = blocks
             legacy_digest_payload["attachments"] = legacy_attachment_fingerprints
-            digest = hashlib.sha256(
-                _json(digest_payload).encode("utf-8")
-            ).hexdigest()
-            legacy_digest = hashlib.sha256(
-                _json(legacy_digest_payload).encode("utf-8")
-            ).hexdigest()
+            digest = _frontend_intent_digest(digest_payload)
+            legacy_media_digest = _frontend_intent_digest(legacy_digest_payload)
             existing = connection.execute(
                 """
                 SELECT i.request_digest, r.* FROM idempotency_records AS i
@@ -3381,8 +3416,23 @@ class SessionStore:
             ).fetchone()
             if existing is not None:
                 stored_digest = str(existing["request_digest"])
-                legacy_request_matches = stored_digest == legacy_digest
-                request_matches = stored_digest == digest or legacy_request_matches
+                winner_request_id = str(existing["request_id"])
+                legacy_request_matches = stored_digest == _legacy_request_digest(
+                    digest_payload,
+                    winner_request_id=winner_request_id,
+                )
+                legacy_media_matches = stored_digest in {
+                    legacy_media_digest,
+                    _legacy_request_digest(
+                        legacy_digest_payload,
+                        winner_request_id=winner_request_id,
+                    ),
+                }
+                request_matches = (
+                    stored_digest == digest
+                    or legacy_request_matches
+                    or legacy_media_matches
+                )
                 if not request_matches and str(idempotency_key).startswith("hchat:"):
                     try:
                         existing_context = json.loads(
@@ -3415,7 +3465,7 @@ class SessionStore:
                     raise IdempotencyConflict(
                         "idempotency key is already bound to a different request"
                     )
-                if legacy_request_matches and stored_digest != digest:
+                if legacy_media_matches and not legacy_request_matches and stored_digest != digest:
                     # Upgrade pre-workspace media digests in place. Older
                     # digests included the central staging path; the current
                     # digest deliberately excludes managed storage location.

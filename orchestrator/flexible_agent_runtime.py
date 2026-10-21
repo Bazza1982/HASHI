@@ -1545,6 +1545,20 @@ class FlexibleAgentRuntime:
         session, accepted, session_owner, session_surface, session_channel_key = (
             admission_result
         )
+        request_session_id = (
+            accepted.session_id
+            if accepted is not None
+            else str(session["session_id"])
+        )
+        request_context_generation = (
+            accepted.context_generation
+            if accepted is not None
+            else int(session["context_generation"])
+        )
+        if accepted is not None:
+            if request_session_id != str(session["session_id"]):
+                raise SessionConflict("admission receipt Session changed")
+            request_id = accepted.request_id
         if admission_cancelled is not None:
             if accepted is not None and not accepted.replayed:
                 await asyncio.to_thread(
@@ -1625,13 +1639,13 @@ class FlexibleAgentRuntime:
             session_workspace, workzone_snapshot = await asyncio.gather(
                 asyncio.to_thread(
                     self.session_store.session_workspace,
-                    session["session_id"],
-                    int(session["context_generation"]),
+                    request_session_id,
+                    request_context_generation,
                 ),
                 asyncio.to_thread(
                     runtime_session.session_workzone_state,
                     self,
-                    session_id=session["session_id"],
+                    session_id=request_session_id,
                 ),
             )
         except BaseException as failure:
@@ -1652,10 +1666,10 @@ class FlexibleAgentRuntime:
             raise
         metadata.update(
             {
-                "hashi_session_id": session["session_id"],
+                "hashi_session_id": request_session_id,
                 "hashi_run_id": accepted.run_id if accepted is not None else None,
                 "hashi_message_id": accepted.message_id if accepted is not None else None,
-                "context_generation": int(session["context_generation"]),
+                "context_generation": request_context_generation,
                 "owner_id": session_owner,
                 "session_surface": session_surface,
                 "session_channel_key": session_channel_key,
@@ -1677,10 +1691,10 @@ class FlexibleAgentRuntime:
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
-            session_id=session["session_id"],
+            session_id=request_session_id,
             run_id=accepted.run_id if accepted is not None else None,
             message_id=accepted.message_id if accepted is not None else None,
-            context_generation=int(session["context_generation"]),
+            context_generation=request_context_generation,
             owner_id=session_owner,
             session_surface=session_surface,
             session_channel_key=session_channel_key,
