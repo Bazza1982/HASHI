@@ -197,6 +197,17 @@ def _parse_key_values(args: list[str]) -> dict[str, str]:
     return values
 
 
+async def _await_owned_completion(task: asyncio.Task):
+    """Join an owned settlement even if the caller is cancelled repeatedly."""
+
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
 class FlexibleAgentRuntime:
 
     def __getattribute__(self, name):
@@ -1537,11 +1548,47 @@ class FlexibleAgentRuntime:
         try:
             admission_result = await asyncio.shield(admission_task)
         except asyncio.CancelledError as cancellation:
-            # The thread cannot be cancelled once SQLite admission has begun.
-            # Join it under the original identity, then close only an exact
-            # receipt proven not to have reached an executor.
             admission_cancelled = cancellation
-            admission_result = await admission_task
+            # The admission thread cannot be cancelled after SQLite work begins.
+            # Give one independent settlement task ownership of both the exact
+            # receipt and its cleanup. Repeated cancellation of this caller may
+            # interrupt the join, but can neither cancel nor orphan settlement.
+            async def settle_cancelled_admission() -> None:
+                (
+                    settled_session,
+                    settled_accepted,
+                    settled_owner,
+                    _settled_surface,
+                    _settled_channel_key,
+                ) = await admission_task
+                if settled_accepted is None:
+                    return
+                if settled_accepted.session_id != str(settled_session["session_id"]):
+                    raise SessionConflict("admission receipt Session changed")
+                if settled_accepted.replayed:
+                    return
+                await asyncio.to_thread(
+                    self.session_store.fail_unsubmitted_request,
+                    settled_accepted.request_id,
+                    session_id=settled_accepted.session_id,
+                    run_id=settled_accepted.run_id,
+                    message_id=settled_accepted.message_id,
+                    context_generation=settled_accepted.context_generation,
+                    owner_id=settled_owner,
+                    agent_id=self.name,
+                    error_text=(
+                        "request admission caller was cancelled before executor handoff"
+                    ),
+                    error_code="ADMISSION_CALLER_CANCELLED",
+                    failure_state="interrupted",
+                )
+
+            settlement_task = asyncio.create_task(
+                settle_cancelled_admission(),
+                name=f"settle-cancelled-admission-{self.name}-{request_id}",
+            )
+            await _await_owned_completion(settlement_task)
+            raise admission_cancelled
         session, accepted, session_owner, session_surface, session_channel_key = (
             admission_result
         )
@@ -1559,22 +1606,6 @@ class FlexibleAgentRuntime:
             if request_session_id != str(session["session_id"]):
                 raise SessionConflict("admission receipt Session changed")
             request_id = accepted.request_id
-        if admission_cancelled is not None:
-            if accepted is not None and not accepted.replayed:
-                await asyncio.to_thread(
-                    self.session_store.fail_unsubmitted_request,
-                    accepted.request_id,
-                    session_id=accepted.session_id,
-                    run_id=accepted.run_id,
-                    message_id=accepted.message_id,
-                    context_generation=accepted.context_generation,
-                    owner_id=session_owner,
-                    agent_id=self.name,
-                    error_text="request admission caller was cancelled before executor handoff",
-                    error_code="ADMISSION_CALLER_CANCELLED",
-                    failure_state="interrupted",
-                )
-            raise admission_cancelled
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import attachment_manifest
 

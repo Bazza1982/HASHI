@@ -266,6 +266,79 @@ async def test_cancel_during_real_admission_joins_original_commit_and_closes_it(
     assert runtime.queue.empty()
 
 
+@pytest.mark.asyncio
+async def test_repeated_cancellation_cannot_orphan_admission_or_exact_cleanup(
+    tmp_path, monkeypatch
+):
+    runtime = _admission_runtime(tmp_path)
+    committed = threading.Event()
+    release_admission = threading.Event()
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_calls = 0
+    original_accept = runtime.session_store.accept_run
+    original_cleanup = runtime.session_store.fail_unsubmitted_request
+
+    def accept_then_pause(*args, **kwargs):
+        receipt = original_accept(*args, **kwargs)
+        committed.set()
+        assert release_admission.wait(timeout=3)
+        return receipt
+
+    def cleanup_then_pause(*args, **kwargs):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=3)
+        return original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.session_store, "accept_run", accept_then_pause)
+    monkeypatch.setattr(
+        runtime.session_store, "fail_unsubmitted_request", cleanup_then_pause
+    )
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *_args, **_kwargs: {}
+    )
+    task = asyncio.create_task(
+        runtime.enqueue_request(
+            42,
+            "cancel repeatedly during admission",
+            "api",
+            "repeat cancel admission",
+            idempotency_key="repeat-cancel-admission",
+            deliver_to_telegram=False,
+        )
+    )
+    assert await asyncio.to_thread(committed.wait, 3)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    release_admission.set()
+    assert await asyncio.to_thread(cleanup_started.wait, 3)
+    task.cancel()
+    await asyncio.sleep(0)
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    session = runtime.session_store.ensure_default_session(
+        owner_id="user:42", agent_id=runtime.name
+    )
+    run = runtime.session_store.find_run_by_idempotency(
+        session_id=session["session_id"],
+        owner_id="user:42",
+        idempotency_key="repeat-cancel-admission",
+    )
+    assert cleanup_calls == 1
+    assert run["state"] == "interrupted"
+    assert runtime.queue.empty()
+    assert _terminal_kinds(runtime.session_store, session["session_id"], "user:42") == [
+        "run.interrupted"
+    ]
+
+
 def test_unsubmitted_cleanup_never_overwrites_executor_or_terminal_winner(tmp_path):
     store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI3")
     owner = "user:42"
