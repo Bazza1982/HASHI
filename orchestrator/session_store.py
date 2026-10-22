@@ -415,7 +415,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 25
+    SCHEMA_VERSION = 26
 
     def __init__(
         self,
@@ -1692,10 +1692,254 @@ class SessionStore:
                 FROM conversation_continuity_imports
                 """
             )
+            if stored_schema_version < 26:
+                self._reconcile_legacy_output_audio(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
+        self._repair_pending_audio_projections()
+
+    @staticmethod
+    def _legacy_audio_part_matches(
+        part: Mapping[str, Any], metadata: Mapping[str, Any]
+    ) -> bool:
+        """Require every available durable message fact to match provider metadata."""
+
+        expected_text = {
+            "sha256": str(metadata.get("sha256") or "").casefold(),
+            "mime_type": str(metadata.get("mime_type") or "").casefold(),
+            "format": str(metadata.get("format") or "").casefold(),
+        }
+        for key, expected in expected_text.items():
+            supplied = str(part.get(key) or "").strip().casefold()
+            if supplied and supplied != expected:
+                return False
+        supplied_size = part.get("size_bytes")
+        if supplied_size is not None:
+            try:
+                if int(supplied_size) != int(metadata.get("size_bytes") or 0):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _reconcile_legacy_output_audio(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Register only legacy output audio with a complete authoritative binding."""
+
+        references: dict[str, list[dict[str, Any]]] = {}
+        rows = connection.execute(
+            """
+            SELECT message.message_id, message.session_id, message.run_id,
+                   message.content_json, message.content_hash, message.created_at,
+                   session.owner_id, session.instance_id,
+                   run.request_id, run.session_id AS run_session_id
+            FROM messages AS message
+            JOIN sessions AS session ON session.session_id = message.session_id
+            LEFT JOIN runs AS run ON run.run_id = message.run_id
+            WHERE message.role = 'assistant'
+              AND message.content_json LIKE '%"asset_id"%'
+            ORDER BY message.created_at, message.message_id
+            """
+        ).fetchall()
+        malformed_messages: list[dict[str, str]] = []
+        for row in rows:
+            encoded_content = str(row["content_json"] or "[]")
+            if hashlib.sha256(encoded_content.encode("utf-8")).hexdigest() != str(
+                row["content_hash"] or ""
+            ):
+                malformed_messages.append(
+                    {
+                        "message_id": str(row["message_id"]),
+                        "reason": "assistant content digest does not match",
+                    }
+                )
+                continue
+            try:
+                content = json.loads(encoded_content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                malformed_messages.append(
+                    {
+                        "message_id": str(row["message_id"]),
+                        "reason": "assistant content is not valid JSON",
+                    }
+                )
+                continue
+            if not isinstance(content, list):
+                continue
+            for raw_part in content:
+                if not isinstance(raw_part, Mapping):
+                    continue
+                part = dict(raw_part)
+                if str(part.get("type") or "").casefold() != "audio":
+                    continue
+                asset_id = str(part.get("asset_id") or "").strip()
+                if not asset_id:
+                    continue
+                references.setdefault(asset_id, []).append(
+                    {
+                        "message_id": str(row["message_id"]),
+                        "session_id": str(row["session_id"]),
+                        "run_id": str(row["run_id"] or ""),
+                        "request_id": str(row["request_id"] or ""),
+                        "run_session_id": str(row["run_session_id"] or ""),
+                        "owner_id": str(row["owner_id"]),
+                        "instance_id": str(row["instance_id"]),
+                        "created_at": str(row["created_at"] or ""),
+                        "part": part,
+                    }
+                )
+
+        report: dict[str, Any] = {
+            "schema": 1,
+            "migration": "legacy_output_audio_v26",
+            "observed_at": _utc_now(),
+            "registered": [],
+            "already_registered": [],
+            "unresolved": malformed_messages,
+        }
+        for asset_id in sorted(references):
+            asset_references = references[asset_id]
+            existing = connection.execute(
+                "SELECT attachment_id FROM session_attachments WHERE asset_id=?",
+                (asset_id,),
+            ).fetchall()
+            if existing:
+                report["already_registered"].append(asset_id)
+                continue
+            identities = {
+                (
+                    item["owner_id"],
+                    item["session_id"],
+                    item["run_id"],
+                    item["request_id"],
+                    item["run_session_id"],
+                    item["instance_id"],
+                )
+                for item in asset_references
+            }
+            if len(identities) != 1:
+                report["unresolved"].append(
+                    {"asset_id": asset_id, "reason": "conflicting durable references"}
+                )
+                continue
+            owner_id, session_id, run_id, request_id, run_session_id, instance_id = (
+                next(iter(identities))
+            )
+            if (
+                not run_id
+                or not request_id
+                or run_session_id != session_id
+                or instance_id != self.instance_id
+            ):
+                report["unresolved"].append(
+                    {"asset_id": asset_id, "reason": "incomplete Run or instance binding"}
+                )
+                continue
+            connection.execute("SAVEPOINT legacy_output_audio_asset")
+            try:
+                metadata, _payload = self.audio_assets.read_bytes(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+                correlation = dict(metadata.get("correlation") or {})
+                if (
+                    str(metadata.get("direction") or "") != "output"
+                    or str(correlation.get("run_id") or "") != run_id
+                    or str(correlation.get("request_id") or "") != request_id
+                    or any(
+                        not self._legacy_audio_part_matches(item["part"], metadata)
+                        for item in asset_references
+                    )
+                ):
+                    raise SessionConflict(
+                        "legacy audio metadata does not match its durable output reference"
+                    )
+                metadata = self.audio_assets.claim(
+                    asset_id,
+                    owner_id=owner_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                    canonical_managed=True,
+                )
+                attachment_id = self._register_audio_asset(
+                    connection,
+                    metadata=metadata,
+                    owner_id=owner_id,
+                    session_id=session_id,
+                    committed_at=str(asset_references[0].get("created_at") or _utc_now()),
+                )
+                message_id = str(asset_references[0]["message_id"])
+                connection.execute(
+                    """UPDATE session_attachments
+                       SET bound_message_id=?, retention_seconds=NULL,
+                           retention_expires_at=NULL, retention_indefinite=1,
+                           audio_projection_pending=1
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?
+                         AND state='committed'""",
+                    (message_id, attachment_id, session_id, owner_id),
+                )
+            except (AudioAssetError, SessionConflict, TypeError, ValueError) as exc:
+                connection.execute("ROLLBACK TO legacy_output_audio_asset")
+                connection.execute("RELEASE legacy_output_audio_asset")
+                report["unresolved"].append(
+                    {
+                        "asset_id": asset_id,
+                        "reason": f"{type(exc).__name__}: {exc}"[:500],
+                    }
+                )
+                continue
+            connection.execute("RELEASE legacy_output_audio_asset")
+            report["registered"].append(asset_id)
+        connection.execute(
+            "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES(?, ?)",
+            ("legacy_output_audio_reconciliation_v26", _json(report)),
+        )
+
+    def _repair_pending_audio_projections(self) -> None:
+        """Finish idempotent filesystem retention projection after DB commit."""
+
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT asset_id, owner_id, session_id
+                   FROM session_attachments
+                   WHERE state='committed' AND audio_projection_pending=1
+                     AND retention_indefinite=1 AND asset_id IS NOT NULL"""
+            ).fetchall()
+        for row in rows:
+            asset_id = str(row["asset_id"] or "")
+            owner_id = str(row["owner_id"])
+            session_id = str(row["session_id"])
+            if not asset_id:
+                continue
+            try:
+                self.audio_assets.set_indefinite(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+            except AudioAssetError:
+                continue
+            with self._lock, self._connection() as connection:
+                connection.execute(
+                    """UPDATE session_attachments SET audio_projection_pending=0
+                       WHERE asset_id=? AND owner_id=? AND session_id=?
+                         AND state='committed' AND retention_indefinite=1""",
+                    (asset_id, owner_id, session_id),
+                )
+
+    def legacy_audio_migration_report(self) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM schema_metadata WHERE key=?",
+                ("legacy_output_audio_reconciliation_v26",),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            value = json.loads(str(row["value"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(value) if isinstance(value, Mapping) else {}
 
     @staticmethod
     def owner_id_for(global_config: Any, explicit: str | None = None) -> str:

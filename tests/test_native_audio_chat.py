@@ -195,6 +195,66 @@ def _prepare_expiring_audio(tmp_path: Path):
     return db_path, session["session_id"], staged["attachment_id"], payload
 
 
+def _prepare_legacy_output_audio(tmp_path: Path):
+    db_path = tmp_path / "state" / "sessions.sqlite3"
+    store = SessionStore(db_path)
+    owner_id = "user:7"
+    session = store.create_session(owner_id=owner_id, agent_id="arale")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="arale",
+        request_id="request-legacy-output-audio",
+        text="reply with native audio",
+        source="test",
+        idempotency_key="legacy-output-audio",
+    )
+    payload = _wav_bytes(tmp_path / "legacy-output.wav")
+    output = store.audio_assets.create(
+        payload,
+        owner_id=owner_id,
+        session_id=session["session_id"],
+        direction="output",
+        mime_type="audio/wav",
+        audio_format="wav",
+        filename="legacy-output.wav",
+        correlation={
+            "run_id": accepted.run_id,
+            "request_id": accepted.request_id,
+            "provider": "legacy-audio-provider",
+            "model": "legacy-audio-model",
+        },
+    )
+    content = [
+        {"type": "text", "text": "Legacy native reply."},
+        {
+            "type": "audio",
+            "asset_id": output["asset_id"],
+            "mime_type": output["mime_type"],
+            "format": output["format"],
+            "size_bytes": output["size_bytes"],
+            "sha256": output["sha256"],
+        },
+    ]
+    finished = store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="Legacy native reply.",
+        assistant_content=content,
+        assistant_source="legacy-audio-provider",
+    )
+    assert finished["state"] == "completed"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_attachments WHERE asset_id=?",
+            (output["asset_id"],),
+        ).fetchone()[0] == 0
+        connection.execute(
+            "UPDATE schema_metadata SET value='25' WHERE key='schema_version'"
+        )
+    return db_path, owner_id, session["session_id"], output, payload, store
+
+
 def _join_spawned(process, *, expected_exit: int = 0) -> None:
     process.join(30)
     if process.is_alive():
@@ -853,7 +913,127 @@ def test_audio_lifecycle_schema_migrates_v24_without_rewriting_rows(tmp_path):
         "audio_projection_pending",
     } <= columns
     assert legacy == ("att_legacy", "committed", "att_legacy")
-    assert version == "25"
+    assert version == str(SessionStore.SCHEMA_VERSION)
+
+
+def test_legacy_output_audio_upgrade_registers_exact_durable_owner(tmp_path):
+    db_path, owner_id, session_id, output, payload, legacy = (
+        _prepare_legacy_output_audio(tmp_path)
+    )
+    with pytest.raises(SessionConflict, match="not canonically registered"):
+        legacy.audio_asset_bytes(
+            session_id=session_id,
+            owner_id=owner_id,
+            asset_id=output["asset_id"],
+        )
+
+    upgraded = SessionStore(db_path)
+    metadata, restored = upgraded.audio_asset_bytes(
+        session_id=session_id,
+        owner_id=owner_id,
+        asset_id=output["asset_id"],
+    )
+    assert restored == payload
+    assert hashlib.sha256(restored).hexdigest() == output["sha256"]
+    assert metadata["asset_id"] == output["asset_id"]
+    with pytest.raises(SessionConflict, match="another Session"):
+        upgraded.audio_asset_bytes(
+            session_id="wrong-session",
+            owner_id=owner_id,
+            asset_id=output["asset_id"],
+        )
+    with pytest.raises(SessionConflict, match="another Session"):
+        upgraded.audio_asset_bytes(
+            session_id=session_id,
+            owner_id="user:wrong",
+            asset_id=output["asset_id"],
+        )
+
+    reopened = SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """SELECT COUNT(*), MIN(retention_indefinite),
+                      MAX(audio_projection_pending), MIN(bound_message_id)
+               FROM session_attachments WHERE asset_id=?""",
+            (output["asset_id"],),
+        ).fetchone()
+    assert row[0:3] == (1, 1, 0)
+    assert row[3]
+    assert reopened.legacy_audio_migration_report()["registered"] == [
+        output["asset_id"]
+    ]
+
+
+def test_legacy_output_audio_projection_recovers_idempotently_after_failure(
+    tmp_path, monkeypatch
+):
+    db_path, owner_id, session_id, output, payload, _legacy = (
+        _prepare_legacy_output_audio(tmp_path)
+    )
+    original = AudioAssetStore.set_indefinite
+    attempts = 0
+
+    def fail_once(asset_store, asset_id, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise AudioAssetNotFound(asset_id)
+        return original(asset_store, asset_id, **kwargs)
+
+    monkeypatch.setattr(AudioAssetStore, "set_indefinite", fail_once)
+    first = SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT audio_projection_pending FROM session_attachments WHERE asset_id=?",
+            (output["asset_id"],),
+        ).fetchone()[0] == 1
+    monkeypatch.setattr(AudioAssetStore, "set_indefinite", original)
+    recovered = SessionStore(db_path)
+    assert recovered.audio_asset_bytes(
+        session_id=session_id,
+        owner_id=owner_id,
+        asset_id=output["asset_id"],
+    )[1] == payload
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            """SELECT COUNT(*), MAX(audio_projection_pending)
+               FROM session_attachments WHERE asset_id=?""",
+            (output["asset_id"],),
+        ).fetchone() == (1, 0)
+    assert first.legacy_audio_migration_report()["registered"] == [output["asset_id"]]
+
+
+def test_legacy_output_audio_with_unproven_digest_is_preserved_and_reported(tmp_path):
+    db_path, owner_id, session_id, output, payload, _legacy = (
+        _prepare_legacy_output_audio(tmp_path)
+    )
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT message_id, content_json FROM messages WHERE role='assistant'"
+        ).fetchone()
+        content = json.loads(row[1])
+        next(part for part in content if part.get("type") == "audio")["sha256"] = "0" * 64
+        encoded = json.dumps(
+            content, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        connection.execute(
+            "UPDATE messages SET content_json=?, content_hash=? WHERE message_id=?",
+            (encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest(), row[0]),
+        )
+
+    upgraded = SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_attachments WHERE asset_id=?",
+            (output["asset_id"],),
+        ).fetchone()[0] == 0
+    raw_metadata, raw_payload = upgraded.audio_assets.read_bytes(
+        output["asset_id"], owner_id=owner_id, session_id=session_id
+    )
+    assert raw_metadata["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert raw_payload == payload
+    unresolved = upgraded.legacy_audio_migration_report()["unresolved"]
+    assert any(item.get("asset_id") == output["asset_id"] for item in unresolved)
 
 
 def test_audio_duration_limit_uses_verified_duration_instead_of_rejecting_all(

@@ -1216,6 +1216,24 @@ admission writes no Message, Run, or idempotency record. SQLite transactions are
 not held across unlink, and every file-side writer uses the same cross-process
 catalogue lock.
 
+#### 18.4.1 Legacy native-output reconciliation
+
+Schema generation 26 reconciles native output audio created before canonical
+`session_attachments` registration existed. The authority is the persisted
+assistant Message audio reference together with its Run and Session, not the
+presence of a file alone. Reconciliation verifies one consistent owner,
+Session, Run/request correlation, managed path, metadata, format, size and byte
+digest before it creates the missing canonical row and Message binding.
+
+The operation is idempotent and uses one savepoint per asset. A crash after the
+database commit may leave only a pending filesystem metadata projection; every
+subsequent open repairs that projection without registering the asset again.
+Ambiguous, mismatched or corrupt assets keep their existing files and metadata
+and enter the durable reconciliation report. They remain unreadable through the
+canonical API and are never guessed, deleted or registered merely to preserve
+legacy behavior. The normal wrong-owner and wrong-Session denials remain in
+force after a successful migration.
+
 ### 18.5 Provider privacy
 
 Local retention settings do not control an upstream provider's data policy.
