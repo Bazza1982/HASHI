@@ -301,19 +301,24 @@ async def test_v3_manager_initializes_from_public_main_target_without_v2_profile
     } == {("deepseek-api", "deepseek-v4-pro")}
 
 
-@pytest.mark.parametrize("provider,model,choices,initial", [
-    ("deepseek-api", "deepseek-v4-pro", ["off", "high", "max"], "high"),
-    ("ollama", "local-qwen:27b", ["enabled", "off"], "enabled"),
+@pytest.mark.parametrize("provider,model,choices,initial,nested", [
+    ("deepseek-api", "deepseek-v4-pro", ["off", "high", "max"], "high", False),
+    ("ollama", "local-qwen:27b", ["enabled", "off"], "enabled", False),
+    ("ollama", "local-qwen:27b", ["enabled", "off"], "enabled", True),
 ])
 def test_v3_effort_choices_follow_provider_model_and_persist(
-    tmp_path, provider, model, choices, initial
+    tmp_path, provider, model, choices, initial, nested
 ):
     manager = _manager(tmp_path)
     if provider == "ollama":
-        manager.config.allowed_backends.append({
+        policy = {
             "engine": "ollama-api", "models": [model], "available_models": [model],
             "model_efforts": {model: choices},
-        })
+        }
+        if nested:
+            manager.config.allowed_backends[0]["her_v2"]["provider_policies"] = [policy]
+        else:
+            manager.config.allowed_backends.append(policy)
     target = HERv3ModelTarget(provider, model)
     manager.apply_her_v3_target(target)
     effective = apply_v3_target(_raw_config(), target)
@@ -342,3 +347,21 @@ def test_v3_effort_choices_follow_provider_model_and_persist(
         backend = reloaded.config.allowed_backends[0]
         assert backend["effort"] == selected
         assert reloaded.state_store.read()["backend_efforts"]["her-v2"] == selected
+
+
+@pytest.mark.parametrize("policies,message", [
+    ({}, "must be a list"),
+    (["invalid-row"], "must be an object"),
+    ([{"engine": "her-v3"}], "requires a concrete Provider"),
+    ([{"engine": "unknown-provider"}], "requires a concrete Provider"),
+    ([{"engine": "ollama"}], "outside the Provider allowlist"),
+])
+def test_v3_rejects_malformed_or_out_of_scope_provider_policy(policies, message):
+    raw = {
+        **_raw_config(),
+        "v3_provider_allowlist": ["deepseek"],
+        "provider_policies": policies,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        normalise_v3_config(raw)

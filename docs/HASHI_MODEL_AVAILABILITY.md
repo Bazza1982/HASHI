@@ -25,6 +25,37 @@ arrays. Its public `backend_model_view` is derived metadata, not configuration
 to write back. Configuration publication retains the owner's read revision
 through `orchestrator.config_json`.
 
+## HERV3 creation and Provider policy
+
+The Agent creation template snapshots model selection policy, not tool,
+filesystem or standalone Engine permission. A concrete Provider such as Ollama
+can also be a selectable Engine. Selected/restricted HERV3 creation preserves
+that Provider's sanitized selection row in
+`allowed_backends[].her_v2.provider_policies` instead of granting its Engine or
+discarding its `available_models` and exact-model `model_efforts`.
+
+These rows use the same selection fields as ordinary backend policy. They are
+scoped by `v3_provider_allowlist`; invalid or out-of-allowlist policies are
+rejected. Provider model menus, effort validation, saved-state restoration and
+live/offline metadata derive from `runtime_effort_options`. Direct Engine
+selection never expands this nested policy into an Engine grant. Reusing the
+created Agent as a template retains the sanitized policy.
+
+Shared HERV3 catalogue choices derive from
+`global.her_providers.providers.<provider>`. Register verified exact-model
+`model_efforts` there when the Provider has no qualified reasoning baseline.
+Agent policy can narrow these choices, including an explicit empty list; a
+shared declaration must never override such a denial. Unknown Ollama models
+do not receive a blanket reasoning capability. An empty shared effort list can
+hide an external client's control even if the creation template offers choices;
+validate the shared, creation and effective Agent catalogues together.
+
+The creation contract covers selected/restricted creation, second-generation
+templates, binary effort persistence, explicit model/effort denials and offline
+projection. Existing Agents with missing policy require a revision-aware
+configuration repair. Passing offline tests does not establish adoption by
+running Workers or an external UI.
+
 ## Codex CLI discovery
 
 `adapters.codex_models` reads the bounded `models_cache.json` maintained by the
