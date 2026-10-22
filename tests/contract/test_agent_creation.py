@@ -294,3 +294,93 @@ def test_creation_keeps_template_revision_until_publication(tmp_path, monkeypatc
     assert latest["global"]["agent_creation"]["template_agent"] == "changed-template"
     assert [row["name"] for row in latest["agents"]] == ["seed"]
     assert not (paths.workspaces_root / "stale-policy").exists()
+
+
+@pytest.mark.parametrize("grant_mode,restricted", [
+    ("selected", False), ("template", True), ("template", False),
+])
+def test_herv3_creation_preserves_provider_policy_without_granting_its_engine(
+    tmp_path, grant_mode, restricted
+):
+    from orchestrator.config_json import read_config_json, write_config_json
+    from orchestrator.agent_creation_policy import (
+        build_effective_backend_catalogue, selection_row,
+    )
+    from orchestrator.runtime_effort_options import get_available_efforts
+
+    paths = _paths(tmp_path)
+    active, disabled, blocked = "client-thinking", "client-fixed", "client-blocked"
+    policy = {
+        "engine": "ollama-api", "model": active,
+        "models": [active, disabled, blocked],
+        "available_models": [active, disabled],
+        "model_efforts": {active: ["enabled", "off"], disabled: []},
+        "tools": ["must-not-inherit"], "permission_mode": "must-not-inherit",
+    }
+    raw = read_config_json(paths.config_path)
+    raw["global"] = {
+        "agent_creation": {"template_agent": "seed", "grant_mode": grant_mode},
+        "her_providers": {"providers": {"ollama": {
+            "engine": "ollama-api", "models": [active, disabled, blocked],
+        }}},
+    }
+    raw["agents"] = [{"name": "seed", "allowed_backends": [
+        {"engine": "her-v2", "effort": "enabled", "her_v2": {
+            "main": {"provider": "ollama", "model": active},
+            "v3_provider_allowlist": ["ollama-api"],
+        }},
+        policy,
+    ]}]
+    write_config_json(paths.config_path, raw)
+    service = AgentCreationService(paths)
+    before = service.creation_catalogue()["backends"]["her-v3"]["providers"]["ollama"]
+    assert before["model_efforts"][active] == ["enabled", "off"]
+
+    service.create(AgentCreationSpec(
+        name="child", backend="her-v3", provider="ollama", model=active,
+        effort="off", restricted=restricted, is_active=False,
+    ))
+    stored = read_config_json(paths.config_path)["agents"][-1]
+    rows = stored["allowed_backends"]
+    assert {row["engine"] for row in rows} == (
+        {"her-v2", "ollama-api"} if grant_mode == "template" and not restricted
+        else {"her-v2"}
+    )
+    assert not any("tools" in row or "permission_mode" in row for row in rows)
+    # A created Agent can itself become a template without losing its policy.
+    inherited = [selection_row(row) for row in rows]
+    view = build_effective_backend_catalogue(
+        inherited, raw["global"]["her_providers"]["providers"],
+    )["her-v3"]["providers"]["ollama"]
+    assert view["models"] == before["models"] == [active, disabled]
+    assert view["model_efforts"] == before["model_efforts"]
+    assert get_available_efforts(
+        "ollama-api", active, allowed_backends=inherited, provider=True,
+    ) == ["enabled", "off"]
+    assert get_available_efforts(
+        "ollama-api", disabled, allowed_backends=inherited, provider=True,
+    ) == []
+    assert blocked not in view["models"]
+    assert "must-not-inherit" not in json.dumps(inherited)
+    promoted = read_config_json(paths.config_path)
+    promoted["global"]["agent_creation"] = {
+        "template_agent": "child", "grant_mode": "selected",
+    }
+    write_config_json(paths.config_path, promoted)
+    with pytest.raises(InvalidEffortError):
+        service.create(AgentCreationSpec(
+            name="denied", backend="her-v3", provider="ollama", model=disabled,
+            effort="enabled", is_active=False,
+        ))
+    assert not (paths.workspaces_root / "denied").exists()
+    service.create(AgentCreationSpec(
+        name="grandchild", backend="her-v3", provider="ollama", model=active,
+        effort="enabled", restricted=True, is_active=False,
+    ))
+    grandchild = read_config_json(paths.config_path)["agents"][-1]
+    assert [row["engine"] for row in grandchild["allowed_backends"]] == ["her-v2"]
+    descendants = build_effective_backend_catalogue(
+        grandchild["allowed_backends"], raw["global"]["her_providers"]["providers"],
+    )["her-v3"]["providers"]["ollama"]
+    assert descendants["models"] == view["models"]
+    assert descendants["model_efforts"] == view["model_efforts"]

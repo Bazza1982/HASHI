@@ -15,7 +15,9 @@ from orchestrator.flexible_backend_registry import (
     public_backend_engine, public_model_provider, get_backend_entry, get_available_models,
     get_secret_lookup_order, is_selectable_backend,
 )
-from orchestrator.runtime_effort_options import get_available_efforts, get_available_models as effective_models
+from orchestrator.runtime_effort_options import (
+    get_available_efforts, get_available_models as effective_models, provider_backend_rows,
+)
 from orchestrator.her_v2.v3_config import (
     HERv3ModelTarget, build_v3_provider_options, resolve_v3_target,
 )
@@ -37,6 +39,10 @@ def selection_row(row):
         result["her_v2"] = {"main": target.to_dict()}
         if "v3_provider_allowlist" in raw:
             result["her_v2"]["v3_provider_allowlist"] = deepcopy(raw["v3_provider_allowlist"])
+        if "provider_policies" in raw:
+            result["her_v2"]["provider_policies"] = [
+                selection_row(policy) for policy in provider_backend_rows([row])
+            ]
     return result
 
 

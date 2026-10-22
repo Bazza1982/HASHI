@@ -122,9 +122,7 @@ from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
     canonical_model_provider,
     public_model_provider,
-    get_available_models,
     get_backend_entry,
-    get_provider_reasoning_efforts,
     public_backend_engine,
 )
 from orchestrator.frontend_delivery import (
@@ -136,7 +134,7 @@ from orchestrator.frontend_delivery import (
 from orchestrator.frontend_compatibility import (
     normalize_compatibility_operation,
 )
-from orchestrator.her_v2.v3_config import resolve_v3_target
+from orchestrator.her_v2.v3_config import build_v3_provider_options, resolve_v3_target
 from orchestrator.runtime_effort_options import (
     backend_model_view,
     get_available_models as runtime_available_models,
@@ -1906,11 +1904,22 @@ class WorkbenchApiServer:
                         }
                         public_row["engine"] = HER_V3_ENGINE
                         if target is not None:
+                            from orchestrator.agent_creation import _provider_profiles
+
+                            options = build_v3_provider_options(
+                                agent_row.get("allowed_backends", []),
+                                _provider_profiles(self.global_config), target,
+                                (backend.get("her_v2") or {}).get("v3_provider_allowlist"),
+                            )
+                            option = next(
+                                (item for item in options if item["engine"] == target.provider),
+                                {},
+                            )
                             public_row.update(
                                 {
                                     "provider": public_model_provider(target.provider),
                                     "model": target.model,
-                                    "models": get_available_models(target.provider),
+                                    "models": list(option.get("models") or []),
                                     "effort": {
                                         "none": "off",
                                         "zero": "off",
@@ -1918,9 +1927,11 @@ class WorkbenchApiServer:
                                         str(backend.get("effort") or "").casefold(),
                                         backend.get("effort"),
                                     ),
-                                    "efforts": get_provider_reasoning_efforts(
+                                    "efforts": runtime_available_efforts(
                                         target.provider,
                                         target.model,
+                                        allowed_backends=agent_row.get("allowed_backends", []),
+                                        provider=True,
                                     ),
                                 }
                             )

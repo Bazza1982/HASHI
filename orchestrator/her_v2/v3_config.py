@@ -14,7 +14,7 @@ from orchestrator.flexible_backend_registry import (
     get_backend_label,
     get_default_model,
 )
-from orchestrator.runtime_effort_options import get_available_models
+from orchestrator.runtime_effort_options import get_available_models, provider_backend_rows
 
 
 HER_V3_CONFIGURATION_STATE_KEY = "her_v3_configuration"
@@ -88,6 +88,8 @@ class CompanionConfig:
 def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Collapse the old route/stage model matrix to one main model + auxiliary lane."""
     result = deepcopy(dict(raw))
+    if "provider_policies" in raw:
+        provider_backend_rows([{"engine": HER_V2_ENGINE, "her_v2": raw}])
     for key in ("profiles", "stage_roles", "targets", "route_targets", "route_reasoning", "stage_reasoning", "slot_models"):
         if raw.get(key) is not None and not isinstance(raw[key], Mapping):
             raise ValueError(f"HER {key} must be an object")
@@ -227,7 +229,7 @@ def build_v3_provider_options(
     """Derive HERV3 Provider/model choices without the v2 route matrix."""
 
     rows_by_engine: dict[str, list[Mapping[str, Any]]] = {}
-    for row in allowed_backends:
+    for row in provider_backend_rows(allowed_backends):
         engine = canonical_model_provider(str(row.get("engine") or ""))
         if engine and engine != HER_V2_ENGINE:
             rows_by_engine.setdefault(engine, []).append(row)

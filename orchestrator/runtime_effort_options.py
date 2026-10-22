@@ -10,6 +10,7 @@ from adapters.codex_models import native_model_catalogue
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
+    canonical_model_provider,
     allows_custom_models,
     get_available_efforts as registry_efforts,
     get_available_models as registry_models,
@@ -17,6 +18,34 @@ from orchestrator.flexible_backend_registry import (
     get_provider_reasoning_efforts as registry_provider_efforts,
     normalize_effort as registry_normalize,
 )
+
+
+def provider_backend_rows(allowed_backends) -> list[Mapping]:
+    """Read HERV3 model policies without granting their standalone Engines."""
+    rows = []
+    for backend in allowed_backends:
+        if canonical_backend_engine(backend.get("engine")) != HER_V2_ENGINE:
+            rows.append(backend)
+            continue
+        raw = backend.get("her_v2") or {}
+        policies = raw.get("provider_policies", [])
+        if not isinstance(policies, list):
+            raise ValueError("HERV3 provider_policies must be a list")
+        allowlist = raw.get("v3_provider_allowlist")
+        allowed = (
+            {canonical_model_provider(value) for value in allowlist}
+            if allowlist is not None else None
+        )
+        for policy in policies:
+            if not isinstance(policy, Mapping):
+                raise ValueError("HERV3 Provider policy must be an object")
+            engine = canonical_model_provider(policy.get("engine"))
+            if engine == HER_V2_ENGINE or not get_backend_entry(engine):
+                raise ValueError("HERV3 Provider policy requires a concrete Provider")
+            if allowed is not None and engine not in allowed:
+                raise ValueError("HERV3 Provider policy is outside the Provider allowlist")
+            rows.append({**policy, "engine": engine})
+    return rows
 
 
 def get_available_models(
@@ -98,6 +127,8 @@ def configured_model_efforts(backend: Mapping, model: str | None) -> list[str] |
 
 def get_available_efforts(engine, model=None, *, allowed_backends=(), provider=False):
     engine = canonical_backend_engine(engine)
+    if provider:
+        allowed_backends = provider_backend_rows(allowed_backends)
     # HERV3 uses Provider/model reasoning levels; instance opt-ins still belong
     # to the selected concrete Provider rather than the compatibility Engine ID.
     if engine != HER_V2_ENGINE:
