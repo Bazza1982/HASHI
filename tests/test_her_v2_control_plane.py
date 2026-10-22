@@ -89,6 +89,28 @@ def _runtime_event(turn_id: str, event_id: str, event: str, **payload):
     }
 
 
+def _run_claim(
+    run_id: str,
+    request_id: str,
+    *,
+    attempt: int = 1,
+    state_revision: int = 1,
+    input_digest: str = "sha256:input",
+    state: str = "running",
+    parent_run_id: str | None = None,
+):
+    return {
+        "run_id": run_id,
+        "request_id": request_id,
+        "attempt": attempt,
+        "attempt_id": f"{run_id}:attempt:{attempt}",
+        "state_revision": state_revision,
+        "input_digest": input_digest,
+        "state": state,
+        "parent_run_id": parent_run_id,
+    }
+
+
 def test_session_store_closes_database_handles_after_success_and_failure(tmp_path, monkeypatch):
     from orchestrator.her_v2 import session_store
 
@@ -361,6 +383,7 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
         {
             "provider": "deepseek-api",
             "model": "deepseek-reasoner",
+            "effort": "high",
             "stage": "execution",
             "boundary": "completed_tool_batch",
             "messages": provider_messages,
@@ -372,6 +395,11 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
             ],
             "provider_request_id": "provider-read",
             "invocation_id": "turn-steered:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-steered",
+                "turn-steered",
+                input_digest="sha256:steered-input",
+            ),
         },
     )
     assert checkpoint["available"] is True
@@ -388,15 +416,99 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     )
     assert recovery["status"] == "terminated"
     assert recovery["recovery_disposition"] == "steered"
+    source_claim = _run_claim(
+        "run-steered",
+        "turn-steered",
+        state="superseded",
+        input_digest="sha256:steered-input",
+    )
     evidence = coordinator.store.interruption_evidence_for_request(
-        "turn-steered"
+        "turn-steered",
+        run_claim=source_claim,
     )
     assert evidence["evidence_ref"].endswith(f":{steered.turn_id}")
     assert evidence["recovery_disposition"] == "steered"
     assert evidence["tool_receipt_count"] == 1
     assert evidence["provider_context"]["available"] is True
     assert evidence["provider_context"]["reasoning_count"] == 1
+    assert evidence["run_id"] == "run-steered"
+    assert evidence["attempt_id"] == "run-steered:attempt:1"
+    assert evidence["state_revision"] == 1
+    assert evidence["input_digest"] == "sha256:steered-input"
+    assert evidence["provider"] == "deepseek-api"
+    assert evidence["model"] == "deepseek-reasoner"
+    assert evidence["effort"] == "high"
     assert evidence["evidence_digest"].startswith("sha256:")
+
+    successor_claim = _run_claim(
+        "run-successor",
+        "turn-successor",
+        state="running",
+        parent_run_id="run-steered",
+        input_digest="sha256:successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == steered.session_id
+
+    # Reopening the durable store under the same exact PAO attempts remains
+    # valid; a newer source attempt makes the old checkpoint diagnostic-only.
+    reopened = HerSessionStore(coordinator.store.path)
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == steered.session_id
+    with sqlite3.connect(reopened.path) as connection:
+        event_count_before = connection.execute(
+            "SELECT count(*) FROM her_session_events WHERE session_id = ?",
+            (steered.session_id,),
+        ).fetchone()[0]
+    stale_source_claim = {
+        **source_claim,
+        "attempt": 2,
+        "attempt_id": "run-steered:attempt:2",
+        "state_revision": 2,
+    }
+    assert reopened.interruption_evidence_for_request(
+        "turn-steered",
+        run_claim=stale_source_claim,
+    ) is None
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=stale_source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) is None
+    with sqlite3.connect(reopened.path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM her_session_events WHERE session_id = ?",
+            (steered.session_id,),
+        ).fetchone()[0] == event_count_before
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim={**successor_claim, "state": "completed"},
+        **binding,
+    ) is None
+    assert reopened.verified_steer_session_id(
+        {**evidence, "effort": "low"},
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) is None
 
     successor = _accept(coordinator, "turn-successor", "Continue differently")
     context = coordinator.store.consume_recovery_context(

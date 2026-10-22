@@ -12,17 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.config_json import new_config_json, read_config_json, write_config_json
+from orchestrator.config_json import (
+    file_write_lock,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
-from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.workspace_state import WorkspaceStateStore
-
-try:
-    import fcntl
-except ModuleNotFoundError:  # Windows native runtime has no fcntl.
-    fcntl = None
-
 
 MEMORY_PLUS_OBSERVER_FACTORY = "orchestrator.memory_plus_mode:build_memory_plus_observer"
 MEMORY_PLUS_OPEN = "<memory_plus_update>"
@@ -46,28 +44,21 @@ _OBJECTIVE_MAX_CHARS = 320
 _INDEX_MAX_DAYS = 90
 
 
-def _lock_file(handle) -> None:
-    if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-
-
-def _unlock_file(handle) -> None:
-    if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
 @contextmanager
 def _memory_plus_store_lock(workspace_dir: Path):
     """Serialize read-modify-write operations across threads and local processes."""
-    lock_path = workspace_dir / "memory" / ".memory_plus.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with process_path_lock(lock_path):
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            _lock_file(handle)
-            try:
-                yield
-            finally:
-                _unlock_file(handle)
+    lock_target = workspace_dir / "memory" / "memory_plus"
+    lock_target.parent.mkdir(parents=True, exist_ok=True)
+    with file_write_lock(lock_target):
+        yield
+
+
+class MemoryPlusStateUnreadable(ValueError):
+    """The canonical Memory+ state exists but cannot be read safely."""
+
+
+class MemoryPlusUnsupportedSchema(ValueError):
+    """The canonical Memory+ state uses a schema this runtime must not rewrite."""
 
 
 @dataclass(frozen=True)
@@ -132,7 +123,6 @@ class MemoryPlusObserver(PreTurnContextProvider):
         self.notepad_path = workspace_dir / "memory" / MEMORY_PLUS_NOTEPAD_FILE
         self.archive_dir = workspace_dir / "memory" / MEMORY_PLUS_ARCHIVE_DIR
         self.runtime: Any | None = None
-        self._last_context_fingerprints: dict[str, str] = {}
 
     def attach_runtime(self, runtime: Any) -> None:
         self.runtime = runtime
@@ -154,21 +144,15 @@ class MemoryPlusObserver(PreTurnContextProvider):
         cfg = self._config()
         requested_workspace = str((request.metadata or {}).get("session_workspace") or "").strip()
         workspace = Path(requested_workspace) if requested_workspace else self.workspace_dir
-        state = prepare_memory_plus_store(workspace, cfg)
-        fingerprint = memory_plus_fingerprint(state)
-        incremental = bool((request.metadata or {}).get("incremental"))
-        key = str(workspace.resolve())
-        if incremental and fingerprint == self._last_context_fingerprints.get(key):
-            return []
-        self._last_context_fingerprints[key] = fingerprint
+        state = read_memory_plus_context_state(workspace)
         body = build_memory_plus_context(state, cfg=cfg, include_update_contract=True)
         return [("Memory+ Continuity", body)]
 
     def mark_session_synced(self, workspace_dir: Path | None = None) -> None:
-        workspace = Path(workspace_dir or self.workspace_dir)
-        state = load_memory_plus_state(workspace)
-        if state:
-            self._last_context_fingerprints[str(workspace.resolve())] = memory_plus_fingerprint(state)
+        # Preparation and write-back are not Engine acknowledgements. Fixed
+        # transports already own durable PCM delta acknowledgement, while
+        # stateless transports need the continuity section on every request.
+        del workspace_dir
 
     def workspace_files_to_preserve(self) -> frozenset[str]:
         return frozenset({"post_turn_observers.json", "memory"})
@@ -347,10 +331,30 @@ def _new_memory_plus_state(date: str | None = None) -> dict[str, Any]:
 
 def load_memory_plus_state(workspace_dir: Path) -> dict[str, Any]:
     state_path, _, _, _ = _memory_paths(workspace_dir)
-    state = _read_json_object(state_path)
-    if int(state.get("schema_version") or 0) != MEMORY_PLUS_SCHEMA_VERSION:
+    try:
+        state = read_config_json(state_path)
+    except FileNotFoundError:
         return {}
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise MemoryPlusStateUnreadable(
+            f"canonical Memory+ state is unreadable: {state_path}"
+        ) from exc
+    if state.get("schema_version") != MEMORY_PLUS_SCHEMA_VERSION:
+        raise MemoryPlusUnsupportedSchema(
+            f"unsupported Memory+ schema: {state.get('schema_version')!r}"
+        )
+    if not isinstance(state.get("today"), Mapping) or not isinstance(
+        state.get("carryover"), Mapping
+    ):
+        raise MemoryPlusStateUnreadable(
+            "canonical Memory+ today/carryover sections must be objects"
+        )
     return _normalize_memory_plus_state(state)
+
+
+def read_memory_plus_context_state(workspace_dir: Path) -> dict[str, Any]:
+    """Return a read-only context view without migration, rollover, or writes."""
+    return load_memory_plus_state(workspace_dir) or _new_memory_plus_state()
 
 
 def prepare_memory_plus_store(
@@ -1103,12 +1107,9 @@ def write_memory_plus_diagnostic(
         "visible_chars": visible_chars,
         "raw_block_chars": raw_block_chars,
     }
-    with path.open("a", encoding="utf-8") as f:
-        _lock_file(f)
-        try:
+    with file_write_lock(path):
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-        finally:
-            _unlock_file(f)
     return path
 
 

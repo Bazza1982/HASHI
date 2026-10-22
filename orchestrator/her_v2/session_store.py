@@ -295,6 +295,8 @@ class HerSessionStore:
                     side_effects_json TEXT NOT NULL DEFAULT '[]',
                     provider_context_json TEXT NOT NULL DEFAULT '{}',
                     provider_context_digest TEXT NOT NULL DEFAULT '',
+                    provider_context_producer_claim_json TEXT NOT NULL DEFAULT '{}',
+                    provider_context_producer_claim_digest TEXT NOT NULL DEFAULT '',
                     remaining_work_json TEXT NOT NULL DEFAULT '{}',
                     safe_to_resume INTEGER NOT NULL DEFAULT 1,
                     recovery_disposition TEXT NOT NULL DEFAULT '',
@@ -420,6 +422,12 @@ class HerSessionStore:
                     "recovery_source_turn_id": "TEXT NOT NULL DEFAULT ''",
                     "provider_context_json": "TEXT NOT NULL DEFAULT '{}'",
                     "provider_context_digest": "TEXT NOT NULL DEFAULT ''",
+                    "provider_context_producer_claim_json": (
+                        "TEXT NOT NULL DEFAULT '{}'"
+                    ),
+                    "provider_context_producer_claim_digest": (
+                        "TEXT NOT NULL DEFAULT ''"
+                    ),
                 },
             }
             for table, declarations in migrations.items():
@@ -1048,6 +1056,11 @@ class HerSessionStore:
             ("tool_receipts_json", "tool_receipts", "array"),
             ("side_effects_json", "side_effects", "array"),
             ("provider_context_json", "provider_context", "object"),
+            (
+                "provider_context_producer_claim_json",
+                "provider_context_producer_claim",
+                "object",
+            ),
             ("remaining_work_json", "remaining_work", "object"),
         ):
             raw = result.pop(source, "{}" if kind == "object" else "[]")
@@ -1081,6 +1094,7 @@ class HerSessionStore:
             "format": str(value.get("format") or ""),
             "provider": str(value.get("provider") or ""),
             "model": str(value.get("model") or ""),
+            "effort": str(value.get("effort") or ""),
             "stage": str(value.get("stage") or ""),
             "boundary": str(value.get("boundary") or ""),
             "message_count": int(value.get("message_count") or 0),
@@ -1262,12 +1276,14 @@ class HerSessionStore:
         turn_id: str,
         provider: str,
         model: str,
+        effort: str = "",
         stage: str,
         boundary: str,
         messages: Sequence[Mapping[str, Any]],
         reasoning: Sequence[Mapping[str, Any]] = (),
         provider_request_id: str = "",
         invocation_id: str = "",
+        producer_run_claim: Mapping[str, Any] | None = None,
         execution_owner_id: str = "",
     ) -> dict[str, Any]:
         """Persist one complete provider boundary for exact private continuation."""
@@ -1302,6 +1318,7 @@ class HerSessionStore:
             "storage": _PROVIDER_CONTEXT_STORAGE,
             "provider": str(provider or ""),
             "model": str(model or ""),
+            "effort": str(effort or ""),
             "stage": str(stage or ""),
             "boundary": clean_boundary,
             "provider_request_id": str(provider_request_id or ""),
@@ -1329,6 +1346,25 @@ class HerSessionStore:
                     "turn_not_active",
                     "Provider context can be checkpointed only for an active Turn.",
                 )
+            supplied_producer_claim = dict(producer_run_claim or {})
+            canonical_producer_claim = self._normalise_run_claim(
+                supplied_producer_claim,
+                expected_request_id=str(turn["request_id"]),
+            )
+            if supplied_producer_claim and (
+                canonical_producer_claim is None
+                or canonical_producer_claim["state"] != "running"
+            ):
+                raise HerSessionStoreError(
+                    "invalid_provider_context_producer_claim",
+                    "Provider context producer claim is not the active PAO Run attempt.",
+                )
+            encoded_producer_claim = _json(canonical_producer_claim or {})
+            producer_claim_digest = (
+                _digest(canonical_producer_claim)
+                if canonical_producer_claim is not None
+                else ""
+            )
             recovery = connection.execute(
                 """
                 SELECT * FROM her_active_turn_recovery
@@ -1342,6 +1378,29 @@ class HerSessionStore:
                     "Provider context has no active recovery projection.",
                 )
             if str(recovery["provider_context_digest"] or "") == digest:
+                stored_producer_claim = _object(
+                    recovery["provider_context_producer_claim_json"]
+                )
+                stored_producer_digest = str(
+                    recovery["provider_context_producer_claim_digest"] or ""
+                )
+                if stored_producer_claim and (
+                    not stored_producer_digest
+                    or _digest(stored_producer_claim) != stored_producer_digest
+                ):
+                    raise HerSessionStoreError(
+                        "provider_context_producer_conflict",
+                        "Provider context producer claim failed its integrity check.",
+                    )
+                if canonical_producer_claim is not None and (
+                    not stored_producer_claim
+                    or stored_producer_digest != producer_claim_digest
+                    or stored_producer_claim != canonical_producer_claim
+                ):
+                    raise HerSessionStoreError(
+                        "provider_context_producer_conflict",
+                        "An existing provider checkpoint cannot be relabelled by another PAO attempt.",
+                    )
                 return self._provider_context_metadata(
                     context_metadata, digest=digest
                 )
@@ -1374,18 +1433,28 @@ class HerSessionStore:
                     **self._provider_context_metadata(
                         context_metadata, digest=digest
                     ),
+                    "producer_attempt_id": str(
+                        (canonical_producer_claim or {}).get("attempt_id") or ""
+                    ),
+                    "producer_state_revision": int(
+                        (canonical_producer_claim or {}).get("state_revision") or 0
+                    ),
                 },
             )
             connection.execute(
                 """
                 UPDATE her_active_turn_recovery
                 SET provider_context_json = ?, provider_context_digest = ?,
+                    provider_context_producer_claim_json = ?,
+                    provider_context_producer_claim_digest = ?,
                     last_event_sequence = ?, updated_at = ?
                 WHERE session_id = ? AND turn_id = ?
                 """,
                 (
                     encoded_metadata,
                     digest,
+                    encoded_producer_claim,
+                    producer_claim_digest,
                     sequence,
                     now,
                     session_id,
@@ -1438,10 +1507,58 @@ class HerSessionStore:
                 )
             return context
 
+    @staticmethod
+    def _normalise_run_claim(
+        claim: Mapping[str, Any] | None,
+        *,
+        expected_request_id: str = "",
+    ) -> dict[str, Any] | None:
+        value = dict(claim or {})
+        run_id = str(value.get("run_id") or "")
+        request_id = str(value.get("request_id") or "")
+        attempt = value.get("attempt")
+        state_revision = value.get("state_revision")
+        attempt_id = str(value.get("attempt_id") or "")
+        input_digest = str(value.get("input_digest") or "")
+        state = str(value.get("state") or "")
+        if (
+            not run_id
+            or not request_id
+            or (expected_request_id and request_id != expected_request_id)
+            or type(attempt) is not int
+            or attempt <= 0
+            or type(state_revision) is not int
+            or state_revision <= 0
+            or attempt_id != f"{run_id}:attempt:{attempt}"
+            or not input_digest
+            or not state
+        ):
+            return None
+        return {
+            "run_id": run_id,
+            "request_id": request_id,
+            "attempt": attempt,
+            "attempt_id": attempt_id,
+            "state_revision": state_revision,
+            "input_digest": input_digest,
+            "state": state,
+            "parent_run_id": str(value.get("parent_run_id") or "") or None,
+        }
+
     def interruption_evidence_for_request(
-        self, request_id: str
+        self,
+        request_id: str,
+        *,
+        run_claim: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Return a privacy-safe receipt for one interrupted provider Turn."""
+
+        canonical_run = self._normalise_run_claim(
+            run_claim,
+            expected_request_id=str(request_id),
+        )
+        if canonical_run is None:
+            return None
 
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -1460,9 +1577,57 @@ class HerSessionStore:
         state = self._recovery_dict(row)
         if state is None:
             return None
+        source_request_id = str(state.get("source_request_id") or "")
+        producer_claim = self._normalise_run_claim(
+            state.get("provider_context_producer_claim")
+            if isinstance(state.get("provider_context_producer_claim"), Mapping)
+            else None,
+            expected_request_id=source_request_id,
+        )
+        producer_claim_digest = str(
+            state.get("provider_context_producer_claim_digest") or ""
+        )
+        if (
+            producer_claim is None
+            or producer_claim.get("state") != "running"
+            or not producer_claim_digest
+            or _digest(producer_claim) != producer_claim_digest
+        ):
+            return None
+        for key in (
+            "run_id",
+            "request_id",
+            "attempt",
+            "attempt_id",
+            "state_revision",
+            "input_digest",
+            "parent_run_id",
+        ):
+            if producer_claim.get(key) != canonical_run.get(key):
+                return None
+        provider_context = self._provider_context_metadata(
+            state.get("provider_context")
+            if isinstance(state.get("provider_context"), Mapping)
+            else None,
+            digest=str(state.get("provider_context_digest") or ""),
+        )
+        provider = str(provider_context.get("provider") or "")
+        model = str(provider_context.get("model") or "")
+        effort = str(provider_context.get("effort") or "")
+        if not bool(provider_context.get("available")) or not all(
+            (provider, model, effort)
+        ):
+            return None
         evidence = {
             "kind": "herv3_active_turn_recovery",
-            "source_request_id": str(state.get("source_request_id") or ""),
+            "source_request_id": source_request_id,
+            "run_id": producer_claim["run_id"],
+            "attempt_id": producer_claim["attempt_id"],
+            "state_revision": producer_claim["state_revision"],
+            "input_digest": producer_claim["input_digest"],
+            "provider": provider,
+            "model": model,
+            "effort": effort,
             "turn_id": str(state.get("turn_id") or ""),
             "turn_status": str(state.get("turn_status") or ""),
             "recovery_status": str(state.get("status") or ""),
@@ -1472,12 +1637,7 @@ class HerSessionStore:
             "safe_to_resume": bool(state.get("safe_to_resume")),
             "tool_receipt_count": len(state.get("tool_receipts") or []),
             "side_effect_count": len(state.get("side_effects") or []),
-            "provider_context": self._provider_context_metadata(
-                state.get("provider_context")
-                if isinstance(state.get("provider_context"), Mapping)
-                else None,
-                digest=str(state.get("provider_context_digest") or ""),
-            ),
+            "provider_context": provider_context,
             "evidence_ref": (
                 f"herv3:{state.get('session_id')}:{state.get('turn_id')}"
             ),
@@ -1489,6 +1649,8 @@ class HerSessionStore:
         self,
         evidence: Mapping[str, Any] | None,
         *,
+        source_run_claim: Mapping[str, Any] | None,
+        successor_run_claim: Mapping[str, Any] | None,
         instance_id: str,
         agent_id: str,
         owner_id: str,
@@ -1504,7 +1666,24 @@ class HerSessionStore:
         source_request_id = str(candidate.get("source_request_id") or "")
         if not source_request_id:
             return None
-        canonical = self.interruption_evidence_for_request(source_request_id)
+        source_run = self._normalise_run_claim(
+            source_run_claim,
+            expected_request_id=source_request_id,
+        )
+        successor_run = self._normalise_run_claim(successor_run_claim)
+        if (
+            source_run is None
+            or successor_run is None
+            or source_run["state"] != "superseded"
+            or successor_run["state"] != "running"
+            or successor_run["run_id"] == source_run["run_id"]
+            or successor_run["parent_run_id"] != source_run["run_id"]
+        ):
+            return None
+        canonical = self.interruption_evidence_for_request(
+            source_request_id,
+            run_claim=source_run,
+        )
         if canonical is None:
             return None
         if (
@@ -1515,7 +1694,18 @@ class HerSessionStore:
             or not bool(canonical.get("safe_to_resume"))
         ):
             return None
-        for key in ("evidence_ref", "evidence_digest", "turn_id"):
+        for key in (
+            "evidence_ref",
+            "evidence_digest",
+            "turn_id",
+            "run_id",
+            "attempt_id",
+            "state_revision",
+            "input_digest",
+            "provider",
+            "model",
+            "effort",
+        ):
             supplied = str(candidate.get(key) or "")
             if not supplied or supplied != str(canonical.get(key) or ""):
                 return None
@@ -1668,14 +1858,25 @@ class HerSessionStore:
                 ]
                 current_effects = list(current_state.get("side_effects") or [])
                 current_remaining = dict(current_state.get("remaining_work") or {})
+                provider_context_source = (
+                    current_state
+                    if current_state.get("provider_context")
+                    else state
+                )
                 inherited_provider_context = (
-                    current_state.get("provider_context")
-                    or state.get("provider_context")
-                    or {}
+                    provider_context_source.get("provider_context") or {}
                 )
                 inherited_provider_context_digest = str(
-                    current_state.get("provider_context_digest")
-                    or state.get("provider_context_digest")
+                    provider_context_source.get("provider_context_digest") or ""
+                )
+                inherited_producer_claim = (
+                    provider_context_source.get("provider_context_producer_claim")
+                    or {}
+                )
+                inherited_producer_claim_digest = str(
+                    provider_context_source.get(
+                        "provider_context_producer_claim_digest"
+                    )
                     or ""
                 )
                 connection.execute(
@@ -1683,7 +1884,10 @@ class HerSessionStore:
                     UPDATE her_active_turn_recovery
                     SET strategy_json = ?, plan_json = ?, tool_receipts_json = ?,
                         side_effects_json = ?, provider_context_json = ?,
-                        provider_context_digest = ?, remaining_work_json = ?,
+                        provider_context_digest = ?,
+                        provider_context_producer_claim_json = ?,
+                        provider_context_producer_claim_digest = ?,
+                        remaining_work_json = ?,
                         safe_to_resume = ?, recovery_source_turn_id = ?,
                         updated_at = ?
                     WHERE session_id = ? AND turn_id = ?
@@ -1704,6 +1908,8 @@ class HerSessionStore:
                         ),
                         _json(inherited_provider_context),
                         inherited_provider_context_digest,
+                        _json(inherited_producer_claim),
+                        inherited_producer_claim_digest,
                         _json(
                             {
                                 **current_remaining,

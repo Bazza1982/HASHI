@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
 
 import asyncio
+import inspect
 import json
 import sys
 import types
@@ -39,7 +40,6 @@ from orchestrator import (
     runtime_lifecycle,
     runtime_model_selection,
     telegram_stream_policy,
-    ui_language,
 )
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT
 
@@ -1202,11 +1202,19 @@ def _make_background_runtime(
             runtime, FlexibleAgentRuntime
         )
     )
-    runtime._notify_request_listeners = (
-        FlexibleAgentRuntime._notify_request_listeners.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
+    async def notify_request_listeners(request_id, payload):
+        # Wrapper tests exercise presentation and delivery plumbing. Canonical
+        # terminal ownership is covered with real SessionStore fixtures in the
+        # run-handoff suite, so keep this lightweight runtime at that boundary.
+        callbacks = runtime._request_listeners.pop(request_id, [])
+        if not callbacks:
+            runtime._pending_request_results[request_id] = payload
+        for callback in callbacks:
+            result = callback(payload)
+            if inspect.isawaitable(result):
+                await result
+
+    runtime._notify_request_listeners = notify_request_listeners
     sent = []
     voices = []
 

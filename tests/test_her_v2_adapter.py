@@ -53,6 +53,7 @@ from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
 )
 from orchestrator.her_v2.audit import DurableAuditLog
+from orchestrator.her_v2.backend_session import HerFixedProtocolError
 from orchestrator.her_v2.checkpoint import (
     CheckpointSnapshot,
     CompulsoryReplanCoordinator,
@@ -549,10 +550,41 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
 ):
     config = _agent_config(tmp_path)
     config._her_v2_stage_provider = _DirectProvider()
+    class _PaoRunStore:
+        def __init__(self):
+            self.runs = {
+                "run-old": {
+                    "run_id": "run-old",
+                    "request_id": "request-before-steer",
+                    "agent_id": "agent",
+                    "attempt": 1,
+                    "fencing_token": 1,
+                    "request_digest": "sha256:old-input",
+                    "state": "running",
+                    "parent_run_id": None,
+                },
+                "run-new": {
+                    "run_id": "run-new",
+                    "request_id": "request-after-steer",
+                    "agent_id": "agent",
+                    "attempt": 1,
+                    "fencing_token": 1,
+                    "request_digest": "sha256:new-input",
+                    "state": "running",
+                    "parent_run_id": "run-old",
+                },
+            }
+
+        def get_run(self, run_id, *, owner_id=None):
+            assert owner_id == "owner"
+            return dict(self.runs[run_id])
+
+    pao_store = _PaoRunStore()
     runtime = SimpleNamespace(
         backend_manager=SimpleNamespace(agent_mode="fixed"),
         _request_meta_by_id={},
         current_request_meta={},
+        session_store=pao_store,
     )
     config._hashi_runtime = runtime
     adapter = HERv2Adapter(config, _global_config(tmp_path))
@@ -584,16 +616,28 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
         "transport_snapshot": {"version": 1, "sections": sections}
     }
 
-    def metadata(request_id, *, evidence=None):
+    def metadata(
+        request_id,
+        *,
+        run_id,
+        source="session-api",
+        evidence=None,
+    ):
         value = {
             "request_id": request_id,
+            "source": source,
+            "owner_id": "owner",
             "hashi_session_id": "hashi-session-steer",
+            "hashi_run_id": run_id,
+            "hashi_fencing_token": 1,
             "hashi_message_id": f"message-{request_id}",
             "context_generation": 1,
             "session_workspace": str(tmp_path / "session-steer"),
         }
         if evidence is not None:
             value["request_metadata"] = {
+                "parent_run_id": "run-old",
+                "steer_parent_request_id": "request-before-steer",
                 "steer_continuation_evidence": {
                     **evidence,
                     "old_run_id": "run-old",
@@ -602,7 +646,8 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
             }
         return value
 
-    first_meta = metadata("request-before-steer")
+    first_meta = metadata("request-before-steer", run_id="run-old")
+    runtime._request_meta_by_id[first_meta["request_id"]] = first_meta
     first_transport, _ = adapter.prepare_fixed_turn_input(
         prompt_payload=prompt_payload,
         user_message="Inspect the marker and then wait.",
@@ -636,15 +681,18 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
         {
             "provider": "deepseek-api",
             "model": "deepseek-flash",
+            "effort": "low",
             "stage": "direct",
             "boundary": "completed_tool_batch",
             "messages": provider_messages,
+            "producer_run_claim": adapter._canonical_pao_run_claim(first_meta),
         },
     )
     adapter._session_coordinator.steer(
         interrupted,
         reason="User supplied a new direction.",
     )
+    pao_store.runs["run-old"]["state"] = "superseded"
     # The live provider can publish its terminal STOPPED transition after the
     # HASHI control path has already marked the Turn as steered.  The Turn
     # remains authoritatively steered, while the recovery projection's
@@ -663,20 +711,24 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
             },
         },
     )
-    evidence = (
-        adapter._session_coordinator.store.interruption_evidence_for_request(
-            first_meta["request_id"]
-        )
-    )
+    evidence = adapter.steer_continuation_evidence(first_meta["request_id"])
     assert evidence is not None
     assert evidence["turn_status"] == "steered"
     assert evidence["recovery_disposition"] == "stopped"
     assert evidence["safe_to_resume"] is True
 
     # Reproduce the live failure: /steer rebuilt the request-local adapter and
-    # therefore began the successor without its in-memory HER Session binding.
+    # therefore began the successor without its in-memory HER Session binding
+    # or predecessor request registry entry.
     adapter._session_id = None
-    second_meta = metadata("request-after-steer", evidence=evidence)
+    runtime._request_meta_by_id.pop(first_meta["request_id"])
+    second_meta = metadata(
+        "request-after-steer",
+        run_id="run-new",
+        source="steer",
+        evidence=evidence,
+    )
+    runtime._request_meta_by_id[second_meta["request_id"]] = second_meta
     second_transport, second_audit = adapter.prepare_fixed_turn_input(
         prompt_payload=prompt_payload,
         user_message="Use the completed marker without reading it again.",
@@ -699,6 +751,29 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
         )
     )
     assert private_context["messages"] == provider_messages
+
+    # The exact same receipt is not authority for a new PAO attempt, an
+    # ordinary reconnect, or a successor that has already terminated.
+    provider = config._her_v2_stage_provider
+    def assert_invalid(invalid_meta):
+        adapter._session_id = None
+        with pytest.raises(HerFixedProtocolError) as caught:
+            adapter.prepare_fixed_turn_input(
+                prompt_payload=prompt_payload,
+                user_message="Do not resume stale private state.",
+                request_id=invalid_meta["request_id"],
+                request_meta=invalid_meta,
+            )
+        assert caught.value.code == "invalid_steer_continuation"
+
+    pao_store.runs["run-old"].update(attempt=2, fencing_token=2)
+    assert_invalid(second_meta)
+    pao_store.runs["run-old"].update(attempt=1, fencing_token=1)
+    assert_invalid({**second_meta, "source": "session-api"})
+    pao_store.runs["run-new"]["state"] = "completed"
+    assert_invalid(second_meta)
+    pao_store.runs["run-new"]["state"] = "running"
+    assert provider.requests == []
 
 @pytest.mark.asyncio
 async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():

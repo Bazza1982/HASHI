@@ -22,7 +22,7 @@ from orchestrator.post_turn_observer import (
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.memory_plus_mode import (
     is_memory_plus_enabled,
-    prepare_memory_plus_store,
+    read_memory_plus_context_state,
     write_memory_plus_update,
 )
 from orchestrator.workspace_state import WorkspaceStateStore
@@ -335,7 +335,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         workspace, continuity_file, artifacts_dir = self._request_paths(request)
         memory_plus = is_memory_plus_enabled(self.workspace_dir)
         continuity = (
-            prepare_memory_plus_store(workspace)
+            read_memory_plus_context_state(workspace)
             if memory_plus
             else _read_jsonl(continuity_file, 0)
         )
@@ -498,7 +498,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         result_for_llm = result_text[: cfg.after_action_result_max_chars]
         memory_plus = is_memory_plus_enabled(self.workspace_dir)
         continuity = (
-            prepare_memory_plus_store(workspace)
+            read_memory_plus_context_state(workspace)
             if memory_plus
             else _read_jsonl(continuity_file, 0)
         )

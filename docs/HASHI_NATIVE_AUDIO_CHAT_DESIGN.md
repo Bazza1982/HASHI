@@ -1200,6 +1200,59 @@ The cleanup worker must be:
 - auditable without logging bytes; and
 - able to emit one **audio.asset.expired** Event when a referenced asset expires.
 
+For Session-managed audio, `session_attachments` is the lifecycle owner. Cleanup
+first claims every row for one asset as `deleting` with one durable token in a
+SQLite transaction. Admission, archive, acquire, retrieval, and provider-path
+resolution reject that state. Only after the claim commits may the file store
+project the token and unlink bytes; a second transaction then publishes
+`expired`. Restart recovery repeats the same token and never guesses that a
+`deleting` asset is available again. JSON metadata remains a file projection,
+not an independent retention or deletion decision.
+
+Every asset-byte operation derives one path through the file store owner.
+`storage_name` must exactly match the flat `<asset_id>.<normalized format>`
+name produced by `create()`; absolute paths, parent traversal, separators,
+drive/UNC forms, alternate streams, mismatched identities and formats are
+invalid. The originally established files root remains the trust anchor.
+Reads, provider paths, claimed deletion and legacy cleanup reject a replaced
+root, links/reparse points and non-regular files, and verify that an existing
+file's real parent is still that root. Reads additionally retain size and
+SHA-256 verification.
+
+An unsafe deletion path leaves the exact durable claim pending and does not
+publish `expired`; a valid in-root path that is already absent remains an
+idempotent recovery case. These checks execute with the existing cross-process
+catalogue lock. They are a persisted-state integrity boundary, not a claim of
+an OS sandbox against an unrelated privileged process racing file replacement.
+
+All rows and durable Message/Run/output references for an asset are aggregated
+before a claim. If admission wins the transaction, its indefinite retention and
+Run lease commit with the Message and the bytes remain. If cleanup wins,
+admission writes no Message, Run, or idempotency record. SQLite transactions are
+not held across unlink, and every file-side writer uses the same cross-process
+catalogue lock.
+
+#### 18.4.1 Legacy native-output reconciliation
+
+Schema generation 26 reconciles native output audio created before canonical
+`session_attachments` registration existed. The authority is the persisted
+assistant Message audio reference together with its Run and Session, not the
+presence of a file alone. Reconciliation verifies one consistent owner,
+Session, Run/request correlation, managed path, metadata, format, size and byte
+digest before it creates the missing canonical row and Message binding.
+Managed-path failure stays in the reconciliation report before any claim or
+registration, and neither the referenced bytes nor the original metadata are
+changed.
+
+The operation is idempotent and uses one savepoint per asset. A crash after the
+database commit may leave only a pending filesystem metadata projection; every
+subsequent open repairs that projection without registering the asset again.
+Ambiguous, mismatched or corrupt assets keep their existing files and metadata
+and enter the durable reconciliation report. They remain unreadable through the
+canonical API and are never guessed, deleted or registered merely to preserve
+legacy behavior. The normal wrong-owner and wrong-Session denials remain in
+force after a successful migration.
+
 ### 18.5 Provider privacy
 
 Local retention settings do not control an upstream provider's data policy.
@@ -1499,6 +1552,21 @@ still enabled. Run `run_01d239e554d3400bbe250e8db50154ae` completed with a
 native WAV reply; its later local STT Event had state `released`, the canonical
 user Message received the transcript, and the Event stream contained zero
 `voice.input.transcript_pending_confirmation` Events.
+
+### Paired Workbench/HASHI3 repair acceptance — 2026-10-22
+
+The repaired native-audio path was adopted as one exact executable pair:
+HASHI `f667164e89836ace44ebececcfba29966991cad7` and Workbench
+`7d4484afe55791a2d480d42d5925093a2a594d84`. The production Workbench service
+served that Workbench revision and authenticated to HASHI3; HASHI3 hot-adopted
+the qualified Function generation while its Core process remained unchanged.
+
+The user then confirmed that the live Workbench-to-HASHI3 voice test passed.
+This closes paired audible acceptance for that tested route. It does not imply
+acceptance of iPhone Safari, other physical devices, every voice configuration,
+or adversarial filesystem races. Those scopes remain separate. The closeout
+documentation commits after this record do not change the tested executable
+paths.
 
 ## 23. Implementation component map
 

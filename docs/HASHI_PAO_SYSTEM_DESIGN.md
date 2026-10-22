@@ -171,6 +171,15 @@ its actual terminal state. Frontend Connectors must show that state and never
 translate a failed or slow Run cancellation into an Agent lifecycle stop or a
 session-wide `/stop`. Prior side effects remain separate from the stop result.
 
+Admission cancellation has a separate settlement owner. Once an admission
+operation may commit, repeated cancellation of the requesting coroutine cannot
+abandon its eventual receipt. The settlement owner receives the admission
+result and performs the exact `fail_unsubmitted_request` fence when the item
+was proved not to have reached an executor. Cancellation while joining or while
+that cleanup is running may stop the caller's wait, but not the owned
+settlement. The fence remains receipt-specific: it cannot fail every queued Run
+or overwrite a Run whose execution ownership has already advanced.
+
 Workzone configuration is Agent control state, not Conversation Session state.
 `/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
 the current Agent Workzone revision into each admitted Run so an in-flight Run

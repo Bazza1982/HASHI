@@ -2,6 +2,12 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Legacy audio migration trusts verified Message/Run ownership and one flat,
+  non-link path under its fixed asset root; ambiguity or unsafe paths stay
+  preserved but unreadable. PAO settlement survives repeated cancellation and
+  cleans only its exact receipt. HERV3 checkpoints keep their producer claim;
+  later attempts cannot relabel them. See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md) and [HERV3](HERV3_UPGRADE.md#completed-tool-checkpoint-provider-call-continuation).
 - PAO strips internal control envelopes before judging deliverability. A result
   containing only Memory+ state fails terminally; typed audio remains deliverable.
 - HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
@@ -116,7 +122,7 @@ synthetic readiness does not activate privacy or prove Worker adoption.
 Model/provider cards share a contract; chat-only has no tools. Fallback is opt-in
 and never replays uncertain effects. Codex `/steer` keeps its Run; HERV3 links one
 verified successor. Command frontend stays primary; receipts omit reasoning and
-recovery grants no authority.
+recovery grants no authority. HERV3 resumes only its exact running PAO child.
 
 ## UI, media, and Phone
 
@@ -182,23 +188,12 @@ Only the Call Window plays its bounded MP3/WAV/Ogg output. See
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-AgentPresence is default-off, owner-scoped and fail-open. Its command, voice
-outbox, Telegram and Workbench Call subscription remain independent. Departure
-finishes before interruptible return; only the initiating frontend plays Call
-audio. Non-call `/voice` and `/say` use the generic owner-mirror outbox without
-another Conversation row; AP plays phone replies. See
+AgentPresence is default-off and owner-scoped. HASHI authenticates its explicit
+instance/API binding, ignores submitted routing, resolves the configured Agent
+and freezes its Conversation. Ingress is fail-closed, confirmation Session-bound,
+missing settings never guessed, and command/voice/Telegram/Call surfaces remain
+independent. Desktop publishing retains globalization data. See
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
-
-AP text/PTT ingress is fail-closed. AP stores only one explicit
-`instance + Backend API` binding; HASHI owns `/agentpresence default <agent>`
-and the current Conversation. HASHI authenticates AP, ignores submitted routing
-fields, resolves its enabled default Agent and freezes that Agent's current
-Conversation, so transcript/Run/reply share Workbench history. WAV PTT uses
-ordinary STT/Safe Voice; confirmation is bound to the same Session/generation.
-Missing settings block rather than guess.
-
-AP desktop publishing retains .NET globalization data; invariant mode can crash
-WPF focus under non-English IMEs. Selfcheck verifies published `zh-CN` support.
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

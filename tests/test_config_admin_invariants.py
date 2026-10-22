@@ -196,6 +196,10 @@ def test_delete_and_recreate_assigns_new_incarnation_and_quarantines_old_state(
     )
 
     assert admin.delete_agent_from_config("zelda") is True
+    # Ordinary create never adopts the prior incarnation's orphaned workspace.
+    old_workspace = tmp_path / "workspaces" / "zelda"
+    (old_workspace / "agent.md").unlink()
+    old_workspace.rmdir()
     assert admin.add_agent_to_config("zelda") is True
 
     second = next(

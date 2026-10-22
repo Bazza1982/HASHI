@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator import runtime_session
+from orchestrator.frontend_contracts import build_frontend_ingress_envelope
 from orchestrator.session_store import (
     IdempotencyConflict,
     SessionConflict,
@@ -2439,6 +2440,219 @@ def test_accept_run_is_atomic_and_idempotency_is_digest_bound(tmp_path):
             source="test",
             idempotency_key="stable-key",
         )
+
+
+def test_accept_request_fences_the_resolved_generation_before_admission(
+    tmp_path, monkeypatch
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    runtime = SimpleNamespace(
+        name="lily",
+        session_store=store,
+        global_config=SimpleNamespace(authorized_id=7, instance_id="HASHI1"),
+    )
+    original_accept = store.accept_run
+
+    def accept_after_fresh(**kwargs):
+        store.start_fresh_generation(
+            session["session_id"], reason="audit-resolve-admission-race"
+        )
+        return original_accept(**kwargs)
+
+    monkeypatch.setattr(store, "accept_run", accept_after_fresh)
+
+    with pytest.raises(SessionConflict, match="session_context_generation_changed"):
+        runtime_session.accept_request(
+            runtime,
+            request_id="req-generation-race",
+            chat_id=None,
+            prompt="must remain in generation one",
+            source="session-api",
+            request_metadata={
+                "owner_id": owner,
+                "session_id": session["session_id"],
+                "session_surface": "workbench",
+                "session_channel_key": "default",
+            },
+            request_content=None,
+            idempotency_key="generation-race",
+        )
+
+    assert store.get_session(session["session_id"])["context_generation"] == 2
+    assert store.messages(session["session_id"], owner_id=owner) == []
+    assert store.recent_session_runs(session["session_id"], owner_id=owner) == []
+
+
+def _frontend_context(
+    request_id: str,
+    *,
+    session_id: str,
+    idempotency_key: str,
+    instance_id: str = "HASHI1",
+):
+    return {
+        "frontend_ingress": build_frontend_ingress_envelope(
+            source_id="backend_api",
+            ingress_transport="session-api",
+            surface="workbench",
+            channel_key="default",
+            instance_id=instance_id,
+            principal={
+                "kind": "human_or_client",
+                "assurance": "runtime_observed",
+            },
+            network_authentication="not_applicable",
+            relay_chain=[],
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            session_id=session_id,
+            agent_id="lily",
+        )
+    }
+
+
+def test_accept_run_excludes_only_the_server_request_id_from_client_intent(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    first_context = _frontend_context(
+        "req-intent-winner",
+        session_id=session["session_id"],
+        idempotency_key="same-client-intent",
+    )
+    first = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-intent-winner",
+        text="same request",
+        source="session-api",
+        idempotency_key="same-client-intent",
+        message_context=first_context,
+    )
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-intent-loser",
+        text="same request",
+        source="session-api",
+        idempotency_key="same-client-intent",
+        message_context=_frontend_context(
+            "req-intent-loser",
+            session_id=session["session_id"],
+            idempotency_key="same-client-intent",
+        ),
+    )
+
+    assert replay.replayed is True
+    assert replay.run_id == first.run_id
+    assert replay.request_id == first.request_id
+    persisted = store.get_run(first.run_id, owner_id=owner)
+    assert (
+        persisted["message_context"]["frontend_ingress"]["message"]["request_id"]
+        == "req-intent-winner"
+    )
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(
+            session_id=session["session_id"],
+            owner_id=owner,
+            agent_id="lily",
+            request_id="req-intent-changed-target",
+            text="same request",
+            source="session-api",
+            idempotency_key="same-client-intent",
+            message_context=_frontend_context(
+                "req-intent-changed-target",
+                session_id=session["session_id"],
+                idempotency_key="same-client-intent",
+                instance_id="HASHI2",
+            ),
+        )
+
+
+def test_accept_run_replays_legacy_full_envelope_digest_without_rewriting_it(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    winner_context = _frontend_context(
+        "req-legacy-winner",
+        session_id=session["session_id"],
+        idempotency_key="legacy-client-intent",
+    )
+    first = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-legacy-winner",
+        text="中文 legacy request",
+        source="session-api",
+        idempotency_key="legacy-client-intent",
+        message_context=winner_context,
+    )
+    legacy_payload = {
+        "content": [{"type": "text", "text": "中文 legacy request"}],
+        "attachments": [],
+        "display_text": None,
+        "execution_mode": "",
+        "parent_run_id": "",
+        "response_preferences": {},
+        "message_context": winner_context,
+        "delivery_route": {},
+    }
+    legacy_digest = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """UPDATE idempotency_records SET request_digest=?
+               WHERE session_id=? AND idempotency_key=?""",
+            (legacy_digest, session["session_id"], "legacy-client-intent"),
+        )
+        connection.execute(
+            "UPDATE runs SET request_digest=? WHERE run_id=?",
+            (legacy_digest, first.run_id),
+        )
+
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-legacy-replay",
+        text="中文 legacy request",
+        source="session-api",
+        idempotency_key="legacy-client-intent",
+        message_context=_frontend_context(
+            "req-legacy-replay",
+            session_id=session["session_id"],
+            idempotency_key="legacy-client-intent",
+        ),
+    )
+
+    assert replay.replayed is True
+    assert replay.run_id == first.run_id
+    with sqlite3.connect(store.db_path) as connection:
+        stored = connection.execute(
+            """SELECT request_digest FROM idempotency_records
+               WHERE session_id=? AND idempotency_key=?""",
+            (session["session_id"], "legacy-client-intent"),
+        ).fetchone()[0]
+        run_digest = connection.execute(
+            "SELECT request_digest FROM runs WHERE run_id=?",
+            (first.run_id,),
+        ).fetchone()[0]
+    assert stored == run_digest == legacy_digest
 
 
 def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp_path):

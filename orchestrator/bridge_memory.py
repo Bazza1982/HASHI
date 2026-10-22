@@ -18,6 +18,12 @@ from typing import Any, ClassVar
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
+from orchestrator.config_json import (
+    ConfigConflictError,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
@@ -63,6 +69,7 @@ class LocalEmbeddingEncoder:
     def __init__(self, dim: int = 256):
         self.dim = dim
         self.vector_dim = dim
+        self.encoder_id = f"local-hash-v1:blake2b8:ascii-lower:{dim}"
         self.ready = True
         self.error = None
 
@@ -72,7 +79,12 @@ class LocalEmbeddingEncoder:
         if not tokens:
             return vec
         for tok in tokens:
-            idx = hash(tok) % self.dim
+            digest = hashlib.blake2b(
+                tok.encode("utf-8"),
+                digest_size=8,
+                person=b"HASHI-MEM-v1",
+            ).digest()
+            idx = int.from_bytes(digest, "big") % self.dim
             vec[idx] += 1.0
         norm = math.sqrt(sum(v * v for v in vec))
         if norm <= 0.0:
@@ -127,6 +139,12 @@ class BgeM3Encoder:
     @property
     def vector_dim(self) -> int | None:
         return self.DIM if self._ready else None
+
+    @property
+    def encoder_id(self) -> str:
+        if self._ready:
+            return "bge-m3-onnx-v1:mean-pool-l2:1024"
+        return self._fallback.encoder_id
 
     def _init(self):
         try:
@@ -314,10 +332,20 @@ class BridgeMemoryStore:
                     role TEXT NOT NULL,
                     source TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    embedding TEXT NOT NULL
+                    embedding TEXT NOT NULL,
+                    embedding_version TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'
                 )
                 """
             )
+            turn_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+            if "embedding_version" not in turn_columns:
+                conn.execute(
+                    "ALTER TABLE turns ADD COLUMN embedding_version "
+                    "TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'"
+                )
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS turns_wip_recovery_source_unique
@@ -334,6 +362,7 @@ class BridgeMemoryStore:
                     content TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 1.0,
                     embedding TEXT NOT NULL,
+                    embedding_version TEXT NOT NULL DEFAULT 'legacy-python-hash-v0',
                     origin TEXT NOT NULL DEFAULT 'legacy',
                     origin_ref TEXT NOT NULL DEFAULT '',
                     session_id TEXT,
@@ -348,6 +377,7 @@ class BridgeMemoryStore:
                 for row in conn.execute("PRAGMA table_info(memories)").fetchall()
             }
             for name, definition in (
+                ("embedding_version", "TEXT NOT NULL DEFAULT 'legacy-python-hash-v0'"),
                 ("origin", "TEXT NOT NULL DEFAULT 'legacy'"),
                 ("origin_ref", "TEXT NOT NULL DEFAULT ''"),
                 ("session_id", "TEXT"),
@@ -439,7 +469,35 @@ class BridgeMemoryStore:
                 self._vec_reason = self._vec_reason or "sqlite-vec unavailable"
             else:
                 self._vec_reason = self.encoder.error or "BGE-M3 unavailable; using legacy hash retrieval"
+            self._rebuild_stale_embeddings(conn)
             conn.commit()
+
+    def _rebuild_stale_embeddings(self, conn: sqlite3.Connection) -> None:
+        """Rebuild derived vectors whose persisted encoder identity is stale."""
+
+        encoder_id = str(self.encoder.encoder_id)
+        for table, text_column, vec_table, key_column in (
+            ("turns", "text", "turns_vec", "turn_id"),
+            ("memories", "content", "memory_vec", "memory_id"),
+        ):
+            rows = conn.execute(
+                f"SELECT id, {text_column} AS body FROM {table} "
+                "WHERE embedding_version != ? OR embedding_version IS NULL",
+                (encoder_id,),
+            ).fetchall()
+            for row in rows:
+                embedding = self.encoder.encode(str(row["body"] or ""))
+                conn.execute(
+                    f"UPDATE {table} SET embedding = ?, embedding_version = ? WHERE id = ?",
+                    (json.dumps(embedding), encoder_id, int(row["id"])),
+                )
+                self._upsert_vec(
+                    conn,
+                    vec_table,
+                    key_column,
+                    int(row["id"]),
+                    embedding,
+                )
 
     def _now(self) -> str:
         return datetime.now().isoformat()
@@ -479,8 +537,10 @@ class BridgeMemoryStore:
         emb = json.dumps(embedding)
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO turns (ts, role, source, text, embedding) VALUES (?, ?, ?, ?, ?)",
-                (self._now(), role, source, clean, emb),
+                "INSERT INTO turns "
+                "(ts, role, source, text, embedding, embedding_version) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self._now(), role, source, clean, emb, self.encoder.encoder_id),
             )
             if cur.lastrowid is not None:
                 self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
@@ -500,10 +560,17 @@ class BridgeMemoryStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO turns(ts, role, source, text, embedding)
-                VALUES (?, 'recovery', ?, ?, ?)
+                INSERT OR IGNORE INTO turns(
+                    ts, role, source, text, embedding, embedding_version
+                ) VALUES (?, 'recovery', ?, ?, ?, ?)
                 """,
-                (self._now(), source, clean, encoded_embedding),
+                (
+                    self._now(),
+                    source,
+                    clean,
+                    encoded_embedding,
+                    self.encoder.encoder_id,
+                ),
             )
             row = conn.execute(
                 "SELECT id, text FROM turns WHERE role = 'recovery' AND source = ?",
@@ -514,6 +581,10 @@ class BridgeMemoryStore:
                     "recovery capsule source digest resolved to different content"
                 )
             if row is not None:
+                conn.execute(
+                    "UPDATE turns SET embedding = ?, embedding_version = ? WHERE id = ?",
+                    (encoded_embedding, self.encoder.encoder_id, int(row["id"])),
+                )
                 self._upsert_vec(
                     conn,
                     "turns_vec",
@@ -840,9 +911,9 @@ class BridgeMemoryStore:
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO memories (
-                    ts, memory_type, source, content, importance, embedding,
+                    ts, memory_type, source, content, importance, embedding, embedding_version,
                     origin, origin_ref, session_id, run_id, message_id, promoted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._now(),
@@ -851,6 +922,7 @@ class BridgeMemoryStore:
                     clean,
                     float(importance),
                     emb,
+                    self.encoder.encoder_id,
                     str(origin or "legacy"),
                     str(origin_ref or ""),
                     str(session_id) if session_id else None,
@@ -925,7 +997,6 @@ class BridgeMemoryStore:
 
         safe_query = self._safe_query(query)
         q_vec = self.encoder.encode(query or "")
-        legacy_q_vec = self.legacy_encoder.encode(query or "")
         candidates: dict[int, dict[str, Any]] = {}
 
         with self._connect() as conn:
@@ -934,7 +1005,7 @@ class BridgeMemoryStore:
                     rows = conn.execute(
                         """
                         SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance,
-                               m.embedding, v.distance
+                               m.embedding, m.embedding_version, v.distance
                         FROM memory_vec v
                         JOIN memories m ON m.id = v.memory_id
                         WHERE v.embedding MATCH ?
@@ -954,7 +1025,8 @@ class BridgeMemoryStore:
                 try:
                     rows = conn.execute(
                         """
-                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
+                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance,
+                               m.embedding, m.embedding_version
                         FROM memory_fts f
                         JOIN memories m ON m.id = f.memory_id
                         WHERE memory_fts MATCH ?
@@ -972,7 +1044,8 @@ class BridgeMemoryStore:
 
             recent_rows = conn.execute(
                 """
-                SELECT id, ts, memory_type, source, content, importance, embedding
+                SELECT id, ts, memory_type, source, content, importance,
+                       embedding, embedding_version
                 FROM memories
                 ORDER BY id DESC
                 LIMIT 60
@@ -989,20 +1062,19 @@ class BridgeMemoryStore:
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in candidates.values():
             sim = 0.0
-            if row.get("distance") is not None:
+            encoder_matches = row.get("embedding_version") == self.encoder.encoder_id
+            if encoder_matches and row.get("distance") is not None:
                 try:
                     sim = max(0.0, 1.0 - float(row["distance"]))
                 except Exception:
                     sim = 0.0
-            elif row.get("embedding"):
+            elif encoder_matches and row.get("embedding"):
                 try:
                     emb = json.loads(row["embedding"])
                 except Exception:
                     emb = []
                 if len(emb) == len(q_vec):
                     sim = self.encoder.cosine(q_vec, emb)
-                elif len(emb) == len(legacy_q_vec):
-                    sim = self.legacy_encoder.cosine(legacy_q_vec, emb)
             vector_score = max(0.0, min(1.0, float(sim)))
             text_score = 1.0 if row.pop("_text_match", False) else 0.0
             row.pop("_vector_match", None)
@@ -1070,6 +1142,7 @@ class BridgeMemoryStore:
         status: dict[str, Any] = {
             "db_path": str(self.db_path),
             "encoder_ready": bool(self.encoder.ready),
+            "encoder_id": str(self.encoder.encoder_id),
             "encoder_dim": self.encoder.vector_dim,
             "encoder_error": self.encoder.error,
             "sqlite_vec_supported": bool(self._sqlite_vec_supported),
@@ -1132,6 +1205,10 @@ class BridgeMemoryStore:
         return status
 
 
+class SysPromptSemanticConflict(RuntimeError):
+    """The target slot changed after the caller observed or confirmed it."""
+
+
 class SysPromptManager:
     """Manage ten local or instance-shared additional system prompt slots."""
 
@@ -1154,7 +1231,7 @@ class SysPromptManager:
         self.scope = "global" if scope == "global" else "local"
         self._lock = _sys_prompt_path_lock(self.state_path)
         with self._lock:
-            self._data: dict = self._load() or self._empty_slots()
+            self._data: dict = self._normalize(self._read_document())
 
     @classmethod
     def for_instance(cls, global_config: Any) -> SysPromptManager:
@@ -1175,73 +1252,105 @@ class SysPromptManager:
         normalized = cls._empty_slots()
         for slot in cls.SLOTS:
             raw = payload.get(slot)
-            if not isinstance(raw, dict):
+            if raw is None:
                 continue
+            if not isinstance(raw, dict):
+                raise TypeError(f"system prompt slot {slot} must be a JSON object")
             text = raw.get("text", "")
+            active = raw.get("active", False)
+            if not isinstance(text, str) or type(active) is not bool:
+                raise TypeError(
+                    f"system prompt slot {slot} text/active has an invalid type"
+                )
             normalized[slot] = {
-                "text": text if isinstance(text, str) else str(text or ""),
-                "active": bool(raw.get("active", False)),
+                "text": text,
+                "active": active,
             }
         return normalized
 
-    def _load(self) -> dict[str, dict[str, object]] | None:
-        if not self.state_path.exists():
-            return self._empty_slots()
+    def _read_document(self):
         try:
-            payload = json.loads(
-                _retry_transient_file_access(
-                    lambda: self.state_path.read_text(encoding="utf-8")
-                )
+            return _retry_transient_file_access(
+                lambda: read_config_json(self.state_path)
             )
-            return self._normalize(payload)
-        except Exception as exc:
-            sys_prompt_logger.error(
-                "Could not load %s system prompt state from %s: %s",
-                self.scope,
-                self.state_path,
-                exc,
-            )
-            return None
+        except FileNotFoundError:
+            return new_config_json(self.state_path)
 
     def _refresh_locked(self) -> None:
-        if not self.shared:
-            return
-        loaded = self._load()
-        if loaded is not None:
-            self._data = loaded
+        self._data = self._normalize(self._read_document())
 
-    def _save_locked(self) -> None:
-        self._data = self._normalize(self._data)
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_name(
-            f".{self.state_path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-        )
-        try:
-            temporary.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            _retry_transient_file_access(
-                lambda: os.replace(temporary, self.state_path)
-            )
-        finally:
-            temporary.unlink(missing_ok=True)
+    @classmethod
+    def _validate_slot_name(cls, n: str) -> None:
+        if n not in cls.SLOTS:
+            raise ValueError("system prompt slot must be 1..10")
 
-    def _save(self) -> None:
-        with self._lock:
-            self._save_locked()
+    def _mutate_locked(
+        self,
+        n: str,
+        command: str,
+        *,
+        text: str | None = None,
+        expected_slot: dict[str, object] | None = None,
+        max_conflicts: int = 4,
+    ) -> dict[str, object]:
+        self._validate_slot_name(n)
+        if command in {"save", "replace"} and not isinstance(text, str):
+            raise TypeError("save/replace requires text")
+        expected = dict(expected_slot) if expected_slot is not None else None
+        if expected is not None:
+            expected = self._normalize({n: expected})[n]
+
+        for attempt in range(max_conflicts + 1):
+            source = self._read_document()
+            current = self._normalize(source)[n]
+            if expected is None:
+                expected = dict(current)
+            if current != expected:
+                raise SysPromptSemanticConflict(
+                    f"system prompt slot {n} changed after it was observed"
+                )
+
+            updated = dict(current)
+            if command == "save":
+                if current["text"]:
+                    raise SysPromptSemanticConflict(
+                        f"system prompt slot {n} is occupied; use confirmed replace"
+                    )
+                updated = {"text": text, "active": False}
+            elif command == "replace":
+                updated["text"] = text
+            elif command == "activate":
+                if not current["text"]:
+                    raise ValueError("cannot activate an empty system prompt slot")
+                updated["active"] = True
+            elif command == "deactivate":
+                updated["active"] = False
+            elif command == "delete":
+                updated = {"text": "", "active": False}
+            else:
+                raise ValueError(f"unsupported system prompt mutation: {command}")
+
+            candidate = source.copy()
+            candidate[n] = updated
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                write_config_json(self.state_path, candidate)
+            except ConfigConflictError:
+                if attempt == max_conflicts:
+                    raise
+                continue
+            self._data = self._normalize(candidate)
+            return updated
+        raise AssertionError("unreachable")
 
     def _slot(self, n: str) -> dict:
-        with self._lock:
-            self._refresh_locked()
-            self._data.setdefault(n, {"text": "", "active": False})
-            return self._data[n]
+        return self.get_slot(n)
 
     def get_slot(self, n: str) -> dict[str, object]:
+        self._validate_slot_name(n)
         with self._lock:
             self._refresh_locked()
-            slot = self._data.setdefault(n, {"text": "", "active": False})
-            return {"text": str(slot.get("text") or ""), "active": bool(slot.get("active"))}
+            return dict(self._data[n])
 
     def display_all(self) -> str:
         lines = ["*System Prompt Slots:*"]
@@ -1260,47 +1369,52 @@ class SysPromptManager:
         text = s["text"] or "(empty)"
         return f"Slot {n} [{status}]:\n{text}"
 
-    def activate(self, n: str) -> str:
+    def activate(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            if not self._data.setdefault(n, {"text": "", "active": False})["text"]:
-                return f"Slot {n} is empty — save a message first."
-            self._data[n]["active"] = True
-            self._save_locked()
+            self._mutate_locked(n, "activate", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} activated."
 
-    def deactivate(self, n: str) -> str:
+    def deactivate(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data.setdefault(n, {"text": "", "active": False})["active"] = False
-            self._save_locked()
+            self._mutate_locked(n, "deactivate", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} deactivated."
 
-    def save(self, n: str, text: str) -> str:
+    def save(
+        self,
+        n: str,
+        text: str,
+        *,
+        expected_slot: dict[str, object] | None = None,
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data[n] = {"text": text, "active": False}
-            self._save_locked()
+            self._mutate_locked(n, "save", text=text, expected_slot=expected_slot)
         if self.scope == "global":
             return f"Global slot {n} saved (inactive). Use /sys global {n} on to activate."
         return f"Slot {n} saved (inactive). Use /sys {n} on to activate."
 
-    def replace(self, n: str, text: str) -> str:
+    def replace(
+        self,
+        n: str,
+        text: str,
+        *,
+        expected_slot: dict[str, object] | None = None,
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            was_active = self._data.setdefault(n, {"text": "", "active": False}).get("active", False)
-            self._data[n] = {"text": text, "active": was_active}
-            self._save_locked()
+            self._mutate_locked(n, "replace", text=text, expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} updated."
 
-    def delete(self, n: str) -> str:
+    def delete(
+        self, n: str, *, expected_slot: dict[str, object] | None = None
+    ) -> str:
         with self._lock:
-            self._refresh_locked()
-            self._data[n] = {"text": "", "active": False}
-            self._save_locked()
+            self._mutate_locked(n, "delete", expected_slot=expected_slot)
         prefix = "Global slot" if self.scope == "global" else "Slot"
         return f"{prefix} {n} cleared."
 
@@ -1715,6 +1829,8 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(global_entries),
             )
+        elif self.global_sys_prompt_manager is not None:
+            removed_section_keys.append("instance_global_sys")
         add_section(
             "instance_path_presentation",
             "INSTANCE PATH PRESENTATION",
@@ -1734,6 +1850,8 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(local_entries),
             )
+        elif self.sys_prompt_manager is not None:
+            removed_section_keys.append("agent_local_sys")
 
         add_section(
             "current_user_request",
@@ -1848,6 +1966,8 @@ class BridgeContextAssembler:
                 "memory",
                 protected=True,
             )
+        elif document is not None:
+            removed_section_keys.append("permanent_memory")
 
         inject_search = (
             not incremental and inject_memory and self.saved_memory_injection_enabled
@@ -2122,7 +2242,7 @@ class BridgeContextAssembler:
             "transport_snapshot": {
                 "version": 1,
                 "sections": transport_sections,
-                "removed_section_keys": removed_section_keys,
+                "removed_section_keys": list(dict.fromkeys(removed_section_keys)),
             },
             "audit": {
                 "hcc": {

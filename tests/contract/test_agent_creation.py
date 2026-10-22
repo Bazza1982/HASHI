@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import multiprocessing
+from pathlib import Path
 import shutil
 
 import pytest
@@ -21,8 +24,8 @@ from orchestrator.agent_creation import (
     validate_agent_name,
 )
 from orchestrator.agent_incarnation import AGENT_LIFECYCLE_FIELD
-from orchestrator.config_admin import ConfigAdmin
-from orchestrator.config_json import ConfigConflictError
+from orchestrator.config_admin import AgentWorkspaceConflictError, ConfigAdmin
+from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 from orchestrator.pathing import BridgePaths
 
 
@@ -37,16 +40,13 @@ HER_PROVIDER_PROFILES = {
 }
 
 
-def _paths(tmp_path) -> BridgePaths:
+def _paths_for_root(tmp_path) -> BridgePaths:
     home = tmp_path / "home"
-    (home / "workspaces").mkdir(parents=True)
-    config_path = home / "agents.json"
-    config_path.write_text('{"global": {}, "agents": []}\n', encoding="utf-8")
     return BridgePaths(
         code_root=home,
         bridge_home=home,
         instance_id="TEST",
-        config_path=config_path,
+        config_path=home / "agents.json",
         secrets_path=home / "secrets.json",
         tasks_path=home / "tasks.json",
         state_path=home / "scheduler_state.json",
@@ -54,6 +54,73 @@ def _paths(tmp_path) -> BridgePaths:
         pid_path=home / "process.pid",
         workspaces_root=home / "workspaces",
     )
+
+
+def _paths(tmp_path) -> BridgePaths:
+    paths = _paths_for_root(tmp_path)
+    home = paths.bridge_home
+    (home / "workspaces").mkdir(parents=True)
+    paths.config_path.write_text(
+        '{"global": {}, "agents": []}\n',
+        encoding="utf-8",
+    )
+    return paths
+
+
+def _service_create_contender(
+    root: str,
+    identity: str,
+    held,
+    release,
+    attempted,
+    proved_blocked,
+    results,
+) -> None:
+    """Exercise the real Windows process lock through AgentCreationService."""
+
+    import orchestrator.config_admin as config_admin_module
+
+    shutil.which = lambda command: f"C:/test/{command}.exe"
+    paths = _paths_for_root(Path(root))
+    if identity == "a":
+        real_pcm_write = config_admin_module.atomic_write_pcm
+
+        def held_pcm_write(path, content):
+            result = real_pcm_write(path, content)
+            held.set()
+            if not release.wait(timeout=15):
+                raise RuntimeError("test did not release the first creator")
+            return result
+
+        config_admin_module.atomic_write_pcm = held_pcm_write
+    else:
+        real_file_lock = config_admin_module.file_write_lock
+
+        @contextmanager
+        def observed_file_lock(target, *args, **kwargs):
+            attempted.set()
+            try:
+                with real_file_lock(target, timeout=0):
+                    raise AssertionError("second creator acquired the held owner lock")
+            except TimeoutError:
+                proved_blocked.set()
+            with real_file_lock(target, *args, **kwargs):
+                yield
+
+        config_admin_module.file_write_lock = observed_file_lock
+    try:
+        result = AgentCreationService(paths, global_config={}).create(
+            AgentCreationSpec(
+                name="same-agent",
+                display_name=f"Owner {identity}",
+                backend="codex-cli",
+            )
+        )
+        results.put((identity, "created", result.config_published))
+    except AgentExistsError:
+        results.put((identity, "exists", False))
+    except BaseException as exc:
+        results.put((identity, "error", repr(exc)))
 
 
 @pytest.fixture
@@ -182,10 +249,98 @@ def test_config_conflict_removes_only_new_scaffold(
     existing.mkdir()
     keep = existing / "keep.txt"
     keep.write_text("preserve", encoding="utf-8")
-    with pytest.raises(ConfigConflictError):
+    with pytest.raises(AgentWorkspaceConflictError):
         ConfigAdmin(paths).add_agent_to_config("existing", {"engine": "codex-cli"})
     assert keep.read_text(encoding="utf-8") == "preserve"
     assert not (existing / "agent.md").exists()
+
+
+def test_same_name_service_creators_share_one_cross_process_owner(tmp_path):
+    paths = _paths(tmp_path)
+    ctx = multiprocessing.get_context("spawn")
+    held = ctx.Event()
+    release = ctx.Event()
+    attempted = ctx.Event()
+    proved_blocked = ctx.Event()
+    results = ctx.Queue()
+    first = ctx.Process(
+        target=_service_create_contender,
+        args=(str(tmp_path), "a", held, release, attempted, proved_blocked, results),
+    )
+    second = ctx.Process(
+        target=_service_create_contender,
+        args=(str(tmp_path), "b", held, release, attempted, proved_blocked, results),
+    )
+    first.start()
+    try:
+        assert held.wait(timeout=15), "first creator did not reach its held phase"
+        second.start()
+        assert attempted.wait(timeout=15), "second creator did not reach the owner lock"
+        assert proved_blocked.wait(timeout=15), "the actual OS lock did not exclude it"
+        release.set()
+        outcomes = sorted(results.get(timeout=20) for _ in range(2))
+        assert outcomes == [
+            ("a", "created", True),
+            ("b", "exists", False),
+        ]
+    finally:
+        release.set()
+        for child in (first, second):
+            if child.pid is None:
+                continue
+            child.join(timeout=10)
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=5)
+    assert first.exitcode == second.exitcode == 0
+    stored = json.loads(paths.config_path.read_text(encoding="utf-8"))
+    assert [row["name"] for row in stored["agents"]] == ["same-agent"]
+    agent_md = paths.workspaces_root / "same-agent" / "agent.md"
+    assert "Owner a" in agent_md.read_text(encoding="utf-8")
+    assert not list(paths.workspaces_root.glob(".agent-create-*"))
+
+
+def test_unknown_post_commit_error_retains_published_scaffold_and_marker(
+    tmp_path, monkeypatch, installed_cli_backends
+):
+    paths = _paths(tmp_path)
+    real_write = ConfigAdmin.write_raw_config
+
+    def commit_then_lose_ack(self, raw_cfg):
+        real_write(self, raw_cfg)
+        raise OSError("injected error after config commit")
+
+    monkeypatch.setattr(ConfigAdmin, "write_raw_config", commit_then_lose_ack)
+    with pytest.raises(OSError, match="after config commit"):
+        AgentCreationService(paths, global_config={}).create(
+            AgentCreationSpec(name="uncertain", backend="codex-cli")
+        )
+    stored = json.loads(paths.config_path.read_text(encoding="utf-8"))
+    assert [row["name"] for row in stored["agents"]] == ["uncertain"]
+    workspace = paths.workspaces_root / "uncertain"
+    assert (workspace / "agent.md").is_file()
+    assert (workspace / ".hashi-agent-create-owner").is_file()
+
+
+def test_committed_durability_warning_returns_receipt_without_marker(
+    tmp_path, monkeypatch, installed_cli_backends
+):
+    paths = _paths(tmp_path)
+    real_write = ConfigAdmin.write_raw_config
+
+    def commit_with_warning(self, raw_cfg):
+        real_write(self, raw_cfg)
+        raise ConfigDurabilityError("injected directory sync warning")
+
+    monkeypatch.setattr(ConfigAdmin, "write_raw_config", commit_with_warning)
+    result = AgentCreationService(paths, global_config={}).create(
+        AgentCreationSpec(name="durability", backend="codex-cli")
+    )
+    assert result.config_published is True
+    assert result.durability_warning is True
+    workspace = paths.workspaces_root / "durability"
+    assert (workspace / "agent.md").is_file()
+    assert not (workspace / ".hashi-agent-create-owner").exists()
 
 
 def test_explicit_template_optin_and_full_backend_policy_persist(tmp_path, monkeypatch):

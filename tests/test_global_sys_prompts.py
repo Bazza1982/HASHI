@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from orchestrator import runtime_sys_prompts
 from orchestrator.bridge_memory import (
     BridgeContextAssembler,
     SysPromptManager,
+    SysPromptSemanticConflict,
     global_sys_prompt_state_path,
 )
 
@@ -49,6 +51,24 @@ class _Query:
 
     async def answer(self, text: str | None = None, show_alert: bool = False):
         self.answers.append((text, show_alert))
+
+
+def _save_sys_prompt_in_process(
+    state_path: str,
+    slot: str,
+    text: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    try:
+        manager = SysPromptManager(state_path=Path(state_path), shared=True)
+        if not start.wait(10):
+            raise TimeoutError("test start gate timed out")
+        manager.save(slot, text)
+    except Exception as exc:  # pragma: no cover - relayed to the parent process
+        results.put((slot, type(exc).__name__, str(exc)))
+    else:
+        results.put((slot, "ok", ""))
 
 
 def _global_config(
@@ -136,6 +156,110 @@ def test_concurrent_global_slot_updates_do_not_overwrite_each_other(
     assert [item["text"] for item in slots] == [
         f"rule-{index}" for index in range(1, 11)
     ]
+
+
+def test_bom_state_preserves_existing_slot_when_another_slot_is_saved(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state" / "global_sys_prompts.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_bytes(
+        b"\xef\xbb\xbf"
+        + json.dumps({"1": {"text": "existing", "active": True}}).encode("utf-8")
+    )
+
+    manager = SysPromptManager(state_path=state_path, shared=True, scope="global")
+    manager.save("2", "new rule")
+
+    assert manager.get_slot("1") == {"text": "existing", "active": True}
+    assert manager.get_slot("2") == {"text": "new rule", "active": False}
+
+
+def test_cross_process_updates_to_different_slots_are_both_preserved(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state" / "global_sys_prompts.json"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    workers = [
+        context.Process(
+            target=_save_sys_prompt_in_process,
+            args=(str(state_path), str(index), f"rule-{index}", start, results),
+        )
+        for index in range(1, 5)
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    outcomes = [results.get(timeout=20) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=20)
+        assert worker.exitcode == 0
+
+    assert {outcome[1] for outcome in outcomes} == {"ok"}
+    manager = SysPromptManager(state_path=state_path, shared=True, scope="global")
+    assert [manager.get_slot(str(index))["text"] for index in range(1, 5)] == [
+        f"rule-{index}" for index in range(1, 5)
+    ]
+
+
+def test_confirmed_mutation_rejects_a_changed_target_slot(tmp_path: Path) -> None:
+    state_path = tmp_path / "state" / "global_sys_prompts.json"
+    first = SysPromptManager(state_path=state_path, shared=True, scope="global")
+    second = SysPromptManager(state_path=state_path, shared=True, scope="global")
+    first.save("1", "original")
+    confirmed = first.get_slot("1")
+    second.replace("1", "changed elsewhere")
+
+    with pytest.raises(SysPromptSemanticConflict, match="changed after"):
+        first.replace("1", "stale confirmed change", expected_slot=confirmed)
+
+    assert first.get_slot("1")["text"] == "changed elsewhere"
+
+
+def test_invalid_canonical_sys_prompt_state_is_not_replaced(tmp_path: Path) -> None:
+    state_path = tmp_path / "sys_prompts.json"
+    state_path.write_text(
+        json.dumps({"1": {"text": ["not text"], "active": "yes"}}),
+        encoding="utf-8",
+    )
+    before = state_path.read_bytes()
+
+    with pytest.raises(TypeError, match="invalid type"):
+        SysPromptManager(state_path=state_path)
+
+    assert state_path.read_bytes() == before
+
+
+def test_optional_sys_sections_emit_tombstones_after_successful_empty_read(
+    tmp_path: Path,
+) -> None:
+    local = SysPromptManager(tmp_path / "workspace")
+    global_manager = SysPromptManager.for_instance(_global_config(tmp_path))
+    local.save("1", "local")
+    local.activate("1")
+    global_manager.save("1", "global")
+    global_manager.activate("1")
+    assembler = BridgeContextAssembler(
+        _EmptyMemoryStore(),
+        system_md=None,
+        sys_prompt_manager=local,
+        global_sys_prompt_manager=global_manager,
+    )
+    first = assembler.build_prompt_payload("first", "her-v2", incremental=True)
+    assert {item["key"] for item in first["transport_snapshot"]["sections"]} >= {
+        "instance_global_sys",
+        "agent_local_sys",
+    }
+
+    local.delete("1")
+    global_manager.delete("1")
+    second = assembler.build_prompt_payload("second", "her-v2", incremental=True)
+
+    assert {"instance_global_sys", "agent_local_sys"} <= set(
+        second["transport_snapshot"]["removed_section_keys"]
+    )
 
 
 def test_prompt_assembler_injects_global_before_agent_local_sys(tmp_path: Path) -> None:

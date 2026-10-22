@@ -5,6 +5,7 @@ import html
 import inspect
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from orchestrator.session_store import (
     SessionConflict,
     SessionNotFound,
     SessionStore,
+    TERMINAL_RUN_STATES,
 )
 
 logger = logging.getLogger("HASHI.RuntimeSession")
@@ -38,6 +40,28 @@ _AGENT_ACTIVITY_SOURCES = frozenset(
         "background_job_event",
     }
 )
+
+
+class ExecutionClaimLost(RuntimeError):
+    """The durable Run was no longer claimable by this queue consumer."""
+
+    code = "EXECUTION_CLAIM_LOST"
+
+
+class TerminalResolutionPending(RuntimeError):
+    """No owner-scoped canonical terminal Run can yet be projected safely."""
+
+    code = "TERMINAL_RESOLUTION_PENDING"
+
+
+@dataclass(frozen=True)
+class TerminalResolution:
+    """Canonical execution outcome plus non-execution terminal side errors."""
+
+    payload: dict[str, Any]
+    run: dict[str, Any]
+    continuity_status: str
+    side_errors: tuple[dict[str, str], ...] = ()
 
 
 def is_agent_activity_source(source: Any) -> bool:
@@ -274,6 +298,12 @@ def accept_request(
         if "session_message_text" in metadata
         else prompt
     )
+    explicit_expected_generation = metadata.get("session_context_generation")
+    expected_generation = (
+        explicit_expected_generation
+        if explicit_expected_generation is not None
+        else int(session["context_generation"])
+    )
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
@@ -287,7 +317,7 @@ def accept_request(
             if "session_message_display_text" in metadata
             else None
         ),
-        expected_context_generation=metadata.get("session_context_generation"),
+        expected_context_generation=expected_generation,
         execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
         parent_run_id=str(metadata.get("parent_run_id") or "") or None,
@@ -1228,7 +1258,7 @@ def runtime_busy(runtime: Any) -> bool:
         return False
 
 
-def mark_running(runtime: Any, item: Any) -> None:
+def mark_running(runtime: Any, item: Any) -> int | None:
     if getattr(item, "run_id", None):
         from orchestrator.message_context import (
             MESSAGE_CONTEXT_METADATA_KEY,
@@ -1291,12 +1321,163 @@ def mark_running(runtime: Any, item: Any) -> None:
                 message_context if isinstance(message_context, Mapping) else None
             ),
         )
+        if item.fencing_token is None:
+            raise ExecutionClaimLost(
+                f"durable Run is no longer claimable for {item.request_id}"
+            )
+        return int(item.fencing_token)
+    return None
 
 
-def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping[str, Any]) -> None:
+def _terminal_side_error(phase: str, error: BaseException) -> dict[str, str]:
+    return {
+        "phase": str(phase),
+        "error_type": type(error).__name__,
+    }
+
+
+def _canonical_terminal_payload(
+    store: SessionStore,
+    *,
+    run: Mapping[str, Any],
+    owner: str,
+    agent_id: str,
+    proposed: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = str(run.get("state") or "")
+    if state not in TERMINAL_RUN_STATES:
+        raise TerminalResolutionPending(
+            f"Run {run.get('run_id') or run.get('request_id')} is still {state or 'active'}"
+        )
+    resolved = dict(proposed)
+    resolved.update(
+        {
+            "request_id": str(run.get("request_id") or proposed.get("request_id") or ""),
+            "source": str(run.get("source") or proposed.get("source") or ""),
+            "terminal_state": state,
+        }
+    )
+    for key in (
+        "error",
+        "error_code",
+        "error_retryable",
+        "http_status",
+        "provider_request_id",
+        "retry_after_s",
+        "side_effects_possible",
+        "effect_reconciliation",
+        "public_failure",
+        "interrupted",
+        "interrupt_reason",
+    ):
+        resolved.pop(key, None)
+    if state == "completed":
+        final_message_id = str(run.get("final_message_id") or "")
+        if final_message_id:
+            message = store.get_message(
+                final_message_id,
+                session_id=str(run["session_id"]),
+                owner_id=owner,
+            )
+            if (
+                str(message.get("run_id") or "") != str(run.get("run_id") or "")
+                or str(message.get("role") or "") != "assistant"
+                or int(message.get("context_generation") or 0)
+                != int(run.get("context_generation") or 0)
+            ):
+                raise TerminalResolutionPending(
+                    "canonical final Message does not belong to the terminal Run"
+                )
+            resolved.update(
+                {
+                    "success": True,
+                    "text": str(message.get("text") or "") or None,
+                    "content": list(message.get("content") or ()),
+                    "final_message_id": final_message_id,
+                    "incremental_only": False,
+                }
+            )
+        else:
+            # First-ready/incremental publication can complete a Run without
+            # creating another final Message.  Never replay proposed content.
+            resolved.update(
+                {
+                    "success": True,
+                    "text": None,
+                    "content": [],
+                    "final_message_id": None,
+                    "incremental_only": True,
+                }
+            )
+        return resolved
+    resolved.update(
+        {
+            "success": False,
+            "text": None,
+            "content": [],
+            "final_message_id": None,
+            "error": str(run.get("error_text") or "Run did not complete"),
+            "error_code": str(run.get("error_code") or f"run_{state}"),
+            "error_retryable": False,
+        }
+    )
+    if state == "failed":
+        detail = store.request_failure_detail(
+            str(run["request_id"]),
+            owner_id=owner,
+            agent_id=agent_id,
+        ) or {}
+        for key in (
+            "error",
+            "error_code",
+            "error_retryable",
+            "http_status",
+            "provider_request_id",
+            "retry_after_s",
+            "side_effects_possible",
+            "effect_reconciliation",
+            "public_failure",
+        ):
+            if key in detail:
+                resolved[key] = detail[key]
+        resolved["error"] = str(resolved.get("error") or "Run failed")
+        return resolved
+    resolved["interrupted"] = True
+    resolved["interrupt_reason"] = (
+        "user_stop"
+        if state == "stopped"
+        else "user_steer"
+        if state == "superseded"
+        else "interrupted"
+    )
+    return resolved
+
+
+def finish_request_from_listener(
+    runtime: Any,
+    request_id: str,
+    payload: Mapping[str, Any],
+) -> TerminalResolution:
     store = getattr(runtime, "session_store", None)
     if not isinstance(store, SessionStore):
-        return
+        raise TerminalResolutionPending("Session store is unavailable")
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    request_meta = registry.get(request_id, {}) if isinstance(registry, dict) else {}
+    try:
+        runtime_owner = owner_id(runtime)
+    except (AttributeError, TypeError):
+        runtime_owner = ""
+    admission_owner = str(request_meta.get("owner_id") or "")
+    admission_agent = str(request_meta.get("agent_id") or "")
+    scoped_owner = str(admission_owner or runtime_owner)
+    scoped_agent = str(admission_agent or getattr(runtime, "name", ""))
+    raw_fencing_token = request_meta.get("hashi_fencing_token")
+    try:
+        fencing_token = int(raw_fencing_token) if raw_fencing_token is not None else None
+    except (TypeError, ValueError):
+        fencing_token = None
+    if fencing_token is not None and fencing_token <= 0:
+        fencing_token = None
     success = bool(payload.get("success"))
     failure_context = None
     if not success:
@@ -1324,19 +1505,67 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         # successor.  PAO records that lifecycle boundary as superseded;
         # HERV3 separately records the interrupted Turn as STEERED.
         failure_state = "superseded"
-    completed_run = store.finish_request(
-        request_id,
-        success=success,
-        assistant_text=str(payload.get("text") or "") or None,
-        assistant_content=(
-            payload.get("content")
-            if isinstance(payload.get("content"), (list, tuple))
-            else None
-        ),
-        assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
-        error_text=str(payload.get("error") or "") or None,
-        error_context=failure_context,
-        failure_state=failure_state,
+    side_errors: list[dict[str, str]] = []
+    try:
+        completed_run = store.finish_request(
+            request_id,
+            success=success,
+            assistant_text=str(payload.get("text") or "") or None,
+            assistant_content=(
+                payload.get("content")
+                if isinstance(payload.get("content"), (list, tuple))
+                else None
+            ),
+            assistant_source=(
+                public_backend_engine(_active_engine(runtime)) or scoped_agent
+            ),
+            error_text=str(payload.get("error") or "") or None,
+            error_context=failure_context,
+            failure_state=failure_state,
+            fencing_token=fencing_token,
+        )
+    except Exception as exc:
+        # Validation and stale-writer failures occur before a new terminal can
+        # be committed.  A pre-existing terminal winner remains authoritative.
+        side_errors.append(_terminal_side_error("terminal_commit", exc))
+        try:
+            if not scoped_owner:
+                raise TerminalResolutionPending(
+                    "owner-scoped terminal readback is unavailable"
+                )
+            completed_run = store.get_run_by_request(
+                request_id,
+                owner_id=scoped_owner,
+                agent_id=scoped_agent or None,
+            )
+        except Exception as read_error:
+            raise TerminalResolutionPending(
+                "canonical terminal could not be resolved after commit failure"
+            ) from read_error
+    if completed_run is None or str(completed_run.get("state") or "") not in TERMINAL_RUN_STATES:
+        raise TerminalResolutionPending(
+            "canonical terminal is not available for listener projection"
+        )
+    canonical_owner = str(
+        store.get_session(str(completed_run["session_id"])).get("owner_id") or ""
+    )
+    if admission_owner and admission_owner != canonical_owner:
+        raise TerminalResolutionPending("canonical terminal owner changed")
+    scoped_owner = canonical_owner
+    if not scoped_owner:
+        raise TerminalResolutionPending("canonical terminal owner is unavailable")
+    canonical_agent = str(completed_run.get("agent_id") or "")
+    if admission_agent and admission_agent.casefold() != canonical_agent.casefold():
+        raise TerminalResolutionPending("canonical terminal Agent changed")
+    scoped_agent = canonical_agent
+    if not scoped_agent:
+        raise TerminalResolutionPending("canonical terminal Agent is unavailable")
+    canonical_payload = _canonical_terminal_payload(
+        store,
+        run=completed_run,
+        owner=scoped_owner,
+        agent_id=scoped_agent,
+        proposed=payload,
     )
     if completed_run is not None and completed_run.get("state") == "completed":
         try:
@@ -1345,15 +1574,32 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             project_completed_result(
                 store,
                 run=completed_run,
-                owner_id=owner_id(runtime),
-                agent_id=runtime.name,
+                owner_id=scoped_owner,
+                agent_id=scoped_agent,
             )
         except Exception as exc:  # presentation cannot change execution outcome
+            side_errors.append(_terminal_side_error("activity_projection", exc))
             logger.warning(
                 "Agent activity Workbench projection failed for %s (%s)",
                 request_id, type(exc).__name__,
             )
-    capture_backend_binding(runtime, request_id=request_id)
+    continuity_status = "captured"
+    try:
+        capture_backend_binding(runtime, request_id=request_id)
+    except Exception as exc:
+        continuity_status = "recovery_required"
+        side_errors.append(_terminal_side_error("backend_binding", exc))
+        logger.warning(
+            "Backend continuity capture failed after terminal commit for %s (%s)",
+            request_id,
+            type(exc).__name__,
+        )
+    return TerminalResolution(
+        payload=canonical_payload,
+        run=dict(completed_run),
+        continuity_status=continuity_status,
+        side_errors=tuple(side_errors),
+    )
 
 
 def record_assistant_delivery(

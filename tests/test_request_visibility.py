@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from orchestrator import runtime_session, runtime_transfer
+from orchestrator import frontend_ingress, runtime_session, runtime_transfer
 from orchestrator import runtime_cross_session, runtime_delivery_order
 from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -16,7 +16,7 @@ from orchestrator.frontend_call.transient_live_media import (
     encode_live_frames,
     live_frames_for,
 )
-from orchestrator.session_store import SessionStore
+from orchestrator.session_store import AcceptedRun, SessionStore
 
 
 def _runtime_for_admission():
@@ -27,6 +27,33 @@ def _runtime_for_admission():
     return runtime
 
 
+def _accepted_run(session_id, run_id, message_id, request_id):
+    return AcceptedRun(
+        session_id=session_id,
+        run_id=run_id,
+        message_id=message_id,
+        request_id=request_id,
+        context_generation=1,
+    )
+
+
+def _admission_store(tmp_path, **extra):
+    return SimpleNamespace(
+        session_workspace=lambda *args: tmp_path,
+        get_message=lambda *args, **kwargs: {"content": []},
+        **extra,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _use_explicit_runtime_store(monkeypatch):
+    monkeypatch.setattr(
+        frontend_ingress,
+        "ensure_store",
+        lambda runtime: runtime.session_store,
+    )
+
+
 @pytest.mark.asyncio
 async def test_live_frames_leave_request_metadata_before_session_admission(
     tmp_path, monkeypatch
@@ -35,7 +62,7 @@ async def test_live_frames_leave_request_metadata_before_session_admission(
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-live-frames"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
@@ -44,11 +71,8 @@ async def test_live_frames_leave_request_metadata_before_session_admission(
         "accept_request",
         lambda *args, **kwargs: (
             {"session_id": "session-live", "context_generation": 1},
-            SimpleNamespace(
-                replayed=False,
-                run_id="run-live",
-                message_id="message-live",
-                request_id="req-live-frames",
+            _accepted_run(
+                "session-live", "run-live", "message-live", "req-live-frames"
             ),
             "user:123",
             "workbench",
@@ -111,17 +135,14 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-visible"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
     monkeypatch.setattr(runtime_session, "accept_request", lambda *args, **kwargs: (
         {"session_id": "session-visible", "context_generation": 1},
-        SimpleNamespace(
-            replayed=False,
-            run_id="run-visible",
-            message_id="message-visible",
-            request_id="req-visible",
+        _accepted_run(
+            "session-visible", "run-visible", "message-visible", "req-visible"
         ),
         "user:123", "workbench", "default",
     ))
@@ -167,7 +188,7 @@ async def test_transfer_bridge_request_uses_internal_connector(
     runtime.name = "target"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI3")
     runtime.next_request_id = lambda: "req-transfer"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
@@ -182,11 +203,8 @@ async def test_transfer_bridge_request_uses_internal_connector(
         "accept_request",
         lambda *args, **kwargs: (
             {"session_id": "session-target", "context_generation": 1},
-            SimpleNamespace(
-                replayed=False,
-                run_id="run-transfer",
-                message_id="message-transfer",
-                request_id="req-transfer",
+            _accepted_run(
+                "session-target", "run-transfer", "message-transfer", "req-transfer"
             ),
             "user:123",
             "bridge",
@@ -246,7 +264,7 @@ async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-fenced"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
@@ -307,7 +325,7 @@ async def test_worker_nonvoice_ingress_preserves_complete_pending_transfer(tmp_p
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-pending"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
@@ -322,11 +340,8 @@ async def test_worker_nonvoice_ingress_preserves_complete_pending_transfer(tmp_p
         "accept_request",
         lambda *args, **kwargs: (
             {"session_id": "session-pending", "context_generation": 1},
-            SimpleNamespace(
-                replayed=False,
-                run_id="run-pending",
-                message_id="message-pending",
-                request_id="req-pending",
+            _accepted_run(
+                "session-pending", "run-pending", "message-pending", "req-pending"
             ),
             "user:123",
             "workbench",
@@ -369,18 +384,13 @@ async def test_typed_tui_run_policy_cannot_disable_central_telegram_mirroring(
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-tui"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
     monkeypatch.setattr(runtime_session, "accept_request", lambda *args, **kwargs: (
         {"session_id": "session-shared", "context_generation": 1},
-        SimpleNamespace(
-            replayed=False,
-            run_id="run-tui",
-            message_id="message-tui",
-            request_id="req-tui",
-        ),
+        _accepted_run("session-shared", "run-tui", "message-tui", "req-tui"),
         "user:123", "workbench", "default",
     ))
     monkeypatch.setattr(runtime_session, "resolve_request_session", lambda *args, **kwargs: (
@@ -434,8 +444,8 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
         "proposal_version": 1,
         "proposal_digest": "digest-origin",
     }
-    runtime.session_store = SimpleNamespace(
-        session_workspace=lambda *args: tmp_path,
+    runtime.session_store = _admission_store(
+        tmp_path,
         resolve_live_voice_origin=Mock(return_value=origin),
     )
     runtime.message_logger = Mock()
@@ -446,11 +456,8 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
         "accept_request",
         lambda *args, **kwargs: (
             {"session_id": "session-live", "context_generation": 1},
-            SimpleNamespace(
-                replayed=False,
-                run_id="run-live",
-                message_id="message-live",
-                request_id="req-live-origin",
+            _accepted_run(
+                "session-live", "run-live", "message-live", "req-live-origin"
             ),
             "user:123",
             "workbench",
@@ -564,7 +571,7 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
         instance_id="HASHI2",
     )
     runtime.next_request_id = lambda: "req-private"
-    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.session_store = _admission_store(tmp_path)
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
@@ -574,11 +581,8 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
         persisted.update(kwargs["request_metadata"])
         return (
             {"session_id": "session-private", "context_generation": 1},
-            SimpleNamespace(
-                replayed=False,
-                run_id="run-private",
-                message_id="message-private",
-                request_id="req-private",
+            _accepted_run(
+                "session-private", "run-private", "message-private", "req-private"
             ),
             "user:123",
             "workbench",

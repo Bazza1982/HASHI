@@ -845,6 +845,69 @@ class HERv2Adapter(BaseBackend):
             return dict(current)
         return {}
 
+    def _canonical_pao_run_claim(
+        self, request_meta: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Read one current PAO Run attempt as continuation authority."""
+
+        meta = dict(request_meta or {})
+        run_id = str(meta.get("hashi_run_id") or "")
+        request_id = str(meta.get("request_id") or "")
+        owner_id = str(meta.get("owner_id") or "")
+        expected_fence = meta.get("hashi_fencing_token")
+        runtime = self._runtime_context()
+        store = getattr(runtime, "session_store", None)
+        lookup = getattr(store, "get_run", None)
+        if (
+            not run_id
+            or not request_id
+            or type(expected_fence) is not int
+            or expected_fence <= 0
+            or not callable(lookup)
+        ):
+            return None
+        try:
+            row = lookup(run_id, owner_id=owner_id or None)
+        except Exception as exc:
+            self.logger.warning(
+                "HERV3 PAO Run claim unavailable request=%s run=%s error=%s",
+                request_id,
+                run_id,
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(row, Mapping):
+            return None
+        attempt = row.get("attempt")
+        state_revision = row.get("fencing_token")
+        if (
+            str(row.get("run_id") or "") != run_id
+            or str(row.get("request_id") or "") != request_id
+            or (
+                str(row.get("agent_id") or "")
+                and str(row.get("agent_id") or "").casefold()
+                != str(self.config.name).casefold()
+            )
+            or type(attempt) is not int
+            or attempt <= 0
+            or type(state_revision) is not int
+            or state_revision <= 0
+            or state_revision != expected_fence
+            or not str(row.get("request_digest") or "")
+            or not str(row.get("state") or "")
+        ):
+            return None
+        return {
+            "run_id": run_id,
+            "request_id": request_id,
+            "attempt": attempt,
+            "attempt_id": f"{run_id}:attempt:{attempt}",
+            "state_revision": state_revision,
+            "input_digest": str(row.get("request_digest") or ""),
+            "state": str(row.get("state") or ""),
+            "parent_run_id": str(row.get("parent_run_id") or "") or None,
+        }
+
     def _close_interrupted_fixed_turn(
         self,
         accepted: AcceptedHerTurn,
@@ -1240,10 +1303,62 @@ class HERv2Adapter(BaseBackend):
                 "session_core_unavailable",
                 "HER fixed-session core is not initialized.",
             )
+        source = str(request_meta.get("source") or "").strip().casefold()
+        source_request_id = str(evidence.get("source_request_id") or "")
+        source_meta = self._runtime_request_meta(source_request_id)
+        if not source_meta:
+            # The predecessor's request-local registry entry need not survive
+            # a Function process restart.  Its durable evidence identifies the
+            # Run/fence to re-read; PAO remains the authority for whether that
+            # exact claim is still current.
+            source_meta = {
+                "request_id": source_request_id,
+                "owner_id": request_meta.get("owner_id"),
+                "hashi_run_id": evidence.get("run_id"),
+                "hashi_fencing_token": evidence.get("state_revision"),
+            }
+        source_run = self._canonical_pao_run_claim(source_meta)
+        successor_run = self._canonical_pao_run_claim(request_meta)
+        parent_run_id = str(request_metadata.get("parent_run_id") or "")
+        parent_request_id = str(
+            request_metadata.get("steer_parent_request_id") or ""
+        )
+        old_run_id = str(evidence.get("old_run_id") or "")
+        invalid_reason = ""
+        if source not in {"steer", "focus"}:
+            invalid_reason = "request source is not steer/focus"
+        elif source_run is None or successor_run is None:
+            invalid_reason = "canonical PAO Run claim is unavailable"
+        elif parent_request_id != source_request_id:
+            invalid_reason = "parent request does not match the evidence"
+        elif parent_run_id != source_run["run_id"]:
+            invalid_reason = "parent Run does not match the evidence source"
+        elif old_run_id != source_run["run_id"]:
+            invalid_reason = "receipt old Run does not match canonical source"
+        elif str(evidence.get("relationship") or "") != "linked_successor":
+            invalid_reason = "receipt is not a linked successor"
+        elif source_run["state"] != "superseded":
+            invalid_reason = "source Run is not superseded"
+        elif successor_run["state"] != "running":
+            invalid_reason = "successor Run is not running"
+        elif successor_run["parent_run_id"] != source_run["run_id"]:
+            invalid_reason = "successor Run has a different canonical parent"
+        if invalid_reason:
+            self.logger.warning(
+                "HERV3 rejected stale continuation request=%s reason=%s",
+                str(request_meta.get("request_id") or ""),
+                invalid_reason,
+            )
+            raise HerFixedProtocolError(
+                "invalid_steer_continuation",
+                "The /steer continuation receipt is stale or is not authoritative.",
+            )
         try:
             session_id = (
                 self._session_coordinator.store.verified_steer_session_id(
                     evidence,
+                    source_run_claim=source_run,
+                    successor_run_claim=successor_run,
                     **self._fixed_session_binding(request_meta),
                 )
             )
@@ -1283,8 +1398,18 @@ class HERv2Adapter(BaseBackend):
 
         if self._session_coordinator is None:
             return None
+        request_meta = self._runtime_request_meta(str(request_id or ""))
+        run_claim = self._canonical_pao_run_claim(request_meta)
+        if run_claim is None:
+            self.logger.warning(
+                "HERV3 continuation evidence omitted because PAO Run authority "
+                "is unavailable request=%s",
+                str(request_id or ""),
+            )
+            return None
         return self._session_coordinator.store.interruption_evidence_for_request(
-            str(request_id or "")
+            str(request_id or ""),
+            run_claim=run_claim,
         )
 
 
@@ -1992,6 +2117,7 @@ class HERv2Adapter(BaseBackend):
             try:
                 route_snapshot = {
                     "routing_mode": turn_config.routing_mode,
+                    "effort": effort_resolution.effective.value,
                     "profiles": [
                         {
                             "name": profile.name,
@@ -2080,11 +2206,24 @@ class HERv2Adapter(BaseBackend):
             and fixed_turn is not None
             and self._session_coordinator is not None
         ):
+            producer_run_claim = self._canonical_pao_run_claim(
+                self._runtime_request_meta(str(request_id or ""))
+            )
+            if producer_run_claim is None:
+                self.logger.warning(
+                    "HERV3 provider checkpoint producer authority is unavailable "
+                    "request=%s; continuation evidence will remain unavailable",
+                    str(request_id or ""),
+                )
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
                         fixed_turn,
-                        checkpoint,
+                        {
+                            **dict(checkpoint),
+                            "effort": effort_resolution.effective.value,
+                            "producer_run_claim": producer_run_claim,
+                        },
                     )
                 ),
                 recovery=private_provider_context,

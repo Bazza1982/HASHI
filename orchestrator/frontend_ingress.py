@@ -268,7 +268,11 @@ def accept_runtime_ingress(
             request_metadata["session_message_content"] = list(message["content"])
     if str(session.get("session_id") or "") != normalized["target"]["session_id"]:
         raise SessionConflict("frontend ingress Session binding was not preserved")
-    if accepted is not None and str(accepted.request_id) != str(request_id):
+    if (
+        accepted is not None
+        and not accepted.replayed
+        and str(accepted.request_id) != str(request_id)
+    ):
         raise SessionConflict("frontend ingress receipt request mismatch")
     return result
 

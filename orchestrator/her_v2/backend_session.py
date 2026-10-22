@@ -115,6 +115,7 @@ class HerBackendSessionCoordinator:
             turn_id=accepted.turn_id,
             provider=str(checkpoint.get("provider") or ""),
             model=str(checkpoint.get("model") or ""),
+            effort=str(checkpoint.get("effort") or ""),
             stage=str(checkpoint.get("stage") or ""),
             boundary=str(checkpoint.get("boundary") or ""),
             messages=tuple(checkpoint.get("messages") or ()),
@@ -123,6 +124,11 @@ class HerBackendSessionCoordinator:
                 checkpoint.get("provider_request_id") or ""
             ),
             invocation_id=str(checkpoint.get("invocation_id") or ""),
+            producer_run_claim=(
+                checkpoint.get("producer_run_claim")
+                if isinstance(checkpoint.get("producer_run_claim"), Mapping)
+                else None
+            ),
             execution_owner_id=self.execution_owner["owner_id"],
         )
 

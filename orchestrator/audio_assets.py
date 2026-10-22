@@ -12,13 +12,17 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import threading
 import wave
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
+
+from orchestrator.config_json import file_write_lock
 
 
 MIN_RETENTION_SECONDS = 60
@@ -145,12 +149,36 @@ class AudioAssetStore:
         self.files_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.metadata_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
+            files_root_stat = os.lstat(self.files_root)
+            trusted_files_root = self.files_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            ) from exc
+        if (
+            not stat.S_ISDIR(files_root_stat.st_mode)
+            or stat.S_ISLNK(files_root_stat.st_mode)
+            or self._is_reparse_point(files_root_stat)
+        ):
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            )
+        self._trusted_files_root = trusted_files_root
+        try:
             os.chmod(self.root, 0o700)
             os.chmod(self.files_root, 0o700)
             os.chmod(self.metadata_root, 0o700)
         except OSError:
             pass
         self._lock = threading.RLock()
+        self._catalogue_lock_target = self.root / "catalogue"
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Serialize metadata writers across Store objects and OS processes."""
+
+        with self._lock, file_write_lock(self._catalogue_lock_target, timeout=30.0):
+            yield
 
     @staticmethod
     def _safe_id(asset_id: str) -> str:
@@ -164,6 +192,89 @@ class AudioAssetStore:
 
     def _metadata_path(self, asset_id: str) -> Path:
         return self.metadata_root / f"{self._safe_id(asset_id)}.json"
+
+    @staticmethod
+    def _is_reparse_point(path_stat: os.stat_result) -> bool:
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+        return bool(
+            reparse_flag
+            and int(getattr(path_stat, "st_file_attributes", 0)) & reparse_flag
+        )
+
+    def _validated_files_root(self) -> Path:
+        try:
+            current_stat = os.lstat(self.files_root)
+            current_root = self.files_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            ) from exc
+        if (
+            not stat.S_ISDIR(current_stat.st_mode)
+            or stat.S_ISLNK(current_stat.st_mode)
+            or self._is_reparse_point(current_stat)
+            or current_root != self._trusted_files_root
+        ):
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            )
+        return self.files_root
+
+    def _managed_asset_path(
+        self,
+        asset_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        allow_missing: bool = False,
+    ) -> Path:
+        safe_asset_id = self._safe_id(asset_id)
+        stored_asset_id = metadata.get("asset_id")
+        raw_format = metadata.get("format")
+        try:
+            normalized_format = normalize_audio_format(
+                raw_format, mime_type=str(metadata.get("mime_type") or "")
+            )
+        except AudioAssetError as exc:
+            raise AudioAssetError(
+                "audio asset storage_name is not a managed flat file"
+            ) from exc
+        storage_name = metadata.get("storage_name")
+        expected_name = f"{safe_asset_id}.{normalized_format}"
+        if (
+            not isinstance(stored_asset_id, str)
+            or stored_asset_id != safe_asset_id
+            or not isinstance(raw_format, str)
+            or raw_format != normalized_format
+            or not isinstance(storage_name, str)
+            or storage_name != expected_name
+        ):
+            raise AudioAssetError(
+                "audio asset storage_name is not a managed flat file"
+            )
+
+        root = self._validated_files_root()
+        path = root / storage_name
+        try:
+            path_stat = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return path
+            raise AudioAssetNotFound(safe_asset_id) from None
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError("audio asset path could not be validated") from exc
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or self._is_reparse_point(path_stat)
+        ):
+            raise AudioAssetError("audio asset path is not a regular managed file")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError("audio asset path could not be validated") from exc
+        if resolved.parent != self._trusted_files_root:
+            raise AudioAssetError("audio asset path escapes the managed root")
+        return path
 
     def _read(self, asset_id: str) -> dict[str, Any]:
         path = self._metadata_path(asset_id)
@@ -194,7 +305,14 @@ class AudioAssetStore:
         return {
             key: value
             for key, value in metadata.items()
-            if key not in {"storage_name", "owner_id"}
+            if key
+            not in {
+                "storage_name",
+                "owner_id",
+                "canonical_managed",
+                "delete_claim_token",
+                "delete_claimed_at",
+            }
         }
 
     def create(
@@ -212,6 +330,7 @@ class AudioAssetStore:
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
         retention_indefinite: bool = False,
         correlation: Mapping[str, Any] | None = None,
+        canonical_managed: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(payload, bytes) or not payload:
             raise AudioAssetError("audio payload must contain bytes")
@@ -257,10 +376,12 @@ class AudioAssetStore:
             "retention_indefinite": bool(retention_indefinite),
             "lease_count": 0,
             "state": "available",
+            "canonical_managed": bool(canonical_managed),
             "storage_name": storage_name,
             "correlation": dict(correlation or {}),
         }
-        with self._lock:
+        with self._transaction():
+            self._validated_files_root()
             if target.exists() or self._metadata_path(opaque_id).exists():
                 raise AudioAssetError("audio asset id already exists")
             try:
@@ -292,7 +413,7 @@ class AudioAssetStore:
     def describe(
         self, asset_id: str, *, owner_id: str, session_id: str
     ) -> dict[str, Any]:
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
             return self._public(metadata)
@@ -300,10 +421,10 @@ class AudioAssetStore:
     def read_bytes(
         self, asset_id: str, *, owner_id: str, session_id: str
     ) -> tuple[dict[str, Any], bytes]:
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
-            path = self.files_root / str(metadata["storage_name"])
+            path = self._managed_asset_path(asset_id, metadata)
             try:
                 payload = path.read_bytes()
             except OSError as exc:
@@ -320,18 +441,16 @@ class AudioAssetStore:
     ) -> tuple[dict[str, Any], Path]:
         """Resolve an internal provider path after owner/Session authorization."""
 
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
-            path = (self.files_root / str(metadata["storage_name"])).resolve()
-            if path.parent != self.files_root or not path.is_file():
-                raise AudioAssetNotFound(asset_id)
+            path = self._managed_asset_path(asset_id, metadata)
             return self._public(metadata), path
 
     def acquire(
         self, asset_id: str, *, owner_id: str, session_id: str
     ) -> dict[str, Any]:
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
             metadata["lease_count"] = int(metadata.get("lease_count") or 0) + 1
@@ -341,7 +460,7 @@ class AudioAssetStore:
     def release(
         self, asset_id: str, *, owner_id: str, session_id: str
     ) -> dict[str, Any]:
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
             metadata["lease_count"] = max(
@@ -369,10 +488,11 @@ class AudioAssetStore:
         owner_id: str,
         session_id: str,
         request_id: str = "",
+        canonical_managed: bool = False,
     ) -> dict[str, Any]:
         """Bind a provider-created output asset to its authoritative Session."""
 
-        with self._lock:
+        with self._transaction():
             metadata = self._read(asset_id)
             current_owner = str(metadata.get("owner_id") or "")
             current_session = str(metadata.get("session_id") or "")
@@ -380,6 +500,9 @@ class AudioAssetStore:
                 self._authorize(
                     metadata, owner_id=owner_id, session_id=session_id
                 )
+                if canonical_managed and not bool(metadata.get("canonical_managed")):
+                    metadata["canonical_managed"] = True
+                    self._write(metadata)
                 return self._public(metadata)
             correlation = dict(metadata.get("correlation") or {})
             expected_request = str(correlation.get("request_id") or "")
@@ -387,13 +510,85 @@ class AudioAssetStore:
                 raise AudioAssetUnauthorized(asset_id)
             metadata["owner_id"] = str(owner_id)
             metadata["session_id"] = str(session_id)
+            if canonical_managed:
+                metadata["canonical_managed"] = True
+            self._write(metadata)
+            return self._public(metadata)
+
+    def begin_delete_claim(
+        self,
+        asset_id: str,
+        *,
+        owner_id: str,
+        session_id: str,
+        claim_token: str,
+        claimed_at: str,
+    ) -> dict[str, Any]:
+        """Project one already-committed canonical deletion claim."""
+
+        token = str(claim_token or "").strip()
+        if not token:
+            raise AudioAssetError("audio deletion claim requires a token")
+        with self._transaction():
+            metadata = self._read(asset_id)
+            if (
+                str(metadata.get("owner_id") or "") != str(owner_id)
+                or str(metadata.get("session_id") or "") != str(session_id)
+            ):
+                raise AudioAssetUnauthorized(asset_id)
+            if not bool(metadata.get("canonical_managed")):
+                raise AudioAssetError("audio deletion requires canonical ownership")
+            state = str(metadata.get("state") or "")
+            existing_token = str(metadata.get("delete_claim_token") or "")
+            if state == "available":
+                metadata["state"] = "deleting"
+                metadata["delete_claim_token"] = token
+                metadata["delete_claimed_at"] = str(claimed_at)
+                self._write(metadata)
+            elif state in {"deleting", "expired"} and existing_token == token:
+                pass
+            else:
+                raise AudioAssetError("audio deletion claim conflicts with asset state")
+            return self._public(metadata)
+
+    def finish_delete_claim(
+        self,
+        asset_id: str,
+        *,
+        owner_id: str,
+        session_id: str,
+        claim_token: str,
+        expired_at: str,
+    ) -> dict[str, Any]:
+        """Idempotently unlink bytes for the same durable deletion claim."""
+
+        token = str(claim_token or "").strip()
+        with self._transaction():
+            metadata = self._read(asset_id)
+            if (
+                str(metadata.get("owner_id") or "") != str(owner_id)
+                or str(metadata.get("session_id") or "") != str(session_id)
+            ):
+                raise AudioAssetUnauthorized(asset_id)
+            if str(metadata.get("delete_claim_token") or "") != token:
+                raise AudioAssetError("audio deletion token no longer owns the asset")
+            state = str(metadata.get("state") or "")
+            if state == "expired":
+                return self._public(metadata)
+            if state != "deleting":
+                raise AudioAssetError("audio asset is not claimed for deletion")
+            path = self._managed_asset_path(asset_id, metadata, allow_missing=True)
+            path.unlink(missing_ok=True)
+            metadata["state"] = "expired"
+            metadata["expired_at"] = str(expired_at)
             self._write(metadata)
             return self._public(metadata)
 
     def cleanup(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         current = now or _utc_now()
         expired: list[dict[str, Any]] = []
-        with self._lock:
+        with self._transaction():
+            self._validated_files_root()
             for metadata_path in sorted(self.metadata_root.glob("*.json")):
                 try:
                     metadata = self._read(metadata_path.stem)
@@ -402,15 +597,17 @@ class AudioAssetStore:
                 expiry = metadata.get("retention_expires_at")
                 if (
                     metadata.get("state") != "available"
+                    or bool(metadata.get("canonical_managed"))
                     or metadata.get("retention_indefinite")
                     or int(metadata.get("lease_count") or 0) > 0
                     or not expiry
                     or _parse_iso(str(expiry)) > current
                 ):
                     continue
-                (self.files_root / str(metadata.get("storage_name") or "")).unlink(
-                    missing_ok=True
+                path = self._managed_asset_path(
+                    metadata_path.stem, metadata, allow_missing=True
                 )
+                path.unlink(missing_ok=True)
                 metadata["state"] = "expired"
                 metadata["expired_at"] = _iso(current)
                 self._write(metadata)
@@ -418,9 +615,17 @@ class AudioAssetStore:
             for partial_root in (self.files_root, self.metadata_root):
                 for partial in partial_root.glob("*.partial"):
                     try:
-                        if datetime.fromtimestamp(
-                            partial.stat().st_mtime, tz=timezone.utc
-                        ) + timedelta(hours=1) <= current:
+                        partial_stat = os.lstat(partial)
+                        if (
+                            stat.S_ISREG(partial_stat.st_mode)
+                            and not stat.S_ISLNK(partial_stat.st_mode)
+                            and not self._is_reparse_point(partial_stat)
+                            and datetime.fromtimestamp(
+                                partial_stat.st_mtime, tz=timezone.utc
+                            )
+                            + timedelta(hours=1)
+                            <= current
+                        ):
                             partial.unlink(missing_ok=True)
                     except OSError:
                         continue

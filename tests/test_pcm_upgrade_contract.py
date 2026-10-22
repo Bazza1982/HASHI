@@ -326,6 +326,22 @@ def test_pcm_envelope_preserves_authority_layers(tmp_path):
     assert sections["current_user_request"]["protected"] is True
 
 
+def test_empty_permanent_memory_emits_fixed_session_tombstone(tmp_path):
+    store, assembler = _assembler(tmp_path)
+    first = assembler.build_prompt_payload("first", "her-v2", incremental=True)
+    assert "permanent_memory" in {
+        item["key"] for item in first["transport_snapshot"]["sections"]
+    }
+
+    _write_pcm(tmp_path / "agent.md", memory="")
+    second = assembler.build_prompt_payload("second", "her-v2", incremental=True)
+
+    assert "permanent_memory" in second["transport_snapshot"]["removed_section_keys"]
+    assert "permanent_memory" not in {
+        item["key"] for item in second["transport_snapshot"]["sections"]
+    }
+
+
 def test_workzones_use_protected_runtime_envelope_without_rendering_revision(tmp_path):
     _store, assembler = _assembler(tmp_path)
     payload = assembler.build_prompt_payload(
