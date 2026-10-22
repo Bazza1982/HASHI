@@ -99,6 +99,46 @@ def test_sync_workzone_to_backend_config_updates_registry(tmp_path):
     assert runtime.backend.tool_registry.access_roots == (runtime.zone,)
 
 
+def test_sync_reapplies_same_workzones_to_replacement_backend(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime_workzone.install_runtime_state(
+        runtime,
+        {
+            "revision": 7,
+            "slots": [
+                {
+                    "slot_id": "main",
+                    "path": str(runtime.zone),
+                    "enabled": True,
+                }
+            ],
+        },
+    )
+    replacement_default = tmp_path / "replacement-default"
+    replacement_default.mkdir()
+    replacement = SimpleNamespace(
+        config=SimpleNamespace(
+            extra={},
+            resolve_access_root=lambda: replacement_default,
+        ),
+        capabilities=SimpleNamespace(supports_files=True, supports_sessions=False),
+        tool_registry=SimpleNamespace(
+            workspace_dir=replacement_default,
+            access_root=replacement_default,
+        ),
+    )
+
+    runtime.backend_manager.current_backend = replacement
+    runtime_workzone.sync_workzone_to_backend_config(runtime)
+
+    assert runtime.config.extra["workzone_revision"] == 7
+    assert replacement.config.extra["workzone_state"]["slots"][0]["path"] == str(
+        runtime.zone
+    )
+    assert replacement.tool_registry.workspace_dir == runtime.zone
+    assert replacement.tool_registry.access_roots == (runtime.zone,)
+
+
 @pytest.mark.asyncio
 async def test_cmd_workzone_status_set_and_off(tmp_path):
     runtime = _runtime(tmp_path)

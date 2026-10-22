@@ -20,8 +20,13 @@
    commit receive the new revision. Runtime, Tool-root, and Engine-session
    activation is deferred to a Run boundary. Explicit `reload`/`reset` remains
    idle-only because it immediately resets the Engine Session.
-3. Existing Session Workzone rows remain untouched and inert. No recovery,
-   merge, or automatic migration into the Agent profile is performed.
+3. Existing Session Workzone rows remain untouched as audit evidence. Beginning
+   with Session schema 27, an Agent without an Agent Workzone profile receives
+   one deterministic legacy snapshot during upgrade: the default Session is
+   preferred, then an active Session, then the most recently updated Session.
+   Existing Agent profiles, including deliberately empty ones, are never
+   overwritten or merged. The promoted profile is backend-neutral and every
+   later backend switch reuses it.
 4. Recent-turn injection and saved-memory injection persist independently.
    Session boundaries and runtime reinitialization reapply both choices.
 5. Memory+ and Dual Brain are outside this change.
@@ -69,3 +74,19 @@ from Windows Python 3.14 reached 714 passing and 1 skipped test; its 16 failures
 were confined to runtime/process contract gates that require the repository's
 mandated Python 3.12.13 environment, so that run is not canonical Core-gate
 evidence. No live adoption was attempted.
+
+## 2026-10-22 correction
+
+The original no-migration rule made retained Workzone settings appear to vanish
+after Agents moved to the Agent-scoped profile or selected a backend with a
+narrower default root. The user rejected that behavior. Schema 27 therefore
+promotes one complete legacy Session snapshot without deleting the source rows,
+widening to a common parent, or replacing an existing Agent profile. Browser and
+Engine selection remain consumers of the same PAO-owned profile; they do not own
+or rewrite it.
+
+The focused regression first failed with an empty Agent profile after reopening a
+schema-26 store. After the correction, the upgrade selects the default Session's
+complete snapshot, retains disabled slots, leaves an existing Agent profile
+unchanged, and reapplies the same revision and exact roots to a replacement
+backend. Live HASHI3 adoption is recorded separately from this source evidence.

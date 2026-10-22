@@ -60,6 +60,10 @@ pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVE
 
 Portable carries no credentials; PAO starts Workers. Wildcards grant permission,
 not capability; path names grant nothing. Runs freeze Workzones until idle.
+Agent Workzones are backend-neutral: schema upgrades promote one deterministic
+legacy Session snapshot only when no Agent profile exists, and backend changes
+reuse rather than replace that profile. A Browser Bridge client disconnect is
+request-local and must not stop the shared Windows named-pipe listener.
 Keep experiments, secrets, media bytes and remote paths out of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
