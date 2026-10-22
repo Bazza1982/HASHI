@@ -1553,6 +1553,21 @@ native WAV reply; its later local STT Event had state `released`, the canonical
 user Message received the transcript, and the Event stream contained zero
 `voice.input.transcript_pending_confirmation` Events.
 
+### Paired Workbench/HASHI3 repair acceptance — 2026-10-22
+
+The repaired native-audio path was adopted as one exact executable pair:
+HASHI `f667164e89836ace44ebececcfba29966991cad7` and Workbench
+`7d4484afe55791a2d480d42d5925093a2a594d84`. The production Workbench service
+served that Workbench revision and authenticated to HASHI3; HASHI3 hot-adopted
+the qualified Function generation while its Core process remained unchanged.
+
+The user then confirmed that the live Workbench-to-HASHI3 voice test passed.
+This closes paired audible acceptance for that tested route. It does not imply
+acceptance of iPhone Safari, other physical devices, every voice configuration,
+or adversarial filesystem races. Those scopes remain separate. The closeout
+documentation commits after this record do not change the tested executable
+paths.
+
 ## 23. Implementation component map
 
 The likely code ownership boundaries are:

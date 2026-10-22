@@ -154,6 +154,11 @@ Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
 audio durable while hiding its duplicate generic player/bubble; ordinary audio
 stays visible. Telegram uses its renderer.
 
+On 2026-10-22 the exact repaired Workbench/HASHI3 pair passed the user's live
+voice test after Workbench authentication and HASHI3 Function hot adoption.
+That acceptance covers the tested Workbench route only; other devices and
+voice configurations remain separate evidence.
+
 Phone binds to the owner's foreground Conversation until hang-up. Actions get
 bounded original PCM/Conversation/job evidence, never scheduled prompts; lookups
 create no Run. See [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and
