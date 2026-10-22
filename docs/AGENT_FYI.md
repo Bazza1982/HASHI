@@ -2,7 +2,8 @@
 
 Current decisions, with full rationale in the linked owners:
 
-- Legacy audio migration trusts verified Message/Run ownership; ambiguity stays
+- Legacy audio migration trusts verified Message/Run ownership and one flat,
+  non-link path under its fixed asset root; ambiguity or unsafe paths stay
   preserved but unreadable. PAO settlement survives repeated cancellation and
   cleans only its exact receipt. HERV3 checkpoints keep their producer claim;
   later attempts cannot relabel them. See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),

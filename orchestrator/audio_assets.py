@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import threading
 import wave
@@ -148,6 +149,22 @@ class AudioAssetStore:
         self.files_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.metadata_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
+            files_root_stat = os.lstat(self.files_root)
+            trusted_files_root = self.files_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            ) from exc
+        if (
+            not stat.S_ISDIR(files_root_stat.st_mode)
+            or stat.S_ISLNK(files_root_stat.st_mode)
+            or self._is_reparse_point(files_root_stat)
+        ):
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            )
+        self._trusted_files_root = trusted_files_root
+        try:
             os.chmod(self.root, 0o700)
             os.chmod(self.files_root, 0o700)
             os.chmod(self.metadata_root, 0o700)
@@ -175,6 +192,89 @@ class AudioAssetStore:
 
     def _metadata_path(self, asset_id: str) -> Path:
         return self.metadata_root / f"{self._safe_id(asset_id)}.json"
+
+    @staticmethod
+    def _is_reparse_point(path_stat: os.stat_result) -> bool:
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+        return bool(
+            reparse_flag
+            and int(getattr(path_stat, "st_file_attributes", 0)) & reparse_flag
+        )
+
+    def _validated_files_root(self) -> Path:
+        try:
+            current_stat = os.lstat(self.files_root)
+            current_root = self.files_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            ) from exc
+        if (
+            not stat.S_ISDIR(current_stat.st_mode)
+            or stat.S_ISLNK(current_stat.st_mode)
+            or self._is_reparse_point(current_stat)
+            or current_root != self._trusted_files_root
+        ):
+            raise AudioAssetError(
+                "audio asset root is not a trusted managed directory"
+            )
+        return self.files_root
+
+    def _managed_asset_path(
+        self,
+        asset_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        allow_missing: bool = False,
+    ) -> Path:
+        safe_asset_id = self._safe_id(asset_id)
+        stored_asset_id = metadata.get("asset_id")
+        raw_format = metadata.get("format")
+        try:
+            normalized_format = normalize_audio_format(
+                raw_format, mime_type=str(metadata.get("mime_type") or "")
+            )
+        except AudioAssetError as exc:
+            raise AudioAssetError(
+                "audio asset storage_name is not a managed flat file"
+            ) from exc
+        storage_name = metadata.get("storage_name")
+        expected_name = f"{safe_asset_id}.{normalized_format}"
+        if (
+            not isinstance(stored_asset_id, str)
+            or stored_asset_id != safe_asset_id
+            or not isinstance(raw_format, str)
+            or raw_format != normalized_format
+            or not isinstance(storage_name, str)
+            or storage_name != expected_name
+        ):
+            raise AudioAssetError(
+                "audio asset storage_name is not a managed flat file"
+            )
+
+        root = self._validated_files_root()
+        path = root / storage_name
+        try:
+            path_stat = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return path
+            raise AudioAssetNotFound(safe_asset_id) from None
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError("audio asset path could not be validated") from exc
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or self._is_reparse_point(path_stat)
+        ):
+            raise AudioAssetError("audio asset path is not a regular managed file")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioAssetError("audio asset path could not be validated") from exc
+        if resolved.parent != self._trusted_files_root:
+            raise AudioAssetError("audio asset path escapes the managed root")
+        return path
 
     def _read(self, asset_id: str) -> dict[str, Any]:
         path = self._metadata_path(asset_id)
@@ -281,6 +381,7 @@ class AudioAssetStore:
             "correlation": dict(correlation or {}),
         }
         with self._transaction():
+            self._validated_files_root()
             if target.exists() or self._metadata_path(opaque_id).exists():
                 raise AudioAssetError("audio asset id already exists")
             try:
@@ -323,7 +424,7 @@ class AudioAssetStore:
         with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
-            path = self.files_root / str(metadata["storage_name"])
+            path = self._managed_asset_path(asset_id, metadata)
             try:
                 payload = path.read_bytes()
             except OSError as exc:
@@ -343,9 +444,7 @@ class AudioAssetStore:
         with self._transaction():
             metadata = self._read(asset_id)
             self._authorize(metadata, owner_id=owner_id, session_id=session_id)
-            path = (self.files_root / str(metadata["storage_name"])).resolve()
-            if path.parent != self.files_root or not path.is_file():
-                raise AudioAssetNotFound(asset_id)
+            path = self._managed_asset_path(asset_id, metadata)
             return self._public(metadata), path
 
     def acquire(
@@ -478,9 +577,8 @@ class AudioAssetStore:
                 return self._public(metadata)
             if state != "deleting":
                 raise AudioAssetError("audio asset is not claimed for deletion")
-            (self.files_root / str(metadata.get("storage_name") or "")).unlink(
-                missing_ok=True
-            )
+            path = self._managed_asset_path(asset_id, metadata, allow_missing=True)
+            path.unlink(missing_ok=True)
             metadata["state"] = "expired"
             metadata["expired_at"] = str(expired_at)
             self._write(metadata)
@@ -490,6 +588,7 @@ class AudioAssetStore:
         current = now or _utc_now()
         expired: list[dict[str, Any]] = []
         with self._transaction():
+            self._validated_files_root()
             for metadata_path in sorted(self.metadata_root.glob("*.json")):
                 try:
                     metadata = self._read(metadata_path.stem)
@@ -505,9 +604,10 @@ class AudioAssetStore:
                     or _parse_iso(str(expiry)) > current
                 ):
                     continue
-                (self.files_root / str(metadata.get("storage_name") or "")).unlink(
-                    missing_ok=True
+                path = self._managed_asset_path(
+                    metadata_path.stem, metadata, allow_missing=True
                 )
+                path.unlink(missing_ok=True)
                 metadata["state"] = "expired"
                 metadata["expired_at"] = _iso(current)
                 self._write(metadata)
@@ -515,9 +615,17 @@ class AudioAssetStore:
             for partial_root in (self.files_root, self.metadata_root):
                 for partial in partial_root.glob("*.partial"):
                     try:
-                        if datetime.fromtimestamp(
-                            partial.stat().st_mtime, tz=timezone.utc
-                        ) + timedelta(hours=1) <= current:
+                        partial_stat = os.lstat(partial)
+                        if (
+                            stat.S_ISREG(partial_stat.st_mode)
+                            and not stat.S_ISLNK(partial_stat.st_mode)
+                            and not self._is_reparse_point(partial_stat)
+                            and datetime.fromtimestamp(
+                                partial_stat.st_mtime, tz=timezone.utc
+                            )
+                            + timedelta(hours=1)
+                            <= current
+                        ):
                             partial.unlink(missing_ok=True)
                     except OSError:
                         continue

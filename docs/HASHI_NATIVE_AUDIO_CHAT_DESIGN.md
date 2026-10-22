@@ -1209,6 +1209,22 @@ project the token and unlink bytes; a second transaction then publishes
 `deleting` asset is available again. JSON metadata remains a file projection,
 not an independent retention or deletion decision.
 
+Every asset-byte operation derives one path through the file store owner.
+`storage_name` must exactly match the flat `<asset_id>.<normalized format>`
+name produced by `create()`; absolute paths, parent traversal, separators,
+drive/UNC forms, alternate streams, mismatched identities and formats are
+invalid. The originally established files root remains the trust anchor.
+Reads, provider paths, claimed deletion and legacy cleanup reject a replaced
+root, links/reparse points and non-regular files, and verify that an existing
+file's real parent is still that root. Reads additionally retain size and
+SHA-256 verification.
+
+An unsafe deletion path leaves the exact durable claim pending and does not
+publish `expired`; a valid in-root path that is already absent remains an
+idempotent recovery case. These checks execute with the existing cross-process
+catalogue lock. They are a persisted-state integrity boundary, not a claim of
+an OS sandbox against an unrelated privileged process racing file replacement.
+
 All rows and durable Message/Run/output references for an asset are aggregated
 before a claim. If admission wins the transaction, its indefinite retention and
 Run lease commit with the Message and the bytes remain. If cleanup wins,
@@ -1224,6 +1240,9 @@ assistant Message audio reference together with its Run and Session, not the
 presence of a file alone. Reconciliation verifies one consistent owner,
 Session, Run/request correlation, managed path, metadata, format, size and byte
 digest before it creates the missing canonical row and Message binding.
+Managed-path failure stays in the reconciliation report before any claim or
+registration, and neither the referenced bytes nor the original metadata are
+changed.
 
 The operation is idempotent and uses one savepoint per asset. A crash after the
 database commit may leave only a pending filesystem metadata projection; every

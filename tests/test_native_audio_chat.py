@@ -23,6 +23,7 @@ from adapters.her_v2_provider import HashiStageProvider, _AdapterDelivery
 from adapters.openrouter_api import OpenRouterAdapter
 from orchestrator import runtime_media, workbench_api
 from orchestrator.audio_assets import (
+    AudioAssetError,
     AudioAssetNotFound,
     AudioAssetStore,
     AudioAssetUnauthorized,
@@ -253,6 +254,15 @@ def _prepare_legacy_output_audio(tmp_path: Path):
             "UPDATE schema_metadata SET value='25' WHERE key='schema_version'"
         )
     return db_path, owner_id, session["session_id"], output, payload, store
+
+
+def _replace_audio_storage_name(
+    store: AudioAssetStore, asset_id: str, storage_name: str
+) -> dict:
+    metadata = store._read(asset_id)
+    metadata["storage_name"] = storage_name
+    store._write(metadata)
+    return metadata
 
 
 def _join_spawned(process, *, expected_exit: int = 0) -> None:
@@ -512,6 +522,247 @@ def test_audio_asset_cleanup_is_authorized_lease_aware_and_archive_safe(tmp_path
     assert store.read_bytes(
         archived["asset_id"], owner_id="user:7", session_id="session-a"
     )[1] == payload
+
+
+def test_audio_asset_paths_require_canonical_flat_storage_names(tmp_path):
+    payload = _wav_bytes(tmp_path / "flat-name.wav")
+    store = AudioAssetStore(tmp_path / "assets")
+    asset = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+    )
+    asset_id = asset["asset_id"]
+    outside = store.root / "outside.wav"
+    outside.write_bytes(payload)
+    unsafe_names = [
+        "../outside.wav",
+        str(outside.resolve()),
+        f"nested/{asset_id}.wav",
+        f"nested\\{asset_id}.wav",
+        r"C:\escape.wav",
+        r"\\server\share\escape.wav",
+        f"{asset_id}.wav:alternate",
+    ]
+
+    for storage_name in unsafe_names:
+        _replace_audio_storage_name(store, asset_id, storage_name)
+        with pytest.raises(AudioAssetError, match="managed flat file"):
+            store.read_bytes(
+                asset_id, owner_id="user:7", session_id="session-a"
+            )
+        with pytest.raises(AudioAssetError, match="managed flat file"):
+            store.authorized_path(
+                asset_id, owner_id="user:7", session_id="session-a"
+            )
+
+    assert outside.read_bytes() == payload
+    _replace_audio_storage_name(store, asset_id, f"{asset_id}.wav")
+    assert store.read_bytes(
+        asset_id, owner_id="user:7", session_id="session-a"
+    )[1] == payload
+
+
+def test_audio_asset_paths_reject_non_regular_files(tmp_path):
+    payload = _wav_bytes(tmp_path / "non-regular.wav")
+    store = AudioAssetStore(tmp_path / "assets")
+    asset = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+    )
+    metadata = store._read(asset["asset_id"])
+    managed_path = store.files_root / metadata["storage_name"]
+    managed_path.unlink()
+    managed_path.mkdir()
+
+    with pytest.raises(AudioAssetError, match="regular managed file"):
+        store.read_bytes(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+    with pytest.raises(AudioAssetError, match="regular managed file"):
+        store.authorized_path(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+
+
+def test_audio_asset_paths_reject_links_to_files_outside_the_store(tmp_path):
+    payload = _wav_bytes(tmp_path / "link-source.wav")
+    store = AudioAssetStore(tmp_path / "assets")
+    asset = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+    )
+    metadata = store._read(asset["asset_id"])
+    managed_path = store.files_root / metadata["storage_name"]
+    outside = tmp_path / "outside-link-target.wav"
+    outside.write_bytes(payload)
+    managed_path.unlink()
+    try:
+        managed_path.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(AudioAssetError, match="regular managed file"):
+        store.read_bytes(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+    with pytest.raises(AudioAssetError, match="regular managed file"):
+        store.authorized_path(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+    assert outside.read_bytes() == payload
+
+
+def test_audio_asset_paths_do_not_retrust_a_replaced_files_root(tmp_path):
+    payload = _wav_bytes(tmp_path / "root-link-source.wav")
+    store = AudioAssetStore(tmp_path / "assets")
+    asset = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+    )
+    metadata = store._read(asset["asset_id"])
+    original_root = store.root / "files-original"
+    store.files_root.rename(original_root)
+    outside_root = tmp_path / "outside-files"
+    outside_root.mkdir()
+    (outside_root / metadata["storage_name"]).write_bytes(payload)
+    try:
+        store.files_root.symlink_to(outside_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    with pytest.raises(AudioAssetError, match="trusted managed directory"):
+        store.read_bytes(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+    with pytest.raises(AudioAssetError, match="trusted managed directory"):
+        store.authorized_path(
+            asset["asset_id"], owner_id="user:7", session_id="session-a"
+        )
+    assert (outside_root / metadata["storage_name"]).read_bytes() == payload
+
+
+def test_audio_delete_and_cleanup_preserve_unsafe_paths_and_state(tmp_path):
+    payload = _wav_bytes(tmp_path / "unsafe-delete.wav")
+    store = AudioAssetStore(tmp_path / "assets")
+    claimed = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+        canonical_managed=True,
+    )
+    token = "delete-claim-1"
+    store.begin_delete_claim(
+        claimed["asset_id"],
+        owner_id="user:7",
+        session_id="session-a",
+        claim_token=token,
+        claimed_at="2026-10-22T00:00:00Z",
+    )
+    delete_survivor = store.root / "must-survive.wav"
+    delete_survivor.write_bytes(payload)
+    _replace_audio_storage_name(
+        store, claimed["asset_id"], "../must-survive.wav"
+    )
+
+    with pytest.raises(AudioAssetError, match="managed flat file"):
+        store.finish_delete_claim(
+            claimed["asset_id"],
+            owner_id="user:7",
+            session_id="session-a",
+            claim_token=token,
+            expired_at="2026-10-22T00:01:00Z",
+        )
+    claimed_metadata = store._read(claimed["asset_id"])
+    assert claimed_metadata["state"] == "deleting"
+    assert claimed_metadata["delete_claim_token"] == token
+    assert delete_survivor.read_bytes() == payload
+
+    canonical_name = f"{claimed['asset_id']}.wav"
+    _replace_audio_storage_name(store, claimed["asset_id"], canonical_name)
+    managed_path = store.files_root / canonical_name
+    managed_path.unlink()
+    try:
+        managed_path.symlink_to(delete_survivor)
+    except (NotImplementedError, OSError):
+        pass
+    else:
+        with pytest.raises(AudioAssetError, match="regular managed file"):
+            store.finish_delete_claim(
+                claimed["asset_id"],
+                owner_id="user:7",
+                session_id="session-a",
+                claim_token=token,
+                expired_at="2026-10-22T00:01:00Z",
+            )
+        assert store._read(claimed["asset_id"])["state"] == "deleting"
+        assert managed_path.is_symlink()
+        assert delete_survivor.read_bytes() == payload
+
+    legacy = store.create(
+        payload,
+        owner_id="user:7",
+        session_id="session-a",
+        direction="input",
+        mime_type="audio/wav",
+        audio_format="wav",
+        retention_seconds=60,
+    )
+    cleanup_survivor = store.root / "cleanup-survivor.wav"
+    cleanup_survivor.write_bytes(payload)
+    _replace_audio_storage_name(
+        store, legacy["asset_id"], "../cleanup-survivor.wav"
+    )
+    with pytest.raises(AudioAssetError, match="managed flat file"):
+        store.cleanup(now=datetime.now(timezone.utc) + timedelta(minutes=2))
+    assert store._read(legacy["asset_id"])["state"] == "available"
+    assert cleanup_survivor.read_bytes() == payload
+
+
+def test_session_audio_gc_keeps_an_unsafe_asset_claim_pending(tmp_path):
+    db_path, _session_id, attachment_id, payload = _prepare_expiring_audio(
+        tmp_path
+    )
+    store = SessionStore(db_path)
+    survivor = store.audio_assets.root / "canonical-survivor.wav"
+    survivor.write_bytes(payload)
+    _replace_audio_storage_name(
+        store.audio_assets, attachment_id, "../canonical-survivor.wav"
+    )
+
+    assert store.cleanup_audio_assets(
+        now=datetime.now(timezone.utc) + timedelta(minutes=2)
+    ) == []
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT state, audio_delete_claim_token FROM session_attachments "
+            "WHERE attachment_id=?",
+            (attachment_id,),
+        ).fetchone()
+    assert row[0] == "deleting"
+    assert row[1]
+    metadata = store.audio_assets._read(attachment_id)
+    assert metadata["state"] == "deleting"
+    assert metadata["delete_claim_token"] == row[1]
+    assert survivor.read_bytes() == payload
 
 
 def test_session_audio_admission_wins_against_spawned_gc(tmp_path):
@@ -1034,6 +1285,46 @@ def test_legacy_output_audio_with_unproven_digest_is_preserved_and_reported(tmp_
     assert raw_payload == payload
     unresolved = upgraded.legacy_audio_migration_report()["unresolved"]
     assert any(item.get("asset_id") == output["asset_id"] for item in unresolved)
+
+
+def test_legacy_output_audio_with_unsafe_path_is_preserved_and_reported(tmp_path):
+    db_path, owner_id, session_id, output, payload, legacy = (
+        _prepare_legacy_output_audio(tmp_path)
+    )
+    original_metadata = legacy.audio_assets._read(output["asset_id"])
+    original_path = (
+        legacy.audio_assets.files_root / original_metadata["storage_name"]
+    )
+    outside = tmp_path / "legacy-outside.wav"
+    outside.write_bytes(payload)
+    _replace_audio_storage_name(
+        legacy.audio_assets, output["asset_id"], str(outside.resolve())
+    )
+
+    upgraded = SessionStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_attachments WHERE asset_id=?",
+            (output["asset_id"],),
+        ).fetchone()[0] == 0
+    assert original_path.read_bytes() == payload
+    assert outside.read_bytes() == payload
+    assert (
+        upgraded.audio_assets._read(output["asset_id"])["canonical_managed"]
+        is False
+    )
+    unresolved = upgraded.legacy_audio_migration_report()["unresolved"]
+    assert any(
+        item.get("asset_id") == output["asset_id"]
+        and "managed flat file" in item.get("reason", "")
+        for item in unresolved
+    )
+    with pytest.raises(SessionConflict, match="not canonically registered"):
+        upgraded.audio_asset_bytes(
+            session_id=session_id,
+            owner_id=owner_id,
+            asset_id=output["asset_id"],
+        )
 
 
 def test_audio_duration_limit_uses_verified_duration_instead_of_rejecting_all(
