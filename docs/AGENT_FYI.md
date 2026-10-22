@@ -112,6 +112,8 @@ Preserve history/usage and qualified Gemini models; old-client rejection is not
 an account ban. See [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
 
 Public HERV3 is `her-v3`; `her-v2` is compatibility only. JEV defaults off.
+Telegram activity/status cards use the public Engine projection and must not
+show the internal compatibility ID.
 Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
 counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
 

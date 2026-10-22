@@ -12068,7 +12068,9 @@ class FlexibleAgentRuntime:
         edit_attempts = 0
         display_disabled = False
         current_message = placeholder
-        engine = getattr(self.config, "active_backend", "unknown")
+        engine = public_backend_engine(
+            getattr(self.config, "active_backend", "unknown")
+        )
         extra = getattr(self.config, "extra", {}) or {}
         display_name = str(extra.get("display_name") or self.name)
         digest = ActivityDigest(started_at=started)
