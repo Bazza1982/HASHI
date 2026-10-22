@@ -40,6 +40,11 @@ adopts only by reboot; docs do not. Workbench config preserves `AGENT_BUSY`;
 retry only before a durable receipt; durable `target_busy` stays pending. See
 [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
+`/reboot max` rejects active Backend API, API Gateway, or background-job work
+before shared intake closes, then checks again after fencing to close the race.
+Those blockers never spend the 120-second handoff budget with HASHI offline.
+See [shared handoff fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
+
 ## Configuration, identity, and persistence
 
 Configuration owns identity, ports, Workzones, endpoints and models; exclude
