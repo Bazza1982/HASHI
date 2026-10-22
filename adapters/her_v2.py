@@ -2206,6 +2206,15 @@ class HERv2Adapter(BaseBackend):
             and fixed_turn is not None
             and self._session_coordinator is not None
         ):
+            producer_run_claim = self._canonical_pao_run_claim(
+                self._runtime_request_meta(str(request_id or ""))
+            )
+            if producer_run_claim is None:
+                self.logger.warning(
+                    "HERV3 provider checkpoint producer authority is unavailable "
+                    "request=%s; continuation evidence will remain unavailable",
+                    str(request_id or ""),
+                )
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
@@ -2213,6 +2222,7 @@ class HERv2Adapter(BaseBackend):
                         {
                             **dict(checkpoint),
                             "effort": effort_resolution.effective.value,
+                            "producer_run_claim": producer_run_claim,
                         },
                     )
                 ),

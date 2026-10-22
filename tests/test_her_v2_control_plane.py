@@ -395,6 +395,11 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
             ],
             "provider_request_id": "provider-read",
             "invocation_id": "turn-steered:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-steered",
+                "turn-steered",
+                input_digest="sha256:steered-input",
+            ),
         },
     )
     assert checkpoint["available"] is True
@@ -477,6 +482,10 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
         "attempt_id": "run-steered:attempt:2",
         "state_revision": 2,
     }
+    assert reopened.interruption_evidence_for_request(
+        "turn-steered",
+        run_claim=stale_source_claim,
+    ) is None
     assert reopened.verified_steer_session_id(
         evidence,
         source_run_claim=stale_source_claim,

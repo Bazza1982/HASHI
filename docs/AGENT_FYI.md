@@ -2,6 +2,14 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Legacy native output audio is reconciled only from verified Message/Run
+  authority into canonical attachment rows; ambiguous assets stay preserved but
+  unreadable. See [native audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation).
+- PAO admission settlement survives repeated caller cancellation and may clean
+  up only its exact unsubmitted receipt. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+- HERV3 provider checkpoints retain their producer PAO claim; a later attempt
+  cannot relabel older checkpoint content as its own evidence. See
+  [HERV3](HERV3_UPGRADE.md#completed-tool-checkpoint-provider-call-continuation).
 - PAO strips internal control envelopes before judging deliverability. A result
   containing only Memory+ state fails terminally; typed audio remains deliverable.
 - HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete

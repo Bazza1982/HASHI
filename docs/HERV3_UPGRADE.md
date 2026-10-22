@@ -158,6 +158,17 @@ corrupt or bounded-away evidence is explicitly incomplete. Provider-call
 continuations share the existing bounded local recovery budget; they never
 authorize replay of a prior Tool call or user request.
 
+Provider-context checkpoints persist the PAO producer claim that existed when
+the checkpoint was written, including Run/request, attempt, attempt ID, fence
+revision and input digest. Recovery verifies that stored claim and may only
+issue evidence for that same producer. A current consumer claim is an access
+check, not a replacement producer label: after attempt 1 writes C1, attempt 2
+cannot turn C1 into attempt-2 evidence merely by reading it with claim 2.
+Inherited provider context retains its original producer claim until a new
+checkpoint is actually written. A missing, corrupt, relabelled or mismatched
+producer claim makes the recovery evidence unavailable rather than inviting a
+replay.
+
 The meaningful-output stream inactivity limit is 300 seconds regardless of
 whether fallback models are configured. It counts provider read wait, excluding
 local tools. Transport diagnostics retain bounded exception causes, actual

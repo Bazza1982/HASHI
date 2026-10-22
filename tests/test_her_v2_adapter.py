@@ -560,7 +560,7 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
                     "attempt": 1,
                     "fencing_token": 1,
                     "request_digest": "sha256:old-input",
-                    "state": "superseded",
+                    "state": "running",
                     "parent_run_id": None,
                 },
                 "run-new": {
@@ -685,12 +685,14 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
             "stage": "direct",
             "boundary": "completed_tool_batch",
             "messages": provider_messages,
+            "producer_run_claim": adapter._canonical_pao_run_claim(first_meta),
         },
     )
     adapter._session_coordinator.steer(
         interrupted,
         reason="User supplied a new direction.",
     )
+    pao_store.runs["run-old"]["state"] = "superseded"
     # The live provider can publish its terminal STOPPED transition after the
     # HASHI control path has already marked the Turn as steered.  The Turn
     # remains authoritatively steered, while the recovery projection's
