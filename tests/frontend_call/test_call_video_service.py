@@ -20,6 +20,7 @@ class Output:
     def __init__(self):
         self.epoch = self.generation = 0
         self.closed = False
+        self.internal_call_id = "ap-internal-call-1"
         self.reference = b"AP-owned PNG"
         self.state = {"replies": []}
         self.starts = self.ends = self.interrupts = self.commits = 0
@@ -40,6 +41,8 @@ class Output:
         assert media == b"AV media"
         self.prepared.append(utterance)
         receipt = {
+            "call_id": self.internal_call_id,
+            "context_id": "ap-context-1",
             "utterance_id": utterance,
             "state": "prepared",
             "generation": self.generation,
@@ -164,13 +167,17 @@ async def test_av_prepare_commit_interrupt_and_end_share_one_call(tmp_path):
         speech["ready"] is True and speech["output"]["audio_owner"] == "agentpresence"
     )
     assert "content_b64" not in speech
+    assert speech["presentation"]["call_id"] == "call-1"
+    assert output.state["replies"][0]["call_id"] == output.internal_call_id
     assert gen.references == [output.reference]
     assert adapters.tts == 0 and output.commits == 0
     assert all(e["kind"] != "call.speech" for e in ports.frontend_events)
-    await service.invoke(
+    committed = await service.invoke(
         "owner",
         {**scoped, "operation": "speech_commit", "output_protocol": "call-output/1"},
     )
+    assert committed["presentation"]["call_id"] == "call-1"
+    assert output.state["replies"][0]["call_id"] == output.internal_call_id
     assert output.commits == 1
     control = {k: v for k, v in scoped.items() if k != "segment"}
     await service.invoke("owner", {**control, "operation": "interrupt"})

@@ -41,6 +41,14 @@ class ExternalCallOutput:
     def view(self):
         return {**self.connector.view(), "service": self.selection.public()}
 
+    def _window_receipt(self, receipt):
+        """Project the logical Call ID without mutating connector-owned scope."""
+        if receipt is None:
+            return None
+        if not isinstance(receipt, dict):
+            raise CallError("call_video_connector_response_invalid", 502)
+        return {**receipt, "call_id": self.call.binding["call_id"]}
+
     async def synthesize(self, text, *, request_id):
         call, turn = self.call, self.call.turn
         epoch = self.connector.epoch
@@ -92,8 +100,10 @@ class ExternalCallOutput:
             raise CallError("call_video_not_prepared", 409)
         await self.ready()
         self.privacy()
-        return await self.connector.commit(
-            presentation["utterance_id"], epoch=presentation["epoch"]
+        return self._window_receipt(
+            await self.connector.commit(
+                presentation["utterance_id"], epoch=presentation["epoch"]
+            )
         )
 
     async def status(self, asset):
@@ -110,7 +120,7 @@ class ExternalCallOutput:
         return {
             "ok": True,
             "output": self.view(),
-            "presentation": receipt,
+            "presentation": self._window_receipt(receipt),
             "ready": receipt is not None,
         }
 

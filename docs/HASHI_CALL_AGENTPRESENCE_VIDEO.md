@@ -93,6 +93,9 @@ context responses advertise `output_protocols: ["call-output/1"]`.
    in-flight negotiation. An old window cannot silently enter this mode.
 2. The usual `speech` operation waits for generation and AP preload. A ready
    response contains `output` and a `presentation` receipt, with no `content_b64`.
+   The receipt projects the logical Call ID supplied by the window. A connector
+   may use a different private ID to isolate its local playback context, but that
+   ID remains inside the connector and is never exposed as the window Call ID.
 3. The window stops ringback/local speech/fillers and yields audio before sending
    `speech_commit` with the usual scope, turn ID, segment and output protocol.
    Commit is idempotent; acceptance does not claim a frame has been presented.

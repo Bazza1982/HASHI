@@ -14,7 +14,9 @@ Current decisions, with full rationale in the linked owners:
   preserves its existing audio path. `/phone` keeps its live audio service and
   sends scoped leave/return lifecycle events after committed state changes.
   AP owns visual assets/references; HASHI owns services/voices. The external
-  window must negotiate and yield audio before commit.
+  window must negotiate and yield audio before commit. Presentation receipts
+  return the window's logical Call ID; connector-private playback IDs remain
+  internal and unchanged.
   See [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23).
   Source, hot adoption, external-window integration and physical acceptance are
   separate; candidate HTTP playback alone is not full Call acceptance.
