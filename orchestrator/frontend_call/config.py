@@ -426,7 +426,11 @@ class CallConfig:
         if doc is None:
             doc, targets = self.read()
         key = digest([owner, agent])
-        value = doc.get("profiles", {}).get(key, doc.get("default_profile", {}))
+        agent_defaults = doc.get("agent_defaults", {})
+        if not isinstance(agent_defaults, dict) or len(agent_defaults) > 200:
+            raise CallError("call_profile_invalid")
+        default = agent_defaults.get(agent, doc.get("default_profile", {}))
+        value = doc.get("profiles", {}).get(key, default)
         return self.validate_profile(value, targets)
 
     @staticmethod

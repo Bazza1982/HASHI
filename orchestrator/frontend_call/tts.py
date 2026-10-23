@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from orchestrator.voice_catalog import VoiceCatalog, VoiceCatalogError
+from orchestrator.tts_routing import resolve_tts_route
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error_detail
 
@@ -93,6 +94,22 @@ class CatalogCallTTS:
             str(preset.get("voice_name") or "").strip() or None,
             dict(preset.get("provider_options") or {}),
         )
+
+    @classmethod
+    def voice_route(cls, call, text):
+        catalog = call.tts_catalog
+        if catalog is None:
+            raise CallError("call_tts_catalog_invalid", 503)
+        provider, voice_name, options = cls._initial_selection(call, catalog)
+        route = resolve_tts_route(
+            provider=provider, voice_name=voice_name, provider_options=options,
+            requested_style=None, text=text, source_language=call.locale,
+            presets=catalog.presets, profiles=VoiceManager.VOICE_PROFILES,
+            provider_profiles=catalog.routing_profiles(),
+        )
+        if route.unsupported_language or not route.voice_name:
+            raise CallError("call_voice_unavailable", 409)
+        return route
 
     async def synthesize(
         self,

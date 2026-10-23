@@ -115,6 +115,29 @@ selected and effective service labels so the initiating Call Window can render
 one explicit downgrade notice. Agent Presence receives lifecycle events only
 and never becomes a second Call audio output.
 
+## Fixed character voices
+
+A service may declare optional `language_voices`, a map from `zh`, `en`
+and `ja` to catalogue voice IDs. Every mapped voice must be enabled on this
+platform, belong to that service and declare the matching language. This
+explicit policy precedes generic English compatibility and catalogue order.
+The existing language assessment still chooses one voice per spoken segment;
+the input locale resolves Han-only ambiguity after a Japanese segment.
+
+A dedicated character service keeps this policy separate from other voices.
+Its declared fallback list controls outages; an empty list preserves the
+requested voice and reports failure rather than selecting another character.
+
+Call supports optional `agent_defaults` profiles keyed by Agent ID. A saved
+owner/Agent profile takes precedence, followed by the Agent default and then
+the instance default. VideoTTS may set `voice_source: "call_tts"` to derive
+each utterance's voice from that same frozen Call catalogue and profile.
+AP supplies reference images and presents AV; it does not select voices.
+The default `voice_source: "configured"` preserves existing video services.
+
+Instance-specific adoption and service availability are recorded separately
+in [Hashiko language voices](HASHIKO_LANGUAGE_VOICES.md).
+
 ## Validation contract
 
 Focused tests cover catalogue merge and schema rejection, configuration-only

@@ -2,6 +2,13 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Fixed character language voices are declared in the TTS catalogue and shared
+  by `/voice`, audio Call and opt-in VideoTTS `voice_source: call_tts`.
+  AP owns presentation only. Hashiko's requested English `af_heart` currently
+  returns `voice_not_found`; Chinese/Japanese synthesis succeeded. Source,
+  staged instance configuration and live adoption remain separate facts.
+  See [language voices](HASHIKO_LANGUAGE_VOICES.md).
+
 - Optional Call AV selects compatible VideoTTS through the Compute directory;
   AP owns the image/assets and sole synchronized output. A capable window must
   negotiate and yield audio before commit. Legacy audio Call is preserved when

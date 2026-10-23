@@ -392,6 +392,11 @@ def resolve_tts_route(
         if selected_capability.native_languages
         else None
     )
+    fixed = provider_profile(provider_name, provider_profiles).get("language_voices") or {}
+    if fixed:
+        # A previous segment's Japanese voice must not reinterpret later Han-only
+        # Chinese. Use the frozen input locale for script ambiguity only.
+        preferred_language = normalize_language(source_language) or preferred_language
     assessment = assess_text_language(
         text,
         source_language=source_language,
@@ -418,7 +423,19 @@ def resolve_tts_route(
     unsupported = False
     route_source = selected_capability.source
 
-    if selected_voice is None and target_language:
+    # Explicit character choices take precedence over generic English compatibility
+    # and catalogue iteration order. The catalogue validates these alias references.
+    alias = fixed.get(target_language)
+    if alias:
+        preset = presets[alias]
+        candidate_voice = str(preset.get("voice_name") or "").strip() or None
+        if candidate_voice != selected_voice:
+            adapted_from = selected_voice
+            adaptation_reason = "configured_language_voice"
+        selected_voice = candidate_voice
+        options = dict(preset.get("provider_options") or {})
+        route_source = f"language_voice:{alias}"
+    elif selected_voice is None and target_language:
         candidate = _provider_voice_for_language(
             provider_name,
             target_language,

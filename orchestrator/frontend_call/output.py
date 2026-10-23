@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
+
+from .tts import CatalogCallTTS
 
 from .contract import CallError
 
@@ -50,8 +53,12 @@ class ExternalCallOutput:
                 utterance
             ] = receipt
 
+        selection = self.selection
+        if selection.voice_source == "call_tts":
+            route = CatalogCallTTS.voice_route(call, text)
+            selection = replace(selection, voice=route.voice_name)
         result = await self.synthesizer.synthesize(
-            self.selection,
+            selection,
             self.connector.reference,
             text,
             privacy_level=self.privacy(),
