@@ -152,7 +152,13 @@ IDs containing slashes or colons remain exact.
 
 Resolution checks the exact reference, requested modalities, protocols,
 features, minimum context, privacy location, health, service state, concurrency,
-and busy flag. A mismatch fails closed. Capability matching can return an
+and busy flag. For the Hashi Compute compatibility gateway, an explicit boolean
+`at_capacity` is the admission signal: `busy` reports activity, so a camera
+request must not exclude an idle VideoTTS offering on the same node. Numeric
+`in_flight >= max_in_flight` still rejects admission. Older gateway manifests
+without a boolean `at_capacity` retain the conservative `busy` fallback;
+formal manifests and each model's own capacity checks remain unchanged.
+A mismatch fails closed. Capability matching can return an
 ordered candidate list, but it never chooses one or crosses a privacy boundary
 for the caller. Cloud fallback therefore remains an explicit consumer policy
 and user choice.

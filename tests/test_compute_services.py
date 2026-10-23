@@ -347,6 +347,29 @@ def test_hashi_compute_manifest_keeps_unavailable_unknown_model_non_authorizing(
         )
 
 
+@pytest.mark.parametrize(
+    ("gateway", "blocked"),
+    [
+        ({"max_in_flight": 16, "in_flight": 1, "busy": True, "at_capacity": False}, False),
+        ({"max_in_flight": 16, "in_flight": 1, "busy": True, "at_capacity": True}, True),
+        ({"max_in_flight": 16, "in_flight": 16, "busy": True, "at_capacity": False}, True),
+        ({"max_in_flight": 16, "in_flight": 1, "busy": True}, True),
+    ],
+)
+def test_hashi_compute_gateway_activity_does_not_mean_capacity(gateway, blocked):
+    # An active camera request must not block an idle offering on the same node.
+    payload = _hashi_compute_manifest()
+    payload["gateway"] = gateway
+    catalogue = parse_compute_manifest(_lan_node(), payload).catalogue()
+    reference = ComputeReference("studio-gpu", "vision", "minicpm-v-4.6")
+
+    if blocked:
+        with pytest.raises(ComputeServiceError, match="compute_node_busy"):
+            catalogue.resolve(reference)
+    else:
+        assert catalogue.resolve(reference).reference == reference
+
+
 def test_hashi_compute_manifest_cannot_change_configured_privacy_boundary():
     payload = _hashi_compute_manifest()
     payload["privacy"]["client_access_location"] = "internet"

@@ -131,8 +131,28 @@ AP 1.5.1 fixes late call entry after the startup overlay has been removed, and
 reports JavaScript dispatch failure instead of waiting forever in entering.
 The regression was observed red before the DOM guard and green afterward.
 
-The external Call Window repository is outside this Run’s access roots. Its
-handshake/playback/VAD changes and a real `/call` remain pending. The instance
-VideoTTS selection stays disabled until that client is connected. Source commit,
-Function-generation qualification, live hot adoption and physical-user acceptance
-must be recorded separately; no source test alone claims runtime adoption.
+## Integration FYI — 2026-10-24
+
+The Workbench Call Window candidate now negotiates `call-output/1`, yields
+browser reply audio, follows AP presentation receipts, and pauses microphone
+capture during external playback. Its independent native Windows entry has
+authenticated to HASHI3 through the existing Remote HMAC. The instance VideoTTS
+selection was enabled with revision-checked atomic publication, retaining the
+configured voice.
+
+A real newly created Conversation reached PAO opening completion and a new
+VideoTTS job. Camera-on requests exposed a Hashi Compute gateway-capacity
+translation defect: activity was treated as saturation. The directory fix has
+focused red/green evidence, including retained full-capacity rejection; it is
+not yet adopted by the running shared Function generation.
+
+With the test camera denied, the provider accepted a job, reported partial
+rendering, then terminated with `video_render_failed` and no complete MP4.
+That is a separate provider failure; its public receipt does not establish the
+underlying rendering cause. No incomplete media was promoted to AP playback.
+Full STT/reply/presentation and physical-user acceptance remain unverified.
+The current campaign has not tested `/phone`.
+
+Source commit, Function-generation qualification, live hot adoption and
+physical-user acceptance remain separate facts. Neither component checks nor
+the successful PAO opening establish a passing end-to-end `/call`.
