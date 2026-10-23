@@ -70,6 +70,8 @@ def register_call_api(api):
     )
     api.call_service = service
     api.live_voice_manager.external_call_busy = service.busy
+    from orchestrator.frontend_optional_egress import PhoneCallFrontendEvents
+    api.live_voice_manager.frontend_call_state = PhoneCallFrontendEvents(api)
     reaper = None
     headers = {
         "Cache-Control": "no-store, private",
@@ -138,11 +140,15 @@ def register_call_api(api):
                     duration_ms=elapsed_ms(time.monotonic, started),
                     **error_facts(exc, "call_internal_error"),
                 )
-            return web.json_response(
-                {"ok": False, "error_code": exc.code},
-                status=exc.status,
-                headers=headers,
-            )
+            response = {"ok": False, "error_code": exc.code}
+            if exc.code.startswith(("call_video_", "call_output_")):
+                from orchestrator import ui_language
+                response.update(
+                    fallback_route="phone",
+                    message=ui_language.tr("call.video_unavailable",
+                                           locale=(body or {}).get("locale")),
+                )
+            return web.json_response(response, status=exc.status, headers=headers)
         except Exception as exc:
             if stage != "invoke":
                 emit(

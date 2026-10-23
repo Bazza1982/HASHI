@@ -138,16 +138,17 @@ class ExternalCallOutput:
 async def negotiate_output(
     config, ports, synthesizer, call, *, revision, generation, protocol
 ):
-    reader = getattr(config, "video_tts_selection", None)
-    selection = reader(revision) if callable(reader) else None
-    if selection is None:
-        return None
     resolver = getattr(ports, "call_output", None)
     if not callable(resolver):
         return None
     connector = await resolver(call.owner, call.binding, generation=generation)
     if connector is None:
         return None
+    # An opted-in AP connection makes /call a video call. Audio remains /phone.
+    reader = getattr(config, "video_tts_selection", None)
+    selection = reader(revision) if callable(reader) else None
+    if selection is None:
+        raise CallError("call_video_not_configured", 503)
     if protocol != OUTPUT_PROTOCOL:
         raise CallError("call_output_client_upgrade_required", 409)
     if synthesizer is None:

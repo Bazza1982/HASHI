@@ -246,11 +246,22 @@ class AgentPresenceConnectorAdapter:
             return _receipt(event, endpoint_id, "skipped")
 
         semantic_kind = str(event.get("semantic_kind") or "").strip().casefold()
-        if semantic_kind == "call.started":
-            accepted = await asyncio.to_thread(_post_json, "/v1/call/incoming", {})
-            return _receipt(event, endpoint_id, "accepted" if accepted else "unknown")
-        if semantic_kind == "call.ended":
-            accepted = await asyncio.to_thread(_post_json, "/v1/call/ended", {})
+        if semantic_kind in {"call.started", "call.ended"}:
+            facts = {
+                str(item.get("key")): item.get("value")
+                for block in event.get("content_blocks") or ()
+                if isinstance(block, Mapping) and block.get("type") == "key_value"
+                for item in block.get("items") or ()
+                if isinstance(item, Mapping)
+            }
+            # Only /phone owns departure. /call negotiates its scoped AV sink.
+            if facts.get("mode") != "phone" or not facts.get("call_id") or not facts.get("instance_id"):
+                return _receipt(event, endpoint_id, "skipped")
+            path = "/v1/phone/start" if semantic_kind == "call.started" else "/v1/phone/end"
+            accepted = await asyncio.to_thread(
+                _post_json, path,
+                {"call_id": facts["call_id"], "instance_id": facts["instance_id"]},
+            )
             return _receipt(event, endpoint_id, "accepted" if accepted else "unknown")
 
         # The active call Connector owns call audio.  AgentPresence consumes

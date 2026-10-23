@@ -5,6 +5,8 @@
   "telegram_language_code": "en",
   "strings": {
     "call.title": "Call settings",
+    "call.companion_modes": "With AgentPresence: /call uses VideoTTS video; /phone uses audio and the companion steps away.",
+    "call.video_unavailable": "Video call unavailable. Use /phone for an audio call.",
     "call.stt": "Speech recognition",
     "call.tts": "Sound",
     "call.vision": "Picture",
@@ -2736,7 +2738,7 @@
     "phone.persona.ready": "safely projected",
     "phone.persona.unavailable": "unavailable — calls are blocked",
     "phone.custom.none": "none (using persona and speaking style)",
-    "phone.effect": "This workspace setting is separate from /voice. Changes apply to the next call; an active call keeps its frozen configuration.",
+    "phone.effect": "With AgentPresence the companion steps away for /phone and returns after hangup. This workspace setting is separate from /voice. Changes apply to the next call; an active call keeps its frozen configuration.",
     "phone.action": "Choose below, or use /phone instructions &lt;text&gt; for a custom delivery prompt.",
     "phone.next_call": "The choice is saved for this Agent and applies to the next call.",
     "phone.choose.action": "Choose one option below.",

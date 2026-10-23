@@ -1477,7 +1477,7 @@ async def test_call_emits_connector_neutral_frontend_events_fail_open(tmp_path):
             },
             "kind": "call.started",
             "subscribers": ("optional-sink",),
-            "payload": {},
+            "payload": {"mode": "call"},
         }
     ]
 

@@ -2107,6 +2107,14 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             await asyncio.Event().wait()
 
         self.manager._run_sideband = fake_sideband
+        lifecycle = []
+        def capture_lifecycle(binding, phase):
+            # The optional sink must see committed state, never a reserved offer.
+            with self.store._lock, self.store._connection() as connection:
+                row = connection.execute("SELECT phase FROM live_calls WHERE call_id = ?",
+                                         (binding.call_id,)).fetchone()
+            lifecycle.append((binding.call_id, phase, row["phase"]))
+        self.manager.frontend_call_state = capture_lifecycle
         start_scope = {key: self.scope[key] for key in (
             "instance_id", "instance_generation", "agent_id", "session_id", "context_generation"
         )}
@@ -2125,6 +2133,16 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(first["sdp_answer"], "v=0\r\nanswer")
         self.assertEqual(first["binding"]["call_id"], first["call_id"])
         self.assertEqual(replay["call_id"], first["call_id"])
+        self.assertEqual(lifecycle, [(first["call_id"], "started", "connecting")])
+        from dataclasses import replace
+        binding = replace(self.binding, call_id=first["call_id"], provider_session_id="live-contract-1")
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("UPDATE live_calls SET termination_initiator='user', "
+                               "termination_reason='user_hangup' WHERE call_id=?", (binding.call_id,))
+        self.manager._mark_terminal(binding, "ended", provider_close_state="confirmed", summary="User hung up")
+        self.manager._mark_terminal(binding, "ended", provider_close_state="confirmed", summary="Duplicate")
+        self.assertEqual(lifecycle, [(binding.call_id, "started", "connecting"),
+                                     (binding.call_id, "ended", "ended")])
         self.assertEqual(config_path.read_bytes(), config_before)
         with self.store._lock, self.store._connection() as conn:
             attempt = conn.execute(

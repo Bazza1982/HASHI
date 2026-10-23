@@ -9,10 +9,13 @@ Current decisions, with full rationale in the linked owners:
   staged instance configuration and live adoption remain separate facts.
   See [language voices](HASHIKO_LANGUAGE_VOICES.md).
 
-- Optional Call AV selects compatible VideoTTS through the Compute directory;
-  AP owns the image/assets and sole synchronized output. A capable window must
-  negotiate and yield audio before commit. Legacy audio Call is preserved when
-  this mode is disabled/unconnected. See [Call AV](HASHI_CALL_AGENTPRESENCE_VIDEO.md).
+- With AP connected, `/call` requires compatible VideoTTS and exclusive AV
+  output; missing VideoTTS explicitly points to `/phone`. Without AP, Call
+  preserves its existing audio path. `/phone` keeps its live audio service and
+  sends scoped leave/return lifecycle events after committed state changes.
+  AP owns visual assets/references; HASHI owns services/voices. The external
+  window must negotiate and yield audio before commit.
+  See [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23).
   Source, hot adoption, external-window integration and physical acceptance are
   separate; candidate HTTP playback alone is not full Call acceptance.
 

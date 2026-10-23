@@ -5,9 +5,28 @@ Functional owner: Frontend Connector Call Function; PAO retains the Compute
 Service Directory and Conversation/Run authority. Layer 2 Functions and
 Layer 4 instance configuration. Protected Core is unchanged.
 
+## Command policy (2026-10-23)
+
+- When the opted-in AP connector is connected, `/call` requires VideoTTS and
+  `call-output/1` window handoff. Disabled, missing or unavailable VideoTTS
+  produces an explicit error and `fallback_route: phone`; it never silently
+  starts an audio call. AP-free Call retains its existing behavior.
+- `/phone` keeps the existing live-audio provider, microphone and audio owner.
+  The companion leaves for the phone call, stays away, then returns on hangup.
+  The two media services share their existing foreground admission interlock.
+- Phone lifecycle events carry `mode: phone`, instance and logical call IDs.
+  Only these events reach `/v1/phone/start` and `/v1/phone/end`. Generic Call
+  events carry `mode: call` and cannot trigger departure.
+- Phone notifications follow successful state persistence and are serialized
+  for each owner, with subscribers frozen at start. Replays, Function recovery,
+  failure and terminal cleanup retain logical call scope. Audio is never
+  mirrored into the ordinary voice-reply animation.
+- AP advertises `ap-phone/1`; its legacy `/v1/call/incoming` and
+  `/v1/call/ended` endpoints remain compatibility-only animation controls.
+
 ## Responsibilities
 
-- Without an enabled, opted-in, authenticated and instance-bound AV connector,
+- Without an opted-in, authenticated and instance-bound AV connector,
   Call keeps its existing STT, camera, PAO, audio TTS, fallback and window playback.
 - In negotiated AV mode, HASHI Call selects and invokes VideoTTS. AP supplies
   the active pack/day-or-night PNG and owns enter/idle/exit clips and synchronized
