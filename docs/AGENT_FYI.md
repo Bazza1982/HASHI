@@ -62,7 +62,10 @@ Portable carries no credentials; PAO starts Workers. Wildcards grant permission,
 not capability; path names grant nothing. Runs freeze Workzones until idle.
 Agent Workzones are backend-neutral: schema upgrades promote one deterministic
 legacy Session snapshot only when no Agent profile exists, and backend changes
-reuse rather than replace that profile. A Browser Bridge client disconnect is
+reuse rather than replace that profile. Agent overview responses expose the
+owner-scoped saved revision separately from the active runtime revision, so a
+busy Run can retain its frozen snapshot without making the new configuration
+disappear from Frontends. A Browser Bridge client disconnect is
 request-local and must not stop the shared Windows named-pipe listener.
 Keep experiments, secrets, media bytes and remote paths out of PCM/logs/chat/Git.
 

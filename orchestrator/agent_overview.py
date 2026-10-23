@@ -95,17 +95,25 @@ def _parked_topics_overview(store: Any) -> dict[str, Any]:
     return {"count": len(topics), "topics": topics}
 
 
-def _workzone_overview(runtime: Any | None, workspace_dir: Path) -> dict[str, Any]:
+def _workzone_overview(
+    runtime: Any | None,
+    workspace_dir: Path,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+    desired_workzone_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     # Keep the new helper lookup lazy so the first hot reboot from the legacy
     # single-Workzone module can reload this consumer before its provider.
     from orchestrator import workzone as workzone_module
 
-    raw_state = getattr(runtime, "_workzone_state", None)
-    if isinstance(raw_state, Mapping):
-        state = workzone_module.normalize_workzone_state(raw_state)
+    raw_active_state = getattr(runtime, "_workzone_state", None)
+    if not isinstance(raw_active_state, Mapping) and isinstance(metadata, Mapping):
+        raw_active_state = metadata.get("workzone_state")
+    if isinstance(raw_active_state, Mapping):
+        active_state = workzone_module.normalize_workzone_state(raw_active_state)
     else:
         legacy = load_workzone(workspace_dir)
-        state = workzone_module.normalize_workzone_state(
+        active_state = workzone_module.normalize_workzone_state(
             {
                 "slots": (
                     [{"slot_id": "main", "path": str(legacy), "enabled": True}]
@@ -114,10 +122,26 @@ def _workzone_overview(runtime: Any | None, workspace_dir: Path) -> dict[str, An
                 )
             }
         )
+    desired_state = (
+        workzone_module.normalize_workzone_state(desired_workzone_state)
+        if isinstance(desired_workzone_state, Mapping)
+        else None
+    )
+    active_revision = int(active_state.get("revision") or 0)
+    desired_revision = int((desired_state or {}).get("revision") or 0)
+    state = (
+        desired_state
+        if desired_state is not None and desired_revision >= active_revision
+        else active_state
+    )
+    revision = int(state.get("revision") or 0)
     active = workzone_module.active_workzone_slots(state)
     primary = workzone_module.primary_workzone_path(state)
     return {
         "active": bool(active),
+        "revision": revision,
+        "active_revision": active_revision,
+        "pending_activation": revision > active_revision,
         "path": str(primary) if primary is not None else None,
         "active_count": len(active),
         "configured_count": len(state["slots"]),
@@ -140,6 +164,7 @@ def build_agent_overview(
     metadata: dict[str, Any],
     workspace_dir: Path,
     runtime: Any | None = None,
+    desired_workzone_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project existing HASHI state for one read-only Workbench panel."""
     workspace_dir = Path(workspace_dir)
@@ -154,7 +179,12 @@ def build_agent_overview(
             "status": str(metadata.get("status") or "offline"),
             "online": bool(metadata.get("online")),
         },
-        "workzone": _workzone_overview(runtime, workspace_dir),
+        "workzone": _workzone_overview(
+            runtime,
+            workspace_dir,
+            metadata=metadata,
+            desired_workzone_state=desired_workzone_state,
+        ),
         "usage": _usage_overview(workspace_dir, session_id),
         "system_prompts": _system_prompt_overview(prompt_manager),
         "parked_topics": _parked_topics_overview(parked_store),

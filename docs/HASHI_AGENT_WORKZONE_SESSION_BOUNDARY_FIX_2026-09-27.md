@@ -90,3 +90,18 @@ schema-26 store. After the correction, the upgrade selects the default Session's
 complete snapshot, retains disabled slots, leaves an existing Agent profile
 unchanged, and reapplies the same revision and exact roots to a replacement
 backend. Live HASHI3 adoption is recorded separately from this source evidence.
+
+## 2026-10-23 Workbench projection correction
+
+Busy-time persistence and Run freezing remain unchanged. The authenticated Agent
+overview now reads the owner/Agent profile directly from PAO and projects its
+revision separately from the active runtime revision. A newer saved revision is
+therefore visible immediately as pending activation while an already-admitted
+Run keeps its frozen snapshot.
+
+Function Worker proxies expose their active snapshot through public runtime
+metadata rather than the in-process private attribute. Overview projection now
+accepts both forms, so isolation cannot silently erase Workzone state. Focused
+red/green coverage includes an isolated Worker at revision 1, an authoritative
+profile at revision 2, owner-scoped API lookup, and the unchanged legacy/runtime
+fallbacks. Protected Core remains unchanged.
