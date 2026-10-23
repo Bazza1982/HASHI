@@ -209,6 +209,15 @@ when that level forbids it. The first successful downgrade is fixed for the
 remaining call and is projected to Workbench as selected/effective labels.
 Call's STT, vision, segmentation, playback, and lifecycle remain independent.
 
+### Call VideoTTS consumer
+
+Optional Call AV resolves an exact directory reference with text/image input and
+audio/video output. Vendor-neutral async-job and direct-MP4 protocols deliver a
+complete audiovisual file to the negotiated external presenter. AP supplies the
+reference image; HASHI owns service invocation, privacy, job cancellation and
+presentation fencing. See [Call AV](HASHI_CALL_AGENTPRESENCE_VIDEO.md).
+No service URL, visual library or implicit provider fallback is copied into AP.
+
 ### HERV3 visual fallback consumer
 
 For an image-bearing stage, HERV3 resolves routes before the first Model

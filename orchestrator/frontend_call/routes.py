@@ -14,6 +14,7 @@ from .contract import CallError, MAX_BODY
 from .ports import HashiPorts
 from .service import CallService
 from .tts import CatalogCallTTS
+from .video_tts import CallVideoTTS, VideoSpeechClient
 from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts
 
 
@@ -60,6 +61,12 @@ def register_call_api(api):
         HashiPorts(api),
         MediaAdapters(secret_resolver=getattr(api, "connector_secret_resolver", None)),
         tts_synthesizer=tts_synthesizer,
+        video_synthesizer=CallVideoTTS(
+            bridge_home / "compute_services.json",
+            client=VideoSpeechClient(
+                secret_resolver=getattr(api, "connector_secret_resolver", None)
+            ),
+        ),
     )
     api.call_service = service
     api.live_voice_manager.external_call_busy = service.busy

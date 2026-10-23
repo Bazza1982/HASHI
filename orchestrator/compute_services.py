@@ -851,6 +851,8 @@ def _formal_capabilities(
 
 
 _LEGACY_PROTOCOLS = {
+    "/v1/video/speech": "video.speech.async.v1",
+    "/v1/video/capabilities": "video.speech.capabilities.v1",
     "/v1/chat/completions": "openai.chat.completions",
     "/v1/embeddings": "openai.embeddings",
     "/v1/audio/transcriptions": "openai.audio.transcriptions",

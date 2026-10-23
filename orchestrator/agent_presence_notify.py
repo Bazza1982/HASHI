@@ -97,6 +97,19 @@ def _json_request(
         return None
 
 
+async def call_video_output(bridge_home, owner_id, binding, *, instance_id, generation):
+    """Negotiate the scoped AV port using this Connector's credential owner."""
+    if not mirror_enabled(bridge_home, owner_id) or not _token():
+        return None
+    from orchestrator.agent_presence_call_video import AgentPresenceCallVideo
+    import hashlib
+
+    material = "\n".join((str(instance_id), str(generation), str(binding["call_id"])))
+    call_id = "hashi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    port = AgentPresenceCallVideo(_base_url(), _token(), str(instance_id), call_id)
+    return port if await port.probe() else None
+
+
 def get_hashi_instance_binding() -> dict[str, Any] | None:
     """Read the singular HASHI instance selected in AP."""
     return _json_request("GET", "/v1/hashi")

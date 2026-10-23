@@ -58,6 +58,13 @@ class HashiPorts:
 
         return configured_owner_subscribers(self.api, owner)
 
+    async def call_output(self, owner, binding, *, generation):
+        from orchestrator.frontend_optional_egress import resolve_call_output
+
+        return await resolve_call_output(
+            self.api, owner, binding, generation=generation
+        )
+
     def emit_frontend_event(
         self,
         owner,

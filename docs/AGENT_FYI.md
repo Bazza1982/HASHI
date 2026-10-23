@@ -2,6 +2,13 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Optional Call AV selects compatible VideoTTS through the Compute directory;
+  AP owns the image/assets and sole synchronized output. A capable window must
+  negotiate and yield audio before commit. Legacy audio Call is preserved when
+  this mode is disabled/unconnected. See [Call AV](HASHI_CALL_AGENTPRESENCE_VIDEO.md).
+  Source, hot adoption, external-window integration and physical acceptance are
+  separate; candidate HTTP playback alone is not full Call acceptance.
+
 - Legacy audio migration trusts verified Message/Run ownership and one flat,
   non-link path under its fixed asset root; ambiguity or unsafe paths stay
   preserved but unreadable. PAO settlement survives repeated cancellation and

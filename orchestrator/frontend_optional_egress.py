@@ -29,6 +29,23 @@ def configured_owner_subscribers(api: Any, owner_id: str) -> tuple[str, ...]:
     )
 
 
+async def resolve_call_output(api, owner_id, binding, *, generation):
+    """Resolve an opted-in external AV sink without naming it in CallService."""
+    subscribers = configured_owner_subscribers(api, owner_id)
+    if "agentpresence" not in subscribers:
+        return None
+    from orchestrator.agent_presence_notify import call_video_output
+
+    config = getattr(api, "global_config", None)
+    return await call_video_output(
+        getattr(config, "bridge_home", None),
+        owner_id,
+        binding,
+        instance_id=getattr(config, "instance_id", ""),
+        generation=generation,
+    )
+
+
 def _event_id(binding: Mapping[str, Any], kind: str, segment: Any) -> str:
     material = "\n".join(
         (

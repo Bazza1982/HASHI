@@ -512,6 +512,15 @@ class CallConfig:
             },
         }
 
+    def video_tts_selection(self, revision):
+        """Freeze Call's exact VideoTTS reference from the same read revision."""
+        from .video_tts import VideoTTSSelection
+
+        doc, _targets, _catalog, effective_revision = self._read_bundle()
+        if revision != effective_revision:
+            raise CallError("call_configuration_changed", 409)
+        return VideoTTSSelection.parse(doc.get("video_tts"))
+
     def freeze(self, owner, agent, revision):
         profile, selected, _catalog = self.freeze_runtime(owner, agent, revision)
         return profile, selected
