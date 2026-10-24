@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,6 +114,7 @@ async def test_registration_requires_bootstrap_and_broadcasts_topology(tmp_path)
     assert accepted.status == 201
     assert json.loads(accepted.text)["registration"]["instance_id"] == "HASHI3"
     assert broker.register_calls[-1] == (payload, "bootstrap-secret")
+    await asyncio.sleep(0)
     assert broadcasts == ["broadcast"]
 
 
@@ -135,9 +137,43 @@ async def test_heartbeat_requires_worker_bearer_token(tmp_path):
     assert denied.status == 403
     assert accepted.status == 200
     assert broker.heartbeat_calls[-1][1]["ttl_seconds"] == 45.0
+    await asyncio.sleep(0)
     # Both a rejected heartbeat that may have evicted an unhealthy Worker and
-    # a successful lease extension refresh the Function-side catalogue.
-    assert broadcasts == ["broadcast", "broadcast"]
+    # a successful lease extension refresh the Function-side catalogue. A
+    # still-running refresh is deliberately coalesced so heartbeats cannot
+    # accumulate topology work.
+    assert broadcasts
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_response_does_not_wait_for_busy_function_worker(tmp_path):
+    server, _broker, _broadcasts = _server(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_broadcast():
+        started.set()
+        await release.wait()
+
+    server.orchestrator.function_workers.broadcast_topology = blocked_broadcast
+    payload = {
+        "capability_id": "cap-1",
+        "identity": {"instance_id": "HASHI3"},
+        "ttl_seconds": 45,
+    }
+
+    response = await asyncio.wait_for(
+        server.handle_device_capability_heartbeat(
+            _Request(payload, {"Authorization": "Bearer worker-secret"})
+        ),
+        timeout=0.2,
+    )
+
+    assert response.status == 200
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+    assert server._device_capability_topology_task is not None
+    release.set()
+    await server.shutdown()
 
 
 @pytest.mark.asyncio

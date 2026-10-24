@@ -415,6 +415,7 @@ class WorkbenchApiServer:
         self._hchat_status_recovery_task: asyncio.Task | None = None
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
+        self._device_capability_topology_task: asyncio.Task | None = None
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
@@ -2340,6 +2341,12 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        if self._device_capability_topology_task is not None:
+            self._device_capability_topology_task.cancel()
+            await asyncio.gather(
+                self._device_capability_topology_task, return_exceptions=True
+            )
+            self._device_capability_topology_task = None
         if self._hchat_status_recovery_task is not None:
             self._hchat_status_recovery_task.cancel()
             await asyncio.gather(
@@ -13933,6 +13940,36 @@ class WorkbenchApiServer:
             )
         return web.json_response(payload)
 
+    def _schedule_device_capability_topology_refresh(self) -> None:
+        workers = getattr(self.orchestrator, "function_workers", None)
+        if workers is None:
+            return
+        current = self._device_capability_topology_task
+        if current is not None and not current.done():
+            return
+
+        async def refresh() -> None:
+            try:
+                await workers.broadcast_topology()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.getLogger("HASHI.Workbench.DeviceCapabilities").warning(
+                    "Device capability topology refresh failed: %s",
+                    type(exc).__name__,
+                )
+
+        task = asyncio.create_task(
+            refresh(), name="hashi-device-capability-topology-refresh"
+        )
+        self._device_capability_topology_task = task
+
+        def clear(completed: asyncio.Task) -> None:
+            if self._device_capability_topology_task is completed:
+                self._device_capability_topology_task = None
+
+        task.add_done_callback(clear)
+
     async def handle_device_capability_register(self, request):
         broker = getattr(self.orchestrator, "capability_broker", None)
         if broker is None:
@@ -13955,9 +13992,7 @@ class WorkbenchApiServer:
                 {"ok": False, "error": str(exc)},
                 status=403,
             )
-        workers = getattr(self.orchestrator, "function_workers", None)
-        if workers is not None:
-            await workers.broadcast_topology()
+        self._schedule_device_capability_topology_refresh()
         return web.json_response(
             {"ok": True, "registration": registration.to_dict()},
             status=201,
@@ -13986,16 +14021,12 @@ class WorkbenchApiServer:
                 ttl_seconds=float(payload.get("ttl_seconds") or 90),
             )
         except (ValueError, TypeError, CapabilityBrokerError) as exc:
-            workers = getattr(self.orchestrator, "function_workers", None)
-            if workers is not None:
-                await workers.broadcast_topology()
+            self._schedule_device_capability_topology_refresh()
             return web.json_response(
                 {"ok": False, "error": str(exc)},
                 status=403,
             )
-        workers = getattr(self.orchestrator, "function_workers", None)
-        if workers is not None:
-            await workers.broadcast_topology()
+        self._schedule_device_capability_topology_refresh()
         return web.json_response(
             {"ok": True, "registration": registration.to_dict()}
         )
