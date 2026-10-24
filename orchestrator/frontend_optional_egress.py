@@ -29,6 +29,56 @@ def configured_owner_subscribers(api: Any, owner_id: str) -> tuple[str, ...]:
     )
 
 
+async def resolve_call_output(api, owner_id, binding, *, generation):
+    """Resolve an opted-in external AV sink without naming it in CallService."""
+    subscribers = configured_owner_subscribers(api, owner_id)
+    if "agentpresence" not in subscribers:
+        return None
+    from orchestrator.agent_presence_notify import call_video_output
+
+    config = getattr(api, "global_config", None)
+    return await call_video_output(
+        getattr(config, "bridge_home", None),
+        owner_id,
+        binding,
+        instance_id=getattr(config, "instance_id", ""),
+        generation=generation,
+    )
+
+
+class PhoneCallFrontendEvents:
+    """Freeze subscribers and order /phone leave/return effects per owner."""
+
+    def __init__(self, api):
+        self.api = api
+        self.subscribers = {}
+        self.tails = {}
+
+    def __call__(self, binding, phase):
+        if phase not in {"started", "ended"}:
+            return
+        key = (binding.owner_id, binding.call_id)
+        subscribers = self.subscribers.get(key)
+        if subscribers is None:
+            subscribers = configured_owner_subscribers(self.api, binding.owner_id)
+        if phase == "started":
+            self.subscribers[key] = subscribers
+        else:
+            self.subscribers.pop(key, None)
+        task = schedule_call_frontend_event(
+            self.api, owner_id=binding.owner_id, binding=binding.public_scope(),
+            kind="call.started" if phase == "started" else "call.ended",
+            subscribers=subscribers, payload={"mode": "phone", "instance_id": binding.instance_id},
+            after=self.tails.get(binding.owner_id),
+        )
+        if task is not None:
+            self.tails[binding.owner_id] = task
+            def finished(completed):
+                if self.tails.get(binding.owner_id) is completed:
+                    self.tails.pop(binding.owner_id, None)
+            task.add_done_callback(finished)
+
+
 def _event_id(binding: Mapping[str, Any], kind: str, segment: Any) -> str:
     material = "\n".join(
         (
@@ -92,6 +142,13 @@ def _call_event(
         reason = str(payload.get("reason") or "").strip()
         if reason:
             items.append({"key": "reason", "value": reason})
+        for key, value in (
+            ("mode", payload.get("mode")),
+            ("call_id", binding.get("call_id")),
+            ("instance_id", payload.get("instance_id") or binding.get("instance_id")),
+        ):
+            if value:
+                items.append({"key": key, "value": str(value)})
         blocks = [{"type": "key_value", "items": items}]
     else:
         raise ValueError("unsupported call frontend event")
@@ -182,6 +239,7 @@ def schedule_call_frontend_event(
     kind: str,
     subscribers: Sequence[str],
     payload: Mapping[str, Any] | None = None,
+    after: asyncio.Task | None = None,
 ) -> asyncio.Task | None:
     """Schedule optional FC effects; failures never affect the call owner."""
 
@@ -191,16 +249,17 @@ def schedule_call_frontend_event(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None
-    task = loop.create_task(
-        dispatch_call_frontend_event(
-            api,
-            owner_id=owner_id,
-            binding=binding,
-            kind=kind,
-            subscribers=subscribers,
-            payload=payload,
+    async def dispatch():
+        if after is not None:
+            try:
+                await asyncio.shield(after)
+            except Exception:
+                pass  # A failed departure must not suppress hang-up cleanup.
+        return await dispatch_call_frontend_event(
+            api, owner_id=owner_id, binding=binding, kind=kind,
+            subscribers=subscribers, payload=payload,
         )
-    )
+    task = loop.create_task(dispatch())
     pending = getattr(api, "_optional_frontend_tasks", None)
     if not isinstance(pending, set):
         pending = set()

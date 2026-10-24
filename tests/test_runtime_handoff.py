@@ -44,6 +44,113 @@ async def test_shared_function_activation_restores_manual_stop_marker():
         await asyncio.gather(host.task, return_exceptions=True)
 
 
+@pytest.mark.parametrize(
+    "blocker",
+    ["backend_requests", "gateway_requests", "background_jobs"],
+)
+@pytest.mark.asyncio
+async def test_shared_function_quiesce_rejects_busy_work_before_disconnecting(
+    blocker,
+):
+    from orchestrator.runtime_app_host import RuntimeAppHost
+
+    blocker_task = asyncio.create_task(asyncio.Event().wait())
+    gateway = SimpleNamespace(
+        _active_requests={"request": None} if blocker == "gateway_requests" else {},
+        _accepting_requests=True,
+    )
+    app = SimpleNamespace(
+        _restart_request=None,
+        reboot_manager=SimpleNamespace(active_operation=None),
+        _startup_tasks={},
+        _handoff_draining=False,
+        _handoff_requests=1 if blocker == "backend_requests" else 0,
+        api_gateway=gateway,
+        background_job_manager=SimpleNamespace(
+            _monitor_tasks={"job": blocker_task}
+            if blocker == "background_jobs"
+            else {}
+        ),
+        function_workers=SimpleNamespace(_telegram_ingress={}),
+        runtimes=[],
+        whatsapp=None,
+    )
+    host = RuntimeAppHost(None, {})
+    host.app = app
+    host.task = asyncio.create_task(asyncio.Event().wait())
+
+    async def resume():
+        app._handoff_draining = False
+        gateway._accepting_requests = True
+        return {"resumed": True, "errors": []}
+
+    # The defective implementation enters its 120-second drain before it can
+    # return. Keep this focused regression bounded while preserving the real
+    # pre-fix outcome: TimeoutError instead of an immediate busy rejection.
+    host.resume = resume
+    try:
+        with pytest.raises(RuntimeError, match="shared Functions are busy") as error:
+            await asyncio.wait_for(host.quiesce(), timeout=0.25)
+        assert blocker in str(error.value)
+        assert app._handoff_draining is False
+        assert gateway._accepting_requests is True
+    finally:
+        host.task.cancel()
+        blocker_task.cancel()
+        await asyncio.gather(host.task, blocker_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shared_function_quiesce_resumes_when_request_races_with_fence():
+    from orchestrator.runtime_app_host import RuntimeAppHost
+
+    gateway = SimpleNamespace(_active_requests={}, _accepting_requests=True)
+    app = SimpleNamespace(
+        _restart_request=None,
+        reboot_manager=SimpleNamespace(active_operation=None),
+        _startup_tasks={},
+        _handoff_draining=False,
+        _handoff_requests=0,
+        api_gateway=gateway,
+        background_job_manager=SimpleNamespace(_monitor_tasks={}),
+        runtimes=[],
+        whatsapp=None,
+    )
+
+    class Ingress:
+        calls = 0
+
+        async def pause(self):
+            self.calls += 1
+            app._handoff_requests = 1
+
+    ingress = Ingress()
+    app.function_workers = SimpleNamespace(_telegram_ingress={"agent": ingress})
+    host = RuntimeAppHost(None, {})
+    host.app = app
+    host.task = asyncio.create_task(asyncio.Event().wait())
+    resumed = []
+
+    async def resume():
+        resumed.append(True)
+        app._handoff_requests = 0
+        app._handoff_draining = False
+        gateway._accepting_requests = True
+        return {"resumed": True, "errors": []}
+
+    host.resume = resume
+    try:
+        with pytest.raises(RuntimeError, match="shared Functions are busy"):
+            await asyncio.wait_for(host.quiesce(), timeout=0.25)
+        assert ingress.calls == 1
+        assert resumed == [True]
+        assert app._handoff_draining is False
+        assert gateway._accepting_requests is True
+    finally:
+        host.task.cancel()
+        await asyncio.gather(host.task, return_exceptions=True)
+
+
 def generation(tmp_path, home, marker, runtime):
     source = tmp_path / marker
     (source / "orchestrator").mkdir(parents=True)

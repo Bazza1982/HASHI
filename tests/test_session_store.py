@@ -164,6 +164,69 @@ def test_schema_13_messages_gain_nullable_display_projection(tmp_path):
     assert message["display_text"] is None
 
 
+def test_schema_27_promotes_default_session_workzones_without_overwriting_profile(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    default = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    other = store.create_session(
+        owner_id="user:7", agent_id="lily", title="Other project"
+    )
+    default_main = tmp_path / "default-main"
+    default_attached = tmp_path / "default-attached"
+    other_main = tmp_path / "other-main"
+    explicit = tmp_path / "explicit-agent-profile"
+    for path in (default_main, default_attached, other_main, explicit):
+        path.mkdir()
+    store.set_workzone_slot(
+        default["session_id"], "main", path=str(default_main)
+    )
+    store.set_workzone_slot(
+        default["session_id"], "1", path=str(default_attached), enabled=False
+    )
+    store.set_workzone_slot(other["session_id"], "main", path=str(other_main))
+    store.ensure_default_session(owner_id="user:8", agent_id="arale")
+    store.set_agent_workzone_slot(
+        owner_id="user:8",
+        agent_id="arale",
+        slot_id="main",
+        path=str(explicit),
+        source="test",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE schema_metadata SET value='26' WHERE key='schema_version'"
+        )
+
+    migrated = _store(tmp_path)
+    state = migrated.get_agent_workzone_set(
+        owner_id="user:7", agent_id="lily"
+    )
+    assert [
+        (item["slot_id"], item["path"], item["enabled"])
+        for item in state["slots"]
+    ] == [
+        ("main", str(default_main), True),
+        ("1", str(default_attached), False),
+    ]
+    assert state["revision"] > 2
+    assert migrated.get_agent_workzone_set(
+        owner_id="user:8", agent_id="arale"
+    )["slots"][0]["path"] == str(explicit)
+    with sqlite3.connect(store.db_path) as connection:
+        event = connection.execute(
+            "SELECT kind, source, detail_json FROM agent_workzone_events "
+            "WHERE instance_id='HASHI1' AND owner_id='user:7' AND agent_id='lily'"
+        ).fetchone()
+    assert event is not None
+    assert event[0:2] == (
+        "agent.workzones_promoted_from_session",
+        "schema_27_migration",
+    )
+    assert json.loads(event[2])["session_id"] == default["session_id"]
+
+
 def test_agent_workzones_are_independent_of_legacy_session_rows(tmp_path):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")

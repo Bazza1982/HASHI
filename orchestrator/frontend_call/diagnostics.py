@@ -185,6 +185,8 @@ def receipt_facts(receipt):
     if not isinstance(receipt, dict):
         return {}
     return {
+        "provider_request_id": receipt.get("provider_request_id")
+        or receipt.get("job_id"),
         "provider_generation_id": receipt.get("generation_id"),
         "verification": receipt.get("verification"),
         "gateway": receipt.get("gateway"),

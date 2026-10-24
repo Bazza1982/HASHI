@@ -5342,10 +5342,20 @@ class WorkbenchApiServer:
 
         runtime = runtime_map.get(name)
         metadata = self._metadata_for_agent(agent_row, runtime)
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated"}, status=401
+            )
+        desired_workzone_state = self.session_store.get_agent_workzone_set(
+            owner_id=owner_id,
+            agent_id=name,
+        )
         overview = build_agent_overview(
             metadata=metadata,
             workspace_dir=Path(metadata["workspace_dir"]),
             runtime=runtime,
+            desired_workzone_state=desired_workzone_state,
         )
         response = web.json_response({"ok": True, "overview": overview})
         response.headers["Cache-Control"] = "no-store"

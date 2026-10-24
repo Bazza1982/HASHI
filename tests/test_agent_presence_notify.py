@@ -153,9 +153,9 @@ async def test_standard_adapter_keeps_call_audio_with_call_frontend(
     monkeypatch.setattr(agent_presence_notify, "_post_json", _post_json)
     monkeypatch.setattr(agent_presence_notify, "_post", _post)
 
-    binding = {"call_id": "call-1", "session_id": "ses-1"}
-    started, _ = _call_event(binding, "call.started", {})
-    ended, _ = _call_event(binding, "call.ended", {"reason": "hangup"})
+    binding = {"call_id": "call-1", "session_id": "ses-1", "instance_id": "HASHI3"}
+    started, _ = _call_event(binding, "call.started", {"mode": "phone"})
+    ended, _ = _call_event(binding, "call.ended", {"mode": "phone", "reason": "hangup"})
     speech, resolved_media = _call_event(
         binding,
         "call.speech",
@@ -188,8 +188,8 @@ async def test_standard_adapter_keeps_call_audio_with_call_frontend(
     assert (await adapter.dispatch(speech, endpoint_id=endpoint_id))["status"] == "skipped"
     assert (await adapter.dispatch(ended, endpoint_id=endpoint_id))["status"] == "accepted"
     assert posted == [
-        ("/v1/call/incoming", {}, "application/json"),
-        ("/v1/call/ended", {}, "application/json"),
+        ("/v1/phone/start", {"call_id": "call-1", "instance_id": "HASHI3"}, "application/json"),
+        ("/v1/phone/end", {"call_id": "call-1", "instance_id": "HASHI3"}, "application/json"),
     ]
 
     disabled = agent_presence_notify.AgentPresenceConnectorAdapter(

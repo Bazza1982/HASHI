@@ -187,10 +187,13 @@ numeric response-length requirements are retired.
   fallback, that effective service remains fixed for the call so later segments
   cannot alternate providers or voices. A new call may retry the saved
   preference.
-- **CALL-SPEECH-15** — Call Window is the sole Call-audio presenter. Agent
-  Presence handles only answer/leave and return lifecycle animation. If every
-  compliant TTS path fails, Call shows a visible error and transcript rather
-  than claiming speech succeeded or becoming silently successful.
+- **CALL-SPEECH-15** — Without negotiated external AV, Call Window is the sole
+  Call-audio presenter and AgentPresence handles lifecycle animation. Enabled
+  external AV uses the scoped [Call output contract](HASHI_CALL_AGENTPRESENCE_VIDEO.md):
+  HASHI obtains AP’s reference, invokes compatible VideoTTS, and AP presents both
+  audio and video after explicit commit. The window yields reply audio and
+  fillers; microphone/camera admission remains independent. An unavailable
+  synthesis path shows a visible error and transcript rather than silent success.
 
 ## Captions and controls
 

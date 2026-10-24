@@ -291,6 +291,29 @@ existing fenced transactional drain still handles the race after preflight.
 There is no forced cancellation, automatic retry, timeout extension, or Core
 change.
 
+## Shared handoff fail-fast correction (2026-10-22)
+
+A live HASHI3 retry exposed the race left after the Worker activity preflight.
+A broad reboot could pass every Worker check while a Backend API request, API
+Gateway request, or background-job monitor was still active. The shared host
+then closed Backend API, API Gateway, and Telegram intake before waiting the
+full 120-second handoff budget. The replacement rolled back, but HASHI had
+already remained unavailable for roughly two minutes.
+
+The shared Function host now checks those shared-process blockers before it
+closes intake. If any are active, Core's handoff request fails immediately and
+the current shared generation stays online. The host checks again after fencing
+intake to close the race between observation and drain; a raced blocker resumes
+the existing ingress immediately instead of entering the 120-second wait.
+Worker quiescence retains its existing bounded transactional timeout. This
+change does not cancel accepted work, retry the reboot, widen its scope, or
+alter protected Core.
+
+Red/green evidence: the focused regression timed out on the preceding
+implementation; the corrected pre-fence and raced-after-fence cases both pass.
+Live adoption and user-terminal confirmation remain separate evidence.
+
+
 ## HASHI1 notification diagnosis (2026-09-27)
 
 On HASHI1, two of the latest three Telegram broad-reboot final notices used a

@@ -376,7 +376,18 @@ class WindowsPipeServer:
                 if not self.stopping.is_set():
                     self.state.logger.warning("Rejected unauthenticated Windows bridge client")
                 continue
-            except (OSError, EOFError):
+            except EOFError:
+                if self.stopping.is_set():
+                    break
+                # A client may disconnect part-way through the multiprocessing
+                # authentication handshake. That abandons one pipe instance,
+                # not the Listener; keep serving later clients.
+                self.state.logger.warning(
+                    "Windows bridge client disconnected during authentication",
+                    exc_info=True,
+                )
+                continue
+            except OSError:
                 if not self.stopping.is_set():
                     self.state.logger.exception("Windows bridge pipe accept failed")
                 break
@@ -390,8 +401,23 @@ class WindowsPipeServer:
                 response = {"ok": False, "error": "invalid local bridge request"}
             try:
                 connection.send_bytes(json.dumps(response).encode("utf-8"))
+            except (BrokenPipeError, EOFError, OSError):
+                # The response belongs only to this client. A disconnect must
+                # never terminate the shared pipe server for every Agent.
+                if not self.stopping.is_set():
+                    self.state.logger.info(
+                        "Windows bridge client disconnected before response",
+                        exc_info=True,
+                    )
             finally:
-                connection.close()
+                try:
+                    connection.close()
+                except OSError:
+                    if not self.stopping.is_set():
+                        self.state.logger.info(
+                            "Windows bridge client close failed",
+                            exc_info=True,
+                        )
 
     def shutdown(self) -> None:
         self.stopping.set()
@@ -454,6 +480,16 @@ def run_stdio_host(
     reader.start()
     try:
         while not state.shutting_down.is_set():
+            if isinstance(server, WindowsPipeServer) and not server.thread.is_alive():
+                # Never leave Chrome attached to a native-host process whose
+                # shared local bridge is dead. Exiting lets the extension's
+                # bounded reconnect loop start a fresh host and Listener.
+                logger.error(
+                    "Windows bridge pipe server stopped unexpectedly; "
+                    "exiting native host for reconnect"
+                )
+                state.shutting_down.set()
+                break
             time.sleep(0.2)
     finally:
         server.shutdown()

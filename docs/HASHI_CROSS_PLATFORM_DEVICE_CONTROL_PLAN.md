@@ -27,6 +27,21 @@ rejects CDP routing and requires its registered extension, including when the
 bridge disconnects. Source and offline tests are separate from running
 generation adoption and live Chrome/Edge acceptance.
 
+### Windows native-pipe continuity correction — 2026-10-22
+
+The configured Windows Browser Bridge must remain available after any individual
+local client disconnects. A disconnect during named-pipe authentication or before
+the response is read affects only that client; it must not stop the shared accept
+loop or leave a live native-host process with a dead pipe thread. Focused Windows
+regressions cover both failure points and require a later authenticated client to
+complete a real bridge ping through the same server. If the pipe thread still
+exits unexpectedly, the native host terminates cleanly so the extension's bounded
+reconnect loop creates a fresh host instead of retaining a false-live process.
+Both disconnect regressions failed before the correction: the next authenticated
+ping timed out while the native-host process remained alive. They now pass on
+native Windows, together with the dead-thread reconnect fallback. Live HASHI3
+adoption remains a separate gate.
+
 ### HASHI4 live check and catalogue clarification — 2026-10-03
 
 After the HASHI4 Agent adopted the repair, an isolated CLI browser tool read

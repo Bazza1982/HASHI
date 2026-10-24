@@ -249,6 +249,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     ):
         self.session_store = session_store
         self.external_call_busy = lambda owner_id: False
+        self.frontend_call_state = None  # Optional Connector port; media stays with /phone.
         self.global_config = global_config
         self.secrets = dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
@@ -900,6 +901,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                      AND c.phase IN ('connecting', 'active', 'recovering')
                      AND NOT (c.termination_initiator = 'user' AND c.termination_reason = 'user_hangup')"""
             ).fetchall()
+        for row in active_rows:
+            self._publish_frontend_call_state(self._binding_from_row(row), "started")
         self._requeue_pending_provider_events()
         user_hangup_ids = {str(row["call_id"]) for row in user_hangups}
         for row in user_hangups:
@@ -1088,6 +1091,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if epoch != binding.call_epoch:
                 raise LiveVoiceError("live_transport_epoch_changed", 409)
         return binding, row
+
+    def _publish_frontend_call_state(self, binding: CallBinding, phase: str) -> None:
+        # Call only after the corresponding transaction has committed.
+        if callable(self.frontend_call_state):
+            try:
+                self.frontend_call_state(binding, phase)
+            except Exception as exc:
+                self.audit.record(binding, "frontend.lifecycle_failed",
+                                  phase=phase, error_type=type(exc).__name__)
 
     def _append_call_state(self, connection: Any, binding: CallBinding, phase: str, summary: str, **detail: Any) -> Mapping[str, Any]:
         event = self.session_store._append_event(
@@ -3182,6 +3194,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise LiveVoiceError(error_code, 409) from exc
             raise
         if not cancelled:
+            self._publish_frontend_call_state(binding, "started")
             self.audit.record(
                 binding,
                 "call.created",
@@ -4121,6 +4134,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._append_call_state(connection, binding, phase, summary, **state_detail)
             became_terminal = True
         if became_terminal:
+            self._publish_frontend_call_state(binding, "ended")
             if settled_attempts:
                 self.audit.record(
                     binding,

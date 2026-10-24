@@ -851,6 +851,8 @@ def _formal_capabilities(
 
 
 _LEGACY_PROTOCOLS = {
+    "/v1/video/speech": "video.speech.async.v1",
+    "/v1/video/capabilities": "video.speech.capabilities.v1",
     "/v1/chat/completions": "openai.chat.completions",
     "/v1/embeddings": "openai.embeddings",
     "/v1/audio/transcriptions": "openai.audio.transcriptions",
@@ -1133,8 +1135,13 @@ def _parse_hashi_compute_manifest(
             if type(in_flight_raw) is int and in_flight_raw >= 0
             else None
         ),
-        busy=bool(
-            gateway.get("busy") is True or gateway.get("at_capacity") is True
+        # Hashi Compute's busy flag reports activity, including camera requests.
+        # Its explicit capacity flag owns admission; older manifests retain the
+        # conservative busy fallback. Numeric limits still fence saturation.
+        busy=(
+            gateway["at_capacity"]
+            if type(gateway.get("at_capacity")) is bool
+            else gateway.get("busy") is True
         ),
     )
 

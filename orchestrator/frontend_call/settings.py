@@ -79,6 +79,7 @@ class CallSettings:
         rows = []
         title = tr("call.title")
         if page == "home":
+            facts.append(escape(tr("call.companion_modes")))
             rows = [
                 [
                     button(tr("call.stt"), "view", "stt"),

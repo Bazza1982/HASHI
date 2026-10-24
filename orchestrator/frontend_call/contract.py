@@ -193,6 +193,7 @@ OPERATIONS = {
         "allow_cloud",
         "locale",
         "video_requested",
+        "output_protocol",
     },
     "turn": {
         "generation",
@@ -207,6 +208,9 @@ OPERATIONS = {
     "camera": {"generation", "call_id", "enabled"},
     "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at"},
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
+    "speech_commit": {"generation", "call_id", "turn_id", "segment", "output_protocol"},
+    "speech_status": {"generation", "call_id", "turn_id", "segment"},
+    "interrupt": {"generation", "call_id", "turn_id"},
     "filler": {"generation", "call_id", "slot"},
     "end": {"generation", "call_id"},
 }

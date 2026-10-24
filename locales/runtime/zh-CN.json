@@ -5,6 +5,8 @@
   "telegram_language_code": "zh",
   "strings": {
     "call.title": "通话设置",
+    "call.companion_modes": "连接智能体在场（AP）时：/call 使用 VideoTTS 视频通话；/phone 使用语音电话，角色离场接听。",
+    "call.video_unavailable": "视频通话暂不可用，请使用 /phone 进行语音电话。",
     "call.stt": "语音识别",
     "call.tts": "声音",
     "call.vision": "画面",
@@ -2736,7 +2738,7 @@
     "phone.persona.ready": "已安全投影",
     "phone.persona.unavailable": "不可用——已阻止通话",
     "phone.custom.none": "无（沿用人格和说话风格）",
-    "phone.effect": "这是当前代理的工作区设置，与 /voice 相互独立。更改从下一次通话生效；正在进行的通话保持启动时的配置。",
+    "phone.effect": "连接智能体在场（AP）时，/phone 让角色离场接电话，挂断后返回。这是当前代理的工作区设置，与 /voice 相互独立。更改从下一次通话生效；正在进行的通话保持启动时的配置。",
     "phone.action": "请在下方选择；也可用 /phone instructions &lt;提示词&gt; 设置专用说话风格。",
     "phone.next_call": "选择会保存给当前代理，并从下一次通话开始生效。",
     "phone.choose.action": "请在下方选择一项。",

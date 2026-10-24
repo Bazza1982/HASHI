@@ -415,7 +415,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 26
+    SCHEMA_VERSION = 27
 
     def __init__(
         self,
@@ -1694,11 +1694,112 @@ class SessionStore:
             )
             if stored_schema_version < 26:
                 self._reconcile_legacy_output_audio(connection)
+            if stored_schema_version < 27:
+                self._promote_legacy_session_workzones(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
         self._repair_pending_audio_projections()
+
+    def _promote_legacy_session_workzones(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Promote one retained Session snapshot into an empty Agent profile.
+
+        Existing Agent profiles are authoritative and are never overwritten.
+        For an Agent that has only legacy Session state, the default Session is
+        preferred, then an active Session, then the most recently updated one.
+        The selected slot collection is copied as one snapshot; legacy rows stay
+        in place as audit evidence.
+        """
+
+        candidates = connection.execute(
+            """
+            SELECT s.session_id, s.owner_id, LOWER(s.agent_id) AS agent_id,
+                   s.workzone_revision, s.is_default, s.status, s.updated_at
+            FROM sessions AS s
+            WHERE s.instance_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM session_workzones AS legacy
+                  WHERE legacy.session_id = s.session_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_workzone_profiles AS profile
+                  WHERE profile.instance_id = s.instance_id
+                    AND profile.owner_id = s.owner_id
+                    AND profile.agent_id = LOWER(s.agent_id)
+              )
+            ORDER BY s.owner_id, LOWER(s.agent_id), s.is_default DESC,
+                     CASE WHEN s.status = 'active' THEN 0 ELSE 1 END,
+                     s.updated_at DESC, s.session_id DESC
+            """,
+            (self.instance_id,),
+        ).fetchall()
+        selected: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in candidates:
+            key = (str(row["owner_id"]), str(row["agent_id"]))
+            selected.setdefault(key, row)
+
+        for (owner_id, agent_id), session in selected.items():
+            legacy_slots = connection.execute(
+                """
+                SELECT slot_id, path, enabled, label, created_at, updated_at
+                FROM session_workzones
+                WHERE session_id = ?
+                ORDER BY CASE WHEN slot_id = 'main' THEN 0 ELSE 1 END,
+                         CAST(slot_id AS INTEGER)
+                """,
+                (str(session["session_id"]),),
+            ).fetchall()
+            if not legacy_slots:
+                continue
+            now = _utc_now()
+            revision = max(1, int(session["workzone_revision"] or 0) + 1)
+            inserted = connection.execute(
+                """
+                INSERT OR IGNORE INTO agent_workzone_profiles(
+                    instance_id, owner_id, agent_id, revision, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (self.instance_id, owner_id, agent_id, revision, now, now),
+            )
+            if not inserted.rowcount:
+                continue
+            for slot in legacy_slots:
+                connection.execute(
+                    """
+                    INSERT INTO agent_workzones(
+                        instance_id, owner_id, agent_id, slot_id, path,
+                        enabled, label, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.instance_id,
+                        owner_id,
+                        agent_id,
+                        str(slot["slot_id"]),
+                        str(slot["path"]),
+                        int(slot["enabled"]),
+                        str(slot["label"] or ""),
+                        str(slot["created_at"]),
+                        str(slot["updated_at"]),
+                    ),
+                )
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner_id,
+                agent_id=agent_id,
+                revision=revision,
+                kind="agent.workzones_promoted_from_session",
+                source="schema_27_migration",
+                detail={
+                    "session_id": str(session["session_id"]),
+                    "legacy_revision": int(session["workzone_revision"] or 0),
+                    "slots": [str(slot["slot_id"]) for slot in legacy_slots],
+                },
+                created_at=now,
+            )
 
     @staticmethod
     def _legacy_audio_part_matches(
