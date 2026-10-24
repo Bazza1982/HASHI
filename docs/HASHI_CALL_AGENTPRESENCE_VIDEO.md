@@ -82,6 +82,15 @@ automatically resubmitted; explicit speech retry cannot replay an uncertain job.
 Cancellation fences local output immediately and optionally cancels the known
 remote job. Late results cannot upload or resume old presentation.
 
+External AV speech is segmented separately from ordinary audio Call. HASHI
+keeps the complete cleaned answer while limiting each VideoTTS submission to 20
+estimated duration units, preferring sentence, clause, and word boundaries.
+This limit reflects the verified stable range of the selected renderer and does
+not replace the configured input-character guard. Preview, commentary, final,
+and opening speech share the same segmentation rule. A failed async job remains
+terminal and is not retried; diagnostics retain a validated provider error code.
+Non-success HTTP responses retain only their numeric status, never their body.
+
 ## Window contract: call-output/1
 
 The existing authenticated/scoped Call endpoint remains authoritative. New

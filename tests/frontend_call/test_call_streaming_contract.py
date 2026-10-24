@@ -32,6 +32,19 @@ def test_final_answer_coalesces_adjacent_short_sentences():
     assert not truncated
 
 
+def test_video_speech_honours_renderer_duration_boundary_without_changing_audio():
+    text = "测试官，晚上好，露米在这里。今天想聊点什么，或者有什么要我来安排的？"
+    audio_parts, audio_truncated = speech_segments(text)
+    video_parts, video_truncated = speech_segments(text, maximum_duration_units=20)
+
+    assert audio_parts == [text]
+    assert video_parts == [
+        "测试官，晚上好，露米在这里。",
+        "今天想聊点什么，或者有什么要我来安排的？",
+    ]
+    assert not audio_truncated and not video_truncated
+
+
 def test_final_answer_keeps_short_english_sentences_in_one_playable_chunk():
     text = "Fashion is on mark. Camera is stable. All test is complete."
     parts, truncated = speech_segments(text)

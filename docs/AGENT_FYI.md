@@ -175,12 +175,13 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share the shipped/instance catalogue and execution path;
-fixed character-language voices also feed opt-in VideoTTS `call_tts`. Agent state
-stores no endpoint/credential. `/call` owns its lifecycle, freezes revisions,
-privacy-filters fallback and locks the first downgrade. With AP it requires
-compatible VideoTTS and exclusive AV; without AP it retains audio Call. Only the
-Call Window plays its bounded output. See [language voices](HASHIKO_LANGUAGE_VOICES.md),
+`/voice` and `/call` share the catalogue/execution path; character-language
+voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
+credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
+and locks the first downgrade. With AP it requires VideoTTS and exclusive AV;
+without AP it stays audio. AV preserves the full answer in renderer-safe natural
+chunks; audio segmentation is unchanged.
+See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
