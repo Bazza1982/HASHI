@@ -95,7 +95,10 @@ class VideoTTSSelection:
         if not voice or len(voice) > 128 or any(ord(c) < 32 for c in voice):
             raise CallError("call_video_configuration_invalid", 503)
         voice_source = raw.get("voice_source", "configured")
-        if not isinstance(voice_source, str) or voice_source not in {"configured", "call_tts"}:
+        if not isinstance(voice_source, str) or voice_source not in {
+            "configured",
+            "call_tts",
+        }:
             raise CallError("call_video_configuration_invalid", 503)
         speed = raw.get("speed", 1.0)
         maximum = raw.get("max_input_chars", 400)
@@ -156,7 +159,11 @@ class VideoTTSSelection:
             "model_id": self.reference.model_id,
             "protocol": self.protocol,
             "voice": self.voice,
-            **({"voice_source": self.voice_source} if self.voice_source != "configured" else {}),
+            **(
+                {"voice_source": self.voice_source}
+                if self.voice_source != "configured"
+                else {}
+            ),
         }
 
 

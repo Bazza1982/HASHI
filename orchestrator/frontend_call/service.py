@@ -187,13 +187,18 @@ class CallService:
     async def _project_readiness(self, owner, agent, projection):
         """Project /call's effective output while preserving AP-free calls."""
         result = dict(projection)
-        result.update(output_mode="window_audio", output_protocol=None,
-                      output_unavailable_reason=None, fallback_route="phone")
+        result.update(
+            output_mode="window_audio",
+            output_protocol=None,
+            output_unavailable_reason=None,
+            fallback_route="phone",
+        )
         resolver = getattr(self.ports, "call_output", None)
         sink = None
         if callable(resolver):
             sink = await resolver(
-                owner, {"agent_id": agent, "call_id": "preflight"},
+                owner,
+                {"agent_id": agent, "call_id": "preflight"},
                 generation=self.generation,
             )
         video_ready = False
@@ -204,31 +209,40 @@ class CallService:
                 selection = reader(result["revision"]) if callable(reader) else None
                 if selection is None or self.video_synthesizer is None:
                     raise CallError("call_video_not_configured", 503)
-                await self.video_synthesizer.resolve(selection, self.ports.privacy_level(agent))
+                await self.video_synthesizer.resolve(
+                    selection, self.ports.privacy_level(agent)
+                )
                 video_ready = True
             except CallError as exc:
                 result["output_unavailable_reason"] = exc.code
         available = getattr(self.adapters, "target_available", None)
         if not result.get("call_ready"):
             return result
-        profile, targets, catalog = self._freeze_configuration(owner, agent, result["revision"])
+        profile, targets, catalog = self._freeze_configuration(
+            owner, agent, result["revision"]
+        )
         stt_ready = targets.get("stt") is not None and (
-            not callable(available) or available(targets["stt"]))
+            not callable(available) or available(targets["stt"])
+        )
         if sink is not None:
             tts_ready = video_ready
         elif self.tts_synthesizer is not None:
             tts_ready = self.tts_synthesizer.has_eligible_path(
-                catalog, profile.get("tts"), self.ports.privacy_level(agent))
+                catalog, profile.get("tts"), self.ports.privacy_level(agent)
+            )
         else:
             tts_ready = targets.get("tts") is not None and (
-                not callable(available) or available(targets["tts"]))
+                not callable(available) or available(targets["tts"])
+            )
         result["call_ready"] = bool(stt_ready and tts_ready)
         if not result["call_ready"]:
             result["route"] = "phone"
         vision = targets.get("vision")
         result["camera_available"] = bool(
-            result["call_ready"] and vision and (
-                not callable(available) or available(vision)))
+            result["call_ready"]
+            and vision
+            and (not callable(available) or available(vision))
+        )
         return result
 
     def busy(self, owner):

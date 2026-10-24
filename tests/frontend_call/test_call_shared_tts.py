@@ -95,18 +95,29 @@ def _call_document():
 def test_agent_default_voice_is_scoped_and_owner_selection_still_wins(tmp_path):
     config = _shared_config(tmp_path)
     doc = json.loads(config.path.read_text(encoding="utf-8"))
-    chosen = {**doc["default_profile"], "tts": {
-        "target_id": "compute-kokoro", "voice_id": "kokoro_one", "options": {}}}
+    chosen = {
+        **doc["default_profile"],
+        "tts": {"target_id": "compute-kokoro", "voice_id": "kokoro_one", "options": {}},
+    }
     doc["agent_defaults"] = {"character": chosen}
     config.path.write_text(json.dumps(doc), encoding="utf-8")
     context = config.context("owner-a", "character")
     assert context["profile"]["tts"]["voice_id"] == "kokoro_one"
     assert config.context("owner-b", "character")["profile"] == context["profile"]
-    assert config.context("owner-a", "other")["profile"]["tts"]["voice_id"] == "premium_one"
+    assert (
+        config.context("owner-a", "other")["profile"]["tts"]["voice_id"]
+        == "premium_one"
+    )
     override = {**context["profile"], "tts": doc["default_profile"]["tts"]}
     config.save("owner-a", "character", context["revision"], override)
-    assert config.context("owner-a", "character")["profile"]["tts"]["voice_id"] == "premium_one"
-    assert config.context("owner-b", "character")["profile"]["tts"]["voice_id"] == "kokoro_one"
+    assert (
+        config.context("owner-a", "character")["profile"]["tts"]["voice_id"]
+        == "premium_one"
+    )
+    assert (
+        config.context("owner-b", "character")["profile"]["tts"]["voice_id"]
+        == "kokoro_one"
+    )
 
 
 def test_call_derives_tts_services_and_voices_from_the_shared_catalog(tmp_path):

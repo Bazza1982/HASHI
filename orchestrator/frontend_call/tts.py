@@ -102,9 +102,14 @@ class CatalogCallTTS:
             raise CallError("call_tts_catalog_invalid", 503)
         provider, voice_name, options = cls._initial_selection(call, catalog)
         route = resolve_tts_route(
-            provider=provider, voice_name=voice_name, provider_options=options,
-            requested_style=None, text=text, source_language=call.locale,
-            presets=catalog.presets, profiles=VoiceManager.VOICE_PROFILES,
+            provider=provider,
+            voice_name=voice_name,
+            provider_options=options,
+            requested_style=None,
+            text=text,
+            source_language=call.locale,
+            presets=catalog.presets,
+            profiles=VoiceManager.VOICE_PROFILES,
             provider_profiles=catalog.routing_profiles(),
         )
         if route.unsupported_language or not route.voice_name:
