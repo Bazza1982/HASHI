@@ -1005,7 +1005,9 @@ def _hashi_compute_feature(
     return support == "supported"
 
 
-def _hashi_compute_interfaces(value: Any) -> tuple[ComputeInterface, ...]:
+def _hashi_compute_interfaces(
+    value: Any, *, allow_unknown: bool = False
+) -> tuple[ComputeInterface, ...]:
     if not isinstance(value, list) or not value:
         raise ComputeServiceError("manifest_interface_invalid")
     interfaces: list[ComputeInterface] = []
@@ -1039,6 +1041,8 @@ def _hashi_compute_interfaces(value: Any) -> tuple[ComputeInterface, ...]:
         )
         if support == "unsupported":
             streaming = ("none",)
+        elif support == "unknown" and allow_unknown:
+            streaming = ()
         elif support != "supported":
             raise ComputeServiceError("manifest_interface_invalid")
         interfaces.append(
@@ -1268,7 +1272,9 @@ def _parse_hashi_compute_manifest(
                 status=status,
                 input_modalities=inputs,
                 output_modalities=outputs,
-                interfaces=_hashi_compute_interfaces(model.get("interfaces")),
+                interfaces=_hashi_compute_interfaces(
+                    model.get("interfaces"), allow_unknown=not available
+                ),
                 image=image_limits,
                 audio=audio_formats,
                 tools=tools,

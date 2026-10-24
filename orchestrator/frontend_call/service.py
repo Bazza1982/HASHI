@@ -41,6 +41,7 @@ from .contract import (
     complete_speech_segments,
     filler_phrases,
     MAX_SPEECH_SEGMENTS,
+    MAX_VIDEO_SPEECH_DURATION_UNITS,
     speech_segments,
 )
 
@@ -52,6 +53,10 @@ def _speech_asset_bytes(asset):
         return 0
     padding = len(encoded) - len(encoded.rstrip("="))
     return max(0, len(encoded) * 3 // 4 - padding)
+
+
+def _speech_duration_limit(call):
+    return MAX_VIDEO_SPEECH_DURATION_UNITS if call.output is not None else None
 
 
 @dataclass
@@ -1646,7 +1651,10 @@ class CallService:
                 preview = (str(turn.get("_answer_preview") or "") + raw_content)[:64000]
                 turn["_answer_preview"] = preview
                 presented_preview = clean_speech_text(preview)
-                stable, _remainder = complete_speech_segments(presented_preview)
+                stable, _remainder = complete_speech_segments(
+                    presented_preview,
+                    maximum_duration_units=_speech_duration_limit(call),
+                )
                 known = list(turn.get("_answer_parts") or ())
                 if stable[: len(known)] == known:
                     for part in stable[len(known) :]:
@@ -1685,7 +1693,10 @@ class CallService:
             if not content or len(content) > 320 or event_id in seen:
                 continue
             seen.add(event_id)
-            commentary, _truncated = speech_segments(content)
+            commentary, _truncated = speech_segments(
+                content,
+                maximum_duration_units=_speech_duration_limit(call),
+            )
             for part in commentary[:2]:
                 self._queue_speech(call, turn, part, "commentary")
             self._append_row(
@@ -1700,7 +1711,10 @@ class CallService:
             )
 
     def _finalize_speech(self, call, turn, answer):
-        final_parts, truncated = speech_segments(answer)
+        final_parts, truncated = speech_segments(
+            answer,
+            maximum_duration_units=_speech_duration_limit(call),
+        )
         known = list(turn.get("_answer_parts") or ())
         if final_parts[: len(known)] == known:
             remaining = final_parts[len(known) :]
@@ -1814,7 +1828,10 @@ class CallService:
                         stage="opening",
                     )
             turn["answer"] = answer
-            turn["speech_segments"], turn["speech_truncated"] = speech_segments(answer)
+            turn["speech_segments"], turn["speech_truncated"] = speech_segments(
+                answer,
+                maximum_duration_units=_speech_duration_limit(call),
+            )
             turn["phase"] = "complete"
             turn["latency_ms"] = int((self.clock() - started) * 1000)
             self._append_row(

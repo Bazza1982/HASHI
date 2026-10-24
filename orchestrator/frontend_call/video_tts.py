@@ -219,6 +219,10 @@ class VideoSpeechClient(ComputeServiceClient):
                     method, url, headers=headers, json=payload, allow_redirects=False
                 ) as response:
                     if response.status not in {200, 201, 202}:
+                        emit(
+                            "video_tts_service_rejected",
+                            provider_http_status=int(response.status),
+                        )
                         raise CallError("call_video_service_rejected", 502)
                     mime = (
                         response.headers.get("Content-Type", "")
@@ -403,6 +407,7 @@ class CallVideoTTS:
                         "video_tts_failed",
                         provider_request_id=job_id,
                         error_code="call_video_generation_failed",
+                        provider_error_code=safe_code,
                         run_state=status,
                     )
                     if on_job is not None:

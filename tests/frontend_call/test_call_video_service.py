@@ -142,6 +142,24 @@ async def test_unconnected_call_keeps_legacy_audio(tmp_path):
     await service.close()
 
 
+async def test_external_video_opening_uses_renderer_safe_speech_segments(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+
+    async def opening(*_args):
+        return "测试官，晚上好，露米在这里。今天想聊点什么，或者有什么要我来安排的？"
+
+    ports.opening = opening
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    await call.task
+
+    assert call.turn["speech_segments"] == [
+        "测试官，晚上好，露米在这里。",
+        "今天想聊点什么，或者有什么要我来安排的？",
+    ]
+    await service.close()
+
+
 async def test_av_prepare_commit_interrupt_and_end_share_one_call(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     result = await service.invoke("owner", body)

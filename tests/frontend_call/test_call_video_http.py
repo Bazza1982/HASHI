@@ -105,7 +105,11 @@ def selection(**overrides):
 async def test_independent_provider_manifest_job_and_result_boundaries(
     tmp_path, monkeypatch, outcome, code
 ):
-    app, posts, redirected = web.Application(), [], []
+    app, posts, redirected, diagnostics = web.Application(), [], [], []
+    monkeypatch.setattr(
+        "orchestrator.frontend_call.video_tts.emit",
+        lambda event, **facts: diagnostics.append({"event": event, **facts}),
+    )
 
     async def discovery(request):
         return web.json_response(manifest())
@@ -189,6 +193,18 @@ async def test_independent_provider_manifest_job_and_result_boundaries(
             == "data:image/png;base64," + base64.b64encode(PNG).decode()
         )
         assert posts[0]["voice"] == "warm" and posts[0]["model"] == "talker"
+        if outcome == "failed":
+            assert any(
+                event.get("event") == "video_tts_failed"
+                and event.get("provider_error_code") == "render_failed"
+                for event in diagnostics
+            )
+        if outcome == "redirect":
+            assert any(
+                event.get("event") == "video_tts_service_rejected"
+                and event.get("provider_http_status") == 302
+                for event in diagnostics
+            )
     finally:
         await runner.cleanup()
 
