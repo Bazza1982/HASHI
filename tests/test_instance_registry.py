@@ -347,3 +347,25 @@ def test_concurrent_instance_creates_are_serialized_and_keep_unique_ports(regist
     }
     assert len({record["api_port"] for record in records}) == 4
     assert len(registry.records()) == 4
+
+
+def test_windows_transient_lock_permission_error_is_retried(tmp_path, monkeypatch):
+    lock_path = tmp_path / "instances.json.lock"
+    real_open = instance_registry.os.open
+    calls = 0
+
+    def transient_open(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(13, "Permission denied", str(lock_path))
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(instance_registry.sys, "platform", "win32")
+    monkeypatch.setattr(instance_registry.os, "open", transient_open)
+
+    with instance_registry._exclusive_lock(lock_path):
+        assert lock_path.is_file()
+
+    assert calls == 2
+    assert not lock_path.exists()
