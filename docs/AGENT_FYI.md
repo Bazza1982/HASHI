@@ -38,12 +38,7 @@ retry only before a durable receipt; durable `target_busy` stays pending. `max`
 rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
 
-A Git source release uses the separate `hashi update` lifecycle: fast-forward
-the clean checkout, let supervised Remote cold-restart Core, then re-register
-and restart Remote. Success requires source, Core, Functions, every Worker and
-Remote to report the exact target commit. Remote remains independent for
-ordinary rescue and `/reboot`; independence does not exempt it from release
-adoption. See [source release closure](HASHI_SOURCE_RELEASE_CLOSURE.md).
+`hashi update` must adopt source, Core, Workers and Remote together or fail.
 
 ## Configuration, identity, and persistence
 
