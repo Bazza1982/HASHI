@@ -1,7 +1,6 @@
 """External AV must fence presentation without changing PAO input ownership."""
 
 import asyncio
-import base64
 import hashlib
 import pytest
 from orchestrator.frontend_call.contract import CallError
@@ -41,7 +40,7 @@ class Output:
 
     async def prepare(self, utterance, media, *, epoch):
         self.require_active(epoch)
-        assert media in {b"AV media", b"fallback AV media"}
+        assert media == b"AV media"
         self.prepared.append(utterance)
         receipt = {
             "call_id": self.internal_call_id,
@@ -99,42 +98,6 @@ class Generator:
         if self.error is not None:
             raise self.error
         return {"media": b"AV media", "provider_receipt": {"job_id": "job-one"}}
-
-
-class Muxer:
-    def __init__(self):
-        self.calls = []
-
-    async def __call__(self, reference, audio, media_type):
-        self.calls.append((reference, audio, media_type))
-        return b"fallback AV media"
-
-
-class SharedAudioFallback:
-    def __init__(self):
-        self.calls = 0
-
-    def has_eligible_path(self, *args):
-        return True
-
-    async def synthesize(self, call, text, **kwargs):
-        self.calls += 1
-        call.tts_effective_service = "windows"
-        call.tts_audio_fallback_reason_code = "tts_provider_unavailable"
-        return {
-            "media_type": "audio/wav",
-            "content_b64": wav(),
-            "provider_receipt": None,
-            "_billing_target": call.targets["tts"],
-            "_tts_route": {
-                "service_id": "windows",
-                "service_label": "Windows Local TTS",
-                "selected_service_id": "hashi-compute-kokoro",
-                "selected_service_label": "HASHI Compute Kokoro",
-                "degraded": True,
-                "reason_code": "tts_provider_unavailable",
-            },
-        }
 
 
 async def arranged(tmp_path, *, connected=True, protocol="call-output/1"):
@@ -425,141 +388,103 @@ async def test_video_output_does_not_depend_on_unused_audio_tts_credentials(tmp_
     await service.close()
 
 
-async def test_video_failure_falls_back_to_audio_without_ending_call(tmp_path):
+async def test_video_service_resolution_failure_starts_with_window_audio(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
-    muxer = Muxer()
-    service.av_fallback_muxer = muxer
+
+    async def unavailable(*_args):
+        raise CallError("call_video_service_unavailable", 503)
+
+    gen.resolve = unavailable
+    result = await service.invoke("owner", body)
+
+    assert result["phase"] == "active"
+    assert result["output"]["mode"] == "window_audio"
+    assert result["output"]["degraded"] is True
+    assert result["output"]["degradation_reason"] == "call_video_service_unavailable"
+    assert result["tts"]["mode"] == "audio_fallback"
+    assert output.starts == 0
+    await service.close()
+
+
+async def test_video_generation_failure_uses_normal_tts_without_ending_call(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     gen.error = CallError("call_video_generation_failed", 502)
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     call.turn = {
         "turn_id": "answer",
         "phase": "complete",
-        "speech_segments": ["仍然保持通话。"],
+        "speech_segments": ["Keep the call alive."],
     }
 
     service._start_speech(call, 0, call.turn["speech_segments"][0])
-    task = call.speech_task
-    await task
+    await call.speech_task
+    speech = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
 
     assert call.phase == "active"
-    assert call.speech_errors == {}
     assert adapters.tts == 1
-    assert output.prepared
-    assert muxer.calls[0][0] == output.reference
-    assert base64.b64decode(wav()).startswith(b"RIFF")
-    assert muxer.calls[0][1].startswith(b"RIFF")
-    assert muxer.calls[0][2] == "audio/wav"
-    assert service._view(call)["tts"] == {
-        "selected_service_id": "avatar",
-        "selected_service_label": "avatar",
-        "effective_service_id": "mouth",
-        "effective_service_label": "mouth",
-        "degraded": True,
-        "reason_code": "call_video_generation_failed",
-        "audio_reason_code": None,
-        "error_code": None,
-        "mode": "audio_fallback",
-        "status": "degraded",
-    }
+    assert speech["ready"] is True
+    assert speech["media_type"] == "audio/wav"
+    assert speech["content_b64"] == wav()
+    assert speech["output"]["mode"] == "window_audio"
+    assert speech["tts"]["mode"] == "audio_fallback"
+    assert speech["tts"]["reason_code"] == "call_video_generation_failed"
+    assert output.ends >= 1
     await service.close()
 
 
-async def test_opening_video_failure_uses_shared_compute_to_local_tts_chain(tmp_path):
+async def test_video_and_audio_failure_keeps_call_alive_with_visible_error(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
-    muxer = Muxer()
-    shared_tts = SharedAudioFallback()
-    service.av_fallback_muxer = muxer
-    service.tts_synthesizer = shared_tts
-    gen.error = CallError("call_video_generation_failed", 502)
-
-    async def opening(*_args):
-        return "开场视频失败后，仍然继续通话。"
-
-    ports.opening = opening
-    await service.invoke("owner", body)
-    call = service.calls["call-1"]
-    await call.task
-    for _ in range(100):
-        if call.speech_cache:
-            break
-        await asyncio.sleep(0.001)
-
-    tts = service._view(call)["tts"]
-    assert call.phase == "active"
-    assert call.speech_errors == {}
-    assert shared_tts.calls == 1
-    assert output.prepared
-    assert tts["effective_service_id"] == "windows"
-    assert tts["effective_service_label"] == "Windows Local TTS"
-    assert tts["reason_code"] == "call_video_generation_failed"
-    assert tts["audio_reason_code"] == "tts_provider_unavailable"
-    await service.close()
-
-
-async def test_video_downgrade_locks_all_concurrent_segments_to_audio(tmp_path):
-    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
-    muxer = Muxer()
-    service.av_fallback_muxer = muxer
-    original_synthesize = gen.synthesize
-
-    async def synthesize(selection, reference, text, **kwargs):
-        if text == "First fails.":
-            raise CallError("call_video_generation_failed", 502)
-        return await original_synthesize(selection, reference, text, **kwargs)
-
-    gen.synthesize = synthesize
-    await service.invoke("owner", body)
-    call = service.calls["call-1"]
-    call.turn = {
-        "turn_id": "answer",
-        "phase": "complete",
-        "speech_segments": [],
-    }
-    service._queue_speech(call, call.turn, "First fails.", "answer")
-    service._queue_speech(call, call.turn, "Second was already rendering.", "answer")
-    tasks = list(call.speech_tasks.values())
-    await asyncio.gather(*tasks)
-
-    assert call.phase == "active"
-    assert call.speech_errors == {}
-    assert adapters.tts == 2
-    assert len(muxer.calls) == 2
-    assert len(output.prepared) == 2
-    assert service._view(call)["tts"]["mode"] == "audio_fallback"
-    await service.close()
-
-
-async def test_total_tts_failure_keeps_call_alive_with_visible_captions_only(tmp_path):
-    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
-    muxer = Muxer()
-    service.av_fallback_muxer = muxer
     gen.error = CallError("call_video_generation_failed", 502)
     adapters.fail_tts = True
-    body["locale"] = "zh-CN"
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     call.turn = {
         "turn_id": "answer",
         "phase": "complete",
-        "speech_segments": ["语音暂时不可用，但通话仍然继续。"],
+        "speech_segments": ["Keep the call alive."],
     }
 
     service._start_speech(call, 0, call.turn["speech_segments"][0])
-    task = call.speech_task
-    await task
+    await call.speech_task
+    with pytest.raises(CallError, match="call_provider_rejected"):
+        await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+    snapshot = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "operation": "snapshot",
+        },
+    )
 
-    tts = service._view(call)["tts"]
     assert call.phase == "active"
-    assert call.speech_errors == {}
-    assert output.prepared
-    assert muxer.calls[0][1].startswith(b"RIFF")
-    assert tts["mode"] == "captions_only"
-    assert tts["status"] == "unavailable"
-    assert tts["effective_service_id"] == "captions_only"
-    assert "字幕" in tts["effective_service_label"]
-    assert tts["reason_code"] == "call_video_generation_failed"
-    assert tts["error_code"] == "call_provider_rejected"
+    assert call.speech_errors[0] == "call_provider_rejected"
+    assert snapshot["output"]["mode"] == "window_audio"
+    assert snapshot["tts"]["mode"] == "audio_fallback"
+    assert snapshot["tts"]["status"] == "degraded"
+    assert snapshot["tts"]["error_code"] == "call_provider_rejected"
     await service.close()
 
 

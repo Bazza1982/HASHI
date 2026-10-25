@@ -5,27 +5,26 @@ from orchestrator.frontend_optional_egress import _call_event
 from orchestrator.agent_presence_notify import AgentPresenceConnectorAdapter
 
 
-async def test_connected_call_explicitly_uses_audio_fallback_when_video_is_disabled(tmp_path):
+async def test_connected_call_explicitly_uses_audio_when_video_is_disabled(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     service.config.video_tts_selection = lambda revision: None
     result = await service.invoke("owner", body)
     assert result["phase"] == "active"
+    assert result["output"]["mode"] == "window_audio"
+    assert result["output"]["degraded"] is True
+    assert result["output"]["degradation_reason"] == "call_video_not_configured"
     assert result["tts"]["mode"] == "audio_fallback"
-    assert result["tts"]["degraded"] is True
-    assert result["tts"]["reason_code"] == "call_video_not_configured"
-    assert output.starts == 1 and adapters.tts == 0
+    assert output.starts == 0 and adapters.tts == 0
     assert service.busy("owner")
     await service.close()
 
 
-async def test_connected_readiness_explains_video_degradation_without_blocking_call(
-    tmp_path,
-):
+async def test_connected_readiness_reports_video_degradation(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     service.config.video_tts_selection = lambda revision: None
     result = await service.invoke("owner", {**base, "operation": "context"})
     assert result["call_ready"] is True
-    assert result["output_mode"] == "external_av"
+    assert result["output_mode"] == "window_audio"
     assert result["output_unavailable_reason"] is None
     assert result["output_degraded"] is True
     assert result["output_degradation_reason"] == "call_video_not_configured"

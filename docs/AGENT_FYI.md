@@ -180,11 +180,11 @@ Workbench/TUI play locally; reboot receipts never prove playback.
 `/voice` and `/call` share the catalogue/execution path; character-language
 voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
 credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
-and locks the first downgrade. With AP it prefers VideoTTS and keeps exclusive
-AV presentation; VideoTTS failure visibly degrades through Compute TTS and the
-configured local TTS chain, packaging fallback audio as static AV without
-ending the Call. Total speech failure continues captions-only with a stable
-error. Without AP it stays audio. AV preserves the full answer in two-stage output:
+and locks the first downgrade. With AP it prefers VideoTTS and exclusive AV;
+VideoTTS unavailability visibly fences AP and returns the same Call to its
+existing ordinary TTS chain without ending it. No media assembly or optional
+dependency is added for this handoff. Without AP it stays audio. Healthy AV
+preserves the full answer in two-stage output:
 its first complete sentence is expedited, then all remaining text is submitted
 as one batch. Provider answer deltas can release the first sentence before the
 Run finishes; both bounded VideoTTS renders may enter Compute early, while AP

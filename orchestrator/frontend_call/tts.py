@@ -181,16 +181,11 @@ class CatalogCallTTS:
         call.tts_effective_options = dict(result.effective_provider_options)
         call.tts_error_code = ""
         call.tts_error_reason = ""
-        if effective != selected:
-            audio_reason = str(
+        if effective != selected and not call.tts_fallback_reason_code:
+            call.tts_fallback_reason_code = str(
                 result.asset.fallback_reason_code or "tts_provider_failed"
             )
-            if not call.tts_audio_fallback_reason_code:
-                call.tts_audio_fallback_reason_code = audio_reason
-            if not call.tts_fallback_reason_code:
-                call.tts_fallback_reason_code = audio_reason
         service = catalog.service(effective)
-        call.tts_effective_service_label = str(service["label"])
         return {
             "content_b64": base64.b64encode(audio).decode("ascii"),
             "media_type": result.asset.mime_type,
@@ -205,7 +200,7 @@ class CatalogCallTTS:
                 "selected_service_id": selected,
                 "selected_service_label": catalog.service_label(selected),
                 "degraded": effective != selected,
-                "reason_code": call.tts_audio_fallback_reason_code or None,
+                "reason_code": call.tts_fallback_reason_code or None,
             },
         }
 
