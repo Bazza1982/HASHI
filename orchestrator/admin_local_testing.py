@@ -236,6 +236,10 @@ async def try_execute_slash_command_text(
     chat_id: int | str | None = None,
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    from orchestrator.agent_presence_controls import try_dispatch as dispatch_ap_controls
+    controls = await dispatch_ap_controls(runtime, text, source_channel=source_channel)
+    if controls is not None:
+        return controls
     voice_confirmation = await try_dispatch_voice_confirmation_transport(
         runtime, text, source_channel=source_channel,
     )

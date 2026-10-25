@@ -5,6 +5,10 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_STRICT_SETTINGS_SAVE = ContextVar("hashi_strict_settings_save", default=False)
 from pathlib import Path
 from typing import Any, Optional
 
@@ -402,6 +406,8 @@ class FlexibleBackendManager:
                 self.logger.error(f"Failed to load state.json: {e}")
 
     def _read_state_dict(self) -> dict[str, Any]:
+        if _STRICT_SETTINGS_SAVE.get():
+            return self.state_store.read_strict()
         try:
             return self.state_store.read()
         except Exception as e:
@@ -449,7 +455,18 @@ class FlexibleBackendManager:
         try:
             self.state_store.replace(state)
         except Exception as e:
+            if _STRICT_SETTINGS_SAVE.get():
+                raise
             self.logger.error(f"Failed to save state.json: {e}")
+
+    @contextmanager
+    def strict_settings_save(self):
+        """Propagate owner persistence failures for confirmed control operations."""
+        token = _STRICT_SETTINGS_SAVE.set(True)
+        try:
+            yield
+        finally:
+            _STRICT_SETTINGS_SAVE.reset(token)
 
     def _save_state(
         self,
