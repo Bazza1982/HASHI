@@ -93,6 +93,26 @@ def test_update_command_is_one_closed_release_operation():
     assert args.branch == "main"
 
 
+def test_runtime_handoff_is_not_owned_by_the_core_restart_controller(
+    tmp_path: Path,
+):
+    argv = release_update._runtime_release_argv(
+        runtime_command=["python"],
+        code_root=tmp_path,
+        release_home=tmp_path,
+        instance_id="HASHI3",
+        api_port=18804,
+        expected_commit="a" * 40,
+        timeout=300,
+    )
+
+    assert "--bridge-home" not in argv
+    assert "--release-home" in argv
+    deploy_index = argv.index("deploy")
+    args = release_update._parser().parse_args(argv[deploy_index:])
+    assert args.bridge_home == tmp_path
+
+
 def test_fast_forward_checkout_updates_exact_fetched_main(tmp_path: Path):
     source, deployed = _source_repository(tmp_path)
     (source / "version.txt").write_text("two\n", encoding="utf-8")

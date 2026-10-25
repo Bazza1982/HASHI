@@ -710,6 +710,39 @@ def _release_environment(
     return environment
 
 
+def _runtime_release_argv(
+    *,
+    runtime_command: Sequence[str],
+    code_root: Path,
+    release_home: Path,
+    instance_id: str,
+    api_port: int,
+    expected_commit: str,
+    timeout: float,
+) -> list[str]:
+    # bridge_ctl.ps1 identifies Core-owned Python processes by --bridge-home.
+    # This coordinator must survive the Core restart, so it uses a distinct
+    # private option that the runtime controller cannot mistake for ownership.
+    return [
+        *runtime_command,
+        "-m",
+        "tools.release_update",
+        "deploy",
+        "--code-root",
+        str(code_root),
+        "--release-home",
+        str(release_home),
+        "--instance-id",
+        str(instance_id),
+        "--api-port",
+        str(int(api_port)),
+        "--expected-commit",
+        str(expected_commit),
+        "--timeout",
+        str(int(timeout)),
+    ]
+
+
 def run_source_release(
     *,
     code_root: Path | str,
@@ -751,24 +784,15 @@ def run_source_release(
         env=_release_environment(root, home, instance_id),
     )
 
-    argv = [
-        *runtime_command,
-        "-m",
-        "tools.release_update",
-        "deploy",
-        "--code-root",
-        str(root),
-        "--bridge-home",
-        str(home),
-        "--instance-id",
-        str(instance_id),
-        "--api-port",
-        str(int(api_port)),
-        "--expected-commit",
-        str(source["target_commit"]),
-        "--timeout",
-        str(int(timeout)),
-    ]
+    argv = _runtime_release_argv(
+        runtime_command=runtime_command,
+        code_root=root,
+        release_home=home,
+        instance_id=instance_id,
+        api_port=api_port,
+        expected_commit=str(source["target_commit"]),
+        timeout=timeout,
+    )
     _progress("continuing with the coordinator from the fetched commit")
     completed = _run(
         argv,
@@ -780,6 +804,12 @@ def run_source_release(
         stdout=subprocess.PIPE,
         stderr=None,
     )
+    if not str(completed.stdout or "").strip():
+        raise ReleaseUpdateError(
+            "runtime_release",
+            "updated release coordinator exited without a receipt",
+            details={"exit_code": completed.returncode},
+        )
     try:
         child_payload = json.loads(str(completed.stdout or "").strip())
     except json.JSONDecodeError as exc:
@@ -827,7 +857,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     deploy = commands.add_parser("deploy", add_help=False)
     deploy.add_argument("--code-root", type=Path, required=True)
-    deploy.add_argument("--bridge-home", type=Path, required=True)
+    deploy.add_argument("--release-home", dest="bridge_home", type=Path, required=True)
     deploy.add_argument("--instance-id", required=True)
     deploy.add_argument("--api-port", type=int, required=True)
     deploy.add_argument("--expected-commit", required=True)
