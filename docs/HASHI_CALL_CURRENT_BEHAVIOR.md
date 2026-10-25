@@ -192,8 +192,14 @@ numeric response-length requirements are retired.
   external AV uses the scoped [Call output contract](HASHI_CALL_AGENTPRESENCE_VIDEO.md):
   HASHI obtains AP’s reference, invokes compatible VideoTTS, and AP presents both
   audio and video after explicit commit. The window yields reply audio and
-  fillers; microphone/camera admission remains independent. An unavailable
-  synthesis path shows a visible error and transcript rather than silent success.
+  fillers; microphone/camera admission remains independent. Missing or failed
+  VideoTTS degrades the same Call to the ordinary catalogue path: selected
+  Compute TTS, then configured local TTS. HASHI packages that audio with AP's
+  reference as a complete static MP4, so output ownership does not race and the
+  Call does not hang up. If all speech providers fail, AP receives a short
+  captions-only presentation and the Call remains live. Snapshots expose the
+  selected/effective services, fallback mode, original VideoTTS reason, any
+  audio-provider fallback reason, and final speech error; failure is never silent.
 - **CALL-SPEECH-16** — External AV sends the first complete sentence as soon as
   it is stable from the Workbench-only provider-preview lane, then sends all
   remaining cleaned answer text as one second VideoTTS request. Up to two
@@ -242,7 +248,8 @@ numeric response-length requirements are retired.
   effective TTS service labels. When they differ, the Call Window renders a
   localized notice in the notice area, separate from transcript content, in the
   form “selected → effective”. It remains visible for that call without being
-  repeated as a caption.
+  repeated as a caption. Captions-only recovery is named explicitly, and stable
+  reason/error codes remain available in the same snapshot for diagnostics.
 
 ## Voice-media billing
 

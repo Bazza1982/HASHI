@@ -1,16 +1,21 @@
 # Call external AV output and AgentPresence
 
-Decision: user-approved integration on HASHI3, 2026-10-23.
+Decision: user-approved integration on HASHI3, 2026-10-23; user-directed
+failure recovery strengthened on 2026-10-25.
 Functional owner: Frontend Connector Call Function; PAO retains the Compute
 Service Directory and Conversation/Run authority. Layer 2 Functions and
 Layer 4 instance configuration. Protected Core is unchanged.
 
 ## Command policy (2026-10-23)
 
-- When the opted-in AP connector is connected, `/call` requires VideoTTS and
-  `call-output/1` window handoff. Disabled, missing or unavailable VideoTTS
-  produces an explicit error and `fallback_route: phone`; it never silently
-  starts an audio call. AP-free Call retains its existing behavior.
+- When the opted-in AP connector is connected, `/call` requires the
+  `call-output/1` window handoff and prefers VideoTTS. Missing, unavailable,
+  or failed VideoTTS no longer ends or redirects the Call. HASHI visibly
+  degrades through the selected ordinary TTS catalogue (Compute first, then
+  its configured local candidates) while AP remains the sole presenter.
+  If every speech provider fails, the same Call continues captions-only and
+  exposes stable failure/degradation codes. AP-free Call retains its existing
+  audio behavior; neither path silently invokes `/phone`.
 - `/phone` keeps the existing live-audio provider, microphone and audio owner.
   The companion leaves for the phone call, stays away, then returns on hangup.
   The two media services share their existing foreground admission interlock.
@@ -30,7 +35,9 @@ Layer 4 instance configuration. Protected Core is unchanged.
   Call keeps its existing STT, camera, PAO, audio TTS, fallback and window playback.
 - In negotiated AV mode, HASHI Call selects and invokes VideoTTS. AP supplies
   the active pack/day-or-night PNG and owns enter/idle/exit clips and synchronized
-  reply audio/video. HASHI keeps reference/media bytes transiently for transport.
+  reply audio/video. On VideoTTS failure, HASHI packages ordinary fallback audio
+  with that same reference as a bounded static H.264/AAC MP4. HASHI keeps
+  reference/media bytes transiently for transport.
 - A service must return one complete H.264/AAC MP4 containing both video and
   audio. AP validates the tracks and independently confirms decode/presentation.
   Separate, unsynchronized audio is not treated as a successful AV response.
@@ -74,7 +81,9 @@ cancelled. Cancel is optional and declared by the configured adapter path.
 The result URL must remain on the configured origin; redirects and environment
 proxies are disabled. Responses are bounded. Privacy is checked before every
 generation and again before presentation. A changed configured node origin
-cannot silently redirect an existing call. There is no automatic provider fallback.
+cannot silently redirect an existing call. A failed VideoTTS job is never
+replayed or silently sent to a different video provider; Call instead enters
+the explicit ordinary-TTS recovery chain.
 
 An accepted job ID is projected to the current turn and content-free diagnostic
 journal before polling. An uncertain submission or job outcome is never
@@ -94,9 +103,9 @@ render may finish first but cannot overtake the opener at the presentation gate.
 A one-sentence answer remains one request, and ordinary audio Call remains
 serial. The configured input-character guard still applies. Preview,
 commentary, final, and opening speech share this rule. A failed async job
-remains terminal and is not retried; diagnostics retain a validated provider
-error code. Non-success HTTP responses retain only their numeric status, never
-their body.
+remains terminal and is not retried. Its validated error code becomes the
+visible degradation reason before ordinary TTS is attempted. Non-success HTTP
+responses retain only their numeric status, never their body.
 
 ## Window contract: call-output/1
 
@@ -124,20 +133,27 @@ context responses advertise `output_protocols: ["call-output/1"]`.
    accepted caller turn also fences prior AV before generating new output.
 6. `end`, lease expiry and service shutdown fence output and end the scoped AP
    context. Snapshot polling observes AP hangup/disconnection and ends the same
-   HASHI Call. No mid-utterance audio-only fallback or replay is inferred.
+   HASHI Call. A VideoTTS generation failure may explicitly switch the remaining
+   Call to ordinary TTS, but AP still receives one ordered complete MP4 per
+   segment; no browser-audio race or failed-job replay is inferred.
 
 Control operations preserve owner/client/Agent/Conversation/context-generation/
 Call-generation binding. Missing or stale IDs are rejected. Camera changes
-remain independent of avatar output. A fresh service failure is exposed through
-speech/turn receipts and a stable error code; readiness alone is not generation.
+remain independent of avatar output. Snapshots expose `tts.mode`,
+selected/effective services, video and audio fallback reasons, and the final
+speech error when captions-only recovery is active. Readiness alone is not
+generation.
 
 ## Implementation and evidence scope
 
-The implementation is in `frontend_call/output.py`, `video_tts.py`, the existing
-Call service/config/routes/port, and the AP Connector port. The connector owns
-its existing token and local transport; Call business code imports no AP client.
+The implementation is in `frontend_call/output.py`, `fallback_av.py`,
+`video_tts.py`, the existing Call service/config/routes/port, and the AP
+Connector port. The connector owns its existing token and local transport;
+Call business code imports no AP client. The standard media profile supplies a
+versioned FFmpeg binary for bounded static fallback packaging.
 
-Focused checks cover legacy audio, provider-delta preview, concurrent bounded
+Focused checks cover legacy audio, VideoTTS-to-Compute/local fallback,
+captions-only continuation, provider-delta preview, concurrent bounded
 first-sentence/remainder generation, ordered AV prepare/commit, late-result
 fencing, duplicate start, unused audio-TTS
 credentials, configured third-party manifests, privacy/origin/download bounds,

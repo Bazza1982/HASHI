@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 from dataclasses import replace
 
+from .fallback_av import mux_audio_to_static_mp4
 from .tts import CatalogCallTTS
 
 from .contract import CallError
@@ -14,7 +15,18 @@ OUTPUT_PROTOCOL = "call-output/1"
 
 
 class ExternalCallOutput:
-    def __init__(self, call, ports, connector, synthesizer, selection, resolved=None):
+    def __init__(
+        self,
+        call,
+        ports,
+        connector,
+        synthesizer,
+        selection,
+        resolved=None,
+        *,
+        fallback_reason_code=None,
+        fallback_muxer=None,
+    ):
         self.call, self.ports = call, ports
         self.connector, self.synthesizer, self.selection = (
             connector,
@@ -27,11 +39,50 @@ class ExternalCallOutput:
         )
         self.barrier = None
         self._prepare_done = {}
+        self.fallback_reason_code = str(fallback_reason_code or "")
+        self.fallback_mode = (
+            "audio_fallback" if self.fallback_reason_code else "video_tts"
+        )
+        self.fallback_error_code = ""
+        self.fallback_muxer = fallback_muxer or mux_audio_to_static_mp4
+
+    @property
+    def selected_service_id(self):
+        if self.selection is None:
+            return "video_tts"
+        return self.selection.reference.service_id
+
+    @property
+    def video_enabled(self):
+        return self.selection is not None and self.fallback_mode == "video_tts"
+
+    @property
+    def captions_only(self):
+        return self.fallback_mode == "captions_only"
+
+    def activate_audio_fallback(self, reason_code):
+        if not self.fallback_reason_code:
+            self.fallback_reason_code = str(reason_code or "call_video_generation_failed")
+        if not self.captions_only:
+            self.fallback_mode = "audio_fallback"
+
+    def activate_captions_only(self, error_code):
+        self.fallback_error_code = str(error_code or "call_speech_unavailable")
+        self.fallback_mode = "captions_only"
+
+    @staticmethod
+    def can_audio_fallback(exc):
+        if not isinstance(exc, CallError):
+            return False
+        return bool(getattr(exc, "call_audio_fallback_allowed", False)) or exc.code in {
+            "call_video_fallback_active",
+            "call_video_prior_segment_failed",
+        }
 
     def privacy(self):
         self.ports.validate(self.call.owner, self.call.binding)
         level = self.ports.privacy_level(self.call.binding["agent_id"])
-        if self.location == "internet" and level not in (0, 1):
+        if self.video_enabled and self.location == "internet" and level not in (0, 1):
             raise CallError("call_cloud_privacy_unqualified", 403)
         return level
 
@@ -40,7 +91,14 @@ class ExternalCallOutput:
             await asyncio.shield(self.barrier)
 
     def view(self):
-        return {**self.connector.view(), "service": self.selection.public()}
+        return {
+            **self.connector.view(),
+            "service": self.selection.public() if self.selection is not None else None,
+            "degraded": not self.video_enabled,
+            "degradation_reason": self.fallback_reason_code or None,
+            "fallback_mode": self.fallback_mode,
+            "error_code": self.fallback_error_code or None,
+        }
 
     def _window_receipt(self, receipt):
         """Project the logical Call ID without mutating connector-owned scope."""
@@ -70,6 +128,8 @@ class ExternalCallOutput:
         return completion
 
     async def synthesize(self, text, *, request_id, segment=0):
+        if not self.video_enabled:
+            raise CallError("call_video_fallback_active", 409)
         call, turn = self.call, self.call.turn
         epoch = self.connector.epoch
         segment = max(0, int(segment or 0))
@@ -87,25 +147,46 @@ class ExternalCallOutput:
                 utterance
             ] = receipt
 
-        selection = self.selection
-        if selection.voice_source == "call_tts":
-            route = CatalogCallTTS.voice_route(call, text)
-            selection = replace(selection, voice=route.voice_name)
+        handoff_to_audio = False
         try:
-            result = await self.synthesizer.synthesize(
-                selection,
-                self.connector.reference,
-                text,
-                privacy_level=self.privacy(),
-                request_id=request_id,
-                expected_origin=self.origin,
-                on_job=on_job,
-            )
+            try:
+                selection = self.selection
+                if selection.voice_source == "call_tts":
+                    route = CatalogCallTTS.voice_route(call, text)
+                    selection = replace(selection, voice=route.voice_name)
+                result = await self.synthesizer.synthesize(
+                    selection,
+                    self.connector.reference,
+                    text,
+                    privacy_level=self.privacy(),
+                    request_id=request_id,
+                    expected_origin=self.origin,
+                    on_job=on_job,
+                )
+            except asyncio.CancelledError:
+                raise
+            except CallError as exc:
+                if exc.code not in {
+                    "call_video_interrupted",
+                    "call_ended",
+                    "call_scope_changed",
+                    "call_cloud_privacy_unqualified",
+                }:
+                    exc.call_audio_fallback_allowed = True
+                    handoff_to_audio = True
+                raise
+            except Exception as exc:
+                error = CallError("call_video_generation_failed", 502)
+                error.call_audio_fallback_allowed = True
+                handoff_to_audio = True
+                raise error from exc
             # Rendering may run concurrently, but AP accepts one ordered item.
             # A later segment therefore waits only at the presentation gate,
             # after its expensive Compute work has already finished.
             if predecessor is not None and not await asyncio.shield(predecessor):
                 raise CallError("call_video_prior_segment_failed", 502)
+            if not self.video_enabled:
+                raise CallError("call_video_fallback_active", 409)
             if call.phase != "active" or call.turn is not turn:
                 raise CallError("call_video_interrupted", 409)
             self.connector.require_active(epoch)
@@ -127,6 +208,56 @@ class ExternalCallOutput:
                     "kind": "tts",
                     "adapter": "video_tts",
                 },
+            }
+        finally:
+            if not completion.done() and not handoff_to_audio:
+                completion.set_result(prepared)
+
+    async def prepare_audio_fallback(
+        self,
+        audio,
+        media_type,
+        *,
+        request_id,
+        segment=0,
+        provider_receipt=None,
+        billing_target=None,
+        billing_usage=None,
+        tts_route=None,
+    ):
+        call, turn = self.call, self.call.turn
+        epoch = self.connector.epoch
+        segment = max(0, int(segment or 0))
+        completion = self._prepare_completion(epoch, segment, reset_failed=True)
+        predecessor = (
+            self._prepare_completion(epoch, segment - 1) if segment > 0 else None
+        )
+        prepared = False
+        await self.ready()
+        self.connector.require_active(epoch)
+        utterance = "utt-" + hashlib.sha256(request_id.encode()).hexdigest()[:48]
+        try:
+            media = await self.fallback_muxer(
+                self.connector.reference, audio, media_type
+            )
+            if predecessor is not None and not await asyncio.shield(predecessor):
+                raise CallError("call_video_prior_segment_failed", 502)
+            if call.phase != "active" or call.turn is not turn:
+                raise CallError("call_video_interrupted", 409)
+            self.connector.require_active(epoch)
+            self.privacy()
+            receipt = await self.connector.prepare(utterance, media, epoch=epoch)
+            prepared = True
+            return {
+                "_external_output": {
+                    "utterance_id": utterance,
+                    "epoch": epoch,
+                    "receipt": receipt,
+                },
+                "provider_receipt": provider_receipt,
+                "_billing_target": billing_target,
+                "_billing_usage": billing_usage,
+                "_tts_route": tts_route,
             }
         finally:
             if not completion.done():
@@ -184,7 +315,16 @@ class ExternalCallOutput:
 
 
 async def negotiate_output(
-    config, ports, synthesizer, call, *, revision, generation, protocol
+    config,
+    ports,
+    synthesizer,
+    call,
+    *,
+    revision,
+    generation,
+    protocol,
+    audio_fallback_available=False,
+    fallback_muxer=None,
 ):
     resolver = getattr(ports, "call_output", None)
     if not callable(resolver):
@@ -192,18 +332,27 @@ async def negotiate_output(
     connector = await resolver(call.owner, call.binding, generation=generation)
     if connector is None:
         return None
-    # An opted-in AP connection makes /call a video call. Audio remains /phone.
-    reader = getattr(config, "video_tts_selection", None)
-    selection = reader(revision) if callable(reader) else None
-    if selection is None:
-        raise CallError("call_video_not_configured", 503)
+    # AP remains the sole presenter. If VideoTTS is unavailable, ordinary TTS
+    # is packaged as a static MP4 so the same scoped output contract survives.
     if protocol != OUTPUT_PROTOCOL:
         raise CallError("call_output_client_upgrade_required", 409)
-    if synthesizer is None:
-        raise CallError("call_video_not_configured", 503)
-    resolved = await synthesizer.resolve(
-        selection, ports.privacy_level(call.binding["agent_id"])
-    )
+    reader = getattr(config, "video_tts_selection", None)
+    selection = reader(revision) if callable(reader) else None
+    resolved = None
+    fallback_reason_code = ""
+    if selection is None or synthesizer is None:
+        fallback_reason_code = "call_video_not_configured"
+    else:
+        try:
+            resolved = await synthesizer.resolve(
+                selection, ports.privacy_level(call.binding["agent_id"])
+            )
+        except CallError as exc:
+            fallback_reason_code = exc.code
+        except Exception:
+            fallback_reason_code = "call_video_service_unavailable"
+    if fallback_reason_code and not audio_fallback_available:
+        raise CallError(fallback_reason_code, 503)
     try:
         ports.validate(call.owner, call.binding)
         await connector.start()
@@ -218,4 +367,13 @@ async def negotiate_output(
     call.frontend_subscribers = tuple(
         x for x in call.frontend_subscribers if x != connector.audio_owner
     )
-    return ExternalCallOutput(call, ports, connector, synthesizer, selection, resolved)
+    return ExternalCallOutput(
+        call,
+        ports,
+        connector,
+        synthesizer,
+        selection,
+        resolved,
+        fallback_reason_code=fallback_reason_code,
+        fallback_muxer=fallback_muxer,
+    )

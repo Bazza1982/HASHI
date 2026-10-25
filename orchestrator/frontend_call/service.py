@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 import hashlib
 import inspect
@@ -19,6 +20,7 @@ from .diagnostics import (
 )
 from .transcription import spoken_transcription
 from .output import OUTPUT_PROTOCOL, negotiate_output
+from .fallback_av import mux_audio_to_static_mp4, silence_wav
 from .billing import MediaBilling, wav_seconds
 from .transient_live_media import (
     LIVE_FRAME_BUFFER_LIMIT,
@@ -83,9 +85,12 @@ class Call:
     locale: str = "en"
     tts_catalog: object | None = None
     tts_effective_service: str = ""
+    tts_effective_service_label: str = ""
     tts_effective_voice: str | None = None
     tts_effective_options: dict = field(default_factory=dict)
     tts_fallback_reason_code: str = ""
+    tts_video_error_code: str = ""
+    tts_audio_fallback_reason_code: str = ""
     tts_error_code: str = ""
     tts_error_reason: str = ""
     phase: str = "active"
@@ -150,10 +155,12 @@ class CallService:
         startup_video_timeout=None,
         tts_synthesizer=None,
         video_synthesizer=None,
+        av_fallback_muxer=None,
     ):
         self.config, self.ports, self.adapters = config, ports, adapters
         self.tts_synthesizer = tts_synthesizer
         self.video_synthesizer = video_synthesizer
+        self.av_fallback_muxer = av_fallback_muxer or mux_audio_to_static_mp4
         self.clock, self.poll_seconds = clock, poll_seconds
         self.startup_video_timeout = (
             max(0.01, float(startup_video_timeout))
@@ -250,6 +257,19 @@ class CallService:
         profile, targets = self.config.freeze(owner, agent, revision)
         return profile, targets, None
 
+    def _audio_tts_available(self, agent, profile, targets, catalog):
+        if self.tts_synthesizer is not None:
+            return self.tts_synthesizer.has_eligible_path(
+                catalog,
+                profile.get("tts"),
+                self.ports.privacy_level(agent),
+            )
+        target = targets.get("tts")
+        available = getattr(self.adapters, "target_available", None)
+        return target is not None and (
+            not callable(available) or available(target)
+        )
+
     async def _project_readiness(self, owner, agent, projection):
         """Project /call's effective output while preserving AP-free calls."""
         result = dict(projection)
@@ -257,6 +277,8 @@ class CallService:
             output_mode="window_audio",
             output_protocol=None,
             output_unavailable_reason=None,
+            output_degraded=False,
+            output_degradation_reason=None,
             fallback_route="phone",
         )
         resolver = getattr(self.ports, "call_output", None)
@@ -268,6 +290,7 @@ class CallService:
                 generation=self.generation,
             )
         video_ready = False
+        video_error_code = ""
         if sink is not None:
             result.update(output_mode="external_av", output_protocol=OUTPUT_PROTOCOL)
             try:
@@ -280,7 +303,9 @@ class CallService:
                 )
                 video_ready = True
             except CallError as exc:
-                result["output_unavailable_reason"] = exc.code
+                video_error_code = exc.code
+            except Exception:
+                video_error_code = "call_video_service_unavailable"
         available = getattr(self.adapters, "target_available", None)
         if not result.get("call_ready"):
             return result
@@ -290,19 +315,28 @@ class CallService:
         stt_ready = targets.get("stt") is not None and (
             not callable(available) or available(targets["stt"])
         )
+        audio_tts_ready = self._audio_tts_available(
+            agent, profile, targets, catalog
+        )
         if sink is not None:
-            tts_ready = video_ready
-        elif self.tts_synthesizer is not None:
-            tts_ready = self.tts_synthesizer.has_eligible_path(
-                catalog, profile.get("tts"), self.ports.privacy_level(agent)
-            )
+            tts_ready = video_ready or audio_tts_ready
+            if not video_ready:
+                if audio_tts_ready:
+                    result["output_degraded"] = True
+                    result["output_degradation_reason"] = (
+                        video_error_code or "call_video_not_configured"
+                    )
+                else:
+                    result["output_unavailable_reason"] = (
+                        video_error_code or "call_video_not_configured"
+                    )
         else:
-            tts_ready = targets.get("tts") is not None and (
-                not callable(available) or available(targets["tts"])
-            )
+            tts_ready = audio_tts_ready
         result["call_ready"] = bool(stt_ready and tts_ready)
         if not result["call_ready"]:
             result["route"] = "phone"
+        elif sink is not None:
+            result["fallback_route"] = None
         vision = targets.get("vision")
         result["camera_available"] = bool(
             result["call_ready"]
@@ -703,16 +737,60 @@ class CallService:
     @staticmethod
     def _tts_view(call):
         if call.output is not None:
-            selected = call.output.selection.reference.service_id
+            selected = call.output.selected_service_id
+            if call.output.video_enabled:
+                return {
+                    "selected_service_id": selected,
+                    "selected_service_label": selected,
+                    "effective_service_id": selected,
+                    "effective_service_label": selected,
+                    "degraded": False,
+                    "reason_code": None,
+                    "audio_reason_code": None,
+                    "error_code": call.tts_error_code or None,
+                    "mode": "video_tts",
+                    "status": "ready",
+                }
+            if call.output.captions_only:
+                locale = str(call.locale or "").casefold()
+                if locale.startswith("zh"):
+                    effective_label = "仅显示字幕（语音不可用）"
+                elif locale.startswith("ja"):
+                    effective_label = "字幕のみ（音声利用不可）"
+                else:
+                    effective_label = "Captions only (speech unavailable)"
+                effective = "captions_only"
+            else:
+                slot = call.profile.get("tts") or {}
+                effective = str(
+                    call.tts_effective_service or slot.get("target_id") or ""
+                )
+                catalog = call.tts_catalog
+                if catalog is not None:
+                    try:
+                        effective_label = catalog.service_label(effective)
+                    except Exception:
+                        effective_label = effective
+                else:
+                    target = call.targets.get("tts") or {}
+                    effective_label = (
+                        call.tts_effective_service_label
+                        or target.get("label")
+                        or effective
+                    )
             return {
                 "selected_service_id": selected,
                 "selected_service_label": selected,
-                "effective_service_id": selected,
-                "effective_service_label": selected,
-                "degraded": False,
-                "reason_code": None,
+                "effective_service_id": effective,
+                "effective_service_label": effective_label,
+                "degraded": True,
+                "reason_code": call.output.fallback_reason_code or None,
+                "audio_reason_code": call.tts_audio_fallback_reason_code or None,
                 "error_code": call.tts_error_code or None,
-                "mode": "video_tts",
+                "mode": call.output.fallback_mode,
+                "status": (
+                    "unavailable" if call.output.captions_only else "degraded"
+                ),
             }
         catalog = call.tts_catalog
         slot = call.profile.get("tts") or {}
@@ -1009,8 +1087,11 @@ class CallService:
         self.ports.validate(call.owner, call.binding)
         privacy_level = self.ports.privacy_level(call.binding["agent_id"])
         if kind == "tts" and call.output is not None:
-            call.output.privacy()
-            return
+            if call.output.captions_only:
+                return
+            if call.output.video_enabled:
+                call.output.privacy()
+                return
         if kind == "tts" and self.tts_synthesizer is not None:
             blocked_cached_route = (
                 isinstance(route, dict)
@@ -1120,6 +1201,8 @@ class CallService:
                         "output_mode",
                         "output_protocol",
                         "output_unavailable_reason",
+                        "output_degraded",
+                        "output_degradation_reason",
                         "fallback_route",
                     )
                 },
@@ -1157,20 +1240,14 @@ class CallService:
                 owner, body["agent_id"], body.get("revision")
             )
             available = getattr(self.adapters, "target_available", None)
-            tts_available = True
-            if callable(available):
-                stt_available = available(targets["stt"])
-                tts_available = (
-                    self.tts_synthesizer.has_eligible_path(
-                        tts_catalog,
-                        profile.get("tts"),
-                        self.ports.privacy_level(body["agent_id"]),
-                    )
-                    if self.tts_synthesizer is not None
-                    else available(targets["tts"])
-                )
-                if not stt_available:
-                    raise CallError("call_credential_missing", 503)
+            stt_available = targets.get("stt") is not None and (
+                not callable(available) or available(targets["stt"])
+            )
+            tts_available = self._audio_tts_available(
+                body["agent_id"], profile, targets, tts_catalog
+            )
+            if not stt_available:
+                raise CallError("call_credential_missing", 503)
             binding = {
                 k: body[k]
                 for k in (
@@ -1216,7 +1293,15 @@ class CallService:
                     revision=body.get("revision"),
                     generation=self.generation,
                     protocol=body.get("output_protocol"),
+                    audio_fallback_available=tts_available,
+                    fallback_muxer=self.av_fallback_muxer,
                 )
+                if (
+                    call.output is not None
+                    and call.output.fallback_reason_code
+                ):
+                    call.tts_video_error_code = call.output.fallback_reason_code
+                    call.tts_fallback_reason_code = call.output.fallback_reason_code
                 if call.output is None and not tts_available:
                     raise CallError("call_credential_missing", 503)
                 self._privacy(call, "tts")
@@ -1595,11 +1680,7 @@ class CallService:
             }
         )
 
-    async def _synthesize_tts(self, call, text, *, request_id, segment=None):
-        if call.output is not None:
-            return await call.output.synthesize(
-                text, request_id=request_id, segment=segment
-            )
+    async def _synthesize_audio_tts(self, call, text, *, request_id):
         if self.tts_synthesizer is not None:
             return await self.tts_synthesizer.synthesize(
                 call,
@@ -1609,6 +1690,176 @@ class CallService:
             )
         return await self.adapters.synthesize(
             call.targets["tts"], call.profile["tts"], text
+        )
+
+    @staticmethod
+    def _decode_tts_asset(asset):
+        encoded = asset.get("content_b64") if isinstance(asset, dict) else None
+        media_type = asset.get("media_type") if isinstance(asset, dict) else None
+        if not isinstance(encoded, str) or not encoded or not isinstance(media_type, str):
+            raise CallError("call_speech_asset_invalid", 502)
+        try:
+            audio = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise CallError("call_speech_asset_invalid", 502) from exc
+        if not audio or len(audio) > 32 * 1024 * 1024:
+            raise CallError("call_speech_asset_invalid", 502)
+        return audio, media_type
+
+    def _external_audio_route(self, call, asset):
+        route = dict(asset.get("_tts_route") or {})
+        target = call.targets.get("tts") or {}
+        slot = call.profile.get("tts") or {}
+        effective = str(
+            route.get("service_id")
+            or call.tts_effective_service
+            or slot.get("target_id")
+            or target.get("id")
+            or ""
+        )
+        label = str(route.get("service_label") or target.get("label") or effective)
+        audio_selected = str(
+            route.get("selected_service_id") or slot.get("target_id") or effective
+        )
+        audio_reason = route.get("reason_code")
+        call.tts_effective_service = effective
+        call.tts_effective_service_label = label
+        if audio_reason and not call.tts_audio_fallback_reason_code:
+            call.tts_audio_fallback_reason_code = str(audio_reason)
+        return {
+            **route,
+            "service_id": effective,
+            "service_label": label,
+            "audio_selected_service_id": audio_selected,
+            "selected_service_id": call.output.selected_service_id,
+            "selected_service_label": call.output.selected_service_id,
+            "degraded": True,
+            "reason_code": call.output.fallback_reason_code or None,
+            "audio_reason_code": call.tts_audio_fallback_reason_code or None,
+            "mode": "audio_fallback",
+        }
+
+    async def _captions_only_asset(
+        self, call, *, request_id, segment, error_code
+    ):
+        call.output.activate_captions_only(error_code)
+        call.tts_effective_service = "captions_only"
+        route = {
+            "service_id": "captions_only",
+            "service_label": self._tts_view(call)["effective_service_label"],
+            "selected_service_id": call.output.selected_service_id,
+            "selected_service_label": call.output.selected_service_id,
+            "degraded": True,
+            "reason_code": call.output.fallback_reason_code or None,
+            "audio_reason_code": call.tts_audio_fallback_reason_code or None,
+            "mode": "captions_only",
+        }
+        return await call.output.prepare_audio_fallback(
+            silence_wav(),
+            "audio/wav",
+            request_id=request_id,
+            segment=segment,
+            billing_target=None,
+            tts_route=route,
+        )
+
+    async def _synthesize_external_audio(
+        self, call, text, *, request_id, segment
+    ):
+        if call.output.captions_only:
+            return await self._captions_only_asset(
+                call,
+                request_id=request_id,
+                segment=segment,
+                error_code=call.tts_error_code or "call_speech_unavailable",
+            )
+        try:
+            self._privacy(call, "tts")
+            asset = await self._synthesize_audio_tts(
+                call, text, request_id=request_id
+            )
+            audio, media_type = self._decode_tts_asset(asset)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_code = (
+                call.tts_error_code
+                or (exc.code if isinstance(exc, CallError) else "call_speech_failed")
+            )
+            call.tts_error_code = error_code
+            call.tts_error_reason = call.tts_error_reason or (
+                "Speech synthesis is unavailable; captions remain active."
+            )
+            emit(
+                "tts_fallback_failed",
+                **self._facts(call, call.turn),
+                stage="tts",
+                segment=segment,
+                video_error_code=call.output.fallback_reason_code or None,
+                error_code=error_code,
+                fallback_mode="captions_only",
+            )
+            return await self._captions_only_asset(
+                call,
+                request_id=request_id,
+                segment=segment,
+                error_code=error_code,
+            )
+        route = self._external_audio_route(call, asset)
+        billing_target = asset.get("_billing_target", call.targets.get("tts"))
+        billing_usage = asset.get("_billing_usage")
+        call.tts_error_code = ""
+        call.tts_error_reason = ""
+        call.output.fallback_error_code = ""
+        return await call.output.prepare_audio_fallback(
+            audio,
+            media_type,
+            request_id=request_id,
+            segment=segment,
+            provider_receipt=asset.get("provider_receipt"),
+            billing_target=billing_target,
+            billing_usage=billing_usage,
+            tts_route=route,
+        )
+
+    async def _synthesize_tts(self, call, text, *, request_id, segment=None):
+        if call.output is not None:
+            if call.output.video_enabled:
+                try:
+                    return await call.output.synthesize(
+                        text, request_id=request_id, segment=segment
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except CallError as exc:
+                    if (
+                        call.phase != "active"
+                        or call.turn.get("_speech_interrupted")
+                        or not call.output.can_audio_fallback(exc)
+                    ):
+                        raise
+                    first_failure = not call.tts_video_error_code
+                    call.output.activate_audio_fallback(exc.code)
+                    call.tts_video_error_code = call.output.fallback_reason_code
+                    call.tts_fallback_reason_code = call.output.fallback_reason_code
+                    if first_failure:
+                        emit(
+                            "tts_degraded",
+                            **self._facts(call, call.turn),
+                            stage="tts",
+                            segment=segment,
+                            from_service=call.output.selected_service_id,
+                            to_service="audio_tts",
+                            reason_code=call.output.fallback_reason_code,
+                        )
+            return await self._synthesize_external_audio(
+                call,
+                text,
+                request_id=request_id,
+                segment=segment,
+            )
+        return await self._synthesize_audio_tts(
+            call, text, request_id=request_id
         )
 
     async def _prepare_filler(self, call, slot, text):
@@ -1645,11 +1896,13 @@ class CallService:
                 )
             route = result.pop("_tts_route", None)
             billing_target = result.pop("_billing_target", call.targets["tts"])
-            call.billing.record_tts(
-                billing_target,
-                text,
-                result.pop("_billing_usage", None),
-            )
+            billing_usage = result.pop("_billing_usage", None)
+            if billing_target is not None:
+                call.billing.record_tts(
+                    billing_target,
+                    text,
+                    billing_usage,
+                )
             if call.phase != "active":
                 raise CallError("call_ended", 410)
             self.ports.validate(call.owner, call.binding)
@@ -2253,7 +2506,7 @@ class CallService:
         ):
             return False
         parts = call.turn.get("speech_segments", [])
-        if call.output is not None:
+        if call.output is not None and call.output.video_enabled:
             started = False
             while len(active_tasks) < VIDEO_SPEECH_PENDING_LIMIT:
                 index = call.speech_index + 1
@@ -2333,11 +2586,13 @@ class CallService:
                 )
             route = result.pop("_tts_route", None)
             billing_target = result.pop("_billing_target", call.targets["tts"])
-            call.billing.record_tts(
-                billing_target,
-                text,
-                result.pop("_billing_usage", None),
-            )
+            billing_usage = result.pop("_billing_usage", None)
+            if billing_target is not None:
+                call.billing.record_tts(
+                    billing_target,
+                    text,
+                    billing_usage,
+                )
             emit(
                 "tts_completed",
                 **self._facts(call, turn),
@@ -2355,8 +2610,7 @@ class CallService:
                         str(index)
                     ] = result["provider_receipt"]
                 if call.output is not None:
-                    call.tts_error_code = ""
-                    call.output.connector.error_code = None
+                    call.output.connector.error_code = call.tts_error_code or None
                 call.speech_cache[index] = result
                 if route:
                     call.speech_routes[index] = route
