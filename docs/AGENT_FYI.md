@@ -38,6 +38,8 @@ retry only before a durable receipt; durable `target_busy` stays pending. `max`
 rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
 
+`hashi update` must adopt source, Core, Workers and Remote together or fail.
+
 ## Configuration, identity, and persistence
 
 Configuration owns identity, ports, Workzones, endpoints and models; exclude

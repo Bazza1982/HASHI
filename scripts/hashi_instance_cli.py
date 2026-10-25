@@ -76,6 +76,18 @@ def _lines(value):
     raise argparse.ArgumentTypeError("lines must be an integer from 1 to 10000")
 
 
+def _release_timeout(value):
+    try:
+        parsed = int(value)
+        if 60 <= parsed <= 900:
+            return parsed
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError(
+        "release timeout must be an integer from 60 to 900"
+    )
+
+
 def _normalize_args(argv):
     if argv[:1] == ["--complete"]:
         return argv
@@ -123,6 +135,24 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--check", action="store_true")
     stop = commands.add_parser("stop", help="Gracefully stop an idle selected instance.")
     stop.add_argument("--timeout", type=_timeout, default=30, help="Graceful stop wait in seconds (1-300); no forced termination.")
+    update = commands.add_parser(
+        "update",
+        help="Fast-forward and fully adopt a verified source release.",
+    )
+    update.add_argument(
+        "--confirm",
+        required=True,
+        metavar="INSTANCE",
+        help="Exact selected instance name; the release restarts Core and Remote.",
+    )
+    update.add_argument("--remote", default="origin", help="Git remote to fetch.")
+    update.add_argument("--branch", default="main", help="Remote branch to adopt.")
+    update.add_argument(
+        "--timeout",
+        type=_release_timeout,
+        default=300,
+        help="Final adoption wait in seconds (60-900).",
+    )
     commands.add_parser("onboard", help="Open local connection or Hashiko assistance.")
     commands.add_parser("ui", help="Open an installed external HASHI UI.")
     help_parser = commands.add_parser("help", help="Show this help.")
@@ -1042,6 +1072,56 @@ def _main(argv: Sequence[str] | None = None) -> int:
             )
         if command == "stop":
             return stop_instance(registry, record, timeout=args.timeout)
+        if command == "update":
+            from tools.release_update import ReleaseUpdateError, run_source_release
+
+            if args.confirm != record["name"]:
+                raise InstanceRegistryError(
+                    "Release confirmation must exactly match selected instance "
+                    f"{record['name']!r}."
+                )
+            if record.get("managed") or record.get("source_kind") != "git":
+                raise InstanceRegistryError(
+                    "Closed-loop update is available only for a registered Git "
+                    "source instance; packaged installs require a verified package."
+                )
+            root = registry.resolved_code_root(record)
+            snapshot = inspect_instance(record, root)
+            if not (
+                snapshot.get("running")
+                and snapshot.get("healthy")
+                and snapshot.get("ready")
+                and snapshot.get("activity_verified")
+            ):
+                print(
+                    "HASHI: selected instance is not ready enough for a verified "
+                    "release; no source was changed.",
+                    file=sys.stderr,
+                )
+                return EXIT_NOT_READY
+            if snapshot.get("busy"):
+                print(
+                    "HASHI: selected instance is busy; no source was changed.",
+                    file=sys.stderr,
+                )
+                return EXIT_BUSY
+            try:
+                result = run_source_release(
+                    code_root=root,
+                    bridge_home=Path(record["bridge_home"]),
+                    instance_id=snapshot["instance_id"],
+                    api_port=snapshot["api_port"],
+                    runtime_command=_select_runtime(root, full=True),
+                    remote=args.remote,
+                    branch=args.branch,
+                    timeout=args.timeout,
+                )
+            except ReleaseUpdateError as exc:
+                _emit(exc.to_payload(), as_json=args.json)
+                return EXIT_RUNTIME
+            record_effect("source_release_completed")
+            _emit(result, as_json=args.json)
+            return 0
         if command == "onboard":
             if record.get("managed") and record.get(
                 "adopted_program_version"
