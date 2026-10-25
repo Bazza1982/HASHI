@@ -1,6 +1,7 @@
 """External AV must fence presentation without changing PAO input ownership."""
 
 import asyncio
+import hashlib
 import pytest
 from orchestrator.frontend_call.contract import CallError
 from orchestrator.frontend_call.video_tts import VideoTTSSelection
@@ -175,9 +176,22 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
     original_synthesize = gen.synthesize
     calls = 0
     released = asyncio.Event()
+    first_started = asyncio.Event()
+    remainder_started = asyncio.Event()
+    release_first = asyncio.Event()
+    expected_utterances = [
+        "utt-"
+        + hashlib.sha256(f"call-1-turn-1-{index}".encode()).hexdigest()[:48]
+        for index in (0, 1)
+    ]
 
     async def synthesize(selection, reference, text, **kwargs):
         observed.append(text)
+        if text == first:
+            first_started.set()
+            await release_first.wait()
+        elif text == remainder:
+            remainder_started.set()
         return await original_synthesize(selection, reference, text, **kwargs)
 
     def result(*_args, **_kwargs):
@@ -243,28 +257,24 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
             await asyncio.sleep(0.001)
         call = service.calls["call-1"]
         assert call.turn["speech_segments"] == [first]
-        for _ in range(100):
-            if 0 in call.speech_cache:
-                break
-            await asyncio.sleep(0.001)
-        await service.invoke(
-            "owner",
-            {
-                **binding,
-                "operation": "speech",
-                "turn_id": "turn-1",
-                "segment": 0,
-            },
-        )
+        await asyncio.wait_for(first_started.wait(), 1)
         released.set()
         await call.task
-        if call.speech_task:
+        await asyncio.wait_for(remainder_started.wait(), 1)
+        assert not set(expected_utterances).intersection(output.prepared)
+        release_first.set()
+        active = list(getattr(call, "speech_tasks", {}).values())
+        if active:
+            await asyncio.gather(*active)
+        elif call.speech_task:
             await call.speech_task
 
         assert call.turn["speech_segments"] == [first, remainder]
-        assert observed == [first, remainder]
+        assert [text for text in observed if text in {first, remainder}] == [first, remainder]
+        assert output.prepared[-2:] == expected_utterances
     finally:
         released.set()
+        release_first.set()
         await service.close()
 
 
@@ -328,12 +338,25 @@ async def test_late_generation_after_interrupt_never_reaches_ap(tmp_path):
     call.turn = {
         "turn_id": "old",
         "phase": "complete",
-        "speech_segments": ["Old reply."],
+        "speech_segments": [],
     }
     gen.release = asyncio.Event()
-    service._start_speech(call, 0, "Old reply.")
-    old_task = call.speech_task
-    await asyncio.wait_for(gen.started.wait(), 2)
+    started_texts = []
+    original_synthesize = gen.synthesize
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started_texts.append(text)
+        return await original_synthesize(selection, reference, text, **kwargs)
+
+    gen.synthesize = synthesize
+    service._queue_speech(call, call.turn, "Old opener.", "answer")
+    service._queue_speech(call, call.turn, "Old remainder.", "answer")
+    old_tasks = list(call.speech_tasks.values())
+    for _ in range(100):
+        if {"Old opener.", "Old remainder."}.issubset(started_texts):
+            break
+        await asyncio.sleep(0.001)
+    assert {"Old opener.", "Old remainder."}.issubset(started_texts)
     await service.invoke(
         "owner",
         {
@@ -345,7 +368,7 @@ async def test_late_generation_after_interrupt_never_reaches_ap(tmp_path):
         },
     )
     gen.release.set()
-    await old_task
+    await asyncio.gather(*old_tasks)
     assert output.prepared == [] and call.speech_cache == {}
     assert adapters.tts == 0 and ports.cancelled == []
     await service.close()

@@ -183,7 +183,10 @@ credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
 and locks the first downgrade. With AP it requires VideoTTS and exclusive AV;
 without AP it stays audio. AV preserves the full answer in two-stage output:
 its first complete sentence is expedited, then all remaining text is submitted
-as one batch so Compute can work ahead. Audio segmentation is unchanged.
+as one batch. Provider answer deltas can release the first sentence before the
+Run finishes; both bounded VideoTTS renders may enter Compute early, while AP
+preload/playback remains ordered. Audio segmentation and serial synthesis are
+unchanged.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),

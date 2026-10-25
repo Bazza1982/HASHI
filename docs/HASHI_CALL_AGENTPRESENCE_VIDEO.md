@@ -82,12 +82,17 @@ automatically resubmitted; explicit speech retry cannot replay an uncertain job.
 Cancellation fences local output immediately and optionally cancels the known
 remote job. Late results cannot upload or resume old presentation.
 
-External AV speech is segmented separately from ordinary audio Call. The first
-complete sentence is released immediately as a short VideoTTS request. All
-remaining cleaned text is then submitted as one second request, so Compute can
-generate it while the first sentence is being presented instead of paying a
-renderer handoff between every sentence. A one-sentence answer remains one
-request. The configured input-character guard still applies. Preview,
+External AV speech is segmented separately from ordinary audio Call. Streaming
+provider answer deltas, including Codex app-server agent-message deltas, enter
+the Workbench-only answer-preview lane; commentary deltas remain excluded. The
+first complete sentence is released immediately as a short VideoTTS request,
+without waiting for the PAO Run to finish. All remaining cleaned text is then
+submitted as one second request. Call keeps up to two VideoTTS renders in flight,
+so the body enters Compute as soon as it is known instead of waiting for the
+first complete MP4. AP preload and playback remain strictly ordered: a later
+render may finish first but cannot overtake the opener at the presentation gate.
+A one-sentence answer remains one request, and ordinary audio Call remains
+serial. The configured input-character guard still applies. Preview,
 commentary, final, and opening speech share this rule. A failed async job
 remains terminal and is not retried; diagnostics retain a validated provider
 error code. Non-success HTTP responses retain only their numeric status, never
@@ -132,8 +137,9 @@ The implementation is in `frontend_call/output.py`, `video_tts.py`, the existing
 Call service/config/routes/port, and the AP Connector port. The connector owns
 its existing token and local transport; Call business code imports no AP client.
 
-Focused checks cover legacy audio, first-sentence/remainder batching, AV
-prepare/commit, late-result fencing, duplicate start, unused audio-TTS
+Focused checks cover legacy audio, provider-delta preview, concurrent bounded
+first-sentence/remainder generation, ordered AV prepare/commit, late-result
+fencing, duplicate start, unused audio-TTS
 credentials, configured third-party manifests, privacy/origin/download bounds,
 cancellation and AP generation races.
 Candidate CallService + real service + real AP has produced fresh day/night

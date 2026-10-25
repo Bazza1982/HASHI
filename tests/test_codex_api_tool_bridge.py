@@ -99,6 +99,8 @@ class _FakeAppServerProcess:
         host_method=None,
         fail_after_tools=False,
         hold_turn=False,
+        text_deltas=None,
+        commentary_deltas=None,
     ):
         self.pid = 4321
         self.returncode = None
@@ -112,6 +114,8 @@ class _FakeAppServerProcess:
         self.host_method = host_method
         self.fail_after_tools = fail_after_tools
         self.hold_turn = hold_turn
+        self.text_deltas = list(text_deltas or [])
+        self.commentary_deltas = list(commentary_deltas or [])
         self.received = []
         self.thread_params = None
         self.injected_items = None
@@ -286,6 +290,75 @@ class _FakeAppServerProcess:
             elif self.tool_calls:
                 self._emit_next_tool_or_resume()
             else:
+                if self.commentary_deltas:
+                    self.stdout.emit(
+                        {
+                            "method": "item/started",
+                            "params": {
+                                "threadId": self.thread_id,
+                                "turnId": self.turn_id,
+                                "item": {
+                                    "type": "agentMessage",
+                                    "id": "commentary",
+                                    "phase": "commentary",
+                                },
+                            },
+                        }
+                    )
+                    for delta in self.commentary_deltas:
+                        self.stdout.emit(
+                            {
+                                "method": "item/agentMessage/delta",
+                                "params": {
+                                    "threadId": self.thread_id,
+                                    "turnId": self.turn_id,
+                                    "itemId": "commentary",
+                                    "delta": delta,
+                                },
+                            }
+                        )
+                    self.stdout.emit(
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": self.thread_id,
+                                "turnId": self.turn_id,
+                                "item": {
+                                    "type": "agentMessage",
+                                    "id": "commentary",
+                                    "phase": "commentary",
+                                    "text": "".join(self.commentary_deltas),
+                                },
+                            },
+                        }
+                    )
+                if self.text_deltas:
+                    self.stdout.emit(
+                        {
+                            "method": "item/started",
+                            "params": {
+                                "threadId": self.thread_id,
+                                "turnId": self.turn_id,
+                                "item": {
+                                    "type": "agentMessage",
+                                    "id": "answer",
+                                    "phase": "final_answer",
+                                },
+                            },
+                        }
+                    )
+                    for delta in self.text_deltas:
+                        self.stdout.emit(
+                            {
+                                "method": "item/agentMessage/delta",
+                                "params": {
+                                    "threadId": self.thread_id,
+                                    "turnId": self.turn_id,
+                                    "itemId": "answer",
+                                    "delta": delta,
+                                },
+                            }
+                        )
                 self.stdout.emit(
                     {
                         "method": "item/completed",
@@ -881,7 +954,11 @@ async def test_codex_app_server_does_not_authorize_calls_from_failed_turn(monkey
 
 @pytest.mark.asyncio
 async def test_codex_app_server_returns_final_text_and_usage_in_stream_mode(monkeypatch):
-    fake = _FakeAppServerProcess(final_text="Final answer")
+    fake = _FakeAppServerProcess(
+        final_text="Final answer",
+        text_deltas=["Final ", "answer"],
+        commentary_deltas=["private commentary"],
+    )
 
     async def create_subprocess(*_args, **_kwargs):
         return fake
@@ -927,7 +1004,10 @@ async def test_codex_app_server_returns_final_text_and_usage_in_stream_mode(monk
         (event.kind, event.summary)
         for event in events
         if event.kind == KIND_TEXT_DELTA
-    ] == [(KIND_TEXT_DELTA, "Final answer")]
+    ] == [
+        (KIND_TEXT_DELTA, "Final "),
+        (KIND_TEXT_DELTA, "answer"),
+    ]
     assert fake.thread_params["dynamicTools"] == []
 
 

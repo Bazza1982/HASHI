@@ -26,6 +26,7 @@ class ExternalCallOutput:
             resolved.snapshot.node.location if resolved is not None else "local"
         )
         self.barrier = None
+        self._prepare_done = {}
 
     def privacy(self):
         self.ports.validate(self.call.owner, self.call.binding)
@@ -49,9 +50,34 @@ class ExternalCallOutput:
             raise CallError("call_video_connector_response_invalid", 502)
         return {**receipt, "call_id": self.call.binding["call_id"]}
 
-    async def synthesize(self, text, *, request_id):
+    def _prepare_completion(self, epoch, segment, *, reset_failed=False):
+        key = (int(epoch), int(segment))
+        completion = self._prepare_done.get(key)
+        if (
+            completion is not None
+            and reset_failed
+            and completion.done()
+            and completion.result() is False
+        ):
+            completion = None
+        if completion is None:
+            completion = asyncio.get_running_loop().create_future()
+            self._prepare_done[key] = completion
+        if len(self._prepare_done) > 32:
+            for old_key, old_completion in list(self._prepare_done.items()):
+                if old_key[0] != epoch and old_completion.done():
+                    self._prepare_done.pop(old_key, None)
+        return completion
+
+    async def synthesize(self, text, *, request_id, segment=0):
         call, turn = self.call, self.call.turn
         epoch = self.connector.epoch
+        segment = max(0, int(segment or 0))
+        completion = self._prepare_completion(epoch, segment, reset_failed=True)
+        predecessor = (
+            self._prepare_completion(epoch, segment - 1) if segment > 0 else None
+        )
+        prepared = False
         await self.ready()
         self.connector.require_active(epoch)
         utterance = "utt-" + hashlib.sha256(request_id.encode()).hexdigest()[:48]
@@ -65,34 +91,46 @@ class ExternalCallOutput:
         if selection.voice_source == "call_tts":
             route = CatalogCallTTS.voice_route(call, text)
             selection = replace(selection, voice=route.voice_name)
-        result = await self.synthesizer.synthesize(
-            selection,
-            self.connector.reference,
-            text,
-            privacy_level=self.privacy(),
-            request_id=request_id,
-            expected_origin=self.origin,
-            on_job=on_job,
-        )
-        if call.phase != "active" or call.turn is not turn:
-            raise CallError("call_video_interrupted", 409)
-        self.connector.require_active(epoch)
-        # A completed artifact does not depend on the provider remaining online.
-        self.privacy()
-        receipt = await self.connector.prepare(utterance, result["media"], epoch=epoch)
-        return {
-            "_external_output": {
-                "utterance_id": utterance,
-                "epoch": epoch,
-                "receipt": receipt,
-            },
-            "provider_receipt": result.get("provider_receipt"),
-            "_billing_target": {
-                "model": self.selection.reference.model_id,
-                "kind": "tts",
-                "adapter": "video_tts",
-            },
-        }
+        try:
+            result = await self.synthesizer.synthesize(
+                selection,
+                self.connector.reference,
+                text,
+                privacy_level=self.privacy(),
+                request_id=request_id,
+                expected_origin=self.origin,
+                on_job=on_job,
+            )
+            # Rendering may run concurrently, but AP accepts one ordered item.
+            # A later segment therefore waits only at the presentation gate,
+            # after its expensive Compute work has already finished.
+            if predecessor is not None and not await asyncio.shield(predecessor):
+                raise CallError("call_video_prior_segment_failed", 502)
+            if call.phase != "active" or call.turn is not turn:
+                raise CallError("call_video_interrupted", 409)
+            self.connector.require_active(epoch)
+            # A completed artifact does not depend on the provider remaining online.
+            self.privacy()
+            receipt = await self.connector.prepare(
+                utterance, result["media"], epoch=epoch
+            )
+            prepared = True
+            return {
+                "_external_output": {
+                    "utterance_id": utterance,
+                    "epoch": epoch,
+                    "receipt": receipt,
+                },
+                "provider_receipt": result.get("provider_receipt"),
+                "_billing_target": {
+                    "model": self.selection.reference.model_id,
+                    "kind": "tts",
+                    "adapter": "video_tts",
+                },
+            }
+        finally:
+            if not completion.done():
+                completion.set_result(prepared)
 
     async def commit(self, asset):
         presentation = asset.get("_external_output")

@@ -195,11 +195,14 @@ numeric response-length requirements are retired.
   fillers; microphone/camera admission remains independent. An unavailable
   synthesis path shows a visible error and transcript rather than silent success.
 - **CALL-SPEECH-16** — External AV sends the first complete sentence as soon as
-  it is stable, then sends all remaining cleaned answer text as one second
-  VideoTTS request. This lets Compute prepare the body while the opener is
-  presented and avoids repeated renderer handoffs. Ordinary audio Call keeps
-  its existing natural-chunk policy. Preview and final segmentation use the
-  same rule, so incremental speech remains a prefix of the final queue.
+  it is stable from the Workbench-only provider-preview lane, then sends all
+  remaining cleaned answer text as one second VideoTTS request. Up to two
+  VideoTTS renders enter Compute without waiting for the opener's MP4; AP
+  preload and playback still follow segment order even if the body renders
+  first. Codex app-server agent-message deltas feed this preview, while its
+  commentary deltas remain private. Ordinary audio Call keeps its existing
+  serial natural-chunk policy. Preview and final segmentation use the same
+  rule, so incremental speech remains a prefix of the final queue.
   Provider failure diagnostics retain only a validated error code or HTTP
   status, never response content.
 

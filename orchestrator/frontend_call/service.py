@@ -46,6 +46,8 @@ from .contract import (
     video_speech_segments,
 )
 
+VIDEO_SPEECH_PENDING_LIMIT = 2
+
 
 def _speech_asset_bytes(asset):
     """Return decoded media size without decoding or logging private audio."""
@@ -98,6 +100,8 @@ class Call:
     cancel_tasks: dict = field(default_factory=dict)
     end_reason: str = ""
     speech_task: asyncio.Task | None = None
+    speech_tasks: dict = field(default_factory=dict)
+    speech_all_tasks: set = field(default_factory=set)
     speech_index: int = -1
     speech_requested_index: int = -1
     speech_cache: dict = field(default_factory=dict)
@@ -190,6 +194,54 @@ class CallService:
         if call.turn_tasks.get(turn_id) is completed:
             call.turn_tasks.pop(turn_id, None)
             call.active_turns.pop(turn_id, None)
+
+    def _forget_speech_task(self, call, index, completed):
+        call.speech_all_tasks.discard(completed)
+        if call.speech_tasks.get(index) is completed:
+            call.speech_tasks.pop(index, None)
+        if call.speech_task is completed:
+            active = [
+                (segment, task)
+                for segment, task in call.speech_tasks.items()
+                if not task.done()
+            ]
+            if active:
+                call.speech_task = max(active)[1]
+        self._start_queued_speech(call)
+
+    @staticmethod
+    def _cancel_speech_tasks(call):
+        tasks = list(call.speech_all_tasks)
+        tasks += [
+            task
+            for task in call.speech_tasks.values()
+            if task not in call.speech_all_tasks
+        ]
+        if call.speech_task is not None and call.speech_task not in tasks:
+            tasks.append(call.speech_task)
+        return [task for task in tasks if task.cancel()]
+
+    @staticmethod
+    def _trim_speech_cache(call):
+        if call.output is None:
+            for old in sorted(call.speech_cache)[:-2]:
+                call.speech_cache.pop(old, None)
+                call.speech_routes.pop(old, None)
+            return
+        # Concurrent VideoTTS jobs may complete out of order. Never evict an
+        # undelivered earlier segment merely because a later render won the
+        # race; playback remains strictly ordered by segment number.
+        while len(call.speech_cache) > 2:
+            evictable = [
+                index
+                for index in sorted(call.speech_cache)
+                if index in call.speech_delivered
+            ]
+            if not evictable:
+                break
+            old = evictable[0]
+            call.speech_cache.pop(old, None)
+            call.speech_routes.pop(old, None)
 
     def _freeze_configuration(self, owner, agent, revision):
         freeze_runtime = getattr(self.config, "freeze_runtime", None)
@@ -330,13 +382,21 @@ class CallService:
                     reason=reason,
                     turn_phase=call.turn.get("phase"),
                 )
-        if call.speech_task:
-            if call.speech_task.cancel():
+        cancelled_speech = self._cancel_speech_tasks(call)
+        if cancelled_speech:
+            for task in cancelled_speech:
                 emit(
                     "tts_cancel_requested",
                     **self._facts(call, call.turn),
                     reason=reason,
-                    segment=call.speech_index,
+                    segment=next(
+                        (
+                            index
+                            for index, candidate in call.speech_tasks.items()
+                            if candidate is task
+                        ),
+                        call.speech_index,
+                    ),
                 )
         for slot, task in call.filler_tasks.items():
             if task.cancel():
@@ -536,6 +596,7 @@ class CallService:
             tasks += (
                 list(call.turn_tasks.values())
                 + list(call.cancel_tasks.values())
+                + list(call.speech_all_tasks)
                 + list(call.filler_tasks.values())
             )
         tasks = list(dict.fromkeys(tasks))
@@ -1313,14 +1374,24 @@ class CallService:
             turn_frames = self._select_turn_frames(call, time.time())
             if call.output is not None:
                 call.output.fence(call.turn)
-            if call.speech_task:
-                if call.speech_task.cancel():
+            cancelled_speech = self._cancel_speech_tasks(call)
+            if cancelled_speech:
+                for task in cancelled_speech:
                     emit(
                         "tts_cancel_requested",
                         **self._facts(call, call.turn),
                         reason="turn_changed",
-                        segment=call.speech_index,
+                        segment=next(
+                            (
+                                index
+                                for index, candidate in call.speech_tasks.items()
+                                if candidate is task
+                            ),
+                            call.speech_index,
+                        ),
                     )
+            call.speech_tasks.clear()
+            call.speech_task = None
             call.speech_cache.clear()
             call.speech_routes.clear()
             call.speech_errors.clear()
@@ -1377,8 +1448,9 @@ class CallService:
             self._privacy(call, "tts")
             if op == "interrupt":
                 if call.output.fence(call.turn):
-                    if call.speech_task:
-                        call.speech_task.cancel()
+                    self._cancel_speech_tasks(call)
+                    call.speech_tasks.clear()
+                    call.speech_task = None
                     call.speech_cache.clear()
                     call.speech_routes.clear()
                 await call.output.interrupt()
@@ -1461,11 +1533,23 @@ class CallService:
                         cached=True,
                         response_bytes=_speech_asset_bytes(asset),
                     )
+                self._trim_speech_cache(call)
                 self._start_queued_speech(call)
                 if call.output is not None:
                     return await call.output.status(asset)
                 return {"ok": True, "ready": True, **asset}
-            if call.speech_task and not call.speech_task.done():
+            index_task = call.speech_tasks.get(index)
+            if index_task is not None and not index_task.done():
+                call.speech_requested_index = max(call.speech_requested_index, index)
+                emit(
+                    "speech_asset_pending",
+                    **self._facts(call, call.turn),
+                    stage="response",
+                    segment=index,
+                    cached=False,
+                )
+                return {"ok": True, "ready": False}
+            if call.output is None and call.speech_task and not call.speech_task.done():
                 if index != call.speech_index:
                     raise CallError("call_speech_busy", 409)
                 call.speech_requested_index = max(call.speech_requested_index, index)
@@ -1511,9 +1595,11 @@ class CallService:
             }
         )
 
-    async def _synthesize_tts(self, call, text, *, request_id):
+    async def _synthesize_tts(self, call, text, *, request_id, segment=None):
         if call.output is not None:
-            return await call.output.synthesize(text, request_id=request_id)
+            return await call.output.synthesize(
+                text, request_id=request_id, segment=segment
+            )
         if self.tts_synthesizer is not None:
             return await self.tts_synthesizer.synthesize(
                 call,
@@ -2158,21 +2244,33 @@ class CallService:
             image = None
 
     def _start_queued_speech(self, call):
-        """Warm the first segment, then at most one beyond client demand."""
-        active_task = call.speech_task
+        """Warm audio serially; let VideoTTS keep two bounded jobs in flight."""
+        active_tasks = [task for task in call.speech_tasks.values() if not task.done()]
         if (
             call.phase != "active"
             or call.turn.get("_speech_interrupted")
-            or (
-                active_task
-                and not active_task.done()
-                and active_task is not asyncio.current_task()
-            )
-            or call.speech_index in call.speech_errors
+            or call.speech_errors
+        ):
+            return False
+        parts = call.turn.get("speech_segments", [])
+        if call.output is not None:
+            started = False
+            while len(active_tasks) < VIDEO_SPEECH_PENDING_LIMIT:
+                index = call.speech_index + 1
+                if index >= len(parts):
+                    break
+                self._start_speech(call, index, parts[index])
+                active_tasks.append(call.speech_tasks[index])
+                started = True
+            return started
+        active_task = call.speech_task
+        if (
+            active_task
+            and not active_task.done()
+            and active_task is not asyncio.current_task()
         ):
             return False
         index = call.speech_index + 1
-        parts = call.turn.get("speech_segments", [])
         if (
             index >= len(parts)
             or index > call.speech_requested_index + 1
@@ -2197,8 +2295,14 @@ class CallService:
             attempt=call.speech_attempts[index],
             cached=False,
         )
-        call.speech_task = asyncio.create_task(
-            self._speak(call, call.turn, index, text)
+        task = asyncio.create_task(self._speak(call, call.turn, index, text))
+        call.speech_task = task
+        call.speech_tasks[index] = task
+        call.speech_all_tasks.add(task)
+        task.add_done_callback(
+            lambda completed, owned=call, segment=index: self._forget_speech_task(
+                owned, segment, completed
+            )
         )
 
     async def _speak(self, call, turn, index, text):
@@ -2222,6 +2326,7 @@ class CallService:
                 result = await self._synthesize_tts(
                     call,
                     text,
+                    segment=index,
                     request_id=(
                         f"{call.binding['call_id']}-{turn.get('turn_id') or 'turn'}-{index}"
                     ),
@@ -2270,9 +2375,7 @@ class CallService:
                         segment=index,
                         asset=result,
                     )
-                for old in sorted(call.speech_cache)[:-2]:
-                    call.speech_cache.pop(old, None)
-                    call.speech_routes.pop(old, None)
+                self._trim_speech_cache(call)
                 self._start_queued_speech(call)
             else:
                 emit(
