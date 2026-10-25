@@ -18,7 +18,6 @@ MAX_OUTPUT = 4 * 1024 * 1024
 MAX_SPEECH_SEGMENTS = 32
 MAX_SPEECH_CHARS = 240
 MIN_SPEECH_DURATION_UNITS = 24
-MAX_VIDEO_SPEECH_DURATION_UNITS = 20
 _SENTENCE_END = re.compile(r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+')
 _LATIN_SPEECH_WORD = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 _COMPACT_SPEECH_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
@@ -526,6 +525,26 @@ def complete_speech_segments(text: str, *, maximum_duration_units: int | None = 
             _join_speech_parts(overflow, remainder),
         )
     return parts, remainder
+
+
+def complete_video_speech_segments(text: str):
+    """Release only VideoTTS's first complete sentence while the answer streams."""
+    clean = clean_speech_text(str(text or ""))
+    match = _SENTENCE_END.search(clean)
+    if match is None:
+        return [], clean
+    first = clean[: match.end()].strip()
+    remainder = clean[match.end() :].strip()
+    return ([first] if first else []), remainder
+
+
+def video_speech_segments(text: str):
+    """Send VideoTTS one fast first sentence, then the entire remaining answer."""
+    clean = clean_speech_text(str(text or ""))
+    first, remainder = complete_video_speech_segments(clean)
+    if not first:
+        return ([clean] if clean else []), False
+    return first + ([remainder] if remainder else []), False
 
 
 def speech_segments(text: str, *, maximum_duration_units: int | None = None):

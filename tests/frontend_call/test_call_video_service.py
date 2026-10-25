@@ -5,6 +5,7 @@ import pytest
 from orchestrator.frontend_call.contract import CallError
 from orchestrator.frontend_call.video_tts import VideoTTSSelection
 from test_call_service import setup
+from test_call_contract import wav
 
 SELECTION = {
     "enabled": True,
@@ -142,7 +143,7 @@ async def test_unconnected_call_keeps_legacy_audio(tmp_path):
     await service.close()
 
 
-async def test_external_video_opening_uses_renderer_safe_speech_segments(tmp_path):
+async def test_external_video_opening_sends_first_sentence_then_remainder(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
 
     async def opening(*_args):
@@ -158,6 +159,113 @@ async def test_external_video_opening_uses_renderer_safe_speech_segments(tmp_pat
         "今天想聊点什么，或者有什么要我来安排的？",
     ]
     await service.close()
+
+
+async def test_external_video_sends_first_sentence_then_batches_the_remainder(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    first = "看见了，测试官，这个我看得挺清楚。"
+    remainder = (
+        "你手里这包是 ChaCha 的藤椒瓜子，绿色包装，上面印着一根大瓜子和几粒青花椒，"
+        "还写着藤椒瓜子和 Szechuan Pepper Flavor，净含量 5.64 盎司，"
+        "换算下来大概 160 克。"
+        "这和咱们前两天聊的藤椒口味正好对上，"
+        "看来你是把当时说的那包直接拿到镜头前给我看了。"
+    )
+    observed = []
+    original_synthesize = gen.synthesize
+    calls = 0
+    released = asyncio.Event()
+
+    async def synthesize(selection, reference, text, **kwargs):
+        observed.append(text)
+        return await original_synthesize(selection, reference, text, **kwargs)
+
+    def result(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [
+                    {
+                        "sequence": 2,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": first + "你手里这包是 ChaCha 的藤椒瓜子",
+                    }
+                ],
+            }
+        if not released.is_set():
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [],
+            }
+        return {
+            "terminal": True,
+            "state": "completed",
+            "text": first + remainder,
+            "activity_sequence": 3,
+            "events": [],
+        }
+
+    gen.synthesize = synthesize
+    ports.result = result
+    try:
+        info = await service.invoke("owner", {**base, "operation": "context"})
+        body["generation"] = info["generation"]
+        body["revision"] = info["revision"]
+        await service.invoke("owner", body)
+        binding = {
+            **base,
+            "call_id": "call-1",
+            "generation": info["generation"],
+        }
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
+        for _ in range(100):
+            call = service.calls["call-1"]
+            if call.turn.get("speech_segments"):
+                break
+            await asyncio.sleep(0.001)
+        call = service.calls["call-1"]
+        assert call.turn["speech_segments"] == [first]
+        for _ in range(100):
+            if 0 in call.speech_cache:
+                break
+            await asyncio.sleep(0.001)
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "speech",
+                "turn_id": "turn-1",
+                "segment": 0,
+            },
+        )
+        released.set()
+        await call.task
+        if call.speech_task:
+            await call.speech_task
+
+        assert call.turn["speech_segments"] == [first, remainder]
+        assert observed == [first, remainder]
+    finally:
+        released.set()
+        await service.close()
 
 
 async def test_av_prepare_commit_interrupt_and_end_share_one_call(tmp_path):

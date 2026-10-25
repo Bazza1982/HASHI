@@ -181,8 +181,9 @@ Workbench/TUI play locally; reboot receipts never prove playback.
 voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
 credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
 and locks the first downgrade. With AP it requires VideoTTS and exclusive AV;
-without AP it stays audio. AV preserves the full answer in renderer-safe natural
-chunks; audio segmentation is unchanged.
+without AP it stays audio. AV preserves the full answer in two-stage output:
+its first complete sentence is expedited, then all remaining text is submitted
+as one batch so Compute can work ahead. Audio segmentation is unchanged.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),

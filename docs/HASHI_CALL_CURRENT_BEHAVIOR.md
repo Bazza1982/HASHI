@@ -194,13 +194,14 @@ numeric response-length requirements are retired.
   audio and video after explicit commit. The window yields reply audio and
   fillers; microphone/camera admission remains independent. An unavailable
   synthesis path shows a visible error and transcript rather than silent success.
-- **CALL-SPEECH-16** — External AV keeps the complete Agent answer but bounds
-  each renderer submission by estimated spoken duration. It prefers sentence,
-  clause, and word boundaries and never applies this provider-specific ceiling
-  to ordinary audio Call. Preview and final segmentation use the same rule, so
-  incremental speech remains a prefix of the final queue. Provider failure
-  diagnostics retain only a validated error code or HTTP status, never response
-  content.
+- **CALL-SPEECH-16** — External AV sends the first complete sentence as soon as
+  it is stable, then sends all remaining cleaned answer text as one second
+  VideoTTS request. This lets Compute prepare the body while the opener is
+  presented and avoids repeated renderer handoffs. Ordinary audio Call keeps
+  its existing natural-chunk policy. Preview and final segmentation use the
+  same rule, so incremental speech remains a prefix of the final queue.
+  Provider failure diagnostics retain only a validated error code or HTTP
+  status, never response content.
 
 ## Captions and controls
 

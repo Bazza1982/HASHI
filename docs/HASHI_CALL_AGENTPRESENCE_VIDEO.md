@@ -82,14 +82,16 @@ automatically resubmitted; explicit speech retry cannot replay an uncertain job.
 Cancellation fences local output immediately and optionally cancels the known
 remote job. Late results cannot upload or resume old presentation.
 
-External AV speech is segmented separately from ordinary audio Call. HASHI
-keeps the complete cleaned answer while limiting each VideoTTS submission to 20
-estimated duration units, preferring sentence, clause, and word boundaries.
-This limit reflects the verified stable range of the selected renderer and does
-not replace the configured input-character guard. Preview, commentary, final,
-and opening speech share the same segmentation rule. A failed async job remains
-terminal and is not retried; diagnostics retain a validated provider error code.
-Non-success HTTP responses retain only their numeric status, never their body.
+External AV speech is segmented separately from ordinary audio Call. The first
+complete sentence is released immediately as a short VideoTTS request. All
+remaining cleaned text is then submitted as one second request, so Compute can
+generate it while the first sentence is being presented instead of paying a
+renderer handoff between every sentence. A one-sentence answer remains one
+request. The configured input-character guard still applies. Preview,
+commentary, final, and opening speech share this rule. A failed async job
+remains terminal and is not retried; diagnostics retain a validated provider
+error code. Non-success HTTP responses retain only their numeric status, never
+their body.
 
 ## Window contract: call-output/1
 
@@ -130,9 +132,10 @@ The implementation is in `frontend_call/output.py`, `video_tts.py`, the existing
 Call service/config/routes/port, and the AP Connector port. The connector owns
 its existing token and local transport; Call business code imports no AP client.
 
-Focused checks cover legacy audio, AV prepare/commit, late-result fencing,
-duplicate start, unused audio-TTS credentials, configured third-party manifests,
-privacy/origin/download bounds, cancellation and AP generation races.
+Focused checks cover legacy audio, first-sentence/remainder batching, AV
+prepare/commit, late-result fencing, duplicate start, unused audio-TTS
+credentials, configured third-party manifests, privacy/origin/download bounds,
+cancellation and AP generation races.
 Candidate CallService + real service + real AP has produced fresh day/night
 video, actual frame/audio progress, complete playback and night hangup. Native
 interruption paused/muted the actual player and repeated interruption stayed
