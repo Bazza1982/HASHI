@@ -83,6 +83,24 @@ def generation_from_dict(value: Mapping[str, Any]) -> VerifiedFunctionGeneration
     )
 
 
+def _generation_receipt_source_commit(value: Any) -> str:
+    commit = str(
+        getattr(getattr(value, "receipt", None), "source_commit", "") or ""
+    ).strip().casefold()
+    if len(commit) not in {40, 64}:
+        return ""
+    if any(character not in "0123456789abcdef" for character in commit):
+        return ""
+    return commit
+
+
+def _kernel_startup_source_commit(kernel: Any) -> str:
+    pinned = getattr(kernel, "_startup_artifact", None)
+    if isinstance(pinned, (tuple, list)) and pinned:
+        return _generation_receipt_source_commit(pinned[0])
+    return ""
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1472,6 +1490,9 @@ class FunctionWorkerSupervisor:
         per_agent = {
             handle.name: {
                 "generation_id": handle.generation_id,
+                "source_commit": _generation_receipt_source_commit(
+                    handle.client.generation
+                ),
                 "worker_pid": handle.worker_pid,
                 "module_count": int(
                     handle.metadata.get("generation_module_count") or 0
@@ -1485,6 +1506,16 @@ class FunctionWorkerSupervisor:
             if isinstance(handle, AgentRuntimeHandle)
         }
         generations = {value["generation_id"] for value in per_agent.values()}
+        source_commits = {
+            value["source_commit"]
+            for value in per_agent.values()
+            if value["source_commit"]
+        }
+        aggregate_source_commit = (
+            next(iter(source_commits))
+            if len(source_commits) == 1
+            else "mixed" if source_commits else None
+        )
         aggregate = (
             next(iter(generations))
             if len(generations) == 1
@@ -1494,6 +1525,7 @@ class FunctionWorkerSupervisor:
         )
         self.kernel.function_generation = {
             "generation_id": aggregate,
+            "source_commit": aggregate_source_commit,
             "worker_model": "per-agent-process",
             "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
             "per_agent": per_agent,
@@ -1536,6 +1568,7 @@ class FunctionWorkerSupervisor:
             "shared_functions": {
                 "pid": os.getpid(),
                 "generation_id": getattr(self.kernel, "shared_generation_id", None),
+                "source_commit": _kernel_startup_source_commit(self.kernel) or None,
                 "adopted_at": getattr(self.kernel, "shared_adopted_at", None),
             },
             "function_workers": [
@@ -1543,6 +1576,9 @@ class FunctionWorkerSupervisor:
                     "agent": handle.name,
                     "pid": handle.worker_pid,
                     "generation_id": handle.generation_id,
+                    "source_commit": _generation_receipt_source_commit(
+                        handle.client.generation
+                    ),
                     "adopted_at": handle.metadata.get("worker_adopted_at"),
                     "phase": handle.metadata.get("worker_phase"),
                     "accepting": bool(handle.metadata.get("worker_accepting", False)),

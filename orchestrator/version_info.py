@@ -108,6 +108,35 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _commit_text(value: Any) -> str:
+    commit = str(value or "").strip().casefold()
+    if len(commit) not in {40, 64}:
+        return ""
+    if any(character not in "0123456789abcdef" for character in commit):
+        return ""
+    return commit
+
+
+def _generation_source_commit(value: Any) -> str:
+    return _commit_text(
+        getattr(getattr(value, "receipt", None), "source_commit", "")
+    )
+
+
+def _startup_source_commit(owner: Any) -> str:
+    pinned = getattr(owner, "_startup_artifact", None)
+    if isinstance(pinned, (tuple, list)) and pinned:
+        return _generation_source_commit(pinned[0])
+    return ""
+
+
+def _adopted_component_commit(value: Any) -> str:
+    component = _mapping(value)
+    return _commit_text(component.get("source_commit")) or _commit_text(
+        _mapping(component.get("provenance")).get("commit")
+    )
+
+
 def _fingerprint_mapping(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -140,6 +169,10 @@ def _worker_row(value: Mapping[str, Any]) -> dict[str, Any]:
         "generation_id": str(
             value.get("generation_id") or metadata.get("generation_id") or ""
         ),
+        "source_commit": _commit_text(
+            value.get("source_commit") or metadata.get("source_commit")
+        )
+        or None,
         "adopted_at": (
             value.get("adopted_at") or metadata.get("worker_adopted_at") or None
         ),
@@ -163,6 +196,11 @@ def _live_worker_rows(owner: Any, topology: Mapping[str, Any]) -> list[dict[str,
                         "agent": getattr(runtime, "name", ""),
                         "pid": getattr(runtime, "worker_pid", 0),
                         "generation_id": getattr(runtime, "generation_id", ""),
+                        "source_commit": _generation_source_commit(
+                            getattr(
+                                getattr(runtime, "client", None), "generation", None
+                            )
+                        ),
                         "metadata": getattr(runtime, "metadata", {}),
                     }
                 )
@@ -261,6 +299,7 @@ def collect_version_payload(
         shared = {
             "pid": os.getpid(),
             "generation_id": getattr(owner, "shared_generation_id", None),
+            "source_commit": _startup_source_commit(owner) or None,
             "adopted_at": getattr(owner, "shared_adopted_at", None),
         }
     workers = _live_worker_rows(owner, topology)
@@ -286,16 +325,28 @@ def collect_version_payload(
 
     shared["generation_id"] = str(shared.get("generation_id") or "")
     shared["pid"] = int(shared.get("pid") or 0) or None
+    shared["source_commit"] = (
+        _commit_text(shared.get("source_commit"))
+        or _startup_source_commit(owner)
+        or None
+    )
     shared["adopted_at"] = shared.get("adopted_at") or None
     shared["provenance"] = provenance_for(shared["generation_id"])
     for worker in workers:
         worker["provenance"] = provenance_for(worker["generation_id"])
 
-    primary = (
-        current_worker.get("provenance") if current_worker else None
-    ) or shared.get("provenance")
-    primary = _mapping(primary)
-    running_commit = str(primary.get("commit") or "") or None
+    if not shared["source_commit"]:
+        worker_source_commits = {
+            _commit_text(worker.get("source_commit"))
+            for worker in workers
+            if _commit_text(worker.get("source_commit"))
+        }
+        if len(worker_source_commits) == 1:
+            shared["source_commit"] = next(iter(worker_source_commits))
+
+    primary_component = current_worker or shared
+    primary = _mapping(primary_component.get("provenance"))
+    running_commit = _adopted_component_commit(primary_component) or None
     source = inspect_source_checkout(code_root, running_commit=running_commit)
     remote = _remote_fact(bridge_home, instance_id)
 
@@ -304,13 +355,22 @@ def collect_version_payload(
         for value in [shared.get("generation_id"), *(row.get("generation_id") for row in workers)]
         if value
     }
+    adopted_commits = {
+        commit
+        for commit in [
+            _adopted_component_commit(shared),
+            *(_adopted_component_commit(worker) for worker in workers),
+        ]
+        if commit
+    }
     reasons: list[str] = []
-    mixed = len(generations) > 1
-    if mixed:
+    mixed_workers = len(generations) > 1 or len(adopted_commits) > 1
+    mixed = mixed_workers
+    if len(generations) > 1:
         reasons.append("function_worker_generations_differ")
-    remote_commit = str(
-        ((_mapping(remote.get("provenance"))).get("commit") or "")
-    )
+    if len(adopted_commits) > 1:
+        reasons.append("function_worker_commits_differ")
+    remote_commit = _adopted_component_commit(remote)
     if running_commit and remote_commit and running_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")
@@ -345,6 +405,11 @@ def collect_version_payload(
     adopted_at = (
         current_worker.get("adopted_at") if current_worker else None
     ) or shared.get("adopted_at")
+    running_source = (
+        source
+        if running_commit and _commit_text(source.get("commit")) == running_commit
+        else {}
+    )
     return {
         "ok": True,
         "schema_version": VERSION_PAYLOAD_SCHEMA,
@@ -357,10 +422,18 @@ def collect_version_payload(
             "python": fingerprint.get("python") or platform.python_version(),
         },
         "running": {
-            "branch": primary.get("branch"),
-            "tag": primary.get("tag"),
+            "branch": (
+                running_source.get("branch")
+                if running_source
+                else primary.get("branch")
+            ),
+            "tag": running_source.get("tag") if running_source else primary.get("tag"),
             "commit": running_commit,
-            "commit_time": primary.get("commit_time"),
+            "commit_time": (
+                running_source.get("commit_time")
+                if running_source
+                else primary.get("commit_time")
+            ),
             "build_id": primary.get("build_id"),
             "build_time": primary.get("build_time"),
             "release_channel": primary.get("release_channel"),
@@ -369,7 +442,7 @@ def collect_version_payload(
             "functions": shared,
             "worker": current_worker,
             "workers": workers,
-            "mixed_workers": len(generations) > 1,
+            "mixed_workers": mixed_workers,
             "remote": remote,
         },
         "source": source,
