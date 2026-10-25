@@ -250,9 +250,12 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _provenance_commit(value: Any) -> str:
+def _component_commit(value: Any) -> str:
+    component = _mapping(value)
     return str(
-        _mapping(_mapping(value).get("provenance")).get("commit") or ""
+        component.get("source_commit")
+        or _mapping(component.get("provenance")).get("commit")
+        or ""
     ).casefold()
 
 
@@ -278,7 +281,7 @@ def validate_release_payload(
     running = _mapping(payload.get("running"))
     if str(running.get("commit") or "").casefold() != target:
         issues.append("running_commit_mismatch")
-    if _provenance_commit(running.get("functions")) != target:
+    if _component_commit(running.get("functions")) != target:
         issues.append("functions_commit_mismatch")
     if running.get("mixed_workers") is True:
         issues.append("worker_generations_mixed")
@@ -294,7 +297,7 @@ def validate_release_payload(
             worker_names.add(label)
             if worker.get("phase") != "ACTIVE" or worker.get("accepting") is not True:
                 issues.append(f"worker_not_ready:{label}")
-            if _provenance_commit(worker) != target:
+            if _component_commit(worker) != target:
                 issues.append(f"worker_commit_mismatch:{label}")
         required_agents = {
             str(agent).strip()
@@ -307,7 +310,7 @@ def validate_release_payload(
     remote = _mapping(running.get("remote"))
     if remote.get("status") != "active":
         issues.append("remote_not_active")
-    remote_commit = _provenance_commit(remote)
+    remote_commit = _component_commit(remote)
     if not remote_commit:
         issues.append("remote_provenance_missing")
     elif remote_commit != target:

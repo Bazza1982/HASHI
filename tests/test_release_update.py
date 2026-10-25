@@ -155,6 +155,26 @@ def test_version_gate_requires_every_component_to_match_target():
     assert "remote_commit_mismatch" in issues
 
 
+def test_version_gate_accepts_requalified_commit_for_reused_function_bytes():
+    target = "a" * 40
+    artifact_commit = "b" * 40
+    payload = _matching_payload(target)
+    payload["running"]["functions"]["source_commit"] = target
+    payload["running"]["functions"]["provenance"] = {"commit": artifact_commit}
+    for worker in payload["running"]["workers"]:
+        worker["source_commit"] = target
+        worker["provenance"] = {"commit": artifact_commit}
+
+    assert (
+        validate_release_payload(
+            payload,
+            expected_commit=target,
+            expected_instance="HASHI3",
+        )
+        == []
+    )
+
+
 def test_version_gate_rejects_offline_remote_even_if_state_is_green():
     target = "a" * 40
     payload = _matching_payload(target)

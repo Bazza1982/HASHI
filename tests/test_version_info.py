@@ -227,6 +227,49 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     assert unavailable["state"]["code"] == "provenance_unavailable"
 
 
+def test_payload_reports_live_adoption_commit_for_reused_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation_id = "sha256:" + "a" * 64
+    artifact_provenance = capture_build_provenance(
+        source,
+        artifact_kind="function-generation",
+        generation_id=generation_id,
+    )
+    artifact_commit = artifact_provenance["commit"]
+    _generation_record(home, generation_id, artifact_provenance)
+    owner = _owner(source, home, generation_id)
+
+    (source / "README.md").write_text("documentation only\n", encoding="utf-8")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-m", "documentation only")
+    adopted_commit = _git(source, "rev-parse", "HEAD")
+    live_generation = SimpleNamespace(
+        receipt=SimpleNamespace(source_commit=adopted_commit)
+    )
+    owner._startup_artifact = (live_generation, home)
+    owner.runtimes[0].client = SimpleNamespace(generation=live_generation)
+    monkeypatch.setattr(
+        "orchestrator.version_info.read_runtime_claim", lambda _root: None
+    )
+
+    payload = collect_version_payload(owner, agent_name="akane")
+
+    assert payload["running"]["commit"] == adopted_commit
+    assert payload["running"]["functions"]["source_commit"] == adopted_commit
+    assert payload["running"]["worker"]["source_commit"] == adopted_commit
+    assert payload["running"]["functions"]["provenance"]["commit"] == artifact_commit
+    assert artifact_commit != adopted_commit
+    assert payload["source"]["commit"] == adopted_commit
+    assert payload["state"] == {
+        "code": "running_matches_source",
+        "reasons": [],
+    }
+
+
 def test_renderers_localize_and_mark_stale_cache(tmp_path: Path) -> None:
     payload = {
         "product": {"version": "4.0.0a2"},

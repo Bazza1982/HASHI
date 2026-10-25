@@ -229,6 +229,25 @@ def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
     assert not handle.get_runtime_metadata()["online"]
 
 
+def test_topology_publishes_live_source_adoption_commit():
+    target = "a" * 40
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    generation = _Generation()
+    generation.receipt = SimpleNamespace(source_commit=target)
+    kernel._startup_artifact = (generation, Path("generation"))
+    kernel.shared_generation_id = generation.manifest.generation_id
+    kernel.shared_adopted_at = "2026-10-25T00:00:00Z"
+    handle = _handle(kernel, _Client("alpha", 101, generation=generation))
+    kernel.runtimes = [handle]
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    topology = supervisor.topology_snapshot()
+
+    assert topology["shared_functions"]["source_commit"] == target
+    assert topology["function_workers"][0]["source_commit"] == target
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"
