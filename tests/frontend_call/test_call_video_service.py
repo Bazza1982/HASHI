@@ -104,12 +104,14 @@ class Generator:
         return {"media": b"AV media", "provider_receipt": {"job_id": "job-one"}}
 
 
-async def arranged(tmp_path, *, connected=True, protocol="call-output/1"):
+async def arranged(
+    tmp_path, *, connected=True, protocol="call-output/1", selection_overrides=None
+):
     service, ports, adapters, base, clock = setup(tmp_path)
     generator, output = Generator(), Output()
     service.video_synthesizer = generator
     service.config.video_tts_selection = lambda revision: VideoTTSSelection.parse(
-        SELECTION
+        {**SELECTION, **(selection_overrides or {})}
     )
 
     async def resolve(*args, **kwargs):
@@ -151,7 +153,7 @@ async def test_unconnected_call_keeps_legacy_audio(tmp_path):
     await service.close()
 
 
-async def test_external_video_opening_sends_first_sentence_then_remainder(tmp_path):
+async def test_external_video_opening_uses_default_two_sentence_first_group(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
 
     async def opening(*_args):
@@ -163,14 +165,15 @@ async def test_external_video_opening_sends_first_sentence_then_remainder(tmp_pa
     await call.task
 
     assert call.turn["speech_segments"] == [
-        "测试官，晚上好，露米在这里。",
-        "今天想聊点什么，或者有什么要我来安排的？",
+        "测试官，晚上好，露米在这里。今天想聊点什么，或者有什么要我来安排的？"
     ]
     await service.close()
 
 
 async def test_external_video_sends_first_sentence_then_batches_the_remainder(tmp_path):
-    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"first_segment_sentences": 1}
+    )
     first = "看见了，测试官，这个我看得挺清楚。"
     remainder = (
         "你手里这包是 ChaCha 的藤椒瓜子，绿色包装，上面印着一根大瓜子和几粒青花椒，"
@@ -290,7 +293,9 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
 async def test_external_video_submits_every_group_concurrently_but_prepares_in_order(
     tmp_path,
 ):
-    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 5}
+    )
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     parts = [f"第{index}组。" for index in range(5)]
@@ -340,7 +345,9 @@ async def test_external_video_submits_every_group_concurrently_but_prepares_in_o
 
 
 async def test_external_video_bounds_only_submission_handshakes(tmp_path):
-    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 4}
+    )
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     parts = [f"第{index}组。" for index in range(4)]
@@ -396,6 +403,65 @@ async def test_external_video_bounds_only_submission_handshakes(tmp_path):
         assert len(output.prepared) == len(parts)
     finally:
         for gate in (*accepted.values(), *rendered.values()):
+            gate.set()
+        await service.close()
+
+
+async def test_external_video_refills_bounded_inflight_window(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 2}
+    )
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(4)]
+    call.turn = {
+        "turn_id": "bounded-inflight",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    rendered = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        kwargs["on_job"]({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
+        await rendered[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:2]
+
+        rendered[parts[0]].set()
+        for _ in range(100):
+            if len(started) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:3]
+        assert not rendered[parts[1]].is_set()
+
+        rendered[parts[1]].set()
+        for _ in range(100):
+            if len(started) == 4:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        rendered[parts[2]].set()
+        rendered[parts[3]].set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == len(parts)
+    finally:
+        for gate in rendered.values():
             gate.set()
         await service.close()
 

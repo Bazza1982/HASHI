@@ -545,15 +545,27 @@ def _video_sentence_units(
     units: list[str] = []
     offset = 0
     for match in _SENTENCE_END.finditer(clean):
-        sentence = clean[offset : match.end()].strip()
+        raw_sentence = clean[offset : match.end()]
+        sentence = raw_sentence.strip()
         offset = match.end()
         if sentence:
-            units.extend(_bounded_video_sentence(sentence, maximum_chars))
-    remainder = clean[offset:].strip()
-    if include_tail and remainder:
-        units.extend(_bounded_video_sentence(remainder, maximum_chars))
+            bounded = _bounded_video_sentence(sentence, maximum_chars)
+            leading = raw_sentence[: len(raw_sentence) - len(raw_sentence.lstrip())]
+            trailing = raw_sentence[len(raw_sentence.rstrip()) :]
+            if leading:
+                bounded[0] = leading + bounded[0]
+            if trailing:
+                bounded[-1] += trailing
+            units.extend(bounded)
+    remainder = clean[offset:]
+    if include_tail and remainder.strip():
+        bounded = _bounded_video_sentence(remainder.strip(), maximum_chars)
+        leading = remainder[: len(remainder) - len(remainder.lstrip())]
+        if leading:
+            bounded[0] = leading + bounded[0]
+        units.extend(bounded)
         remainder = ""
-    return units, remainder
+    return units, remainder.strip()
 
 
 def _bounded_video_sentence(sentence: str, maximum_chars: int | None) -> list[str]:

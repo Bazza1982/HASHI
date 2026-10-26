@@ -55,8 +55,9 @@ class VideoTTSSelection:
     wait_min_seconds: float
     wait_max_seconds: float
     voice_source: str = "configured"
-    first_segment_sentences: int = 1
+    first_segment_sentences: int = 2
     group_sentences: int = 4
+    max_inflight_groups: int = 2
 
     @classmethod
     def parse(cls, raw):
@@ -84,6 +85,7 @@ class VideoTTSSelection:
             "wait_max_seconds",
             "first_segment_sentences",
             "group_sentences",
+            "max_inflight_groups",
         }
         if set(raw) - allowed or raw.get("enabled") is not True:
             raise CallError("call_video_configuration_invalid", 503)
@@ -120,8 +122,9 @@ class VideoTTSSelection:
         wait_per_char = raw.get("wait_per_char_seconds", 0.17)
         wait_min = raw.get("wait_min_seconds", 20)
         wait_max = raw.get("wait_max_seconds", 90)
-        first_segment_sentences = raw.get("first_segment_sentences", 1)
+        first_segment_sentences = raw.get("first_segment_sentences", 2)
         group_sentences = raw.get("group_sentences", 4)
+        max_inflight_groups = raw.get("max_inflight_groups", 2)
         for value, low, high in (
             (speed, 0.5, 2),
             (request_timeout, 1, 900),
@@ -144,6 +147,8 @@ class VideoTTSSelection:
             or not 1 <= first_segment_sentences <= 32
             or type(group_sentences) is not int
             or not 1 <= group_sentences <= 32
+            or type(max_inflight_groups) is not int
+            or not 1 <= max_inflight_groups <= 16
         ):
             raise CallError("call_video_configuration_invalid", 503)
         if wait_min > wait_max or job_timeout < wait_max:
@@ -187,6 +192,7 @@ class VideoTTSSelection:
             voice_source,
             first_segment_sentences,
             group_sentences,
+            max_inflight_groups,
         )
 
     def foreground_wait_seconds(self, text):
@@ -204,6 +210,7 @@ class VideoTTSSelection:
             "voice": self.voice,
             "first_segment_sentences": self.first_segment_sentences,
             "group_sentences": self.group_sentences,
+            "max_inflight_groups": self.max_inflight_groups,
             **(
                 {"voice_source": self.voice_source}
                 if self.voice_source != "configured"
@@ -336,6 +343,10 @@ class CallVideoTTS:
                     protocols={selection.protocol},
                     locations=locations,
                 ),
+                # The async VideoTTS contract owns its queue. A busy capability
+                # is therefore a scheduling signal, not a reason to reject the
+                # next sentence group before the provider can enqueue it.
+                allow_busy=selection.protocol == ASYNC_PROTOCOL,
             )
             if resolved.offering.interface(selection.protocol).method != "POST":
                 raise CallError("call_video_interface_invalid", 503)

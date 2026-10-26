@@ -91,6 +91,22 @@ def test_video_streaming_releases_configured_complete_sentence_groups():
     assert remainder == sentences[9]
 
 
+def test_video_sentence_groups_preserve_spaces_between_english_sentences():
+    text = "First sentence. Second sentence! Third sentence? Fourth sentence."
+    parts, truncated = video_speech_segments(
+        text,
+        first_segment_sentences=1,
+        group_sentences=3,
+    )
+
+    assert parts == [
+        "First sentence.",
+        "Second sentence! Third sentence? Fourth sentence.",
+    ]
+    assert " ".join(parts) == text
+    assert not truncated
+
+
 @pytest.mark.parametrize(
     "sentence_count,expected_sizes",
     [

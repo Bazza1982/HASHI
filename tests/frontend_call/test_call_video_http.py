@@ -133,19 +133,28 @@ def selection(**overrides):
 
 def test_video_wait_budget_scales_with_text_and_keeps_tracking_longer():
     policy = selection()
-    assert policy.first_segment_sentences == 1
+    assert policy.first_segment_sentences == 2
     assert policy.group_sentences == 4
+    assert policy.max_inflight_groups == 2
     assert policy.foreground_wait_seconds("短句。") == 20
     assert policy.foreground_wait_seconds("字" * 161) == pytest.approx(45.87)
     assert policy.job_timeout_seconds > policy.foreground_wait_seconds("字" * 400)
-    tuned = selection(first_segment_sentences=3, group_sentences=6)
-    assert (tuned.first_segment_sentences, tuned.group_sentences) == (3, 6)
+    tuned = selection(
+        first_segment_sentences=3, group_sentences=6, max_inflight_groups=5
+    )
+    assert (
+        tuned.first_segment_sentences,
+        tuned.group_sentences,
+        tuned.max_inflight_groups,
+    ) == (3, 6, 5)
     with pytest.raises(CallError, match="call_video_configuration_invalid"):
         selection(job_timeout_seconds=30, wait_max_seconds=90)
     with pytest.raises(CallError, match="call_video_configuration_invalid"):
         selection(first_segment_sentences=0)
     with pytest.raises(CallError, match="call_video_configuration_invalid"):
         selection(group_sentences=33)
+    with pytest.raises(CallError, match="call_video_configuration_invalid"):
+        selection(max_inflight_groups=0)
 
 
 @pytest.mark.anyio
@@ -324,6 +333,32 @@ async def test_privacy_and_frozen_origin_precede_render_submission():
     with pytest.raises(CallError, match="call_video_interface_invalid"):
         await consumer.synthesize(
             selection(), PNG, "Hello.", privacy_level=1, request_id="one"
+        )
+
+
+@pytest.mark.anyio
+async def test_async_video_queue_accepts_busy_capability_but_sync_does_not():
+    node = validate_compute_node(
+        {"id": "studio", "location": "lan", "base_url": "https://192.168.0.41"}
+    )
+    payload = manifest()
+    payload["privacy_location"] = "lan"
+    payload["capacity"].update(in_flight=1, busy=True)
+    payload["services"][0]["status"] = "busy"
+    payload["services"][0]["capacity"].update(in_flight=1, busy=True)
+    catalogue = parse_compute_manifest(node, payload).catalogue()
+
+    class Directory:
+        async def refresh(self):
+            return SimpleNamespace(catalogue=catalogue)
+
+    consumer = CallVideoTTS("unused", directory=Directory())
+    resolved = await consumer.resolve(selection(), privacy_level=1)
+    assert resolved.offering.service_id == "avatar"
+
+    with pytest.raises(CallError, match="call_video_compute_node_busy"):
+        await consumer.resolve(
+            selection(protocol="video.speech.mp4.v1"), privacy_level=1
         )
 
 

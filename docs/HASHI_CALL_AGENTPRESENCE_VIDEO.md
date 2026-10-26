@@ -73,8 +73,9 @@ selections are preserved. A call freezes this selection at its Call revision.
     "wait_per_char_seconds": 0.17,
     "wait_min_seconds": 20,
     "wait_max_seconds": 90,
-    "first_segment_sentences": 1,
-    "group_sentences": 4
+    "first_segment_sentences": 2,
+    "group_sentences": 4,
+    "max_inflight_groups": 2
   }
 }
 ```
@@ -112,8 +113,11 @@ provider answer deltas, including Codex app-server agent-message deltas, enter
 the Workbench-only answer-preview lane; commentary deltas remain excluded. The
 first `first_segment_sentences` complete sentences are released immediately as
 a short VideoTTS request, without waiting for the PAO Run to finish. Remaining
-sentences are grouped in order by `group_sentences`; the defaults are 1 and 4.
-All ready groups enter Compute immediately and may render concurrently. AP
+sentences are grouped in order by `group_sentences`; the defaults are 2 and 4.
+All ready groups are scheduled immediately. `max_inflight_groups` (default 2)
+keeps the provider's render lanes full without leaving later jobs in a short
+provider queue long enough to expire. A finished group immediately admits the
+next waiting group. AP
 preload and playback remain strictly ordered: a later render may finish first
 but cannot overtake an earlier group at the presentation gate. A short answer
 remains one request, and ordinary audio Call remains serial. The configured

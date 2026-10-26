@@ -91,6 +91,12 @@ class ExternalCallOutput:
         # Bound only the short async-job admission handshake. Once the provider
         # accepts a job, its render continues concurrently and the next submits.
         self._submission_slots = asyncio.Semaphore(VIDEO_TTS_SUBMISSION_CONCURRENCY)
+        # Provider work is also bounded independently of admission. All logical
+        # groups are scheduled immediately, while this prefetch window prevents
+        # queued jobs from expiring before a render lane becomes available.
+        self._provider_slots = asyncio.Semaphore(
+            selection.max_inflight_groups if selection is not None else 1
+        )
         self.fallback_reason_code = str(fallback_reason_code or "")
         self.transient_reason_code = ""
 
@@ -376,19 +382,23 @@ class ExternalCallOutput:
             selection = replace(selection, voice=route.voice_name)
 
         async def generate():
-            await self._submission_slots.acquire()
+            await self._provider_slots.acquire()
             try:
-                return await self.synthesizer.synthesize(
-                    selection,
-                    self.connector.reference,
-                    text,
-                    privacy_level=self.privacy(),
-                    request_id=request_id,
-                    expected_origin=self.origin,
-                    on_job=on_job,
-                )
+                await self._submission_slots.acquire()
+                try:
+                    return await self.synthesizer.synthesize(
+                        selection,
+                        self.connector.reference,
+                        text,
+                        privacy_level=self.privacy(),
+                        request_id=request_id,
+                        expected_origin=self.origin,
+                        on_job=on_job,
+                    )
+                finally:
+                    release_submission()
             finally:
-                release_submission()
+                self._provider_slots.release()
 
         provider_task = self._own_provider_task(generate())
         wait_seconds = selection.foreground_wait_seconds(text)
