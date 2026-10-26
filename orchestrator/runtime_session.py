@@ -127,6 +127,140 @@ def owner_id(runtime: Any, explicit: str | None = None) -> str:
     return SessionStore.owner_id_for(runtime.global_config, explicit)
 
 
+def _publish_route_metadata(runtime: Any) -> None:
+    publisher = getattr(runtime, "_publish_worker_metadata", None)
+    if not callable(publisher):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        result = publisher()
+        if inspect.isawaitable(result):
+            loop.create_task(result)
+    except RuntimeError:
+        # Runtime construction and isolated tests may not have an active loop.
+        return
+    except Exception:
+        logger.warning("Could not publish updated Telegram route metadata", exc_info=True)
+
+
+def record_telegram_route(
+    runtime: Any,
+    *,
+    chat_id: Any,
+    explicit_owner_id: str | None = None,
+    session_id: str | None = None,
+) -> int:
+    """Persist an observed authorized Telegram endpoint in PAO Session state."""
+
+    try:
+        resolved_chat_id = int(str(chat_id).strip())
+    except (TypeError, ValueError) as exc:
+        raise SessionConflict("Telegram channel key must be a non-zero integer") from exc
+    if resolved_chat_id == 0:
+        raise SessionConflict("Telegram channel key must be a non-zero integer")
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    selected = (
+        store.get_session(
+            session_id,
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            include_deleted=False,
+        )
+        if session_id is not None
+        else store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(resolved_chat_id),
+        session_id=selected["session_id"],
+    )
+    _publish_route_metadata(runtime)
+    return resolved_chat_id
+
+
+def _restore_telegram_chat_from_ingress(
+    runtime: Any,
+    *,
+    store: SessionStore,
+    resolved_owner: str,
+) -> int | None:
+    """Migrate a pre-binding route by matching its opaque FC endpoint."""
+
+    ingress = store.latest_frontend_ingress(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        connector_id="telegram",
+    )
+    if ingress is None:
+        return None
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+
+    candidates: list[int] = []
+    for raw in getattr(runtime, "_authorized_telegram_ids", ()):
+        try:
+            candidate = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    matches = [
+        candidate
+        for candidate in candidates
+        if endpoint_id_for(
+            ingress["connector_id"],
+            ingress_transport=ingress["ingress_transport"],
+            channel_key=str(candidate),
+        )
+        == ingress["endpoint_id"]
+    ]
+    if len(matches) != 1:
+        return None
+    selected = store.resolve_primary_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        establish=True,
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(matches[0]),
+        session_id=selected["session_id"],
+    )
+    return matches[0]
+
+
+def primary_telegram_chat_id(runtime: Any) -> int | None:
+    """Restore the newest owner/Agent-bound Telegram endpoint after restart."""
+
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime)
+    binding = store.latest_channel_binding(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+    )
+    if binding is not None:
+        try:
+            chat_id = int(str(binding["channel_key"]).strip())
+        except (KeyError, TypeError, ValueError):
+            chat_id = 0
+        if chat_id:
+            return chat_id
+    return _restore_telegram_chat_from_ingress(
+        runtime,
+        store=store,
+        resolved_owner=resolved_owner,
+    )
+
+
 def initialize_runtime_sessions(runtime: Any) -> dict[str, Any]:
     store = ensure_store(runtime)
     default = store.ensure_default_session(owner_id=owner_id(runtime), agent_id=runtime.name)
@@ -237,6 +371,13 @@ def resolve_request_session(
             channel_key=channel_key,
             explicit_session_id=explicit_session_id,
             default_only=default_only,
+        )
+    if surface == "telegram":
+        record_telegram_route(
+            runtime,
+            chat_id=channel_key,
+            explicit_owner_id=resolved_owner,
+            session_id=session["session_id"],
         )
     return session, resolved_owner, surface, channel_key
 
@@ -1936,6 +2077,13 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
             agent_id=runtime.name,
             session_id=session_id,
         )
+        if surface == "telegram":
+            record_telegram_route(
+                runtime,
+                chat_id=channel_key,
+                explicit_owner_id=resolved_owner,
+                session_id=session_id,
+            )
     else:
         store.bind_channel(
             owner_id=resolved_owner,

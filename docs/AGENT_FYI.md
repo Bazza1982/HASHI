@@ -150,6 +150,12 @@ neither translates replies/IDs. TUI switches freeze runtime identity/state.
 Remote authenticates. Mirror opt-outs preserve origin replies; `/think` and
 `/commentary` are independent.
 
+Telegram allowlists authorize ingress; they never choose an output target. PAO's
+latest owner/Agent Telegram binding routes proactive output across restarts, and
+legacy recovery requires one opaque endpoint match. Ambiguity means no send.
+Windows local-API credential publication preserves the registered Remote task
+SID on create and repairs that ACL without rewriting existing credential bytes.
+
 `/stop` fences every Agent Session, cancels owned work, rejects stale callbacks,
 retains periodic definitions, and durably records `stopped` before cleanup.
 Never retry uncertain saves; HERV3 releases its Turn first. See

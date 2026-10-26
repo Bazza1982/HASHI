@@ -3367,6 +3367,85 @@ class SessionStore:
             )
         return session
 
+    def latest_channel_binding(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        surface: str,
+    ) -> dict[str, str] | None:
+        """Return the latest persisted endpoint for one owner/Agent surface."""
+
+        normalized_surface = str(surface or "").strip().lower()
+        if not normalized_surface:
+            raise ValueError("channel binding surface is required")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT surface, channel_key, session_id, updated_at
+                FROM channel_bindings
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                  AND surface = ?
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                    normalized_surface,
+                ),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_frontend_ingress(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        connector_id: str,
+    ) -> dict[str, str] | None:
+        """Return bounded routing facts from the newest canonical user ingress."""
+
+        connector = str(connector_id or "").strip().casefold()
+        if not connector:
+            raise ValueError("connector id is required")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.message_context_json
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND m.role = 'user' AND m.message_context_json != '{}'
+                ORDER BY m.created_at DESC, m.ordinal DESC
+                LIMIT 4096
+                """,
+                (
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                ),
+            ).fetchall()
+        for row in rows:
+            context = _json_object(row["message_context_json"])
+            ingress = context.get("frontend_ingress")
+            if not isinstance(ingress, Mapping):
+                continue
+            endpoint = ingress.get("connector")
+            if not isinstance(endpoint, Mapping):
+                continue
+            observed_connector = str(endpoint.get("id") or "").strip().casefold()
+            endpoint_id = str(endpoint.get("endpoint_id") or "").strip()
+            transport = str(context.get("ingress_transport") or "").strip().casefold()
+            if observed_connector == connector and endpoint_id and transport:
+                return {
+                    "connector_id": observed_connector,
+                    "endpoint_id": endpoint_id,
+                    "ingress_transport": transport,
+                }
+        return None
+
     def bind_primary_session(
         self,
         *,

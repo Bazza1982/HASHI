@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -290,3 +292,160 @@ async def test_reply_to_an_ordinary_bot_message_is_not_mistaken_for_a_question(t
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=7),
         message=SimpleNamespace(reply_to_message=original, text="ordinary follow-up"))
     assert await handle_text_reply(runtime, update) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
+def test_bootstrap_preserves_and_repairs_the_registered_remote_runtime_acl(tmp_path):
+    from orchestrator.config_json import read_config_json
+    from orchestrator.workbench_auth import ensure_local_api_credential
+    from tools.private_files import protect_private_file
+
+    def acl() -> str:
+        return subprocess.run(
+            ["icacls.exe", str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    path = tmp_path / "secrets.json"
+    path.write_text(
+        json.dumps({"hashi_remote_shared_token": "fixture"}),
+        encoding="utf-8",
+    )
+    first = ensure_local_api_credential(
+        read_config_json(path),
+        profile="personal",
+        remote_runtime_sids=("S-1-5-19",),
+    )
+    saved = path.read_bytes()
+    assert first["workbench_admin_token"]
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl()
+
+    # Reproduce the incident: a later private publication removes the
+    # separately supervised Remote principal while leaving bytes intact.
+    protect_private_file(path)
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" not in acl()
+
+    repaired = ensure_local_api_credential(
+        read_config_json(path),
+        profile="personal",
+        remote_runtime_sids=("S-1-5-19",),
+    )
+    assert repaired["workbench_admin_token"] == first["workbench_admin_token"]
+    assert path.read_bytes() == saved
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl()
+
+
+def test_primary_telegram_chat_survives_runtime_recreation_in_pao_binding(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="MSI")
+    store.ensure_default_session(owner_id="user:8872", agent_id="hashiko")
+    runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=store,
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    runtime._is_authorized_user = lambda user_id: user_id in runtime._authorized_telegram_ids
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7666),
+        effective_chat=SimpleNamespace(id=7666),
+    )
+    FlexibleAgentRuntime._record_active_chat(runtime, update)
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 7666
+
+    restarted = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=SessionStore(store.db_path, instance_id="MSI"),
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 7666
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows task principal contract")
+def test_remote_runtime_sid_comes_from_the_registered_instance_task(tmp_path, monkeypatch):
+    from orchestrator import workbench_auth
+    from remote import supervisor_identity
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout="SID:S-1-5-19\n", stderr="")
+
+    monkeypatch.setattr(
+        supervisor_identity,
+        "resolve_supervisor_identity",
+        lambda _root: SimpleNamespace(windows_task_name="HashiRemote-MSI"),
+    )
+    monkeypatch.setattr(workbench_auth.subprocess, "run", fake_run)
+
+    assert workbench_auth._windows_remote_runtime_sids(tmp_path) == ("S-1-5-19",)
+    assert captured["env"]["HASHI_REMOTE_PRINCIPAL_QUERY_TASK"] == "HashiRemote-MSI"
+    assert "HashiRemote-MSI" not in captured["argv"]
+
+
+def test_legacy_telegram_endpoint_migrates_without_allowlist_order(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="MSI")
+    owner = "user:8872"
+    session = store.ensure_default_session(owner_id=owner, agent_id="hashiko")
+    runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=store,
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+
+    # Multiple authorized identities are an allowlist, not a destination.
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 0
+
+    endpoint_id = endpoint_id_for(
+        "telegram",
+        ingress_transport="photo",
+        channel_key="7666",
+    )
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="hashiko",
+        request_id="route-migration",
+        text="authorized photo ingress",
+        source="photo",
+        idempotency_key="route-migration",
+        message_context={
+            "frontend_ingress": {
+                "connector": {
+                    "id": "telegram",
+                    "endpoint_id": endpoint_id,
+                },
+            },
+            "ingress_transport": "photo",
+        },
+    )
+
+    restarted = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=SessionStore(store.db_path, instance_id="MSI"),
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 7666
+    binding = restarted.session_store.latest_channel_binding(
+        owner_id=owner,
+        agent_id="hashiko",
+        surface="telegram",
+    )
+    assert binding is not None
+    assert binding["channel_key"] == "7666"
