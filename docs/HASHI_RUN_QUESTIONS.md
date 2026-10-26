@@ -1,5 +1,50 @@
 # Asynchronous questions within a Run
 
+## October 26: five-minute resolution and usable connector delivery
+
+PAO caps every question at 300 seconds from creation, including persisted
+legacy deadlines and older callers requesting a longer lifetime. Shorter
+explicit deadlines remain valid. A timely saved answer remains consumable
+after the deadline; expiry never invents an answer or discards an already
+authenticated answer. Confirmed failure of every frozen delivery destination
+resolves the question early as an explicit non-answer. An outbox `unknown`
+outcome remains indeterminate: it neither proves non-delivery nor cancels the
+question, and it remains outside claim/retry selection until explicit evidence
+reconciles it. This prevents both premature cancellation and duplicate sends.
+
+Native Codex expiry resolves the original RPC with a typed unanswered error,
+the question identity, every authenticated answer already consumed from the
+same native batch, and fixed runtime guidance. The adapter scans the whole
+batch before resolving expiry, so question order cannot hide a partial answer.
+It never returns an empty or suggested answer. The Engine must reassess the
+original goal: stop and
+restate a critical unanswered question in ordinary final chat, or state a
+reasonable assumption and continue already-authorized work. Recreating the
+same question just to restart its deadline is forbidden. HER uses the same
+guidance; its terminal guard respects the remaining card deadline and bounds
+transport-error retries instead of waiting indefinitely.
+
+For an already-configured personal Remote bridge, configuration loading
+publishes a missing independent loopback API credential through the private,
+revision-checked configuration owner. Existing credentials and unrelated
+declarations are retained; governed-profile authentication is unchanged.
+Remote's existing per-request credential lookup can then authenticate question
+list/answer requests. Anonymous requests remain rejected.
+
+Telegram question cards have FC-owned durable transport renditions rather than
+pretending a question Event is a final assistant Message. Explicit replies can
+resolve the original card even if a Telegram client omits the quoted keyboard.
+A restart preserves the binding; answered, expired and cancelled cards update
+in place. These rendition records never become answer or permission authority.
+
+Focused regression evidence covers simulated five-minute expiry, legacy
+deadlines, authenticated HTTP list/answer, original-RPC non-answer resolution,
+late consumption of timely answers, card restoration/expiry, Unicode text
+replies without quoted keyboards, and bounded HER transport failure.
+These are isolated checks, not proof of external client display or live
+adoption. Shared API changes require a user-initiated shared Functions adoption;
+no Remote restart or Protected Core change is required.
+
 ## October 20: terminal guard for unanswered cards
 
 A successful provider response can no longer end an HERV3 Run while a question
@@ -97,7 +142,7 @@ Public question list/answer routes require an authenticated owner; the scoped
 tool token cannot act as an admin token or answer on the user's behalf. Token
 lifetimes are one hour. HERV3 can issue a fresh token per call; an already
 serialized Codex Gateway token expires after that hour and no automatic renewal
-contract is claimed here. Questions have an explicit 30–3600 second deadline;
+contract is claimed here. Questions have an effective 30–300 second deadline;
 answer polling waits at most 30 seconds per tool call. Cancellation propagates
 normally through the running tool. Reserved operation fields cannot override
 the Engine tool's mechanical create/get operation.

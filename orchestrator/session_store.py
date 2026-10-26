@@ -415,7 +415,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 27
+    SCHEMA_VERSION = 28
 
     def __init__(
         self,
@@ -728,6 +728,8 @@ class SessionStore:
                     agent_id TEXT NOT NULL,
                     surface TEXT NOT NULL,
                     channel_key TEXT NOT NULL,
+                    actor_id TEXT,
+                    actor_role TEXT,
                     session_id TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(instance_id, owner_id, agent_id, surface, channel_key),
@@ -1409,7 +1411,10 @@ class SessionStore:
                 stored_schema_version = int(schema_version_row["value"]) if schema_version_row else 0
             except (TypeError, ValueError):
                 stored_schema_version = 0
-            if stored_schema_version < self.SCHEMA_VERSION:
+            # Version 27 repaired legacy terminal live-call rows. Keep this
+            # migration pinned to its own introduction version so later schema
+            # additions do not reopen calls that ended under version 27.
+            if stored_schema_version < 27:
                 legacy_terminal_rows = connection.execute(
                     """SELECT rowid, * FROM live_calls
                        WHERE phase IN ('ended', 'failed', 'interrupted')"""
@@ -1567,6 +1572,17 @@ class SessionStore:
                 "CREATE INDEX IF NOT EXISTS delivery_outbox_claimable "
                 "ON delivery_outbox(session_id, state, created_at)"
             )
+            channel_binding_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_bindings)"
+                ).fetchall()
+            }
+            for column in ("actor_id", "actor_role"):
+                if column not in channel_binding_columns:
+                    connection.execute(
+                        f"ALTER TABLE channel_bindings ADD COLUMN {column} TEXT"
+                    )
             attachment_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -3335,6 +3351,8 @@ class SessionStore:
         surface: str,
         channel_key: str,
         session_id: str,
+        actor_id: str | int | None = None,
+        actor_role: str | None = None,
     ) -> dict[str, Any]:
         session = self.get_session(
             session_id,
@@ -3344,16 +3362,50 @@ class SessionStore:
         )
         if session["status"] != "active":
             raise SessionConflict("only active Sessions can be selected")
+        normalized_actor_id = (
+            str(actor_id).strip() if actor_id is not None else None
+        )
+        normalized_actor_role = (
+            str(actor_role).strip().lower() if actor_role is not None else None
+        )
+        if bool(normalized_actor_id) != bool(normalized_actor_role):
+            raise ValueError("channel binding actor_id and actor_role must be provided together")
+        if normalized_actor_role not in {None, "owner", "secondary"}:
+            raise ValueError("channel binding actor_role must be owner or secondary")
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO channel_bindings(
                     instance_id, owner_id, agent_id, surface, channel_key,
-                    session_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    actor_id, actor_role, session_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instance_id, owner_id, agent_id, surface, channel_key)
-                DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at
+                DO UPDATE SET
+                    actor_id = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.actor_id
+                        ELSE COALESCE(excluded.actor_id, channel_bindings.actor_id)
+                    END,
+                    actor_role = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.actor_role
+                        ELSE COALESCE(excluded.actor_role, channel_bindings.actor_role)
+                    END,
+                    session_id = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.session_id
+                        ELSE excluded.session_id
+                    END,
+                    updated_at = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.updated_at
+                        ELSE excluded.updated_at
+                    END
                 """,
                 (
                     self.instance_id,
@@ -3361,11 +3413,99 @@ class SessionStore:
                     str(agent_id).lower(),
                     str(surface).lower(),
                     str(channel_key),
+                    normalized_actor_id,
+                    normalized_actor_role,
                     str(session_id),
                     now,
                 ),
             )
         return session
+
+    def latest_channel_binding(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        surface: str,
+        actor_id: str | int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the latest persisted endpoint for one owner/Agent surface."""
+
+        normalized_surface = str(surface or "").strip().lower()
+        if not normalized_surface:
+            raise ValueError("channel binding surface is required")
+        actor_clause = ""
+        args: list[Any] = [
+            self.instance_id,
+            str(owner_id),
+            str(agent_id).lower(),
+            normalized_surface,
+        ]
+        if actor_id is not None:
+            actor_clause = " AND actor_id = ?"
+            args.append(str(actor_id).strip())
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT surface, channel_key, actor_id, actor_role,
+                       session_id, updated_at
+                FROM channel_bindings
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                  AND surface = ?{actor_clause}
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                args,
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_frontend_ingress(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        connector_id: str,
+    ) -> dict[str, str] | None:
+        """Return bounded routing facts from the newest canonical user ingress."""
+
+        connector = str(connector_id or "").strip().casefold()
+        if not connector:
+            raise ValueError("connector id is required")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.message_context_json
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND m.role = 'user' AND m.message_context_json != '{}'
+                ORDER BY m.created_at DESC, m.ordinal DESC
+                LIMIT 4096
+                """,
+                (
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                ),
+            ).fetchall()
+        for row in rows:
+            context = _json_object(row["message_context_json"])
+            ingress = context.get("frontend_ingress")
+            if not isinstance(ingress, Mapping):
+                continue
+            endpoint = ingress.get("connector")
+            if not isinstance(endpoint, Mapping):
+                continue
+            observed_connector = str(endpoint.get("id") or "").strip().casefold()
+            endpoint_id = str(endpoint.get("endpoint_id") or "").strip()
+            transport = str(context.get("ingress_transport") or "").strip().casefold()
+            if observed_connector == connector and endpoint_id and transport:
+                return {
+                    "connector_id": observed_connector,
+                    "endpoint_id": endpoint_id,
+                    "ingress_transport": transport,
+                }
+        return None
 
     def bind_primary_session(
         self,

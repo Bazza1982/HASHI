@@ -81,7 +81,10 @@ async def dispatch_pending_telegram_deliverables(
         agent_id=runtime.name, limit=limit
     )
     from orchestrator.run_questions import RunQuestions
-    candidates = [*RunQuestions(store).pending_telegram_deliveries(agent_id=runtime.name, limit=limit), *candidates]
+    from orchestrator.frontend_run_questions import refresh_telegram_question_renditions
+    questions = RunQuestions(store)
+    questions.refresh_pending(agent_id=runtime.name)
+    candidates = [*questions.pending_telegram_deliveries(agent_id=runtime.name, limit=limit), *candidates]
     dispatched = 0
     for candidate in candidates:
         if await dispatch_incremental_telegram_event(
@@ -93,6 +96,7 @@ async def dispatch_pending_telegram_deliverables(
             event_id=str(candidate["event_id"]),
         ):
             dispatched += 1
+    await refresh_telegram_question_renditions(runtime, store)
     return dispatched
 
 

@@ -56,10 +56,14 @@ request needs those actions, explain this limit and suggest a tool-capable model
 QUESTION_CONTRACT = """When you need a clarification or preference from the user,
 use ask_user to publish an answerable question card, with concise options and
 allow_free_text when useful. Do not put the question only in commentary or end
-the Run before collecting the answer. Continue independent work, then use
-get_user_answer with the returned question_id in this same Run (wait_seconds
-up to 30). If dependent work must wait, keep collecting while pending. Respect
-expired/cancelled state; silence or a suggested/default option is not an answer.
+the Run while required information is still pending. Continue independent work,
+then use get_user_answer with the returned question_id in this same Run
+(wait_seconds up to 30). A card expires no later than five minutes after creation.
+At expiry or a delivery failure, reassess the original task: if the missing
+information is critical, end the Run and restate the question in the final chat
+reply; otherwise state a reasonable assumption and continue the authorized work.
+Do not recreate the same question to restart its deadline. Silence or a
+suggested/default option is not an answer.
 Answers supply information only, never permission to perform side effects.
 Do not request secrets through question cards.
 """

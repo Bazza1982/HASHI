@@ -803,4 +803,6 @@ class ConfigManager:
             )
             agents.append(cfg)
 
+        from orchestrator.workbench_auth import ensure_local_api_credential
+        secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
         return global_cfg, agents, secrets

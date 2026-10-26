@@ -81,6 +81,14 @@ async def handle_text_reply(runtime, update):
             match = re.fullmatch(CALLBACK_PATTERN, str(getattr(button, 'callback_data', '') or ''))
             if match:
                 ids.add(match.group(1))
+    if not ids:
+        # Some Telegram clients omit reply_markup on the quoted message.
+        from orchestrator.frontend_run_questions import QuestionRenditions
+        qid = QuestionRenditions(runtime_session.ensure_store(runtime)).resolve(
+            agent_id=runtime.name, chat_id=update.effective_chat.id,
+            transport_message_id=getattr(original, "message_id", ""))
+        if qid:
+            ids.add(qid)
     if len(ids) != 1:
         return False
     # The caller has already checked actor authorization and the enterprise gate.

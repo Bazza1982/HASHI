@@ -1889,12 +1889,15 @@ class _CognitiveControlToolRegistry:
             "cancelled",
         }:
             return None
-        return {
+        result = {
             "question_id": question_id,
             "state": state,
             "answer": copy.deepcopy(question.get("answer")),
             "expires_at": question.get("expires_at"),
         }
+        if question.get("resolution_reason"):
+            result["resolution_reason"] = question["resolution_reason"]
+        return result
 
     def _observe_run_question_result(self, name: str, result: Any) -> dict[str, Any] | None:
         if name not in {"ask_user", "get_user_answer"} or bool(
@@ -1947,9 +1950,31 @@ class _CognitiveControlToolRegistry:
             "run_question_wait_started",
             {"question_ids": list(started_ids)},
         )
+        from orchestrator.run_questions import QUESTION_TTL_SECONDS
         resolved: list[dict[str, Any]] = []
         round_robin = 0
         error_streak = 0
+        loop = asyncio.get_running_loop()
+        budgets = []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).timestamp()
+        for question in self._pending_run_questions.values():
+            try:
+                expiry = datetime.fromisoformat(
+                    str(question.get("expires_at") or "").replace("Z", "+00:00")
+                ).timestamp()
+                budgets.append(max(0.0, expiry - now))
+            except ValueError:
+                budgets.append(float(QUESTION_TTL_SECONDS))
+        remaining_budget = min(float(QUESTION_TTL_SECONDS), max(budgets, default=0.0))
+        deadline = loop.time() + remaining_budget
+
+        def release_unanswered(reason):
+            for question_id, question in tuple(self._pending_run_questions.items()):
+                resolved.append({**question, "state": "unavailable", "answer": None,
+                                 "resolution_reason": reason})
+                self._pending_run_questions.pop(question_id, None)
+
         for question_id in tuple(self._pending_run_questions):
             _valid, question = await self._poll_run_question(
                 question_id,
@@ -1962,12 +1987,16 @@ class _CognitiveControlToolRegistry:
                 resolved.append(question)
 
         while self._pending_run_questions:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                release_unanswered("question_wait_deadline_exceeded")
+                break
             question_ids = tuple(self._pending_run_questions)
             question_id = question_ids[round_robin % len(question_ids)]
             round_robin += 1
             valid, question = await self._poll_run_question(
                 question_id,
-                wait_seconds=30,
+                wait_seconds=min(30, remaining),
             )
             if question is not None and question["state"] not in {
                 "pending",
@@ -1979,7 +2008,10 @@ class _CognitiveControlToolRegistry:
                 error_streak = 0
                 continue
             error_streak += 1
-            delay = min(30, 2 ** min(error_streak - 1, 4))
+            if error_streak >= 3:
+                release_unanswered("question_transport_unavailable")
+                break
+            delay = min(max(0, deadline - loop.time()), 2 ** (error_streak - 1))
             self._audit(
                 "run_question_wait_retry",
                 {

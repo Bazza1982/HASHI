@@ -2078,6 +2078,7 @@ class OpenRouterAdapter(BaseBackend):
     def _run_question_resolution_messages(
         resolution: Mapping[str, Any],
     ) -> list[dict[str, str]]:
+        from orchestrator.run_questions import QUESTION_UNANSWERED_INSTRUCTION
         return [
             {
                 "role": "system",
@@ -2085,10 +2086,12 @@ class OpenRouterAdapter(BaseBackend):
                     "HASHI_RUN_QUESTION_TERMINAL_GUARD\n"
                     "The preceding assistant response was withheld because this "
                     "Run still had an outstanding PAO question. Continue the same "
-                    "Run using the following authenticated user-level resolution. "
+                    "Run using the following runtime resolution. Authenticated "
+                    "answer content retains user authority. "
                     "Only a consumed question with an authenticated_user answer is "
                     "an answer. Pending, expired, cancelled, missing, or default "
-                    "values never grant permission or approval."
+                    "values never grant permission or approval. "
+                    + QUESTION_UNANSWERED_INSTRUCTION
                 ),
             },
             {

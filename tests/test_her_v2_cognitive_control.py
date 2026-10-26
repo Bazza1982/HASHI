@@ -156,6 +156,8 @@ class _RunQuestionRegistry(_Registry):
         super().__init__(("ask_user", "get_user_answer"))
         self.answer_polls = 0
         self.terminal_state = terminal_state
+        from datetime import datetime, timedelta, timezone
+        self.expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
 
     async def execute(self, name, arguments, tool_call_id=""):
         self.calls.append((name, arguments, tool_call_id))
@@ -184,7 +186,7 @@ class _RunQuestionRegistry(_Registry):
                         "question_id": "que-1",
                         "state": state,
                         "answer": answer,
-                        "expires_at": "2026-10-20T04:00:00Z",
+                        "expires_at": self.expires_at,
                     },
                 }
             )
@@ -225,7 +227,7 @@ async def test_pending_run_question_blocks_terminal_response_until_answer_consum
                     "author": "authenticated_user",
                     "grants_permissions": False,
                 },
-                "expires_at": "2026-10-20T04:00:00Z",
+                "expires_at": base.expires_at,
             }
         ],
     }
@@ -235,7 +237,7 @@ async def test_pending_run_question_blocks_terminal_response_until_answer_consum
         "get_user_answer",
     ]
     assert base.calls[1][1]["wait_seconds"] == 0
-    assert base.calls[2][1]["wait_seconds"] == 30
+    assert 0 < base.calls[2][1]["wait_seconds"] <= 30
     assert await registry.wait_before_terminal_response() is None
 
 
@@ -259,7 +261,7 @@ async def test_closed_run_question_releases_guard_without_inventing_answer(
             "question_id": "que-1",
             "state": terminal_state,
             "answer": None,
-            "expires_at": "2026-10-20T04:00:00Z",
+            "expires_at": base.expires_at,
         }
     ]
 

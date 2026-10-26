@@ -772,6 +772,7 @@ async def _send_long_message_transport(
     skip_local_capture: bool = False,
     outbox_outcome: dict[str, Any] | None = None,
     reply_markup: Any = None,
+    frontend_question_id: str | None = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -941,20 +942,30 @@ async def _send_long_message_transport(
                     )
                     if callable(recorder):
                         try:
-                            recorder(
-                                session_id=str(frontend_session_id),
-                                owner_id=str(frontend_owner_id),
-                                connector_id="telegram",
-                                endpoint_id=audit_endpoint_id,
-                                transport_message_id=stable_message_id,
-                                event_id=str(frontend_event_id),
-                            )
+                            if frontend_question_id:
+                                from orchestrator.frontend_run_questions import QuestionRenditions
+                                QuestionRenditions(store).record(
+                                    question_id=frontend_question_id, endpoint_id=audit_endpoint_id,
+                                    chat_id=chat_id, transport_message_id=stable_message_id,
+                                    owner_id=str(frontend_owner_id), agent_id=runtime.name,
+                                    request_id=str(request_id))
+                            else:
+                                recorder(
+                                    session_id=str(frontend_session_id),
+                                    owner_id=str(frontend_owner_id),
+                                    connector_id="telegram",
+                                    endpoint_id=audit_endpoint_id,
+                                    transport_message_id=stable_message_id,
+                                    event_id=str(frontend_event_id),
+                                )
                         except Exception as exc:
                             runtime.logger.warning(
                                 "Telegram reply-reference persistence failed for %s (%s)",
                                 request_id or "<none>",
                                 type(exc).__name__,
                             )
+                            if frontend_question_id:
+                                raise
             if outbox_outcome is not None:
                 outbox_outcome["accepted_effect_count"] = int(
                     outbox_outcome.get("accepted_effect_count") or 0
@@ -1208,6 +1219,8 @@ async def dispatch_claimed_telegram_event(
         standard_event
     )
     canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
+    from orchestrator.frontend_run_questions import question_identity
+    frontend_question_id = question_identity(standard_event)
     if not include_text:
         canonical_text = ""
     media_refs = _standard_event_media_refs(standard_event)
@@ -1240,6 +1253,7 @@ async def dispatch_claimed_telegram_event(
                 skip_local_capture=True,
                 outbox_outcome=outcome,
                 reply_markup=canonical_markup,
+                frontend_question_id=frontend_question_id,
             )
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")
