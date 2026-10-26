@@ -444,6 +444,19 @@ async def test_video_generation_failure_uses_normal_tts_without_ending_call(
 ):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     gen.error = CallError(video_error, 502)
+    original_audio = adapters.synthesize
+
+    async def routed_audio(*args, **kwargs):
+        result = await original_audio(*args, **kwargs)
+        return {
+            **result,
+            "_tts_route": {
+                "service_id": "normal-tts",
+                "service_label": "Normal TTS",
+            },
+        }
+
+    adapters.synthesize = routed_audio
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     call.turn = {
@@ -474,6 +487,9 @@ async def test_video_generation_failure_uses_normal_tts_without_ending_call(
     assert speech["output"]["mode"] == "window_audio"
     assert speech["tts"]["mode"] == "audio_fallback"
     assert speech["tts"]["reason_code"] == video_error
+    assert speech["tts"]["selected_service_label"] == "avatar"
+    assert speech["tts"]["effective_service_id"] == "normal-tts"
+    assert speech["tts"]["effective_service_label"] == "Normal TTS"
     assert output.ends == 0
     assert call.output.video_enabled is True
     assert call.output.transient_reason_code == video_error

@@ -1695,18 +1695,24 @@ class CallService:
         )
 
     @staticmethod
-    def _segment_audio_tts_view(call, output, reason_code):
+    def _segment_audio_tts_view(call, output, reason_code, asset=None):
+        route = asset.get("_tts_route") if isinstance(asset, dict) else None
+        route = route if isinstance(route, dict) else {}
         slot = call.profile.get("tts") or {}
         effective = str(
-            call.tts_effective_service or slot.get("target_id") or "audio_tts"
+            route.get("service_id")
+            or call.tts_effective_service
+            or slot.get("target_id")
+            or "audio_tts"
         )
+        effective_label = str(route.get("service_label") or "")
         catalog = call.tts_catalog
-        if catalog is not None:
+        if not effective_label and catalog is not None:
             try:
                 effective_label = catalog.service_label(effective)
             except Exception:
                 effective_label = effective
-        else:
+        elif not effective_label:
             target = call.targets.get("tts") or {}
             effective_label = target.get("label") or effective
         selected = output.selected_service_id
@@ -1738,7 +1744,9 @@ class CallService:
         )
         value = dict(result)
         value["output"] = output.temporary_audio_view(reason_code)
-        value["tts"] = self._segment_audio_tts_view(call, output, reason_code)
+        value["tts"] = self._segment_audio_tts_view(
+            call, output, reason_code, result
+        )
         call.tts_error_code = ""
         call.tts_error_reason = ""
         return value
