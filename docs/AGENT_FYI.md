@@ -22,11 +22,6 @@ Current decisions, with full rationale in the linked owners:
 - Tool screenshots use provider-native image input, never Base64 text. Ollama
   behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
-- AgentPresence input feedback is a per-Agent Frontend Function: notify only
-  after new human/client PAO admission and only on the frozen owner route;
-  never wait for reply generation or echo AP-local input. HAP and Worker
-  adoption require separate proof. See [input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
-
 ## Authority and ownership
 
 PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones
@@ -182,34 +177,25 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share the catalogue/execution path; character-language
-voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
-credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
-and locks the first downgrade. With AP it prefers VideoTTS and exclusive AV;
-however AP's active role may explicitly declare `video_tts_supported: false`.
-That declaration selects ordinary TTS before any video context or job exists
-and is not a fault. For roles that did negotiate AV, VideoTTS unavailability
-visibly fences AP and returns the same Call to its
-existing ordinary TTS chain without ending it. No media assembly or optional
-dependency is added for this handoff. Without AP it stays audio. Healthy AV
-preserves the full answer in configurable complete-sentence groups. The short
-first group is expedited, later groups are admitted through a bounded local
-window, and AP preload/playback remains ordered. A group's adaptive render wait
-starts only after Compute accepts it; an old turn's unsubmitted tail is
-cancelled, while a late accepted result is only a recovery signal. Audio
-segmentation and serial synthesis are unchanged.
+`/voice` and `/call` share voice routing; Call freezes lifecycle/revisions and
+privacy-filters fallback. With AP it prefers VideoTTS unless the role sets
+`video_tts_supported: false`; without AP it stays audio. Sentence groups use
+bounded admission, accepted-job timing and ordered playback; fallback affects
+one group; stale tails cancel and late jobs only signal recovery.
+Audio remains serial.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-AgentPresence is default-off and owner-scoped. HASHI authenticates its explicit
-binding, ignores submitted routing, resolves the configured Agent and freezes its
-Conversation. `/phone` sends scoped leave/return events; AP owns presentation and
-HASHI services/voices. Ingress is fail-closed, settings are never guessed, and
-command/voice/Telegram/Call surfaces remain independent. See
-[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+AgentPresence is owner-scoped and default-off. HASHI authenticates binding and
+freezes the resolved Agent/Conversation. Only PAO-admitted human/client input
+triggers owner-route feedback; AP-local input never echoes. `/phone` sends scoped
+leave/return; AP owns presentation, HASHI owns services/voices. Ingress fails
+closed; surfaces stay independent. See
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
+[input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See
