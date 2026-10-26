@@ -1084,47 +1084,115 @@ class CallService:
             raise CallError("call_scope_changed", 409)
         return call
 
-    def _privacy(self, call, kind, route=None):
+    @staticmethod
+    def _audio_location_allowed(location, privacy_level):
+        return privacy_level in (0, 1) or location in {"local", "lan"}
+
+    def _clear_tts_assets_for_privacy(self, call, error, privacy_level):
+        target = call.targets.get("tts") or {}
+        target_location = str(target.get("location") or "").strip().casefold()
+        for index, asset in list(call.speech_cache.items()):
+            route = call.speech_routes.get(index)
+            if isinstance(route, dict):
+                location = self._audio_route_location(call, route)
+                blocked = not self._audio_location_allowed(location, privacy_level)
+            elif isinstance(asset, dict) and "_external_output" in asset:
+                blocked = False
+            else:
+                blocked = not self._audio_location_allowed(
+                    target_location, privacy_level
+                )
+            if blocked:
+                call.speech_errors[index] = error.code
+                call.speech_cache.pop(index, None)
+                call.speech_routes.pop(index, None)
+        for slot in list(call.filler_cache):
+            route = call.filler_routes.get(slot)
+            location = (
+                self._audio_route_location(call, route)
+                if isinstance(route, dict)
+                else target_location
+            )
+            if not self._audio_location_allowed(location, privacy_level):
+                call.filler_cache.pop(slot, None)
+                call.filler_routes.pop(slot, None)
+
+    def _reject_audio_privacy(self, call, privacy_level):
+        error = CallError("call_cloud_privacy_unqualified", 403)
+        self._clear_tts_assets_for_privacy(call, error, privacy_level)
+        raise error
+
+    @staticmethod
+    def _audio_route_location(call, route):
+        if not isinstance(route, dict):
+            return ""
+        location = str(route.get("location") or "").strip().casefold()
+        if location:
+            return location
+        service_id = str(route.get("service_id") or "").strip().casefold()
+        catalog = call.tts_catalog
+        if service_id and catalog is not None:
+            try:
+                return (
+                    str(catalog.service(service_id).get("location") or "")
+                    .strip()
+                    .casefold()
+                )
+            except Exception:
+                pass
+        target = call.targets.get("tts") or {}
+        selected = (
+            str(
+                target.get("id")
+                or (call.profile.get("tts") or {}).get("target_id")
+                or ""
+            )
+            .strip()
+            .casefold()
+        )
+        if not service_id or service_id == selected:
+            return str(target.get("location") or "").strip().casefold()
+        return ""
+
+    def _audio_privacy(self, call, route=None):
         self.ports.validate(call.owner, call.binding)
         privacy_level = self.ports.privacy_level(call.binding["agent_id"])
-        if kind == "tts" and call.output is not None and call.output.video_enabled:
-            call.output.privacy()
-            return
-        if kind == "tts" and self.tts_synthesizer is not None:
-            blocked_cached_route = (
-                isinstance(route, dict)
-                and route.get("location") == "cloud"
-                and privacy_level not in (0, 1)
-            )
+        if isinstance(route, dict):
+            location = self._audio_route_location(call, route)
+            if self._audio_location_allowed(location, privacy_level):
+                return privacy_level
+            self._reject_audio_privacy(call, privacy_level)
+        if self.tts_synthesizer is not None:
             eligible = self.tts_synthesizer.has_eligible_path(
                 call.tts_catalog,
                 call.profile.get("tts"),
                 privacy_level,
             )
-            if not blocked_cached_route and eligible:
-                return
-            error = CallError("call_cloud_privacy_unqualified", 403)
-            call.speech_errors.update(dict.fromkeys(call.speech_cache, error.code))
-            call.speech_cache.clear()
-            call.speech_routes.clear()
-            call.filler_cache.clear()
-            call.filler_routes.clear()
-            raise error
+            if eligible:
+                return privacy_level
+            self._reject_audio_privacy(call, privacy_level)
+        target = call.targets.get("tts")
+        if target and (
+            privacy_level not in (0, 1)
+            and str(target.get("location") or "").strip().casefold()
+            not in {"local", "lan"}
+        ):
+            self._reject_audio_privacy(call, privacy_level)
+        return privacy_level
+
+    def _privacy(self, call, kind, route=None):
+        if kind == "tts":
+            if isinstance(route, dict):
+                return self._audio_privacy(call, route)
+            if call.output is not None and call.output.video_enabled:
+                return call.output.privacy()
+            return self._audio_privacy(call)
+        self.ports.validate(call.owner, call.binding)
+        privacy_level = self.ports.privacy_level(call.binding["agent_id"])
         target = call.targets[kind]
-        if target and target["location"] == "cloud":
-            if privacy_level not in (0, 1):
-                error = CallError("call_cloud_privacy_unqualified", 403)
-                if kind == "tts":
-                    # Every TTS privacy check invalidates already generated
-                    # segments, including earlier ones while a later one runs.
-                    call.speech_errors.update(
-                        dict.fromkeys(call.speech_cache, error.code)
-                    )
-                    call.speech_cache.clear()
-                    call.speech_routes.clear()
-                    call.filler_cache.clear()
-                    call.filler_routes.clear()
-                raise error
+        if target and target["location"] == "cloud" and privacy_level not in (0, 1):
+            raise CallError("call_cloud_privacy_unqualified", 403)
+        return privacy_level
 
     async def invoke(self, owner, body):
         # Includes validation failures for direct consumers; the HTTP route logs
@@ -1700,17 +1768,33 @@ class CallService:
             }
         )
 
+    @staticmethod
+    def _configured_audio_route(call):
+        target = call.targets.get("tts") or {}
+        slot = call.profile.get("tts") or {}
+        service_id = str(target.get("id") or slot.get("target_id") or "audio_tts")
+        return {
+            "service_id": service_id,
+            "service_label": str(target.get("label") or service_id),
+            "location": str(target.get("location") or ""),
+            "selected_service_id": str(slot.get("target_id") or service_id),
+        }
+
     async def _synthesize_audio_tts(self, call, text, *, request_id):
         if self.tts_synthesizer is not None:
-            return await self.tts_synthesizer.synthesize(
+            result = await self.tts_synthesizer.synthesize(
                 call,
                 text,
                 privacy_level=self.ports.privacy_level(call.binding["agent_id"]),
                 request_id=request_id,
             )
-        return await self.adapters.synthesize(
-            call.targets["tts"], call.profile["tts"], text
-        )
+        else:
+            result = await self.adapters.synthesize(
+                call.targets["tts"], call.profile["tts"], text
+            )
+        if not isinstance(result.get("_tts_route"), dict):
+            result = {**result, "_tts_route": self._configured_audio_route(call)}
+        return result
 
     @staticmethod
     def _segment_audio_tts_view(call, output, reason_code, asset=None):
@@ -1749,6 +1833,8 @@ class CallService:
         }
 
     def _publish_segment_audio(self, call, output, result, reason_code, segment):
+        route = result.get("_tts_route") if isinstance(result, dict) else None
+        self._audio_privacy(call, route)
         output.note_transient_fallback(reason_code)
         emit(
             "tts_degraded",
@@ -1768,8 +1854,10 @@ class CallService:
         return value
 
     async def _audio_for_segment(self, call, text, *, request_id):
-        self._privacy(call, "tts")
-        return await self._synthesize_audio_tts(call, text, request_id=request_id)
+        self._audio_privacy(call)
+        result = await self._synthesize_audio_tts(call, text, request_id=request_id)
+        self._audio_privacy(call, result.get("_tts_route"))
+        return result
 
     async def _race_deferred_video_with_audio(
         self, call, output, deferred, text, *, request_id, segment
@@ -1809,16 +1897,60 @@ class CallService:
                         segment=segment,
                     )
                     return video_result
-            else:
-                reason_code = "call_video_wait_timeout"
-                video_wait.cancel()
-                with suppress(asyncio.CancelledError):
-                    await video_wait
-                deferred.abandon(reason_code)
-            audio_result = await audio_task
-            return self._publish_segment_audio(
-                call, output, audio_result, reason_code, segment
-            )
+                audio_result = await audio_task
+                return self._publish_segment_audio(
+                    call, output, audio_result, reason_code, segment
+                )
+
+            reason_code = "call_video_wait_timeout"
+            try:
+                audio_result = audio_task.result()
+                audio_value = self._publish_segment_audio(
+                    call, output, audio_result, reason_code, segment
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as audio_exc:
+                completion_window = output.client_wait_remaining_seconds(segment)
+                if completion_window is None:
+                    completion_window = 30.0
+                completed, _pending = await asyncio.wait(
+                    {video_wait}, timeout=max(0.0, float(completion_window))
+                )
+                if video_wait not in completed:
+                    video_wait.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await video_wait
+                    deferred.abandon(reason_code)
+                    raise audio_exc
+                try:
+                    provider_result = video_wait.result()
+                    video_result = await deferred.prepare(provider_result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as video_exc:
+                    if not output.can_audio_fallback(video_exc):
+                        raise
+                    reason_code = (
+                        video_exc.code
+                        if isinstance(video_exc, CallError)
+                        else "call_video_generation_failed"
+                    )
+                    deferred.abandon(reason_code)
+                    raise audio_exc
+                emit(
+                    "video_tts_late_promoted",
+                    **self._facts(call, call.turn),
+                    stage="tts",
+                    segment=segment,
+                )
+                return video_result
+
+            video_wait.cancel()
+            with suppress(asyncio.CancelledError):
+                await video_wait
+            deferred.abandon(reason_code)
+            return audio_value
         except asyncio.CancelledError:
             if not audio_task.done():
                 audio_task.cancel()
@@ -1893,8 +2025,7 @@ class CallService:
                     return self._publish_segment_audio(
                         call, output, result, reason_code, segment
                     )
-        self._privacy(call, "tts")
-        result = await self._synthesize_audio_tts(call, text, request_id=request_id)
+        result = await self._audio_for_segment(call, text, request_id=request_id)
         call.tts_error_code = ""
         call.tts_error_reason = ""
         return result

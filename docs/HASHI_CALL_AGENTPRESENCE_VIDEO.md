@@ -93,10 +93,13 @@ status and `video_url` on completion. Terminal states are completed/failed/
 cancelled. Cancel is optional and declared by the configured adapter path.
 The result URL must remain on the configured origin; redirects and environment
 proxies are disabled. Responses are bounded. Privacy is checked before every
-generation and again before presentation. A changed configured node origin
-cannot silently redirect an existing call. A failed or uncertain VideoTTS job
-is never resubmitted to another video provider; Call instead uses its already
-configured ordinary TTS chain.
+generation and again before presentation. VideoTTS and ordinary TTS validate
+their own effective service independently. Ordinary audio carries its actual
+route through generation, cache publication and retrieval so a later privacy
+change cannot reuse an ineligible cloud result. A changed configured node
+origin cannot silently redirect an existing call. A failed or uncertain
+VideoTTS job is never resubmitted to another video provider; Call instead uses
+its already configured ordinary TTS chain.
 
 Each group has separate waiting-slot, submitting, and accepted states. The
 text-length foreground clock starts only when the provider returns an accepted
@@ -108,12 +111,15 @@ clamped to 20–150 seconds.
 
 When the accepted-job wait expires, ordinary TTS races the still-running job.
 Video wins if it becomes ready before audio is published; otherwise audio owns
-only that segment. A later successful accepted job is retained as a
-health/recovery signal for the next segment and is never replayed over published
-audio. An unsubmitted group is cancelled on queue timeout, turn replacement, or
-Call end. A submission whose outcome is not yet known remains owned until the
-transport resolves and is never resubmitted. Diagnostics record local queue,
-submission, accepted-job, total, and configured wait-budget timing.
+only that segment. If ordinary TTS fails first, the accepted VideoTTS job keeps
+its remaining bounded client completion window; the segment fails only when
+neither route can complete within its boundary. A later successful accepted job
+is retained as a health/recovery signal for the next segment and is never
+replayed over published audio. An unsubmitted group is cancelled on queue
+timeout, turn replacement, or Call end. A submission whose outcome is not yet
+known remains owned until the transport resolves and is never resubmitted.
+Diagnostics record local queue, submission, accepted-job, total, and configured
+wait-budget timing.
 Cancellation fences local output immediately; old-turn results cannot upload or
 resume presentation.
 

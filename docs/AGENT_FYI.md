@@ -177,12 +177,12 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share voice routing; Call freezes lifecycle/revisions and
-privacy-filters fallback. With AP it prefers VideoTTS unless the role sets
-`video_tts_supported: false`; without AP it stays audio. Sentence groups use
-bounded admission, accepted-job timing and ordered playback; fallback affects
-one group; stale tails cancel and late jobs only signal recovery.
-Audio remains serial.
+`/voice` and `/call` share routing; actual video/audio routes are
+privacy-checked before publish or cached delivery. AP prefers VideoTTS
+unless `video_tts_supported: false`; without AP it uses audio. Groups have
+bounded admission and ordered playback. Audio failure keeps video waiting;
+fallback is group-local; stale tails cancel; late jobs only signal recovery.
+Audio stays serial.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),

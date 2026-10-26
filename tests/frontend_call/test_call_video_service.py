@@ -105,9 +105,14 @@ class Generator:
 
 
 async def arranged(
-    tmp_path, *, connected=True, protocol="call-output/1", selection_overrides=None
+    tmp_path,
+    *,
+    connected=True,
+    protocol="call-output/1",
+    selection_overrides=None,
+    location="local",
 ):
-    service, ports, adapters, base, clock = setup(tmp_path)
+    service, ports, adapters, base, clock = setup(tmp_path, location)
     generator, output = Generator(), Output()
     service.video_synthesizer = generator
     service.config.video_tts_selection = lambda revision: VideoTTSSelection.parse(
@@ -696,6 +701,147 @@ async def test_video_generation_failure_uses_normal_tts_without_ending_call(
     assert call.output.transient_reason_code == ""
     assert adapters.tts == 1
     await service.close()
+
+
+async def test_local_video_fallback_checks_cloud_audio_privacy_before_synthesis(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, location="cloud"
+    )
+    gen.error = CallError("call_video_generation_failed", 502)
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    ports.level = 2
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Do not send this fallback to the cloud."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+
+    assert adapters.tts == 0
+    assert call.speech_cache == {}
+    assert call.speech_errors[0] == "call_cloud_privacy_unqualified"
+    assert output.prepared == []
+    await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("revocation", ["inflight", "cached"])
+async def test_video_audio_fallback_rechecks_effective_route_privacy(
+    tmp_path, revocation
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    gen.error = CallError("call_video_generation_failed", 502)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_audio = adapters.synthesize
+
+    async def cloud_audio(*args):
+        started.set()
+        if revocation == "inflight":
+            await release.wait()
+        result = await original_audio(*args)
+        return {
+            **result,
+            "_tts_route": {
+                "service_id": "cloud-fallback",
+                "service_label": "Cloud fallback",
+                "location": "cloud",
+            },
+        }
+
+    adapters.synthesize = cloud_audio
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Recheck the service that made this audio."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        await asyncio.wait_for(started.wait(), 1)
+        if revocation == "inflight":
+            ports.level = 2
+            release.set()
+        await call.speech_task
+
+        speech = {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        }
+        if revocation == "inflight":
+            assert call.speech_cache == {}
+            assert call.speech_errors[0] == "call_cloud_privacy_unqualified"
+        else:
+            assert call.speech_cache
+            ports.level = 2
+            with pytest.raises(CallError, match="call_cloud_privacy_unqualified"):
+                await service.invoke("owner", speech)
+            assert call.speech_cache == {}
+        assert output.prepared == []
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_audio_failure_before_deferred_video_success_uses_video(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    adapters.fail_tts = True
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Video is still rendering."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        for _ in range(1000):
+            if adapters.tts:
+                break
+            await asyncio.sleep(0.001)
+        assert adapters.tts == 1
+        assert not call.speech_task.done()
+
+        gen.release.set()
+        await call.speech_task
+        asset = await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+        assert asset["output"]["mode"] == "external_av"
+        assert asset["presentation"]["state"] == "prepared"
+        assert 0 not in call.speech_errors
+        assert len(output.prepared) == 1
+    finally:
+        gen.release.set()
+        await service.close()
 
 
 async def test_slow_video_falls_back_for_one_segment_then_late_success_recovers(
