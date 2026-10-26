@@ -193,6 +193,12 @@ ACL without rewriting the credential bytes. Principal lookup or ACL repair
 failure remains an actionable startup error rather than being reclassified as
 an absent credential.
 
+Credential publication and ACL repair are explicit shared-Function bootstrap
+work. The shared candidate performs them once before starting Agent Workers;
+ordinary configuration reads and per-Agent Workers are read-only. A targeted
+Worker reboot therefore never repeats scheduled-task principal discovery or
+rewrites the shared secrets-file ACL.
+
 Handshake and protocol message requests include:
 
 ```json

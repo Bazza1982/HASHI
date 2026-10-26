@@ -66,6 +66,11 @@ JSON writers validate private candidates under lock/revision and atomically repl
 Display fallback is read-only; conflicts require fresh state/action, never blind
 retry or stale restore. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
+Local API credential publication and Remote-principal ACL repair run once in
+shared Function bootstrap. Ordinary config reads and Agent Workers are
+read-only; never move this maintenance back into `ConfigManager.load()` by
+default or multiply it across `/reboot max`.
+
 Endpoint publication may retry only bounded Windows rename blocking of the same
 fsynced candidate; permanent failure keeps prior state and never replays actions.
 

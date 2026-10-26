@@ -84,7 +84,9 @@ class RuntimeAppHost:
             enable_api_gateway=bool(args.get("api_gateway")),
         )
         # Candidate config validation does not initialize providers or bind ports.
-        self.app._load_config_bundle()
+        self.app._load_config_bundle(
+            bootstrap_local_api_credential=True,
+        )
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.shared_generation_id = manifest["generation_id"]
         self.app.function_release_adoption = dict(

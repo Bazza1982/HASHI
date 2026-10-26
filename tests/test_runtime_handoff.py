@@ -262,10 +262,15 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
     qualified = generation(tmp_path, home, "qualified", runtime)
     current_source_commit = "f" * 40
     assert current_source_commit != qualified.generation.receipt.source_commit
+    config_loads = []
+
+    def load_config_bundle(*, bootstrap_local_api_credential=False):
+        config_loads.append(bootstrap_local_api_credential)
+
     app = SimpleNamespace(
         global_cfg=SimpleNamespace(project_root=tmp_path),
         shutdown_manager=SimpleNamespace(start_exit_watchdog=lambda: None),
-        _load_config_bundle=lambda: None,
+        _load_config_bundle=load_config_bundle,
     )
 
     monkeypatch.setattr(runtime_app_host, "candidate_import_guard", nullcontext)
@@ -306,6 +311,7 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
 
     await host.prepare()
 
+    assert config_loads == [True]
     assert app._shared_replacement_candidate is True
     assert app.function_release_timing["phases_ms"]["isolated_probe"] == 800.0
     startup_generation, startup_root = app._startup_artifact

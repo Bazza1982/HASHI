@@ -148,7 +148,7 @@ async def test_authenticated_remote_bridge_can_list_and_answer_without_preconfig
                 "other_credential": "preserve-this-value"}
     secret_path.write_text(json.dumps(original), encoding="utf-8")
     manager = ConfigManager(config, secret_path, bridge_home=tmp_path)
-    cfg, _, secrets = manager.load()
+    cfg, _, secrets = manager.load(bootstrap_local_api_credential=True)
     token = secrets.get("workbench_admin_token")
     assert isinstance(token, str) and len(token) >= 32
     saved = json.loads(secret_path.read_text(encoding="utf-8"))
@@ -179,6 +179,36 @@ async def test_authenticated_remote_bridge_can_list_and_answer_without_preconfig
         assert server.session_store.get_run(run.run_id)["state"] == "running"
     finally:
         await client.close()
+
+def test_config_reads_do_not_repeat_local_api_credential_maintenance(tmp_path, monkeypatch):
+    from orchestrator import workbench_auth
+    from orchestrator.config import ConfigManager
+
+    config, secret_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    secret_path.write_text(
+        json.dumps({
+            "hashi_remote_shared_token": "fixture",
+            "workbench_admin_token": "existing-local-key",
+        }),
+        encoding="utf-8",
+    )
+    maintenance_calls = []
+
+    def observe_maintenance(document, *, profile, remote_runtime_sids=None):
+        maintenance_calls.append((profile, remote_runtime_sids))
+        return document
+
+    monkeypatch.setattr(
+        workbench_auth,
+        "ensure_local_api_credential",
+        observe_maintenance,
+    )
+    manager = ConfigManager(config, secret_path, bridge_home=tmp_path)
+    manager.load()
+    manager.load()
+    assert maintenance_calls == []
+    manager.load(bootstrap_local_api_credential=True)
+    assert maintenance_calls == [("personal", None)]
 
 
 @pytest.mark.asyncio
