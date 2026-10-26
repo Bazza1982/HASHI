@@ -69,10 +69,11 @@ selections are preserved. A call freezes this selection at its Call revision.
     "cancel_path": "/avatar/jobs/{job_id}/cancel",
     "request_timeout_seconds": 120,
     "job_timeout_seconds": 180,
+    "queue_timeout_seconds": 180,
     "wait_base_seconds": 18.5,
-    "wait_per_char_seconds": 0.17,
+    "wait_per_char_seconds": 0.35,
     "wait_min_seconds": 20,
-    "wait_max_seconds": 90,
+    "wait_max_seconds": 150,
     "first_segment_sentences": 2,
     "group_sentences": 4,
     "max_inflight_groups": 2
@@ -97,16 +98,24 @@ cannot silently redirect an existing call. A failed or uncertain VideoTTS job
 is never resubmitted to another video provider; Call instead uses its already
 configured ordinary TTS chain.
 
-An accepted job ID is projected to the current turn and content-free diagnostic
-journal before polling. The foreground wait is calculated from text length and
-is separate from the longer terminal-state tracking limit. With the calibrated
-defaults it is `18.5 + 0.17 * characters` seconds, clamped to 20–90 seconds.
-When that wait expires, ordinary TTS races the still-running job. Video wins if
-it becomes ready before audio is published; otherwise audio owns only that
-segment. A later successful video is retained as a health/recovery signal for
-the next segment and is never replayed over published audio. An uncertain
-submission is never resubmitted. Cancellation fences local output immediately;
-late results from an old turn cannot upload or resume presentation.
+Each group has separate waiting-slot, submitting, and accepted states. The
+text-length foreground clock starts only when the provider returns an accepted
+job ID; local slot wait and the admission request do not spend that render
+budget. Local slot wait has its own `queue_timeout_seconds` safety bound, while
+`job_timeout_seconds` bounds accepted terminal-state tracking. With the
+calibrated defaults the foreground wait is `18.5 + 0.35 * characters` seconds,
+clamped to 20–150 seconds.
+
+When the accepted-job wait expires, ordinary TTS races the still-running job.
+Video wins if it becomes ready before audio is published; otherwise audio owns
+only that segment. A later successful accepted job is retained as a
+health/recovery signal for the next segment and is never replayed over published
+audio. An unsubmitted group is cancelled on queue timeout, turn replacement, or
+Call end. A submission whose outcome is not yet known remains owned until the
+transport resolves and is never resubmitted. Diagnostics record local queue,
+submission, accepted-job, total, and configured wait-budget timing.
+Cancellation fences local output immediately; old-turn results cannot upload or
+resume presentation.
 
 External AV speech is segmented separately from ordinary audio Call. Streaming
 provider answer deltas, including Codex app-server agent-message deltas, enter
@@ -115,10 +124,12 @@ first `first_segment_sentences` complete sentences are released immediately as
 a short VideoTTS request, without waiting for the PAO Run to finish. Remaining
 sentences are grouped in order by `group_sentences`; the defaults are 2 and 4.
 All ready groups are scheduled immediately. `max_inflight_groups` (default 2)
-keeps the provider's render lanes full without leaving later jobs in a short
-provider queue long enough to expire. A finished group immediately admits the
-next waiting group. AP
-preload and playback remain strictly ordered: a later render may finish first
+keeps the provider's render lanes full; later groups wait locally without
+starting their accepted-job timer. A finished group immediately admits the next
+waiting group. Turn replacement cancels the old turn's still-unsubmitted tail
+before new-turn speech is admitted; already accepted jobs may finish only as
+late health signals. AP preload and playback remain strictly ordered: a later
+render may finish first
 but cannot overtake an earlier group at the presentation gate. A short answer
 remains one request, and ordinary audio Call remains serial. The configured
 input-character guard still applies; only a single sentence longer than that

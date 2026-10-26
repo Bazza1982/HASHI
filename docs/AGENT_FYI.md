@@ -22,6 +22,11 @@ Current decisions, with full rationale in the linked owners:
 - Tool screenshots use provider-native image input, never Base64 text. Ollama
   behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
+- AgentPresence input feedback is a per-Agent Frontend Function: notify only
+  after new human/client PAO admission and only on the frozen owner route;
+  never wait for reply generation or echo AP-local input. HAP and Worker
+  adoption require separate proof. See [input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
+
 ## Authority and ownership
 
 PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones
@@ -181,15 +186,18 @@ Workbench/TUI play locally; reboot receipts never prove playback.
 voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
 credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
 and locks the first downgrade. With AP it prefers VideoTTS and exclusive AV;
-VideoTTS unavailability visibly fences AP and returns the same Call to its
+however AP's active role may explicitly declare `video_tts_supported: false`.
+That declaration selects ordinary TTS before any video context or job exists
+and is not a fault. For roles that did negotiate AV, VideoTTS unavailability
+visibly fences AP and returns the same Call to its
 existing ordinary TTS chain without ending it. No media assembly or optional
 dependency is added for this handoff. Without AP it stays audio. Healthy AV
-preserves the full answer in two-stage output:
-its first complete sentence is expedited, then all remaining text is submitted
-as one batch. Provider answer deltas can release the first sentence before the
-Run finishes; both bounded VideoTTS renders may enter Compute early, while AP
-preload/playback remains ordered. Audio segmentation and serial synthesis are
-unchanged.
+preserves the full answer in configurable complete-sentence groups. The short
+first group is expedited, later groups are admitted through a bounded local
+window, and AP preload/playback remains ordered. A group's adaptive render wait
+starts only after Compute accepts it; an old turn's unsubmitted tail is
+cancelled, while a late accepted result is only a recovery signal. Audio
+segmentation and serial synthesis are unchanged.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),

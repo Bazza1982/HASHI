@@ -50,6 +50,7 @@ class VideoTTSSelection:
     cancel_path: str | None
     request_timeout_seconds: float
     job_timeout_seconds: float
+    queue_timeout_seconds: float
     wait_base_seconds: float
     wait_per_char_seconds: float
     wait_min_seconds: float
@@ -79,6 +80,7 @@ class VideoTTSSelection:
             "cancel_path",
             "request_timeout_seconds",
             "job_timeout_seconds",
+            "queue_timeout_seconds",
             "wait_base_seconds",
             "wait_per_char_seconds",
             "wait_min_seconds",
@@ -118,10 +120,11 @@ class VideoTTSSelection:
         maximum = raw.get("max_input_chars", 400)
         request_timeout = raw.get("request_timeout_seconds", 120)
         job_timeout = raw.get("job_timeout_seconds", 180)
+        queue_timeout = raw.get("queue_timeout_seconds", 180)
         wait_base = raw.get("wait_base_seconds", 18.5)
-        wait_per_char = raw.get("wait_per_char_seconds", 0.17)
+        wait_per_char = raw.get("wait_per_char_seconds", 0.35)
         wait_min = raw.get("wait_min_seconds", 20)
-        wait_max = raw.get("wait_max_seconds", 90)
+        wait_max = raw.get("wait_max_seconds", 150)
         first_segment_sentences = raw.get("first_segment_sentences", 2)
         group_sentences = raw.get("group_sentences", 4)
         max_inflight_groups = raw.get("max_inflight_groups", 2)
@@ -129,6 +132,7 @@ class VideoTTSSelection:
             (speed, 0.5, 2),
             (request_timeout, 1, 900),
             (job_timeout, 1, 1800),
+            (queue_timeout, 1, 1800),
             (wait_base, 0, 300),
             (wait_per_char, 0, 5),
             (wait_min, 1, 300),
@@ -185,6 +189,7 @@ class VideoTTSSelection:
             cancel_path,
             float(request_timeout),
             float(job_timeout),
+            float(queue_timeout),
             float(wait_base),
             float(wait_per_char),
             float(wait_min),
@@ -363,6 +368,7 @@ class CallVideoTTS:
         privacy_level,
         request_id,
         expected_origin=None,
+        on_submit=None,
         on_job=None,
     ):
         resolved = await self.resolve(selection, privacy_level)
@@ -407,6 +413,8 @@ class CallVideoTTS:
         }
         job_id = None
         submitted_at = time.monotonic()
+        if on_submit is not None:
+            on_submit()
         emit("video_tts_submitting", **selection.public(), text_chars=len(text))
         try:
             result = await self.client.request(

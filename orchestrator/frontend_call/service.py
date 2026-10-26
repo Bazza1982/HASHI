@@ -808,6 +808,14 @@ class CallService:
 
     def _speech_pending_response(self, call, index):
         response = {"ok": True, "ready": False, "retry_after_ms": 350}
+        if call.output is not None and call.output.video_enabled:
+            remaining = call.output.client_wait_remaining_seconds(index)
+            if remaining is not None:
+                response["wait_remaining_ms"] = max(
+                    0,
+                    int(remaining * 1000),
+                )
+                return response
         deadline = call.speech_deadlines.get(index)
         if deadline is not None:
             response["wait_remaining_ms"] = max(
