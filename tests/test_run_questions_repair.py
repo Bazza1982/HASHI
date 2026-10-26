@@ -12,7 +12,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.codex_run_questions import NativeRunQuestions
-from orchestrator.run_questions import QuestionError
+from orchestrator.run_questions import QuestionError, UnansweredQuestion
 from orchestrator.workbench_api import WorkbenchApiServer
 from tests.test_config import _minimal_flex_agent, _write_base_files
 from tests.test_run_question_connectors import running
@@ -43,6 +43,84 @@ async def test_native_question_expires_after_five_minutes_without_inventing_an_a
         assert resolution["questions"][0]["state"] == "expired"
         assert resolution["questions"][0]["answer"] is None
         assert service.store.get_run(run.run_id)["state"] == "running"
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_batch_expiry_preserves_authenticated_partial_answers(tmp_path):
+    service, session, run, _ = running(tmp_path)
+    now = [1000.0]
+    service.clock = lambda: now[0]
+    native = NativeRunQuestions(
+        service,
+        request_id=run.request_id,
+        agent_id="zelda",
+        interval=.001,
+    )
+    task = asyncio.create_task(native.answer(43, {
+        "itemId": "partial-expiry",
+        "questions": [
+            {"id": "reference", "question": "Which reference?", "options": []},
+            {"id": "colour", "question": "Which colour?", "options": [
+                {"label": "Blue", "description": "Recommended"}]},
+        ],
+    }))
+    try:
+        colour = reference = None
+        for _ in range(100):
+            rows = service.list(
+                session_id=session["session_id"], owner_id="user:7"
+            )
+            colour = next(
+                (item for item in rows if item["question"] == "Which colour?"),
+                None,
+            )
+            reference = next(
+                (item for item in rows if item["question"] == "Which reference?"),
+                None,
+            )
+            if colour is not None and reference is not None:
+                break
+            await asyncio.sleep(.005)
+        assert colour is not None and reference is not None
+        service.answer(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            question_id=colour["question_id"],
+            payload={
+                "idempotency_key": "partial-colour",
+                "option_id": "option_0",
+            },
+        )
+        for _ in range(100):
+            rows = service.list(
+                session_id=session["session_id"], owner_id="user:7"
+            )
+            if next(
+                item for item in rows if item["question_id"] == colour["question_id"]
+            )["state"] == "consumed":
+                break
+            await asyncio.sleep(.005)
+        now[0] += 301
+        with pytest.raises(UnansweredQuestion) as error:
+            await asyncio.wait_for(task, 1)
+        assert error.value.resolution["partial_answers"] == {
+            "colour": {"answers": ["Blue"]}
+        }
+        rows = service.list(
+            session_id=session["session_id"], owner_id="user:7"
+        )
+        saved = next(
+            item for item in rows if item["question_id"] == colour["question_id"]
+        )
+        assert saved["state"] == "consumed"
+        assert saved["answer"]["author"] == "authenticated_user"
+        assert next(
+            item for item in rows if item["question_id"] == reference["question_id"]
+        )["state"] == "expired"
     finally:
         if not task.done():
             task.cancel()
@@ -266,18 +344,79 @@ async def test_telegram_text_reply_can_resolve_a_card_without_quoted_keyboard(tm
         assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("outcome", ["failed", "unknown"])
-def test_all_delivery_failures_release_question_without_a_default_answer(tmp_path, outcome):
+def test_confirmed_delivery_failure_releases_question_without_a_default_answer(tmp_path):
     service, session, run, question = running(tmp_path)
     with service.store._connection() as connection:
-        connection.execute("UPDATE connector_delivery_tasks SET state=? WHERE run_id=?",
-                           (outcome, run.run_id))
+        connection.execute("UPDATE connector_delivery_tasks SET state='failed' WHERE run_id=?",
+                           (run.run_id,))
     resolution = service.get_answer(request_id=run.request_id, agent_id="zelda",
                                     question_id=question["question_id"])
     assert resolution["state"] == "cancelled"
-    assert resolution["resolution_reason"] == ("delivery_failed" if outcome == "failed" else "delivery_unknown")
+    assert resolution["resolution_reason"] == "delivery_failed"
     assert resolution["answer"] is None
     assert service.store.get_run(run.run_id)["state"] == "running"
+
+
+def test_unknown_question_delivery_waits_without_cancellation_or_duplicate_send(tmp_path):
+    from orchestrator.run_questions import RunQuestions
+    from orchestrator.session_store import SessionStore
+
+    service, session, run, question = running(tmp_path)
+    with service.store._connection() as connection:
+        task = connection.execute(
+            "SELECT d.task_id,d.event_id,d.attempt_count "
+            "FROM connector_delivery_tasks AS d "
+            "JOIN run_events AS e ON e.event_id=d.event_id "
+            "WHERE d.run_id=? AND d.connector_id='telegram' "
+            "AND e.kind='run.question.created' "
+            "AND json_extract(e.detail_json,'$.question_id')=?",
+            (run.run_id, question["question_id"]),
+        ).fetchone()
+        connection.execute(
+            "UPDATE connector_delivery_tasks SET state='unknown' WHERE task_id=?",
+            (task["task_id"],),
+        )
+
+    reopened_store = SessionStore(
+        service.store.db_path,
+        instance_id=service.store.instance_id,
+    )
+    reopened = RunQuestions(reopened_store, clock=service.clock)
+    unresolved = reopened.get_answer(
+        request_id=run.request_id,
+        agent_id="zelda",
+        question_id=question["question_id"],
+    )
+    assert unresolved["state"] == "pending"
+    assert unresolved.get("resolution_reason") is None
+    assert reopened.pending_telegram_deliveries(agent_id="zelda") == []
+    assert reopened_store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        worker_id="question-retry-must-not-run",
+        event_id=task["event_id"],
+        connector_id="telegram",
+        limit=1,
+    ) == []
+    with reopened_store._connection() as connection:
+        current = connection.execute(
+            "SELECT state,attempt_count FROM connector_delivery_tasks WHERE task_id=?",
+            (task["task_id"],),
+        ).fetchone()
+    assert dict(current) == {"state": "unknown", "attempt_count": task["attempt_count"]}
+
+    from datetime import datetime
+    created = datetime.fromisoformat(
+        question["created_at"].replace("Z", "+00:00")
+    ).timestamp()
+    reopened.clock = lambda: created + 301
+    expired = reopened.get_answer(
+        request_id=run.request_id,
+        agent_id="zelda",
+        question_id=question["question_id"],
+    )
+    assert expired["state"] == "expired"
+    assert expired.get("resolution_reason") is None
 
 
 @pytest.mark.asyncio
@@ -337,7 +476,7 @@ def test_bootstrap_preserves_and_repairs_the_registered_remote_runtime_acl(tmp_p
     assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl()
 
 
-def test_primary_telegram_chat_survives_runtime_recreation_in_pao_binding(tmp_path):
+def test_owner_telegram_chat_survives_restart_and_is_revalidated_after_revocation(tmp_path):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.session_store import SessionStore
 
@@ -352,11 +491,11 @@ def test_primary_telegram_chat_survives_runtime_recreation_in_pao_binding(tmp_pa
     )
     runtime._is_authorized_user = lambda user_id: user_id in runtime._authorized_telegram_ids
     update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=7666),
-        effective_chat=SimpleNamespace(id=7666),
+        effective_user=SimpleNamespace(id=8872),
+        effective_chat=SimpleNamespace(id=8872),
     )
     FlexibleAgentRuntime._record_active_chat(runtime, update)
-    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 7666
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 8872
 
     restarted = SimpleNamespace(
         name="hashiko",
@@ -365,7 +504,194 @@ def test_primary_telegram_chat_survives_runtime_recreation_in_pao_binding(tmp_pa
         _authorized_telegram_ids=(8872, 7666),
         _active_chat_ids={},
     )
-    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 7666
+    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 8872
+
+    revoked = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=SessionStore(store.db_path, instance_id="MSI"),
+        _authorized_telegram_ids=(7666,),
+        _active_chat_ids={},
+    )
+    assert FlexibleAgentRuntime._primary_chat_id(revoked) == 0
+
+    denied_gate = SimpleNamespace(
+        check_egress=lambda *_args, **_kwargs: SimpleNamespace(
+            allowed=False, reason="channel_disabled"
+        )
+    )
+    channel_revoked = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=SessionStore(store.db_path, instance_id="MSI"),
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+        _channel_gate=denied_gate,
+    )
+    assert FlexibleAgentRuntime._primary_chat_id(channel_revoked) == 0
+
+
+def test_secondary_telegram_user_cannot_replace_owner_proactive_route(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="MSI")
+    store.ensure_default_session(owner_id="user:8872", agent_id="hashiko")
+    runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=store,
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    runtime._is_authorized_user = lambda user_id: user_id in runtime._authorized_telegram_ids
+    for actor in (8872, 7666):
+        FlexibleAgentRuntime._record_active_chat(
+            runtime,
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=actor),
+                effective_chat=SimpleNamespace(id=actor),
+            ),
+        )
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 8872
+    # A secondary actor in the same group chat cannot erase the owner's
+    # authenticated route evidence for that shared channel key.
+    FlexibleAgentRuntime._record_active_chat(
+        runtime,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=8872),
+            effective_chat=SimpleNamespace(id=-1008872),
+        ),
+    )
+    # Select the owner's direct chat again after the older group binding.
+    FlexibleAgentRuntime._record_active_chat(
+        runtime,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=8872),
+            effective_chat=SimpleNamespace(id=8872),
+        ),
+    )
+    FlexibleAgentRuntime._record_active_chat(
+        runtime,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=7666),
+            effective_chat=SimpleNamespace(id=-1008872),
+        ),
+    )
+    with store._connection() as connection:
+        same_chat = connection.execute(
+            "SELECT channel_key,actor_id,actor_role FROM channel_bindings "
+            "WHERE instance_id='MSI' AND owner_id='user:8872' "
+            "AND agent_id='hashiko' AND surface='telegram' "
+            "AND channel_key='-1008872'"
+        ).fetchone()
+    assert same_chat is not None
+    assert same_chat["actor_id"] == "8872"
+    assert same_chat["actor_role"] == "owner"
+    assert same_chat["channel_key"] == "-1008872"
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 8872
+
+    only_secondary = SessionStore(
+        tmp_path / "secondary.sqlite3", instance_id="MSI"
+    )
+    only_secondary.ensure_default_session(owner_id="user:8872", agent_id="hashiko")
+    secondary_runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=only_secondary,
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    secondary_runtime._is_authorized_user = (
+        lambda user_id: user_id in secondary_runtime._authorized_telegram_ids
+    )
+    FlexibleAgentRuntime._record_active_chat(
+        secondary_runtime,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=7666),
+            effective_chat=SimpleNamespace(id=7666),
+        ),
+    )
+    assert FlexibleAgentRuntime._primary_chat_id(secondary_runtime) == 0
+
+
+def test_telegram_actor_binding_schema_upgrades_from_version_27(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    db_path = tmp_path / "sessions.sqlite3"
+    original = SessionStore(db_path, instance_id="MSI")
+    session = original.ensure_default_session(
+        owner_id="user:8872", agent_id="hashiko"
+    )
+    original.bind_channel(
+        owner_id="user:8872",
+        agent_id="hashiko",
+        surface="telegram",
+        channel_key="8872",
+        session_id=session["session_id"],
+    )
+    with original._connection() as connection:
+        connection.executescript(
+            """
+            ALTER TABLE channel_bindings RENAME TO channel_bindings_current;
+            CREATE TABLE channel_bindings (
+                instance_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                surface TEXT NOT NULL,
+                channel_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(instance_id, owner_id, agent_id, surface, channel_key),
+                FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+            );
+            INSERT INTO channel_bindings(
+                instance_id, owner_id, agent_id, surface, channel_key,
+                session_id, updated_at
+            )
+            SELECT instance_id, owner_id, agent_id, surface, channel_key,
+                   session_id, updated_at
+            FROM channel_bindings_current;
+            DROP TABLE channel_bindings_current;
+            UPDATE schema_metadata SET value='27' WHERE key='schema_version';
+            """
+        )
+
+    upgraded = SessionStore(db_path, instance_id="MSI")
+    with upgraded._connection() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(channel_bindings)"
+            ).fetchall()
+        }
+    assert {"actor_id", "actor_role"} <= columns
+
+    runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=upgraded,
+        _authorized_telegram_ids=(8872,),
+        _active_chat_ids={},
+    )
+    runtime._is_authorized_user = lambda user_id: user_id == 8872
+    FlexibleAgentRuntime._record_active_chat(
+        runtime,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=8872),
+            effective_chat=SimpleNamespace(id=8872),
+        ),
+    )
+    binding = upgraded.latest_channel_binding(
+        owner_id="user:8872",
+        agent_id="hashiko",
+        surface="telegram",
+        actor_id=8872,
+    )
+    assert binding is not None
+    assert binding["actor_role"] == "owner"
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 8872
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows task principal contract")
 def test_remote_runtime_sid_comes_from_the_registered_instance_task(tmp_path, monkeypatch):
@@ -391,7 +717,7 @@ def test_remote_runtime_sid_comes_from_the_registered_instance_task(tmp_path, mo
     assert "HashiRemote-MSI" not in captured["argv"]
 
 
-def test_legacy_telegram_endpoint_migrates_without_allowlist_order(tmp_path):
+def test_legacy_owner_telegram_endpoint_migrates_without_allowlist_order(tmp_path):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.frontend_connector_registry import endpoint_id_for
     from orchestrator.session_store import SessionStore
@@ -413,7 +739,7 @@ def test_legacy_telegram_endpoint_migrates_without_allowlist_order(tmp_path):
     endpoint_id = endpoint_id_for(
         "telegram",
         ingress_transport="photo",
-        channel_key="7666",
+        channel_key="8872",
     )
     store.accept_run(
         session_id=session["session_id"],
@@ -441,11 +767,13 @@ def test_legacy_telegram_endpoint_migrates_without_allowlist_order(tmp_path):
         _authorized_telegram_ids=(8872, 7666),
         _active_chat_ids={},
     )
-    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 7666
+    assert FlexibleAgentRuntime._primary_chat_id(restarted) == 8872
     binding = restarted.session_store.latest_channel_binding(
         owner_id=owner,
         agent_id="hashiko",
         surface="telegram",
     )
     assert binding is not None
-    assert binding["channel_key"] == "7666"
+    assert binding["channel_key"] == "8872"
+    assert binding["actor_id"] == "8872"
+    assert binding["actor_role"] == "owner"

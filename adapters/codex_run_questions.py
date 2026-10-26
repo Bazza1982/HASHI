@@ -37,25 +37,45 @@ class NativeRunQuestions:
                 batch.append((raw['id'], q))
             while len(answers) < len(batch):
                 self.activity()
+                terminal_questions = []
+                terminal_reason = None
+                cancelled_without_reason = False
                 for original_id, q in batch:
                     if original_id in answers:
                         continue
                     current = self.service.get_answer(request_id=self.request_id,
                         agent_id=self.agent_id, question_id=q['question_id'])
                     if current['state'] == 'expired':
-                        raise UnansweredQuestion([
+                        terminal_questions.append(
                             {**current, "native_question_id": original_id}
-                        ])
+                        )
+                        terminal_reason = terminal_reason or "expired"
+                        continue
                     if current['state'] == 'cancelled':
                         if current.get("resolution_reason"):
-                            raise UnansweredQuestion([current], current["resolution_reason"])
-                        raise QuestionError('question_cancelled')
+                            terminal_questions.append(
+                                {**current, "native_question_id": original_id}
+                            )
+                            terminal_reason = (
+                                terminal_reason or current["resolution_reason"]
+                            )
+                        else:
+                            cancelled_without_reason = True
+                        continue
                     if current['state'] == 'consumed':
                         answer = current['answer']
                         values = [o['label'] for o in q['options'] if o['id'] == answer['option_id']]
                         if answer['text']:
                             values.append(answer['text'])
                         answers[original_id] = {'answers': values}
+                if terminal_questions:
+                    raise UnansweredQuestion(
+                        terminal_questions,
+                        terminal_reason or "expired",
+                        partial_answers=answers,
+                    )
+                if cancelled_without_reason:
+                    raise QuestionError('question_cancelled')
                 if len(answers) < len(batch):
                     await asyncio.sleep(self.interval)
             return {'answers': answers}

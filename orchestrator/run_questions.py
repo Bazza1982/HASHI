@@ -31,12 +31,13 @@ class QuestionError(ValueError):
         self.code, self.status = code, status
 
 class UnansweredQuestion(QuestionError):
-    def __init__(self, questions, reason="expired"):
+    def __init__(self, questions, reason="expired", *, partial_answers=None):
         super().__init__("question_" + reason)
         self.resolution = {
             "type": "hashi.run_question.unanswered",
             "reason": reason,
             "questions": questions,
+            "partial_answers": dict(partial_answers or {}),
             "instruction": QUESTION_UNANSWERED_INSTRUCTION,
         }
 
@@ -212,9 +213,13 @@ class RunQuestions:
             "WHERE e.run_id=? AND e.kind='run.question.created' "
             "AND json_extract(e.detail_json,'$.question_id')=?",
             (row["run_id"], row["question_id"])).fetchall()
-        failed = {"failed", "unknown", "suppressed"}
+        # ``unknown`` is an indeterminate post-send outcome. It is intentionally
+        # neither retried nor interpreted as confirmed non-delivery; only an
+        # explicit reconciliation may move that task again. Cancelling the
+        # question here would discard a reply to a card that may be visible.
+        failed = {"failed", "suppressed"}
         if rows and all(item["state"] in failed for item in rows):
-            return "delivery_unknown" if any(item["state"] == "unknown" for item in rows) else "delivery_failed"
+            return "delivery_failed"
         return None
 
     def _refresh(self, c, row):

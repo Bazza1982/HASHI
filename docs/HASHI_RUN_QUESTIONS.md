@@ -7,11 +7,17 @@ legacy deadlines and older callers requesting a longer lifetime. Shorter
 explicit deadlines remain valid. A timely saved answer remains consumable
 after the deadline; expiry never invents an answer or discards an already
 authenticated answer. Confirmed failure of every frozen delivery destination
-resolves the question early as an explicit non-answer.
+resolves the question early as an explicit non-answer. An outbox `unknown`
+outcome remains indeterminate: it neither proves non-delivery nor cancels the
+question, and it remains outside claim/retry selection until explicit evidence
+reconciles it. This prevents both premature cancellation and duplicate sends.
 
 Native Codex expiry resolves the original RPC with a typed unanswered error,
-the question identity and fixed runtime guidance. It never returns an empty
-or suggested answer. The Engine must reassess the original goal: stop and
+the question identity, every authenticated answer already consumed from the
+same native batch, and fixed runtime guidance. The adapter scans the whole
+batch before resolving expiry, so question order cannot hide a partial answer.
+It never returns an empty or suggested answer. The Engine must reassess the
+original goal: stop and
 restate a critical unanswered question in ordinary final chat, or state a
 reasonable assumption and continue already-authorized work. Recreating the
 same question just to restart its deadline is forbidden. HER uses the same
