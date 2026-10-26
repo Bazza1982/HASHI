@@ -1606,6 +1606,12 @@ class FlexibleAgentRuntime:
             if request_session_id != str(session["session_id"]):
                 raise SessionConflict("admission receipt Session changed")
             request_id = accepted.request_id
+        from orchestrator.frontend_agent_presence import schedule_agentpresence_message_received
+
+        schedule_agentpresence_message_received(
+            self, ingress=frontend_ingress_envelope, accepted=accepted,
+            delivery_route=delivery_route,
+        )
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import attachment_manifest
 
