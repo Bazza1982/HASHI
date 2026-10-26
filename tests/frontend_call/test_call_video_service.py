@@ -90,6 +90,9 @@ class Generator:
     async def synthesize(self, selection, reference, text, **kwargs):
         self.references.append(reference)
         self.started.set()
+        on_job = kwargs.get("on_job")
+        if on_job is not None:
+            on_job({"job_id": "job-one", "status": "accepted"})
         if self.release:
             try:
                 await self.release.wait()
@@ -301,6 +304,9 @@ async def test_external_video_submits_every_group_concurrently_but_prepares_in_o
 
     async def synthesize(selection, reference, text, **kwargs):
         started.append(text)
+        on_job = kwargs.get("on_job")
+        if on_job is not None:
+            on_job({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
         await gates[text].wait()
         return {
             "media": b"AV media",
@@ -329,6 +335,67 @@ async def test_external_video_submits_every_group_concurrently_but_prepares_in_o
         assert output.prepared[-len(parts) :] == expected
     finally:
         for gate in gates.values():
+            gate.set()
+        await service.close()
+
+
+async def test_external_video_bounds_only_submission_handshakes(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(4)]
+    call.turn = {
+        "turn_id": "bounded-submission",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    accepted = {part: asyncio.Event() for part in parts}
+    rendered = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        await accepted[text].wait()
+        kwargs["on_job"]({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
+        await rendered[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:2]
+
+        accepted[parts[0]].set()
+        for _ in range(100):
+            if len(started) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:3]
+        assert not rendered[parts[0]].is_set()
+
+        accepted[parts[1]].set()
+        for _ in range(100):
+            if len(started) == 4:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        accepted[parts[2]].set()
+        accepted[parts[3]].set()
+        for gate in reversed(list(rendered.values())):
+            gate.set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == len(parts)
+    finally:
+        for gate in (*accepted.values(), *rendered.values()):
             gate.set()
         await service.close()
 

@@ -12,6 +12,7 @@ from .contract import CallError
 from .diagnostics import emit, error_facts, receipt_facts
 
 OUTPUT_PROTOCOL = "call-output/1"
+VIDEO_TTS_SUBMISSION_CONCURRENCY = 2
 
 
 class VideoTTSDeferred(CallError):
@@ -87,6 +88,9 @@ class ExternalCallOutput:
         self._prepare_done = {}
         self._provider_tasks = set()
         self._late_observers = set()
+        # Bound only the short async-job admission handshake. Once the provider
+        # accepts a job, its render continues concurrently and the next submits.
+        self._submission_slots = asyncio.Semaphore(VIDEO_TTS_SUBMISSION_CONCURRENCY)
         self.fallback_reason_code = str(fallback_reason_code or "")
         self.transient_reason_code = ""
 
@@ -351,26 +355,42 @@ class ExternalCallOutput:
         self.connector.require_active(epoch)
         utterance = "utt-" + hashlib.sha256(request_id.encode()).hexdigest()[:48]
 
+        submission_released = False
+
+        def release_submission():
+            nonlocal submission_released
+            if not submission_released:
+                submission_released = True
+                self._submission_slots.release()
+
         def on_job(receipt):
             turn.setdefault("provider_receipts", {}).setdefault("video_tts", {})[
                 utterance
             ] = receipt
+            if receipt.get("status") == "accepted":
+                release_submission()
 
         selection = self.selection
         if selection.voice_source == "call_tts":
             route = CatalogCallTTS.voice_route(call, text)
             selection = replace(selection, voice=route.voice_name)
-        provider_task = self._own_provider_task(
-            self.synthesizer.synthesize(
-                selection,
-                self.connector.reference,
-                text,
-                privacy_level=self.privacy(),
-                request_id=request_id,
-                expected_origin=self.origin,
-                on_job=on_job,
-            )
-        )
+
+        async def generate():
+            await self._submission_slots.acquire()
+            try:
+                return await self.synthesizer.synthesize(
+                    selection,
+                    self.connector.reference,
+                    text,
+                    privacy_level=self.privacy(),
+                    request_id=request_id,
+                    expected_origin=self.origin,
+                    on_job=on_job,
+                )
+            finally:
+                release_submission()
+
+        provider_task = self._own_provider_task(generate())
         wait_seconds = selection.foreground_wait_seconds(text)
         deferred = VideoTTSDeferred(
             self,
