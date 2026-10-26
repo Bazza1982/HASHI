@@ -2,6 +2,13 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- PAO question cards expire within five minutes, including legacy long deadlines.
+  An unanswered card returns control to its original Engine: restate a critical
+  question and stop, or state a reasonable assumption and continue authorized
+  work. Silence never supplies an answer. FC retains Telegram card bindings and
+  updates closed cards in place; personal Remote bridges bootstrap only a missing
+  private loopback credential. Shared Functions adoption and real client display
+  remain separate from source/offline proof. See [questions](HASHI_RUN_QUESTIONS.md).
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
   See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),

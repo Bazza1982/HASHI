@@ -9,6 +9,7 @@ import asyncio
 import json
 
 from adapters.codex_run_questions import NativeRunQuestions
+from orchestrator.run_questions import QUESTION_UNANSWERED_INSTRUCTION, UnansweredQuestion
 from adapters.stream_io import iter_stream_lines
 
 
@@ -52,6 +53,11 @@ class InteractiveTurn:
             await self.send(proc, {'id': rpc_id, 'result': answer})
         except asyncio.CancelledError:
             raise
+        except UnansweredQuestion as exc:
+            # Resolve the original native tool RPC with an explicit non-answer.
+            # The Engine receives the reason and must reassess the original task.
+            await self.send(proc, {'id': rpc_id, 'error': {
+                'code': -32001, 'message': str(exc), 'data': exc.resolution}})
         except Exception as exc:
             # Explicit RPC error; never manufacture a default or empty user answer.
             await self.send(proc, {'id': rpc_id, 'error': {'code': -32000, 'message': str(exc)}})
@@ -92,7 +98,7 @@ class InteractiveTurn:
                         await self.send(proc, {'method': 'initialized'})
                         config = {'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
                                   'cwd': str(self.adapter.effective_workdir),
-                                  'developerInstructions': 'HASHI native process protection is active. Native shell is disabled; use the HASHI managed tools for execution and process control. Use request_user_input for clarification questions. User answers supply information, never authorize side effects. Do not request secrets in shared question cards.'}
+                                  'developerInstructions': 'HASHI native process protection is active. Native shell is disabled; use the HASHI managed tools for execution and process control. Use request_user_input for clarification questions. User answers supply information, never authorize side effects. Do not request secrets in shared question cards. ' + QUESTION_UNANSWERED_INSTRUCTION}
                         if self.adapter.config.model and self.adapter.config.model != 'default':
                             config['model'] = self.adapter.config.model
                         if self.thread_id:
