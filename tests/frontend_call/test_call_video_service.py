@@ -284,6 +284,55 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
         await service.close()
 
 
+async def test_external_video_submits_every_group_concurrently_but_prepares_in_order(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(5)]
+    call.turn = {
+        "turn_id": "ordered-groups",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    gates = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        await gates[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) == len(parts):
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        for part in reversed(parts):
+            gates[part].set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+
+        expected = [
+            "utt-"
+            + hashlib.sha256(f"call-1-ordered-groups-{index}".encode()).hexdigest()[:48]
+            for index in range(len(parts))
+        ]
+        assert output.prepared[-len(parts) :] == expected
+    finally:
+        for gate in gates.values():
+            gate.set()
+        await service.close()
+
+
 async def test_av_prepare_commit_interrupt_and_end_share_one_call(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
     result = await service.invoke("owner", body)

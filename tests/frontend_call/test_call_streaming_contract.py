@@ -1,8 +1,12 @@
+import pytest
+
 from orchestrator.frontend_call.contract import (
+    complete_video_speech_segments,
     complete_speech_segments,
     FILLER_TIER_SIZE,
     filler_phrases,
     speech_segments,
+    video_speech_segments,
 )
 
 
@@ -69,6 +73,46 @@ def test_streaming_chunks_remain_a_prefix_of_the_final_chunks():
     for preview in (first, first + short, first + short + third):
         stable, _remainder = complete_speech_segments(preview)
         assert final[: len(stable)] == stable
+
+
+def test_video_streaming_releases_configured_complete_sentence_groups():
+    sentences = [f"第{index}句。" for index in range(1, 11)]
+    stable, remainder = complete_video_speech_segments(
+        "".join(sentences),
+        first_segment_sentences=1,
+        group_sentences=4,
+    )
+
+    assert stable == [
+        sentences[0],
+        "".join(sentences[1:5]),
+        "".join(sentences[5:9]),
+    ]
+    assert remainder == sentences[9]
+
+
+@pytest.mark.parametrize(
+    "sentence_count,expected_sizes",
+    [
+        (6, [1, 4, 1]),
+        (10, [1, 4, 4, 1]),
+        (12, [1, 4, 4, 3]),
+        (20, [1, 4, 4, 4, 4, 3]),
+    ],
+)
+def test_video_final_answer_uses_tunable_sentence_groups(
+    sentence_count, expected_sizes
+):
+    sentences = [f"第{index}句。" for index in range(1, sentence_count + 1)]
+    parts, truncated = video_speech_segments(
+        "".join(sentences),
+        first_segment_sentences=1,
+        group_sentences=4,
+    )
+
+    assert not truncated
+    assert [part.count("句。") for part in parts] == expected_sizes
+    assert "".join(parts) == "".join(sentences)
 
 
 def test_final_answer_groups_short_sentences_into_a_natural_tts_item():

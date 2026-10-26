@@ -55,6 +55,8 @@ class VideoTTSSelection:
     wait_min_seconds: float
     wait_max_seconds: float
     voice_source: str = "configured"
+    first_segment_sentences: int = 1
+    group_sentences: int = 4
 
     @classmethod
     def parse(cls, raw):
@@ -80,6 +82,8 @@ class VideoTTSSelection:
             "wait_per_char_seconds",
             "wait_min_seconds",
             "wait_max_seconds",
+            "first_segment_sentences",
+            "group_sentences",
         }
         if set(raw) - allowed or raw.get("enabled") is not True:
             raise CallError("call_video_configuration_invalid", 503)
@@ -116,6 +120,8 @@ class VideoTTSSelection:
         wait_per_char = raw.get("wait_per_char_seconds", 0.17)
         wait_min = raw.get("wait_min_seconds", 20)
         wait_max = raw.get("wait_max_seconds", 90)
+        first_segment_sentences = raw.get("first_segment_sentences", 1)
+        group_sentences = raw.get("group_sentences", 4)
         for value, low, high in (
             (speed, 0.5, 2),
             (request_timeout, 1, 900),
@@ -132,6 +138,13 @@ class VideoTTSSelection:
             ):
                 raise CallError("call_video_configuration_invalid", 503)
         if type(maximum) is not int or not 1 <= maximum <= 4000:
+            raise CallError("call_video_configuration_invalid", 503)
+        if (
+            type(first_segment_sentences) is not int
+            or not 1 <= first_segment_sentences <= 32
+            or type(group_sentences) is not int
+            or not 1 <= group_sentences <= 32
+        ):
             raise CallError("call_video_configuration_invalid", 503)
         if wait_min > wait_max or job_timeout < wait_max:
             raise CallError("call_video_configuration_invalid", 503)
@@ -172,6 +185,8 @@ class VideoTTSSelection:
             float(wait_min),
             float(wait_max),
             voice_source,
+            first_segment_sentences,
+            group_sentences,
         )
 
     def foreground_wait_seconds(self, text):
@@ -187,6 +202,8 @@ class VideoTTSSelection:
             "model_id": self.reference.model_id,
             "protocol": self.protocol,
             "voice": self.voice,
+            "first_segment_sentences": self.first_segment_sentences,
+            "group_sentences": self.group_sentences,
             **(
                 {"voice_source": self.voice_source}
                 if self.voice_source != "configured"

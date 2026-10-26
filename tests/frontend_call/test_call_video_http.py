@@ -133,11 +133,19 @@ def selection(**overrides):
 
 def test_video_wait_budget_scales_with_text_and_keeps_tracking_longer():
     policy = selection()
+    assert policy.first_segment_sentences == 1
+    assert policy.group_sentences == 4
     assert policy.foreground_wait_seconds("短句。") == 20
     assert policy.foreground_wait_seconds("字" * 161) == pytest.approx(45.87)
     assert policy.job_timeout_seconds > policy.foreground_wait_seconds("字" * 400)
+    tuned = selection(first_segment_sentences=3, group_sentences=6)
+    assert (tuned.first_segment_sentences, tuned.group_sentences) == (3, 6)
     with pytest.raises(CallError, match="call_video_configuration_invalid"):
         selection(job_timeout_seconds=30, wait_max_seconds=90)
+    with pytest.raises(CallError, match="call_video_configuration_invalid"):
+        selection(first_segment_sentences=0)
+    with pytest.raises(CallError, match="call_video_configuration_invalid"):
+        selection(group_sentences=33)
 
 
 @pytest.mark.anyio

@@ -72,7 +72,9 @@ selections are preserved. A call freezes this selection at its Call revision.
     "wait_base_seconds": 18.5,
     "wait_per_char_seconds": 0.17,
     "wait_min_seconds": 20,
-    "wait_max_seconds": 90
+    "wait_max_seconds": 90,
+    "first_segment_sentences": 1,
+    "group_sentences": 4
   }
 }
 ```
@@ -108,14 +110,15 @@ late results from an old turn cannot upload or resume presentation.
 External AV speech is segmented separately from ordinary audio Call. Streaming
 provider answer deltas, including Codex app-server agent-message deltas, enter
 the Workbench-only answer-preview lane; commentary deltas remain excluded. The
-first complete sentence is released immediately as a short VideoTTS request,
-without waiting for the PAO Run to finish. All remaining cleaned text is then
-submitted as one second request. Call keeps up to two VideoTTS renders in flight,
-so the body enters Compute as soon as it is known instead of waiting for the
-first complete MP4. AP preload and playback remain strictly ordered: a later
-render may finish first but cannot overtake the opener at the presentation gate.
-A one-sentence answer remains one request, and ordinary audio Call remains
-serial. The configured input-character guard still applies. Preview,
+first `first_segment_sentences` complete sentences are released immediately as
+a short VideoTTS request, without waiting for the PAO Run to finish. Remaining
+sentences are grouped in order by `group_sentences`; the defaults are 1 and 4.
+All ready groups enter Compute immediately and may render concurrently. AP
+preload and playback remain strictly ordered: a later render may finish first
+but cannot overtake an earlier group at the presentation gate. A short answer
+remains one request, and ordinary audio Call remains serial. The configured
+input-character guard still applies; only a single sentence longer than that
+hard limit may be split below the configured sentence count. Preview,
 commentary, final, and opening speech share this rule. A failed async job
 remains terminal and is not retried; diagnostics retain a validated provider
 error code. Non-success HTTP responses retain only their numeric status, never

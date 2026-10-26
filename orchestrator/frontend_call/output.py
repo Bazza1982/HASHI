@@ -349,10 +349,6 @@ class ExternalCallOutput:
         )
         await self.ready()
         self.connector.require_active(epoch)
-        if self.pending_video_jobs >= 2:
-            if not completion.done():
-                completion.set_result(False)
-            raise CallError("call_video_recovery_pending", 503)
         utterance = "utt-" + hashlib.sha256(request_id.encode()).hexdigest()[:48]
 
         def on_job(receipt):

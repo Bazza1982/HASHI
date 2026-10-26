@@ -47,8 +47,6 @@ from .contract import (
     video_speech_segments,
 )
 
-VIDEO_SPEECH_PENDING_LIMIT = 2
-
 
 def _speech_asset_bytes(asset):
     """Return decoded media size without decoding or logging private audio."""
@@ -61,13 +59,25 @@ def _speech_asset_bytes(asset):
 
 def _complete_call_speech_segments(call, text):
     if call.output is not None and call.output.video_enabled:
-        return complete_video_speech_segments(text)
+        selection = call.output.selection
+        return complete_video_speech_segments(
+            text,
+            first_segment_sentences=selection.first_segment_sentences,
+            group_sentences=selection.group_sentences,
+            maximum_chars=selection.max_input_chars,
+        )
     return complete_speech_segments(text)
 
 
 def _final_call_speech_segments(call, text):
     if call.output is not None and call.output.video_enabled:
-        return video_speech_segments(text)
+        selection = call.output.selection
+        return video_speech_segments(
+            text,
+            first_segment_sentences=selection.first_segment_sentences,
+            group_sentences=selection.group_sentences,
+            maximum_chars=selection.max_input_chars,
+        )
     return speech_segments(text)
 
 
@@ -1744,9 +1754,7 @@ class CallService:
         )
         value = dict(result)
         value["output"] = output.temporary_audio_view(reason_code)
-        value["tts"] = self._segment_audio_tts_view(
-            call, output, reason_code, result
-        )
+        value["tts"] = self._segment_audio_tts_view(call, output, reason_code, result)
         call.tts_error_code = ""
         call.tts_error_reason = ""
         return value
@@ -2516,8 +2524,7 @@ class CallService:
             image = None
 
     def _start_queued_speech(self, call):
-        """Warm audio serially; let VideoTTS keep two bounded jobs in flight."""
-        active_tasks = [task for task in call.speech_tasks.values() if not task.done()]
+        """Warm audio serially; submit every ready VideoTTS group immediately."""
         if (
             call.phase != "active"
             or call.turn.get("_speech_interrupted")
@@ -2527,12 +2534,11 @@ class CallService:
         parts = call.turn.get("speech_segments", [])
         if call.output is not None and call.output.video_enabled:
             started = False
-            while len(active_tasks) < VIDEO_SPEECH_PENDING_LIMIT:
+            while True:
                 index = call.speech_index + 1
                 if index >= len(parts):
                     break
                 self._start_speech(call, index, parts[index])
-                active_tasks.append(call.speech_tasks[index])
                 started = True
             return started
         active_task = call.speech_task
