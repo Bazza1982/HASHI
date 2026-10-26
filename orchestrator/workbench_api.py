@@ -449,12 +449,23 @@ class WorkbenchApiServer:
             owner = self.orchestrator
             tracked = owner is not None and request.method != "GET"
             if tracked:
-                owner._handoff_requests = getattr(owner, "_handoff_requests", 0) + 1
+                outstanding = max(
+                    0, int(getattr(owner, "_handoff_requests", 0) or 0)
+                )
+                request_idle = getattr(owner, "_handoff_requests_idle", None)
+                if outstanding == 0 and request_idle is not None:
+                    request_idle.clear()
+                owner._handoff_requests = outstanding + 1
             try:
                 return await handler(request)
             finally:
                 if tracked:
-                    owner._handoff_requests -= 1
+                    owner._handoff_requests = max(
+                        0, int(getattr(owner, "_handoff_requests", 0) or 0) - 1
+                    )
+                    request_idle = getattr(owner, "_handoff_requests_idle", None)
+                    if owner._handoff_requests == 0 and request_idle is not None:
+                        request_idle.set()
 
         self.app = web.Application(client_max_size=64 * 1024 * 1024,
                                    middlewares=[runtime_admission])

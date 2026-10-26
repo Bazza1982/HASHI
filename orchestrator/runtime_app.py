@@ -83,6 +83,9 @@ class UniversalOrchestrator:
         self.is_stopping = False
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
+        self._handoff_requests = 0
+        self._handoff_requests_idle = asyncio.Event()
+        self._handoff_requests_idle.set()
         self._restart_request: dict | None = None  # set by request_restart()
         self._shutdown_request = {
             "reason": "external",

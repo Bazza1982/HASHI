@@ -490,7 +490,9 @@ async def test_shared_handoff_rejects_new_http_work_and_can_resume(tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
     server = _server(tmp_path, profile="personal")
-    owner = SimpleNamespace(_handoff_draining=False)
+    request_idle = asyncio.Event()
+    request_idle.set()
+    owner = SimpleNamespace(_handoff_draining=False, _handoff_requests_idle=request_idle)
     server.orchestrator = owner
     entered, finish = asyncio.Event(), asyncio.Event()
 
@@ -505,12 +507,14 @@ async def test_shared_handoff_rejects_new_http_work_and_can_resume(tmp_path):
         await asyncio.wait_for(entered.wait(), timeout=1)
         assert owner._handoff_requests == 1
         owner._handoff_draining = True
+        assert request_idle.is_set() is False
         rejected = await client.post("/test-handoff-work")
         assert rejected.status == 503
         finish.set()
         assert (await active).status == 200
         assert owner._handoff_requests == 0
         owner._handoff_draining = False
+        assert request_idle.is_set() is True
         assert (await client.post("/test-handoff-work")).status == 200
 
 

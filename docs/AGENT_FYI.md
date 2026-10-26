@@ -37,6 +37,8 @@ adopts only by reboot; docs do not. Workbench config preserves `AGENT_BUSY`;
 retry only before a durable receipt; durable `target_busy` stays pending. `max`
 rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
+For Workbench `max`, publish to Core only after its own authenticated control
+POST leaves shared request accounting; other shared work remains a blocker.
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
 

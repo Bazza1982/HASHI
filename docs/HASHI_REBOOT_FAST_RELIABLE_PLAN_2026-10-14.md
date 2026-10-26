@@ -704,6 +704,9 @@ Worker 启动时都会解析 Windows Remote 计划任务身份，并对同一个
 - 共享 Function 候选进程在任何 Agent Worker 启动前显式执行一次凭据发布与
   ACL 修复；
 - `/reboot max` 每个共享候选最多执行一次；`min|same|<agent>` 不执行；
+- Workbench 发起 `/reboot max` 时，先让这一个已认证控制 POST 退出共享
+  请求计数，再向 Core 发布 handoff；额外的共享 API 工作仍由 Core 按 busy
+  fail-fast，不能被控制请求本身误判为业务负载；
 - 缺少凭据、SID 查询失败或 ACL 修复失败仍然阻止共享候选采用，安全边界不降级；
 - 不通过增加 Worker 并发掩盖串行外部进程与 ACL 争用。
 
