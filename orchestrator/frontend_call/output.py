@@ -370,9 +370,7 @@ class ExternalCallOutput:
             ),
             **(
                 {
-                    "submission_elapsed_ms": int(
-                        (accepted_at - submit_at) * 1000
-                    ),
+                    "submission_elapsed_ms": int((accepted_at - submit_at) * 1000),
                     "job_elapsed_ms": int((now - accepted_at) * 1000),
                 }
                 if accepted_at is not None and submit_at is not None
@@ -618,6 +616,7 @@ class ExternalCallOutput:
             text_chars=len(text),
             lifecycle=lifecycle,
         )
+
         async def wait_for_event(event, *, timeout=None):
             waiter = asyncio.create_task(event.wait())
             try:
