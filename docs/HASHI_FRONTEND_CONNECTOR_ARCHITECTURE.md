@@ -270,6 +270,21 @@ admission, so switching later does not replay or redirect it. Automatic
 WhatsApp mirrors require exactly one configured allowed personal number; the
 transport's ordinary replies still use their original chat endpoint.
 
+Telegram authorization and delivery routing are separate state. Every accepted
+authorized Telegram ingress persists its actual chat endpoint together with the
+authenticated actor and its `owner` or `secondary` role in PAO's
+instance/owner/Agent-scoped `channel_bindings`. Only the configured owner may
+establish the durable proactive destination. A secondary authorized user may
+enter Runs and receive replies through each Run's frozen inbound route, but the
+secondary user's activity never selects or replaces the owner's proactive
+route. On every lookup, including after Worker restart, PAO revalidates the
+persisted owner actor against the current Telegram allowlist and the current
+channel-egress policy. Revocation therefore disables the old route without
+deleting audit evidence. A legacy Session with no actor-bound route may recover
+one only by matching the canonical ingress envelope's opaque `endpoint_id`
+against the currently authorized configured owner. An authorization-list
+position never selects a destination, and an unresolved route sends nothing.
+
 AgentPresence is an optional local desktop-companion egress Connector. Its
 owner-scoped `/agentpresence on|off` preference defaults off and is shared by
 existing and future Agents through the connector-neutral preference store. The

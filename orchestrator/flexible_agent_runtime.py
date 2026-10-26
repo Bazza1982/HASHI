@@ -473,27 +473,37 @@ class FlexibleAgentRuntime:
         self.reload_post_turn_observers()
 
     def _record_active_chat(self, update) -> None:
-        """Track the chat_id for each authorized user who messages this bot."""
+        """Persist the latest authorized Telegram route as PAO Session state."""
         user = getattr(update, "effective_user", None)
         chat = getattr(update, "effective_chat", None)
         if user and chat and self._is_authorized_user(user.id):
             self._active_chat_ids[user.id] = chat.id
+            try:
+                runtime_session.record_telegram_route(
+                    self,
+                    chat_id=chat.id,
+                    actor_id=user.id,
+                )
+            except Exception:
+                logger = getattr(self, "logger", logging.getLogger("HASHI.TelegramRoute"))
+                logger.warning(
+                    "Could not persist the authorized Telegram route",
+                    exc_info=True,
+                )
 
     def _primary_chat_id(self) -> int:
-        """Return the best chat_id for proactive messages (forks, notifications).
+        """Return the durable owner/Agent Telegram endpoint for proactive work."""
 
-        Prefer a chat_id from an authorized user who has actually messaged
-        this bot (i.e. has an established conversation).  Fall back to the
-        first authorized ID only if no active chat has been recorded yet.
-        """
-        # Return the first active chat we find, in config order
-        for uid in self._authorized_telegram_ids:
-            if uid in self._active_chat_ids:
-                return self._active_chat_ids[uid]
-        # Fallback: original behaviour
-        if self._authorized_telegram_ids:
-            return self._authorized_telegram_ids[0]
-        return self.global_config.authorized_id
+        try:
+            persisted = runtime_session.primary_telegram_chat_id(self)
+        except Exception:
+            logger = getattr(self, "logger", logging.getLogger("HASHI.TelegramRoute"))
+            logger.warning(
+                "Could not restore the durable Telegram route",
+                exc_info=True,
+            )
+            persisted = None
+        return persisted or 0
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None:

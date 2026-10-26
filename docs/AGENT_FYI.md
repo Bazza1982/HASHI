@@ -79,9 +79,10 @@ Accepted non-voice attachments commit atomically to the target Agent's ignored
 `.attachments/{session}/{message}/`; only its home scope may read them and
 Session retention removes them. Safe Voice has its own lifecycle.
 
-Incremental deliverables bind exact files/stable publication IDs. Persistence,
-receipts and UI visibility differ; uncertain delivery never auto-retries and
-final attachments stay final-only. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#64-incremental-assistant-deliverables).
+Telegram proactive routes are owner-only and revalidate actor/egress after restart.
+Question `unknown` neither cancels nor retries; Codex expiry preserves authenticated
+partial answers. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
+[questions](HASHI_RUN_QUESTIONS.md).
 
 CURRENT MESSAGE CONTEXT separates source, assurance, authority and destination;
 only current successful private_authorization grants scope. HChat separates
