@@ -193,6 +193,14 @@ def voice_bytes(bridge_home: Any, owner_id: Any, data: bytes, mime_type: str) ->
     return _post("/v1/voice/speak", data=bytes(data), content_type=content_type)
 
 
+def message_received(instance_id: str, request_id: str) -> bool:
+    """Notify AP of one validated, owner-routed user admission without its body."""
+    return _post_json(
+        "/v1/hashi/message-received",
+        {"instance_id": instance_id, "request_id": request_id},
+    )
+
+
 def _receipt(
     event: Mapping[str, Any],
     endpoint_id: str,
@@ -341,6 +349,7 @@ __all__ = [
     "call_started",
     "get_hashi_instance_binding",
     "mirror_enabled",
+    "message_received",
     "token_matches",
     "voice_bytes",
 ]

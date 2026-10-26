@@ -460,6 +460,8 @@ class WorkbenchApiServer:
                                    middlewares=[runtime_admission])
         from orchestrator.desktop_api import register_desktop_api
         register_desktop_api(self)
+        from orchestrator.agent_presence_control_api import register_agentpresence_controls
+        register_agentpresence_controls(self)
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
         from orchestrator.frontend_live_voice.manager import LiveVoiceManager

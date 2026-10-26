@@ -829,6 +829,8 @@ class CodexAppServerToolBridge:
         external_call_ids: set[str] = set()
         completed_call_ids: set[str] = set()
         final_text = ""
+        streamed_text_delta = False
+        agent_message_phases: dict[str, str] = {}
         usage: TokenUsage | None = None
         protocol_error: str | None = None
         last_activity_broadcast = 0.0
@@ -991,6 +993,26 @@ class CodexAppServerToolBridge:
                     method = str(message.get("method") or "")
                     params = message.get("params") or {}
 
+                    if method == "item/agentMessage/delta":
+                        item_id = str(params.get("itemId") or "")
+                        delta = str(params.get("delta") or "")
+                        if (
+                            delta
+                            and agent_message_phases.get(item_id) != "commentary"
+                            and use_streaming
+                            and on_stream_event is not None
+                        ):
+                            await on_stream_event(
+                                StreamEvent(
+                                    kind=KIND_TEXT_DELTA,
+                                    summary=delta,
+                                    raw_delta=delta,
+                                    origin="codex-app-server",
+                                )
+                            )
+                            streamed_text_delta = True
+                        continue
+
                     if method == "item/tool/call":
                         call_id = str(params.get("callId") or "")
                         codex_tool_name = str(params.get("tool") or "")
@@ -1071,6 +1093,9 @@ class CodexAppServerToolBridge:
                                 completed_call_ids.add(completed_id)
                         elif item_type == "agentMessage":
                             phase = str(item.get("phase") or "")
+                            item_id = str(item.get("id") or "")
+                            if item_id:
+                                agent_message_phases[item_id] = phase
                             if phase != "commentary":
                                 final_text = str(item.get("text") or "")
                         continue
@@ -1078,6 +1103,12 @@ class CodexAppServerToolBridge:
                     if method == "item/started":
                         item = params.get("item") or {}
                         item_type = str(item.get("type") or "")
+                        if item_type == "agentMessage":
+                            item_id = str(item.get("id") or "")
+                            if item_id:
+                                agent_message_phases[item_id] = str(
+                                    item.get("phase") or ""
+                                )
                         should_stop_after_dynamic_calls = (
                             external_calls
                             and not interrupt_sent
@@ -1193,7 +1224,13 @@ class CodexAppServerToolBridge:
                 temp_dir.cleanup()
 
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        if use_streaming and final_text and not external_calls and on_stream_event:
+        if (
+            use_streaming
+            and final_text
+            and not external_calls
+            and on_stream_event
+            and not streamed_text_delta
+        ):
             await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=final_text))
         return BackendResponse(
             text="" if external_calls else final_text,

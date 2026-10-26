@@ -12,6 +12,7 @@ from typing import Any
 
 from orchestrator.config_json import (
     ConfigDocument,
+    ConfigConflictError,
     new_config_json,
     read_config_json,
     write_config_json,
@@ -73,12 +74,16 @@ def get_default_agent(bridge_home: Any) -> str:
     return str(load_settings(bridge_home)["default_agent"])
 
 
-def set_default_agent(bridge_home: Any, agent_id: Any = "") -> dict[str, Any]:
+def set_default_agent(
+    bridge_home: Any, agent_id: Any = "", *, expected_revision: int | None = None
+) -> dict[str, Any]:
     agent = str(agent_id or "").strip().casefold()
     if len(agent) > 64 or any(char.isspace() for char in agent):
         raise ValueError("invalid Agent Presence default Agent")
 
     state, document = _read_snapshot(bridge_home)
+    if expected_revision is not None and state["revision"] != expected_revision:
+        raise ConfigConflictError("Agent Presence route changed; refresh before applying")
     state["default_agent"] = agent
     state["revision"] += 1
     target = state_path(bridge_home)

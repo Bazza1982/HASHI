@@ -133,10 +133,12 @@ class AgentPresenceCallVideo:
         except CallError:
             return False
         contract = caps.get("call_video_contract") or {}
+        role_video_tts = contract.get("video_tts_supported", True)
         return bool(
             caps.get("features", {}).get("call_video") is True
             and contract.get("version") == AP_PROTOCOL
             and contract.get("requires_commit") is True
+            and role_video_tts is True
             and binding.get("configured") is True
             and binding.get("instance_id") == self.instance_id
         )

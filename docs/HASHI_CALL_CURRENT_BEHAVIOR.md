@@ -192,15 +192,23 @@ numeric response-length requirements are retired.
   external AV uses the scoped [Call output contract](HASHI_CALL_AGENTPRESENCE_VIDEO.md):
   HASHI obtains AP’s reference, invokes compatible VideoTTS, and AP presents both
   audio and video after explicit commit. The window yields reply audio and
-  fillers; microphone/camera admission remains independent. An unavailable
-  synthesis path shows a visible error and transcript rather than silent success.
-- **CALL-SPEECH-16** — External AV keeps the complete Agent answer but bounds
-  each renderer submission by estimated spoken duration. It prefers sentence,
-  clause, and word boundaries and never applies this provider-specific ceiling
-  to ordinary audio Call. Preview and final segmentation use the same rule, so
-  incremental speech remains a prefix of the final queue. Provider failure
-  diagnostics retain only a validated error code or HTTP status, never response
-  content.
+  fillers while AV remains healthy; microphone/camera admission remains
+  independent. If VideoTTS is unavailable or generation fails, AP presentation
+  is fenced and the same Call visibly returns to its existing ordinary TTS
+  chain (including its configured Compute/local fallback). The failure never
+  ends or retargets the Call. If ordinary TTS also fails, the existing visible
+  speech error/retry path remains active rather than silently succeeding.
+- **CALL-SPEECH-16** — External AV sends the first complete sentence as soon as
+  it is stable from the Workbench-only provider-preview lane, then sends all
+  remaining cleaned answer text as one second VideoTTS request. Up to two
+  VideoTTS renders enter Compute without waiting for the opener's MP4; AP
+  preload and playback still follow segment order even if the body renders
+  first. Codex app-server agent-message deltas feed this preview, while its
+  commentary deltas remain private. Ordinary audio Call keeps its existing
+  serial natural-chunk policy. Preview and final segmentation use the same
+  rule, so incremental speech remains a prefix of the final queue.
+  Provider failure diagnostics retain only a validated error code or HTTP
+  status, never response content.
 
 ## Captions and controls
 
@@ -237,8 +245,9 @@ numeric response-length requirements are retired.
 - **CALL-UI-10** — The authoritative Call snapshot exposes selected and
   effective TTS service labels. When they differ, the Call Window renders a
   localized notice in the notice area, separate from transcript content, in the
-  form “selected → effective”. It remains visible for that call without being
-  repeated as a caption.
+  form “selected → effective”, followed by the stable degradation reason code
+  when one exists. It remains visible for that call without being repeated as a
+  caption.
 
 ## Voice-media billing
 

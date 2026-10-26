@@ -178,24 +178,25 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share the catalogue/execution path; character-language
-voices also feed opt-in VideoTTS `call_tts`. Agent state stores no endpoint or
-credential. `/call` freezes its lifecycle/revisions, privacy-filters fallback
-and locks the first downgrade. With AP it requires VideoTTS and exclusive AV;
-without AP it stays audio. AV preserves the full answer in renderer-safe natural
-chunks; audio segmentation is unchanged.
+`/voice` and `/call` share routing; actual video/audio routes are
+privacy-checked before publish or cached delivery. AP prefers VideoTTS
+unless `video_tts_supported: false`; without AP it uses audio. Groups have
+bounded admission and ordered playback. Audio failure keeps video waiting;
+fallback is group-local; stale tails cancel; late jobs only signal recovery.
+Audio stays serial.
 See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-AgentPresence is default-off and owner-scoped. HASHI authenticates its explicit
-binding, ignores submitted routing, resolves the configured Agent and freezes its
-Conversation. `/phone` sends scoped leave/return events; AP owns presentation and
-HASHI services/voices. Ingress is fail-closed, settings are never guessed, and
-command/voice/Telegram/Call surfaces remain independent. See
-[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+AgentPresence is owner-scoped and default-off. HASHI authenticates binding and
+freezes the resolved Agent/Conversation. Only PAO-admitted human/client input
+triggers owner-route feedback; AP-local input never echoes. `/phone` sends scoped
+leave/return; AP owns presentation, HASHI owns services/voices. Ingress fails
+closed; surfaces stay independent. See
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
+[input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

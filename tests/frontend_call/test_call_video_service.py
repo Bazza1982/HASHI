@@ -1,10 +1,13 @@
 """External AV must fence presentation without changing PAO input ownership."""
 
 import asyncio
+import hashlib
+from dataclasses import replace
 import pytest
 from orchestrator.frontend_call.contract import CallError
 from orchestrator.frontend_call.video_tts import VideoTTSSelection
 from test_call_service import setup
+from test_call_contract import wav
 
 SELECTION = {
     "enabled": True,
@@ -79,6 +82,7 @@ class Generator:
         self.references = []
         self.release = None
         self.started = asyncio.Event()
+        self.error = None
 
     async def resolve(self, *args):
         return None
@@ -86,21 +90,33 @@ class Generator:
     async def synthesize(self, selection, reference, text, **kwargs):
         self.references.append(reference)
         self.started.set()
+        on_job = kwargs.get("on_job")
+        if on_job is not None:
+            on_job({"job_id": "job-one", "status": "accepted"})
         if self.release:
             try:
                 await self.release.wait()
             except asyncio.CancelledError:
                 # A remote server may finish after client cancellation.
                 await self.release.wait()
+        if self.error is not None:
+            raise self.error
         return {"media": b"AV media", "provider_receipt": {"job_id": "job-one"}}
 
 
-async def arranged(tmp_path, *, connected=True, protocol="call-output/1"):
-    service, ports, adapters, base, clock = setup(tmp_path)
+async def arranged(
+    tmp_path,
+    *,
+    connected=True,
+    protocol="call-output/1",
+    selection_overrides=None,
+    location="local",
+):
+    service, ports, adapters, base, clock = setup(tmp_path, location)
     generator, output = Generator(), Output()
     service.video_synthesizer = generator
     service.config.video_tts_selection = lambda revision: VideoTTSSelection.parse(
-        SELECTION
+        {**SELECTION, **(selection_overrides or {})}
     )
 
     async def resolve(*args, **kwargs):
@@ -142,7 +158,7 @@ async def test_unconnected_call_keeps_legacy_audio(tmp_path):
     await service.close()
 
 
-async def test_external_video_opening_uses_renderer_safe_speech_segments(tmp_path):
+async def test_external_video_opening_uses_default_two_sentence_first_group(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
 
     async def opening(*_args):
@@ -154,10 +170,305 @@ async def test_external_video_opening_uses_renderer_safe_speech_segments(tmp_pat
     await call.task
 
     assert call.turn["speech_segments"] == [
-        "测试官，晚上好，露米在这里。",
-        "今天想聊点什么，或者有什么要我来安排的？",
+        "测试官，晚上好，露米在这里。今天想聊点什么，或者有什么要我来安排的？"
     ]
     await service.close()
+
+
+async def test_external_video_sends_first_sentence_then_batches_the_remainder(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"first_segment_sentences": 1}
+    )
+    first = "看见了，测试官，这个我看得挺清楚。"
+    remainder = (
+        "你手里这包是 ChaCha 的藤椒瓜子，绿色包装，上面印着一根大瓜子和几粒青花椒，"
+        "还写着藤椒瓜子和 Szechuan Pepper Flavor，净含量 5.64 盎司，"
+        "换算下来大概 160 克。"
+        "这和咱们前两天聊的藤椒口味正好对上，"
+        "看来你是把当时说的那包直接拿到镜头前给我看了。"
+    )
+    observed = []
+    original_synthesize = gen.synthesize
+    calls = 0
+    released = asyncio.Event()
+    first_started = asyncio.Event()
+    remainder_started = asyncio.Event()
+    release_first = asyncio.Event()
+    expected_utterances = [
+        "utt-" + hashlib.sha256(f"call-1-turn-1-{index}".encode()).hexdigest()[:48]
+        for index in (0, 1)
+    ]
+
+    async def synthesize(selection, reference, text, **kwargs):
+        observed.append(text)
+        if text == first:
+            first_started.set()
+            await release_first.wait()
+        elif text == remainder:
+            remainder_started.set()
+        return await original_synthesize(selection, reference, text, **kwargs)
+
+    def result(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [
+                    {
+                        "sequence": 2,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": first + "你手里这包是 ChaCha 的藤椒瓜子",
+                    }
+                ],
+            }
+        if not released.is_set():
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [],
+            }
+        return {
+            "terminal": True,
+            "state": "completed",
+            "text": first + remainder,
+            "activity_sequence": 3,
+            "events": [],
+        }
+
+    gen.synthesize = synthesize
+    ports.result = result
+    try:
+        info = await service.invoke("owner", {**base, "operation": "context"})
+        body["generation"] = info["generation"]
+        body["revision"] = info["revision"]
+        await service.invoke("owner", body)
+        binding = {
+            **base,
+            "call_id": "call-1",
+            "generation": info["generation"],
+        }
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
+        for _ in range(100):
+            call = service.calls["call-1"]
+            if call.turn.get("speech_segments"):
+                break
+            await asyncio.sleep(0.001)
+        call = service.calls["call-1"]
+        assert call.turn["speech_segments"] == [first]
+        await asyncio.wait_for(first_started.wait(), 1)
+        released.set()
+        await call.task
+        await asyncio.wait_for(remainder_started.wait(), 1)
+        assert not set(expected_utterances).intersection(output.prepared)
+        release_first.set()
+        active = list(getattr(call, "speech_tasks", {}).values())
+        if active:
+            await asyncio.gather(*active)
+        elif call.speech_task:
+            await call.speech_task
+
+        assert call.turn["speech_segments"] == [first, remainder]
+        assert [text for text in observed if text in {first, remainder}] == [
+            first,
+            remainder,
+        ]
+        assert output.prepared[-2:] == expected_utterances
+    finally:
+        released.set()
+        release_first.set()
+        await service.close()
+
+
+async def test_external_video_submits_every_group_concurrently_but_prepares_in_order(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 5}
+    )
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(5)]
+    call.turn = {
+        "turn_id": "ordered-groups",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    gates = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        on_job = kwargs.get("on_job")
+        if on_job is not None:
+            on_job({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
+        await gates[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) == len(parts):
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        for part in reversed(parts):
+            gates[part].set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+
+        expected = [
+            "utt-"
+            + hashlib.sha256(f"call-1-ordered-groups-{index}".encode()).hexdigest()[:48]
+            for index in range(len(parts))
+        ]
+        assert output.prepared[-len(parts) :] == expected
+    finally:
+        for gate in gates.values():
+            gate.set()
+        await service.close()
+
+
+async def test_external_video_bounds_only_submission_handshakes(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 4}
+    )
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(4)]
+    call.turn = {
+        "turn_id": "bounded-submission",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    accepted = {part: asyncio.Event() for part in parts}
+    rendered = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        await accepted[text].wait()
+        kwargs["on_job"]({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
+        await rendered[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:2]
+
+        accepted[parts[0]].set()
+        for _ in range(100):
+            if len(started) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:3]
+        assert not rendered[parts[0]].is_set()
+
+        accepted[parts[1]].set()
+        for _ in range(100):
+            if len(started) == 4:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        accepted[parts[2]].set()
+        accepted[parts[3]].set()
+        for gate in reversed(list(rendered.values())):
+            gate.set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == len(parts)
+    finally:
+        for gate in (*accepted.values(), *rendered.values()):
+            gate.set()
+        await service.close()
+
+
+async def test_external_video_refills_bounded_inflight_window(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, selection_overrides={"max_inflight_groups": 2}
+    )
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    parts = [f"第{index}组。" for index in range(4)]
+    call.turn = {
+        "turn_id": "bounded-inflight",
+        "phase": "complete",
+        "speech_segments": [],
+    }
+    rendered = {part: asyncio.Event() for part in parts}
+    started = []
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started.append(text)
+        kwargs["on_job"]({"job_id": f"job-{parts.index(text)}", "status": "accepted"})
+        await rendered[text].wait()
+        return {
+            "media": b"AV media",
+            "provider_receipt": {"job_id": f"job-{parts.index(text)}"},
+        }
+
+    gen.synthesize = synthesize
+    try:
+        for part in parts:
+            service._queue_speech(call, call.turn, part, "answer")
+        for _ in range(100):
+            if len(started) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:2]
+
+        rendered[parts[0]].set()
+        for _ in range(100):
+            if len(started) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts[:3]
+        assert not rendered[parts[1]].is_set()
+
+        rendered[parts[1]].set()
+        for _ in range(100):
+            if len(started) == 4:
+                break
+            await asyncio.sleep(0.001)
+        assert started == parts
+
+        rendered[parts[2]].set()
+        rendered[parts[3]].set()
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == len(parts)
+    finally:
+        for gate in rendered.values():
+            gate.set()
+        await service.close()
 
 
 async def test_av_prepare_commit_interrupt_and_end_share_one_call(tmp_path):
@@ -220,12 +531,25 @@ async def test_late_generation_after_interrupt_never_reaches_ap(tmp_path):
     call.turn = {
         "turn_id": "old",
         "phase": "complete",
-        "speech_segments": ["Old reply."],
+        "speech_segments": [],
     }
     gen.release = asyncio.Event()
-    service._start_speech(call, 0, "Old reply.")
-    old_task = call.speech_task
-    await asyncio.wait_for(gen.started.wait(), 2)
+    started_texts = []
+    original_synthesize = gen.synthesize
+
+    async def synthesize(selection, reference, text, **kwargs):
+        started_texts.append(text)
+        return await original_synthesize(selection, reference, text, **kwargs)
+
+    gen.synthesize = synthesize
+    service._queue_speech(call, call.turn, "Old opener.", "answer")
+    service._queue_speech(call, call.turn, "Old remainder.", "answer")
+    old_tasks = list(call.speech_tasks.values())
+    for _ in range(100):
+        if {"Old opener.", "Old remainder."}.issubset(started_texts):
+            break
+        await asyncio.sleep(0.001)
+    assert {"Old opener.", "Old remainder."}.issubset(started_texts)
     await service.invoke(
         "owner",
         {
@@ -237,7 +561,7 @@ async def test_late_generation_after_interrupt_never_reaches_ap(tmp_path):
         },
     )
     gen.release.set()
-    await old_task
+    await asyncio.gather(*old_tasks)
     assert output.prepared == [] and call.speech_cache == {}
     assert adapters.tts == 0 and ports.cancelled == []
     await service.close()
@@ -251,6 +575,461 @@ async def test_video_output_does_not_depend_on_unused_audio_tts_credentials(tmp_
     result = await service.invoke("owner", body)
     assert result["output"]["mode"] == "external_av"
     assert output.starts == 1 and adapters.tts == 0
+    await service.close()
+
+
+async def test_transient_resolution_failure_starts_recovering_and_can_upgrade(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    original_resolve = gen.resolve
+
+    async def unavailable(*_args):
+        raise CallError("call_video_service_unavailable", 503)
+
+    gen.resolve = unavailable
+    result = await service.invoke("owner", body)
+
+    assert result["phase"] == "active"
+    assert result["output"]["mode"] == "external_av"
+    assert result["output"]["degraded"] is True
+    assert result["output"]["degradation_reason"] == "call_video_service_unavailable"
+    assert result["tts"]["mode"] == "video_tts"
+    assert result["tts"]["status"] == "recovering"
+    assert output.starts == 1
+
+    gen.resolve = original_resolve
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Service recovered."],
+    }
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+    speech = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert speech["output"]["mode"] == "external_av"
+    assert call.output.transient_reason_code == ""
+    await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "video_error",
+    ["call_video_generation_failed", "call_video_queue_timeout"],
+)
+async def test_video_generation_failure_uses_normal_tts_without_ending_call(
+    tmp_path, video_error
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    gen.error = CallError(video_error, 502)
+    original_audio = adapters.synthesize
+
+    async def routed_audio(*args, **kwargs):
+        result = await original_audio(*args, **kwargs)
+        return {
+            **result,
+            "_tts_route": {
+                "service_id": "normal-tts",
+                "service_label": "Normal TTS",
+            },
+        }
+
+    adapters.synthesize = routed_audio
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Keep the call alive."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+    speech = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+
+    assert call.phase == "active"
+    assert adapters.tts == 1
+    assert speech["ready"] is True
+    assert speech["media_type"] == "audio/wav"
+    assert speech["content_b64"] == wav()
+    assert speech["output"]["mode"] == "window_audio"
+    assert speech["tts"]["mode"] == "audio_fallback"
+    assert speech["tts"]["reason_code"] == video_error
+    assert speech["tts"]["selected_service_label"] == "avatar"
+    assert speech["tts"]["effective_service_id"] == "normal-tts"
+    assert speech["tts"]["effective_service_label"] == "Normal TTS"
+    assert output.ends == 0
+    assert call.output.video_enabled is True
+    assert call.output.transient_reason_code == video_error
+
+    gen.error = None
+    call.turn["speech_segments"].append("Video can recover on the next segment.")
+    service._start_speech(call, 1, call.turn["speech_segments"][1])
+    await call.speech_task
+    recovered = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 1,
+            "operation": "speech",
+        },
+    )
+    assert recovered["output"]["mode"] == "external_av"
+    assert recovered["presentation"]["state"] == "prepared"
+    assert call.output.transient_reason_code == ""
+    assert adapters.tts == 1
+    await service.close()
+
+
+async def test_local_video_fallback_checks_cloud_audio_privacy_before_synthesis(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(
+        tmp_path, location="cloud"
+    )
+    gen.error = CallError("call_video_generation_failed", 502)
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    ports.level = 2
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Do not send this fallback to the cloud."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+
+    assert adapters.tts == 0
+    assert call.speech_cache == {}
+    assert call.speech_errors[0] == "call_cloud_privacy_unqualified"
+    assert output.prepared == []
+    await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("revocation", ["inflight", "cached"])
+async def test_video_audio_fallback_rechecks_effective_route_privacy(
+    tmp_path, revocation
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    gen.error = CallError("call_video_generation_failed", 502)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_audio = adapters.synthesize
+
+    async def cloud_audio(*args):
+        started.set()
+        if revocation == "inflight":
+            await release.wait()
+        result = await original_audio(*args)
+        return {
+            **result,
+            "_tts_route": {
+                "service_id": "cloud-fallback",
+                "service_label": "Cloud fallback",
+                "location": "cloud",
+            },
+        }
+
+    adapters.synthesize = cloud_audio
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Recheck the service that made this audio."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        await asyncio.wait_for(started.wait(), 1)
+        if revocation == "inflight":
+            ports.level = 2
+            release.set()
+        await call.speech_task
+
+        speech = {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        }
+        if revocation == "inflight":
+            assert call.speech_cache == {}
+            assert call.speech_errors[0] == "call_cloud_privacy_unqualified"
+        else:
+            assert call.speech_cache
+            ports.level = 2
+            with pytest.raises(CallError, match="call_cloud_privacy_unqualified"):
+                await service.invoke("owner", speech)
+            assert call.speech_cache == {}
+        assert output.prepared == []
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_audio_failure_before_deferred_video_success_uses_video(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    adapters.fail_tts = True
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Video is still rendering."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        for _ in range(1000):
+            if adapters.tts:
+                break
+            await asyncio.sleep(0.001)
+        assert adapters.tts == 1
+        assert not call.speech_task.done()
+
+        gen.release.set()
+        await call.speech_task
+        asset = await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+        assert asset["output"]["mode"] == "external_av"
+        assert asset["presentation"]["state"] == "prepared"
+        assert 0 not in call.speech_errors
+        assert len(output.prepared) == 1
+    finally:
+        gen.release.set()
+        await service.close()
+
+
+async def test_slow_video_falls_back_for_one_segment_then_late_success_recovers(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Slow segment."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await asyncio.wait_for(gen.started.wait(), 1)
+    pending = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert pending["ready"] is False
+    assert pending["retry_after_ms"] == 350
+    assert pending["wait_remaining_ms"] >= 30000
+    await call.speech_task
+    fallback = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert fallback["output"]["mode"] == "window_audio"
+    assert fallback["tts"]["reason_code"] == "call_video_wait_timeout"
+    assert call.output.video_enabled is True
+    assert output.prepared == []
+
+    gen.release.set()
+    for _ in range(100):
+        if not call.output.transient_reason_code:
+            break
+        await asyncio.sleep(0.001)
+    assert call.output.transient_reason_code == ""
+    assert output.prepared == [], (
+        "late media is a health signal, not duplicate playback"
+    )
+
+    call.turn["speech_segments"].append("Recovered segment.")
+    service._start_speech(call, 1, call.turn["speech_segments"][1])
+    await call.speech_task
+    recovered = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 1,
+            "operation": "speech",
+        },
+    )
+    assert recovered["output"]["mode"] == "external_av"
+    assert recovered["presentation"]["state"] == "prepared"
+    assert len(output.prepared) == 1
+    await service.close()
+
+
+async def test_video_finishing_during_audio_fallback_is_promoted_before_publish(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    audio_started = asyncio.Event()
+    audio_release = asyncio.Event()
+    original_audio = adapters.synthesize
+
+    async def slow_audio(*args):
+        audio_started.set()
+        await audio_release.wait()
+        return await original_audio(*args)
+
+    adapters.synthesize = slow_audio
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Promote the late video."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        await asyncio.wait_for(audio_started.wait(), 1)
+        gen.release.set()
+        await call.speech_task
+        asset = await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+        assert asset["output"]["mode"] == "external_av"
+        assert asset["presentation"]["state"] == "prepared"
+        assert call.output.transient_reason_code == ""
+        assert len(output.prepared) == 1
+    finally:
+        gen.release.set()
+        audio_release.set()
+        await service.close()
+
+
+async def test_video_and_audio_failure_keeps_call_alive_with_visible_error(tmp_path):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    gen.error = CallError("call_video_generation_failed", 502)
+    adapters.fail_tts = True
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Keep the call alive."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+    with pytest.raises(CallError, match="call_provider_rejected"):
+        await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+    snapshot = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "operation": "snapshot",
+        },
+    )
+
+    assert call.phase == "active"
+    assert call.speech_errors[0] == "call_provider_rejected"
+    assert snapshot["output"]["mode"] == "external_av"
+    assert snapshot["output"]["degraded"] is True
+    assert snapshot["tts"]["mode"] == "video_tts"
+    assert snapshot["tts"]["status"] == "recovering"
+    assert snapshot["tts"]["reason_code"] == "call_video_generation_failed"
+    assert snapshot["tts"]["error_code"] == "call_provider_rejected"
     await service.close()
 
 

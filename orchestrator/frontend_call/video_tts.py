@@ -50,7 +50,15 @@ class VideoTTSSelection:
     cancel_path: str | None
     request_timeout_seconds: float
     job_timeout_seconds: float
+    queue_timeout_seconds: float
+    wait_base_seconds: float
+    wait_per_char_seconds: float
+    wait_min_seconds: float
+    wait_max_seconds: float
     voice_source: str = "configured"
+    first_segment_sentences: int = 2
+    group_sentences: int = 4
+    max_inflight_groups: int = 2
 
     @classmethod
     def parse(cls, raw):
@@ -72,6 +80,14 @@ class VideoTTSSelection:
             "cancel_path",
             "request_timeout_seconds",
             "job_timeout_seconds",
+            "queue_timeout_seconds",
+            "wait_base_seconds",
+            "wait_per_char_seconds",
+            "wait_min_seconds",
+            "wait_max_seconds",
+            "first_segment_sentences",
+            "group_sentences",
+            "max_inflight_groups",
         }
         if set(raw) - allowed or raw.get("enabled") is not True:
             raise CallError("call_video_configuration_invalid", 503)
@@ -103,11 +119,24 @@ class VideoTTSSelection:
         speed = raw.get("speed", 1.0)
         maximum = raw.get("max_input_chars", 400)
         request_timeout = raw.get("request_timeout_seconds", 120)
-        job_timeout = raw.get("job_timeout_seconds", 900)
+        job_timeout = raw.get("job_timeout_seconds", 180)
+        queue_timeout = raw.get("queue_timeout_seconds", 180)
+        wait_base = raw.get("wait_base_seconds", 18.5)
+        wait_per_char = raw.get("wait_per_char_seconds", 0.35)
+        wait_min = raw.get("wait_min_seconds", 20)
+        wait_max = raw.get("wait_max_seconds", 150)
+        first_segment_sentences = raw.get("first_segment_sentences", 2)
+        group_sentences = raw.get("group_sentences", 4)
+        max_inflight_groups = raw.get("max_inflight_groups", 2)
         for value, low, high in (
             (speed, 0.5, 2),
             (request_timeout, 1, 900),
             (job_timeout, 1, 1800),
+            (queue_timeout, 1, 1800),
+            (wait_base, 0, 300),
+            (wait_per_char, 0, 5),
+            (wait_min, 1, 300),
+            (wait_max, 1, 600),
         ):
             if (
                 type(value) not in (int, float)
@@ -116,6 +145,17 @@ class VideoTTSSelection:
             ):
                 raise CallError("call_video_configuration_invalid", 503)
         if type(maximum) is not int or not 1 <= maximum <= 4000:
+            raise CallError("call_video_configuration_invalid", 503)
+        if (
+            type(first_segment_sentences) is not int
+            or not 1 <= first_segment_sentences <= 32
+            or type(group_sentences) is not int
+            or not 1 <= group_sentences <= 32
+            or type(max_inflight_groups) is not int
+            or not 1 <= max_inflight_groups <= 16
+        ):
+            raise CallError("call_video_configuration_invalid", 503)
+        if wait_min > wait_max or job_timeout < wait_max:
             raise CallError("call_video_configuration_invalid", 503)
         job_path = raw.get("job_path", "/v1/video/jobs/{job_id}")
         cancel_path = raw.get("cancel_path")
@@ -149,8 +189,22 @@ class VideoTTSSelection:
             cancel_path,
             float(request_timeout),
             float(job_timeout),
+            float(queue_timeout),
+            float(wait_base),
+            float(wait_per_char),
+            float(wait_min),
+            float(wait_max),
             voice_source,
+            first_segment_sentences,
+            group_sentences,
+            max_inflight_groups,
         )
+
+    def foreground_wait_seconds(self, text):
+        """Character-calibrated user-facing wait; job tracking remains separate."""
+        characters = len(text) if isinstance(text, str) else max(0, int(text or 0))
+        estimate = self.wait_base_seconds + self.wait_per_char_seconds * characters
+        return min(self.wait_max_seconds, max(self.wait_min_seconds, estimate))
 
     def public(self):
         return {
@@ -159,6 +213,9 @@ class VideoTTSSelection:
             "model_id": self.reference.model_id,
             "protocol": self.protocol,
             "voice": self.voice,
+            "first_segment_sentences": self.first_segment_sentences,
+            "group_sentences": self.group_sentences,
+            "max_inflight_groups": self.max_inflight_groups,
             **(
                 {"voice_source": self.voice_source}
                 if self.voice_source != "configured"
@@ -291,6 +348,10 @@ class CallVideoTTS:
                     protocols={selection.protocol},
                     locations=locations,
                 ),
+                # The async VideoTTS contract owns its queue. A busy capability
+                # is therefore a scheduling signal, not a reason to reject the
+                # next sentence group before the provider can enqueue it.
+                allow_busy=selection.protocol == ASYNC_PROTOCOL,
             )
             if resolved.offering.interface(selection.protocol).method != "POST":
                 raise CallError("call_video_interface_invalid", 503)
@@ -307,6 +368,7 @@ class CallVideoTTS:
         privacy_level,
         request_id,
         expected_origin=None,
+        on_submit=None,
         on_job=None,
     ):
         resolved = await self.resolve(selection, privacy_level)
@@ -350,7 +412,9 @@ class CallVideoTTS:
             + base64.b64encode(reference).decode("ascii"),
         }
         job_id = None
-        started = time.monotonic()
+        submitted_at = time.monotonic()
+        if on_submit is not None:
+            on_submit()
         emit("video_tts_submitting", **selection.public(), text_chars=len(text))
         try:
             result = await self.client.request(
@@ -376,12 +440,24 @@ class CallVideoTTS:
                 "video_tts_accepted",
                 provider_request_id=job_id,
                 requested_model=offering.model_id,
+                submit_duration_ms=int((time.monotonic() - submitted_at) * 1000),
             )
             if on_job is not None:
                 on_job({**receipt, "status": "accepted"})
-            deadline = started + selection.job_timeout_seconds
+            accepted_at = time.monotonic()
+            deadline = accepted_at + selection.job_timeout_seconds
+            previous_status = None
             while True:
                 status = result.get("status")
+                if status != previous_status:
+                    emit(
+                        "video_tts_status_changed",
+                        provider_request_id=job_id,
+                        run_state=status or "accepted",
+                        job_elapsed_ms=int((time.monotonic() - accepted_at) * 1000),
+                        text_chars=len(text),
+                    )
+                    previous_status = status
                 if status == "completed":
                     data = await self.client.request(
                         node,
@@ -393,31 +469,61 @@ class CallVideoTTS:
                     )
                     if on_job is not None:
                         on_job({**receipt, "status": "completed"})
+                    emit(
+                        "video_tts_completed",
+                        provider_request_id=job_id,
+                        job_elapsed_ms=int((time.monotonic() - accepted_at) * 1000),
+                        total_elapsed_ms=int((time.monotonic() - submitted_at) * 1000),
+                        text_chars=len(text),
+                    )
                     return {"media": data, "provider_receipt": receipt}
                 if status in {"failed", "cancelled"}:
                     error = result.get("error") or {}
                     code = error.get("code") if isinstance(error, dict) else None
+                    diagnostic_id = (
+                        error.get("diagnostic_id")
+                        if isinstance(error, dict)
+                        and isinstance(error.get("diagnostic_id"), str)
+                        and _JOB_ID.fullmatch(error["diagnostic_id"])
+                        else None
+                    )
                     safe_code = (
                         code
                         if isinstance(code, str)
                         and re.fullmatch(r"[a-z0-9_]{1,80}", code)
                         else status
                     )
+                    reason_code = (
+                        "call_" + safe_code
+                        if safe_code.startswith("video_")
+                        else (
+                            "call_video_generation_failed"
+                            if status == "failed"
+                            else "call_video_generation_cancelled"
+                        )
+                    )
                     emit(
                         "video_tts_failed",
                         provider_request_id=job_id,
-                        error_code="call_video_generation_failed",
+                        provider_diagnostic_id=diagnostic_id,
+                        error_code=reason_code,
                         provider_error_code=safe_code,
                         run_state=status,
                     )
                     if on_job is not None:
-                        on_job({**receipt, "status": status, "error_code": safe_code})
-                    raise CallError(
-                        "call_video_generation_failed"
-                        if status == "failed"
-                        else "call_video_generation_cancelled",
-                        502,
-                    )
+                        on_job(
+                            {
+                                **receipt,
+                                "status": status,
+                                "error_code": safe_code,
+                                **(
+                                    {"diagnostic_id": diagnostic_id}
+                                    if diagnostic_id is not None
+                                    else {}
+                                ),
+                            }
+                        )
+                    raise CallError(reason_code, 502)
                 if status not in {
                     None,
                     "accepted",
@@ -428,7 +534,7 @@ class CallVideoTTS:
                 }:
                     raise CallError("call_video_job_invalid", 502)
                 if time.monotonic() >= deadline:
-                    raise CallError("call_video_outcome_unknown", 502)
+                    raise CallError("call_video_tracking_timeout", 502)
                 await asyncio.sleep(self.poll_seconds)
                 result = await self.client.request(
                     node,

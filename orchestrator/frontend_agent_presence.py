@@ -90,6 +90,56 @@ async def deliver_agentpresence_audio_event(
     )
 
 
+def schedule_agentpresence_message_received(
+    runtime: Any,
+    *,
+    ingress: Mapping[str, Any],
+    accepted: Any,
+    delivery_route: Mapping[str, Any],
+) -> asyncio.Task | None:
+    """Best-effort input feedback, after PAO acceptance and before execution.
+
+    Use the frozen owner route, never message text, Agent names or a second
+    chat store. AP's local input already animates before sending to HASHI.
+    """
+    from orchestrator.agent_presence_notify import message_received
+    from orchestrator.frontend_delivery import normalize_run_delivery_route
+
+    try:
+        if accepted is None or accepted.replayed:
+            return None
+        if ingress["principal"]["kind"] != "human_or_client":
+            return None
+        if ingress["connector"]["id"] in {"agentpresence", "call"}:
+            return None
+        route = normalize_run_delivery_route(delivery_route)
+        destinations = [route.get("primary"), *route["mirrors"]]
+        if not any(item and item["surface"] == "agentpresence" for item in destinations):
+            return None
+        pending = getattr(runtime, "_optional_frontend_tasks", set())
+        if len(pending) >= 8:
+            return None
+        instance_id = str(ingress["instance_id"])
+        request_id = str(accepted.request_id)
+        if request_id != str(ingress["message"]["request_id"]):
+            return None
+        if str(accepted.session_id) != str(ingress["target"]["session_id"]):
+            return None
+
+        async def deliver():
+            ok = await asyncio.to_thread(message_received, instance_id, request_id)
+            logger = getattr(runtime, "logger", None)
+            if logger:
+                logger.info("AgentPresence message receipt %s: %s",
+                            request_id, "delivered" if ok else "unavailable")
+            return ok
+
+        return _schedule_optional_task(runtime, deliver, request_id)
+    except Exception:
+        # Input presentation must never alter PAO admission or execution.
+        return None
+
+
 def schedule_agentpresence_audio_event(
     runtime: Any,
     *,
@@ -99,18 +149,21 @@ def schedule_agentpresence_audio_event(
 ) -> asyncio.Task | None:
     """Retain one fail-open local FC task until it reaches a typed outcome."""
 
+    return _schedule_optional_task(
+        runtime,
+        lambda: deliver_agentpresence_audio_event(
+            runtime, target=target, owner_id=owner_id, source_event_id=source_event_id,
+        ),
+        source_event_id,
+    )
+
+
+def _schedule_optional_task(runtime: Any, factory: Any, source_event_id: str) -> asyncio.Task | None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None
-    task = loop.create_task(
-        deliver_agentpresence_audio_event(
-            runtime,
-            target=target,
-            owner_id=owner_id,
-            source_event_id=source_event_id,
-        )
-    )
+    task = loop.create_task(factory())
     pending = getattr(runtime, "_optional_frontend_tasks", None)
     if not isinstance(pending, set):
         pending = set()
@@ -126,7 +179,7 @@ def schedule_agentpresence_audio_event(
             warning = getattr(logger, "warning", None)
             if callable(warning):
                 warning(
-                    "AgentPresence audio delivery failed safely for %s (%s)",
+                    "AgentPresence delivery failed safely for %s (%s)",
                     source_event_id,
                     type(exc).__name__,
                 )
@@ -138,4 +191,5 @@ def schedule_agentpresence_audio_event(
 __all__ = [
     "deliver_agentpresence_audio_event",
     "schedule_agentpresence_audio_event",
+    "schedule_agentpresence_message_received",
 ]

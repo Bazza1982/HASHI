@@ -105,6 +105,73 @@ async def test_real_enqueue_binds_workspace_metadata_and_queue_to_receipt_genera
 
 
 @pytest.mark.asyncio
+async def test_real_enqueue_notifies_companion_before_execution_once_and_fail_open(
+    tmp_path, monkeypatch
+):
+    from orchestrator import agent_presence_notify
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+
+    runtime = _admission_runtime(tmp_path)
+    sequence = iter(range(100))
+    runtime.next_request_id = lambda: f"req-input-{next(sequence)}"
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *_a, **_k: {})
+    set_connector_preference(tmp_path, "user:42", "agentpresence", "mirror", True)
+    monkeypatch.setattr(agent_presence_notify, "_token", lambda: "local-token")
+    posts = []
+    monkeypatch.setattr(
+        agent_presence_notify, "_post_json",
+        lambda path, payload: posts.append((path, payload)) or True,
+    )
+
+    async def enqueue(key):
+        return await runtime.enqueue_request(
+            42, "private message body", "telegram", "receive notification",
+            idempotency_key=key, deliver_to_telegram=False,
+        )
+
+    async def settled():
+        tasks = getattr(runtime, "_optional_frontend_tasks", set()).copy()
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    request = await enqueue("message-intent")
+    await settled()
+    assert posts == [("/v1/hashi/message-received", {
+        "instance_id": "HASHI3", "request_id": request,
+    })]
+    assert runtime.queue.qsize() == 1  # No Provider or response was needed.
+    assert await enqueue("message-intent") == request
+    await settled()
+    assert len(posts) == 1
+
+    await runtime.enqueue_request(
+        42, "already animated by HAP", "agentpresence", "local input",
+        idempotency_key="ap-local-input", deliver_to_telegram=False,
+        request_metadata={
+            "_message_source_reserved": "agentpresence",
+            "_agentpresence_authenticated": True,
+            "session_surface": "agentpresence",
+        },
+    )
+    await settled()
+    assert len(posts) == 1  # No echo into AP's own device.text_submitted.
+
+    set_connector_preference(tmp_path, "user:42", "agentpresence", "mirror", False)
+    await enqueue("mirror-off")
+    await settled()
+    assert len(posts) == 1
+
+    set_connector_preference(tmp_path, "user:42", "agentpresence", "mirror", True)
+    def unavailable(*_a, **_k):
+        raise OSError("companion offline")
+    monkeypatch.setattr(agent_presence_notify, "_post_json", unavailable)
+    assert await enqueue("companion-offline")
+    await settled()
+    assert runtime.queue.qsize() == 4
+
+
+
+@pytest.mark.asyncio
 async def test_concurrent_real_enqueues_share_one_canonical_receipt_and_queue_item(
     tmp_path, monkeypatch
 ):
