@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+from dataclasses import replace
 import pytest
 from orchestrator.frontend_call.contract import CallError
 from orchestrator.frontend_call.video_tts import VideoTTSSelection
@@ -183,8 +184,7 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
     remainder_started = asyncio.Event()
     release_first = asyncio.Event()
     expected_utterances = [
-        "utt-"
-        + hashlib.sha256(f"call-1-turn-1-{index}".encode()).hexdigest()[:48]
+        "utt-" + hashlib.sha256(f"call-1-turn-1-{index}".encode()).hexdigest()[:48]
         for index in (0, 1)
     ]
 
@@ -273,7 +273,10 @@ async def test_external_video_sends_first_sentence_then_batches_the_remainder(tm
             await call.speech_task
 
         assert call.turn["speech_segments"] == [first, remainder]
-        assert [text for text in observed if text in {first, remainder}] == [first, remainder]
+        assert [text for text in observed if text in {first, remainder}] == [
+            first,
+            remainder,
+        ]
         assert output.prepared[-2:] == expected_utterances
     finally:
         released.set()
@@ -388,8 +391,9 @@ async def test_video_output_does_not_depend_on_unused_audio_tts_credentials(tmp_
     await service.close()
 
 
-async def test_video_service_resolution_failure_starts_with_window_audio(tmp_path):
+async def test_transient_resolution_failure_starts_recovering_and_can_upgrade(tmp_path):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    original_resolve = gen.resolve
 
     async def unavailable(*_args):
         raise CallError("call_video_service_unavailable", 503)
@@ -398,17 +402,48 @@ async def test_video_service_resolution_failure_starts_with_window_audio(tmp_pat
     result = await service.invoke("owner", body)
 
     assert result["phase"] == "active"
-    assert result["output"]["mode"] == "window_audio"
+    assert result["output"]["mode"] == "external_av"
     assert result["output"]["degraded"] is True
     assert result["output"]["degradation_reason"] == "call_video_service_unavailable"
-    assert result["tts"]["mode"] == "audio_fallback"
-    assert output.starts == 0
+    assert result["tts"]["mode"] == "video_tts"
+    assert result["tts"]["status"] == "recovering"
+    assert output.starts == 1
+
+    gen.resolve = original_resolve
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Service recovered."],
+    }
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await call.speech_task
+    speech = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert speech["output"]["mode"] == "external_av"
+    assert call.output.transient_reason_code == ""
     await service.close()
 
 
-async def test_video_generation_failure_uses_normal_tts_without_ending_call(tmp_path):
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "video_error",
+    ["call_video_generation_failed", "call_video_queue_timeout"],
+)
+async def test_video_generation_failure_uses_normal_tts_without_ending_call(
+    tmp_path, video_error
+):
     service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
-    gen.error = CallError("call_video_generation_failed", 502)
+    gen.error = CallError(video_error, 502)
     await service.invoke("owner", body)
     call = service.calls["call-1"]
     call.turn = {
@@ -438,9 +473,173 @@ async def test_video_generation_failure_uses_normal_tts_without_ending_call(tmp_
     assert speech["content_b64"] == wav()
     assert speech["output"]["mode"] == "window_audio"
     assert speech["tts"]["mode"] == "audio_fallback"
-    assert speech["tts"]["reason_code"] == "call_video_generation_failed"
-    assert output.ends >= 1
+    assert speech["tts"]["reason_code"] == video_error
+    assert output.ends == 0
+    assert call.output.video_enabled is True
+    assert call.output.transient_reason_code == video_error
+
+    gen.error = None
+    call.turn["speech_segments"].append("Video can recover on the next segment.")
+    service._start_speech(call, 1, call.turn["speech_segments"][1])
+    await call.speech_task
+    recovered = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 1,
+            "operation": "speech",
+        },
+    )
+    assert recovered["output"]["mode"] == "external_av"
+    assert recovered["presentation"]["state"] == "prepared"
+    assert call.output.transient_reason_code == ""
+    assert adapters.tts == 1
     await service.close()
+
+
+async def test_slow_video_falls_back_for_one_segment_then_late_success_recovers(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "answer",
+        "phase": "complete",
+        "speech_segments": ["Slow segment."],
+    }
+
+    service._start_speech(call, 0, call.turn["speech_segments"][0])
+    await asyncio.wait_for(gen.started.wait(), 1)
+    pending = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert pending["ready"] is False
+    assert pending["retry_after_ms"] == 350
+    assert pending["wait_remaining_ms"] >= 30000
+    await call.speech_task
+    fallback = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 0,
+            "operation": "speech",
+        },
+    )
+    assert fallback["output"]["mode"] == "window_audio"
+    assert fallback["tts"]["reason_code"] == "call_video_wait_timeout"
+    assert call.output.video_enabled is True
+    assert output.prepared == []
+
+    gen.release.set()
+    for _ in range(100):
+        if not call.output.transient_reason_code:
+            break
+        await asyncio.sleep(0.001)
+    assert call.output.transient_reason_code == ""
+    assert output.prepared == [], (
+        "late media is a health signal, not duplicate playback"
+    )
+
+    call.turn["speech_segments"].append("Recovered segment.")
+    service._start_speech(call, 1, call.turn["speech_segments"][1])
+    await call.speech_task
+    recovered = await service.invoke(
+        "owner",
+        {
+            **base,
+            "call_id": "call-1",
+            "generation": service.generation,
+            "turn_id": "answer",
+            "segment": 1,
+            "operation": "speech",
+        },
+    )
+    assert recovered["output"]["mode"] == "external_av"
+    assert recovered["presentation"]["state"] == "prepared"
+    assert len(output.prepared) == 1
+    await service.close()
+
+
+async def test_video_finishing_during_audio_fallback_is_promoted_before_publish(
+    tmp_path,
+):
+    service, ports, adapters, base, gen, output, body = await arranged(tmp_path)
+    selection = replace(
+        VideoTTSSelection.parse(SELECTION),
+        wait_base_seconds=0.01,
+        wait_per_char_seconds=0.0,
+        wait_min_seconds=0.01,
+        wait_max_seconds=0.01,
+        job_timeout_seconds=1.0,
+    )
+    service.config.video_tts_selection = lambda revision: selection
+    gen.release = asyncio.Event()
+    audio_started = asyncio.Event()
+    audio_release = asyncio.Event()
+    original_audio = adapters.synthesize
+
+    async def slow_audio(*args):
+        audio_started.set()
+        await audio_release.wait()
+        return await original_audio(*args)
+
+    adapters.synthesize = slow_audio
+    try:
+        await service.invoke("owner", body)
+        call = service.calls["call-1"]
+        call.turn = {
+            "turn_id": "answer",
+            "phase": "complete",
+            "speech_segments": ["Promote the late video."],
+        }
+        service._start_speech(call, 0, call.turn["speech_segments"][0])
+        await asyncio.wait_for(audio_started.wait(), 1)
+        gen.release.set()
+        await call.speech_task
+        asset = await service.invoke(
+            "owner",
+            {
+                **base,
+                "call_id": "call-1",
+                "generation": service.generation,
+                "turn_id": "answer",
+                "segment": 0,
+                "operation": "speech",
+            },
+        )
+        assert asset["output"]["mode"] == "external_av"
+        assert asset["presentation"]["state"] == "prepared"
+        assert call.output.transient_reason_code == ""
+        assert len(output.prepared) == 1
+    finally:
+        gen.release.set()
+        audio_release.set()
+        await service.close()
 
 
 async def test_video_and_audio_failure_keeps_call_alive_with_visible_error(tmp_path):
@@ -481,9 +680,11 @@ async def test_video_and_audio_failure_keeps_call_alive_with_visible_error(tmp_p
 
     assert call.phase == "active"
     assert call.speech_errors[0] == "call_provider_rejected"
-    assert snapshot["output"]["mode"] == "window_audio"
-    assert snapshot["tts"]["mode"] == "audio_fallback"
-    assert snapshot["tts"]["status"] == "degraded"
+    assert snapshot["output"]["mode"] == "external_av"
+    assert snapshot["output"]["degraded"] is True
+    assert snapshot["tts"]["mode"] == "video_tts"
+    assert snapshot["tts"]["status"] == "recovering"
+    assert snapshot["tts"]["reason_code"] == "call_video_generation_failed"
     assert snapshot["tts"]["error_code"] == "call_provider_rejected"
     await service.close()
 

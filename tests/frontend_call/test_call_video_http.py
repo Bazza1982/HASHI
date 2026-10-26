@@ -75,6 +75,46 @@ def manifest():
     }
 
 
+@pytest.mark.anyio
+async def test_ap_probe_declines_role_without_video_tts():
+    app, requests = web.Application(), []
+
+    async def capabilities(request):
+        requests.append(request.path)
+        return web.json_response(
+            {
+                "features": {"call_video": True},
+                "call_video_contract": {
+                    "version": "ap-call-video/1",
+                    "requires_commit": True,
+                    "video_tts_supported": False,
+                    "video_tts_unavailable_reason": "character_has_no_human_face",
+                },
+            }
+        )
+
+    async def binding(request):
+        requests.append(request.path)
+        return web.json_response({"configured": True, "instance_id": "test-instance"})
+
+    app.router.add_get("/v1/capabilities", capabilities)
+    app.router.add_get("/v1/hashi", binding)
+    runner, origin = await serve(app)
+    try:
+        port = AgentPresenceCallVideo(
+            origin,
+            "fixture-only",
+            "test-instance",
+            "call-one",
+        )
+        assert await port.probe() is False
+        assert requests == ["/v1/capabilities", "/v1/hashi"]
+        assert port.context_id == ""
+        assert port.reference == b""
+    finally:
+        await runner.cleanup()
+
+
 def selection(**overrides):
     return VideoTTSSelection.parse(
         {
@@ -91,12 +131,21 @@ def selection(**overrides):
     )
 
 
+def test_video_wait_budget_scales_with_text_and_keeps_tracking_longer():
+    policy = selection()
+    assert policy.foreground_wait_seconds("短句。") == 20
+    assert policy.foreground_wait_seconds("字" * 161) == pytest.approx(45.87)
+    assert policy.job_timeout_seconds > policy.foreground_wait_seconds("字" * 400)
+    with pytest.raises(CallError, match="call_video_configuration_invalid"):
+        selection(job_timeout_seconds=30, wait_max_seconds=90)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "outcome,code",
     [
         ("success", None),
-        ("failed", "call_video_generation_failed"),
+        ("failed", "call_video_native_failure"),
         ("cross_origin", "call_video_result_url_invalid"),
         ("redirect", "call_video_service_rejected"),
         ("oversized", "call_video_response_too_large"),
@@ -105,7 +154,7 @@ def selection(**overrides):
 async def test_independent_provider_manifest_job_and_result_boundaries(
     tmp_path, monkeypatch, outcome, code
 ):
-    app, posts, redirected, diagnostics = web.Application(), [], [], []
+    app, posts, redirected, diagnostics, receipts = web.Application(), [], [], [], []
     monkeypatch.setattr(
         "orchestrator.frontend_call.video_tts.emit",
         lambda event, **facts: diagnostics.append({"event": event, **facts}),
@@ -124,7 +173,10 @@ async def test_independent_provider_manifest_job_and_result_boundaries(
                 {
                     "id": "job-one",
                     "status": "failed",
-                    "error": {"code": "render_failed"},
+                    "error": {
+                        "code": "video_native_failure",
+                        "diagnostic_id": "diagnostic-one",
+                    },
                 }
             )
         url = (
@@ -177,11 +229,21 @@ async def test_independent_provider_manifest_job_and_result_boundaries(
         if code:
             with pytest.raises(CallError, match=code):
                 await consumer.synthesize(
-                    selection(), PNG, "Hello.", privacy_level=1, request_id="one"
+                    selection(),
+                    PNG,
+                    "Hello.",
+                    privacy_level=1,
+                    request_id="one",
+                    on_job=receipts.append,
                 )
         else:
             result = await consumer.synthesize(
-                selection(), PNG, "Hello.", privacy_level=1, request_id="one"
+                selection(),
+                PNG,
+                "Hello.",
+                privacy_level=1,
+                request_id="one",
+                on_job=receipts.append,
             )
             assert (
                 result["media"] == MP4
@@ -196,9 +258,11 @@ async def test_independent_provider_manifest_job_and_result_boundaries(
         if outcome == "failed":
             assert any(
                 event.get("event") == "video_tts_failed"
-                and event.get("provider_error_code") == "render_failed"
+                and event.get("provider_error_code") == "video_native_failure"
+                and event.get("provider_diagnostic_id") == "diagnostic-one"
                 for event in diagnostics
             )
+            assert receipts[-1]["diagnostic_id"] == "diagnostic-one"
         if outcome == "redirect":
             assert any(
                 event.get("event") == "video_tts_service_rejected"

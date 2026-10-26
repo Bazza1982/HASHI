@@ -22,6 +22,7 @@ _context = ContextVar("call_diagnostic_context", default={})
 _identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _generation = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
 _code = re.compile(r"call_[a-z][a-z0-9_]{0,119}\Z")
+_provider_code = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 _name = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
 _state = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
 _model = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}\Z")
@@ -38,6 +39,7 @@ _identifiers = {
     "request_id",
     "message_id",
     "provider_request_id",
+    "provider_diagnostic_id",
     "correlation_id",
     "trace_id",
     "span_id",
@@ -221,7 +223,17 @@ def _emit(event, **facts):
             and _generation.fullmatch(value)
         ):
             record[key] = value
-        elif key == "error_code" and isinstance(value, str) and _code.fullmatch(value):
+        elif (
+            key in ("error_code", "reason_code")
+            and isinstance(value, str)
+            and _code.fullmatch(value)
+        ):
+            record[key] = value
+        elif (
+            key == "provider_error_code"
+            and isinstance(value, str)
+            and _provider_code.fullmatch(value)
+        ):
             record[key] = value
         elif (
             key in ("exception_type", "cause_type")

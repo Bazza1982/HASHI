@@ -7,11 +7,16 @@ Layer 4 instance configuration. Protected Core is unchanged.
 
 ## Command policy (2026-10-23)
 
+- AP is authoritative for whether its active character supports human-face
+  VideoTTS. When it explicitly advertises `video_tts_supported: false`,
+  `/call` keeps ordinary TTS from the start, creates no AP video context and
+  submits no VideoTTS job. This is the character's normal mode, not degradation.
 - When the opted-in AP connector is connected, `/call` prefers VideoTTS and
   negotiates `call-output/1`. If VideoTTS is missing, unavailable, or fails for
   one reply, the same Call visibly hands reply audio back to the Call Window and
-  uses the existing ordinary TTS chain. It does not start Phone or end the Call.
-  AP-free Call retains its existing behavior.
+  uses the existing ordinary TTS chain. A runtime failure affects that speech
+  segment only; later segments probe VideoTTS again. It does not start Phone or
+  end the Call. AP-free Call retains its existing behavior.
 - `/phone` keeps the existing live-audio provider, microphone and audio owner.
   The companion leaves for the phone call, stays away, then returns on hangup.
   The two media services share their existing foreground admission interlock.
@@ -29,17 +34,21 @@ Layer 4 instance configuration. Protected Core is unchanged.
 
 - Without an opted-in, authenticated and instance-bound AV connector,
   Call keeps its existing STT, camera, PAO, audio TTS, fallback and window playback.
+- AP owns the current character capability. HASHI consumes the advertised
+  boolean and does not classify characters or inspect their images. Older AP
+  versions without the field retain the previous VideoTTS-compatible behavior.
 - While negotiated AV remains healthy, HASHI Call selects and invokes VideoTTS. AP supplies
   the active pack/day-or-night PNG and owns enter/idle/exit clips and synchronized
   reply audio/video. HASHI keeps reference/media bytes transiently for transport.
 - A service must return one complete H.264/AAC MP4 containing both video and
   audio. AP validates the tracks and independently confirms decode/presentation.
   Separate, unsynchronized audio is not treated as a successful AV response.
-- AP is the sole reply-audio presenter only while AV mode is healthy. Call returns no browser
-  audio bytes, does not mirror ordinary call speech to AP, and skips audio fillers.
-  After visible degradation, AP is fenced and the existing Call Window audio
-  path resumes. Microphone/camera admission and PAO Run ownership stay with
-  their existing owners.
+- AP is the sole reply-audio presenter only while a segment uses AV. Call returns
+  no browser audio bytes for that segment and does not mirror it to AP. A
+  transient failure hands only the affected segment to the Call Window.
+  Structural inability (for example, no supported face/reference or an
+  incompatible capability) keeps ordinary TTS for the Call. Microphone/camera
+  admission and PAO Run ownership stay with their existing owners.
 
 ## Exact service selection
 
@@ -59,7 +68,11 @@ selections are preserved. A call freezes this selection at its Call revision.
     "job_path": "/avatar/jobs/{job_id}",
     "cancel_path": "/avatar/jobs/{job_id}/cancel",
     "request_timeout_seconds": 120,
-    "job_timeout_seconds": 900
+    "job_timeout_seconds": 180,
+    "wait_base_seconds": 18.5,
+    "wait_per_char_seconds": 0.17,
+    "wait_min_seconds": 20,
+    "wait_max_seconds": 90
   }
 }
 ```
@@ -82,10 +95,15 @@ is never resubmitted to another video provider; Call instead uses its already
 configured ordinary TTS chain.
 
 An accepted job ID is projected to the current turn and content-free diagnostic
-journal before polling. An uncertain submission or job outcome is never
-automatically resubmitted; explicit speech retry cannot replay an uncertain job.
-Cancellation fences local output immediately and optionally cancels the known
-remote job. Late results cannot upload or resume old presentation.
+journal before polling. The foreground wait is calculated from text length and
+is separate from the longer terminal-state tracking limit. With the calibrated
+defaults it is `18.5 + 0.17 * characters` seconds, clamped to 20–90 seconds.
+When that wait expires, ordinary TTS races the still-running job. Video wins if
+it becomes ready before audio is published; otherwise audio owns only that
+segment. A later successful video is retained as a health/recovery signal for
+the next segment and is never replayed over published audio. An uncertain
+submission is never resubmitted. Cancellation fences local output immediately;
+late results from an old turn cannot upload or resume presentation.
 
 External AV speech is segmented separately from ordinary audio Call. Streaming
 provider answer deltas, including Codex app-server agent-message deltas, enter
@@ -108,6 +126,11 @@ their body.
 The existing authenticated/scoped Call endpoint remains authoritative. New
 context responses advertise `output_protocols: ["call-output/1"]`.
 
+Before AV negotiation, the connector probes AP's active-character capability.
+An explicit `video_tts_supported: false` returns no AV sink, so the existing
+window-audio/ordinary-TTS route proceeds without opening an AP video session or
+reporting a VideoTTS failure.
+
 1. A capable window sends `output_protocol: "call-output/1"` on `start`.
    If an enabled AP AV sink and VideoTTS are available, `output.mode` is
    `external_av` and `output.audio_owner` is `agentpresence`. If VideoTTS is
@@ -129,11 +152,11 @@ context responses advertise `output_protocols: ["call-output/1"]`.
    It stops presentation and clears the speech queue without cancelling PAO work.
    Duplicate interruption of the same turn does not advance AP twice. A newly
    accepted caller turn also fences prior AV before generating new output.
-6. A VideoTTS generation failure fences and ends the scoped AP presentation,
-   then returns that reply to the existing ordinary TTS path without replaying
-   provider work or ending the Call. `end`, lease expiry and service shutdown
-   still end the scoped AP context. Snapshot polling treats AP state as
-   authoritative only while external AV remains active.
+6. A transient VideoTTS failure returns only that segment to ordinary TTS and
+   leaves the scoped AP presentation available for recovery. Workbench follows
+   HASHI3's per-segment remaining-time hint instead of counting a fixed number
+   of polls. Structural incompatibility still ends AV ownership for the Call.
+   `end`, lease expiry and service shutdown end the scoped AP context.
 
 Control operations preserve owner/client/Agent/Conversation/context-generation/
 Call-generation binding. Missing or stale IDs are rejected. Camera changes

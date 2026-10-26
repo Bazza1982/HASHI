@@ -83,6 +83,27 @@ def test_camera_fallback_reasons_survive_the_diagnostic_allowlist(caplog):
     ]
 
 
+def test_video_provider_failure_reasons_survive_the_diagnostic_allowlist(caplog):
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
+    diagnostics.emit(
+        "video_tts_failed",
+        provider_request_id="job-one",
+        provider_diagnostic_id="diagnostic-one",
+        error_code="call_video_queue_timeout",
+        provider_error_code="video_queue_timeout",
+        reason_code="call_video_queue_timeout",
+        private_message="PRIVATE_PROVIDER_MESSAGE",
+    )
+
+    row = events(caplog, "video_tts_failed")[-1]
+    assert row["provider_request_id"] == "job-one"
+    assert row["provider_diagnostic_id"] == "diagnostic-one"
+    assert row["error_code"] == "call_video_queue_timeout"
+    assert row["provider_error_code"] == "video_queue_timeout"
+    assert row["reason_code"] == "call_video_queue_timeout"
+    assert "PRIVATE_PROVIDER_MESSAGE" not in caplog.text
+
+
 async def test_shared_call_diagnostics_reach_existing_durable_bridge_journal(tmp_path):
     from orchestrator.bootstrap_logging import setup_bridge_file_logging
 

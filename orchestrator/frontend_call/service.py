@@ -6,6 +6,7 @@ import asyncio
 import time
 import hashlib
 import inspect
+from contextlib import suppress
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -18,7 +19,7 @@ from .diagnostics import (
     receipt_facts,
 )
 from .transcription import spoken_transcription
-from .output import OUTPUT_PROTOCOL, negotiate_output
+from .output import OUTPUT_PROTOCOL, VideoTTSDeferred, negotiate_output
 from .billing import MediaBilling, wav_seconds
 from .transient_live_media import (
     LIVE_FRAME_BUFFER_LIMIT,
@@ -109,6 +110,7 @@ class Call:
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
     speech_delivered: set = field(default_factory=set)
+    speech_deadlines: dict = field(default_factory=dict)
     filler_tasks: dict = field(default_factory=dict)
     filler_cache: dict = field(default_factory=dict)
     filler_routes: dict = field(default_factory=dict)
@@ -259,9 +261,7 @@ class CallService:
             )
         target = targets.get("tts")
         available = getattr(self.adapters, "target_available", None)
-        return target is not None and (
-            not callable(available) or available(target)
-        )
+        return target is not None and (not callable(available) or available(target))
 
     async def _project_readiness(self, owner, agent, projection):
         """Project /call's effective output while preserving AP-free calls."""
@@ -308,9 +308,7 @@ class CallService:
         stt_ready = targets.get("stt") is not None and (
             not callable(available) or available(targets["stt"])
         )
-        audio_tts_ready = self._audio_tts_available(
-            agent, profile, targets, catalog
-        )
+        audio_tts_ready = self._audio_tts_available(agent, profile, targets, catalog)
         tts_ready = video_ready or audio_tts_ready
         if sink is not None and not video_ready:
             result.update(
@@ -727,17 +725,21 @@ class CallService:
         if call.output is not None:
             selected = call.output.selected_service_id
             if call.output.video_enabled:
+                transient_reason = str(
+                    getattr(call.output, "transient_reason_code", "") or ""
+                )
+                recovering = bool(transient_reason)
                 return {
                     "selected_service_id": selected,
                     "selected_service_label": selected,
                     "effective_service_id": selected,
                     "effective_service_label": selected,
-                    "degraded": False,
-                    "reason_code": None,
+                    "degraded": recovering,
+                    "reason_code": transient_reason or None,
                     "audio_reason_code": None,
                     "error_code": call.tts_error_code or None,
                     "mode": "video_tts",
-                    "status": "ready",
+                    "status": "recovering" if recovering else "ready",
                 }
             slot = call.profile.get("tts") or {}
             effective = str(
@@ -793,6 +795,15 @@ class CallService:
             "reason_code": call.tts_fallback_reason_code or None,
             "error_code": call.tts_error_code or None,
         }
+
+    def _speech_pending_response(self, call, index):
+        response = {"ok": True, "ready": False, "retry_after_ms": 350}
+        deadline = call.speech_deadlines.get(index)
+        if deadline is not None:
+            response["wait_remaining_ms"] = max(
+                0, int((deadline - self.clock()) * 1000)
+            )
+        return response
 
     def _camera_view(self, call):
         fresh = self._fresh_observation(call)
@@ -1058,11 +1069,7 @@ class CallService:
     def _privacy(self, call, kind, route=None):
         self.ports.validate(call.owner, call.binding)
         privacy_level = self.ports.privacy_level(call.binding["agent_id"])
-        if (
-            kind == "tts"
-            and call.output is not None
-            and call.output.video_enabled
-        ):
+        if kind == "tts" and call.output is not None and call.output.video_enabled:
             call.output.privacy()
             return
         if kind == "tts" and self.tts_synthesizer is not None:
@@ -1274,9 +1281,8 @@ class CallService:
                     protocol=body.get("output_protocol"),
                 )
                 if (
-                    (call.output is None or not call.output.video_enabled)
-                    and not tts_available
-                ):
+                    call.output is None or not call.output.video_enabled
+                ) and not tts_available:
                     raise CallError("call_credential_missing", 503)
                 self._privacy(call, "tts")
             except BaseException as exc:
@@ -1456,6 +1462,7 @@ class CallService:
             call.speech_errors.clear()
             call.speech_attempts.clear()
             call.speech_delivered.clear()
+            call.speech_deadlines.clear()
             call.speech_index = -1
             call.speech_requested_index = -1
             call.sequence = sequence
@@ -1598,21 +1605,21 @@ class CallService:
                     )
                 self._trim_speech_cache(call)
                 self._start_queued_speech(call)
-                if call.output is not None and call.output.video_enabled:
+                if (
+                    call.output is not None
+                    and call.output.video_enabled
+                    and "_external_output" in asset
+                ):
                     return await call.output.status(asset)
-                return {
+                response = {
                     "ok": True,
                     "ready": True,
                     **asset,
-                    **(
-                        {
-                            "output": call.output.view(),
-                            "tts": self._tts_view(call),
-                        }
-                        if call.output is not None
-                        else {}
-                    ),
                 }
+                if call.output is not None:
+                    response.setdefault("output", call.output.view())
+                    response.setdefault("tts", self._tts_view(call))
+                return response
             index_task = call.speech_tasks.get(index)
             if index_task is not None and not index_task.done():
                 call.speech_requested_index = max(call.speech_requested_index, index)
@@ -1623,7 +1630,7 @@ class CallService:
                     segment=index,
                     cached=False,
                 )
-                return {"ok": True, "ready": False}
+                return self._speech_pending_response(call, index)
             if (
                 (call.output is None or not call.output.video_enabled)
                 and call.speech_task
@@ -1639,10 +1646,11 @@ class CallService:
                     segment=index,
                     cached=False,
                 )
-                return {"ok": True, "ready": False}
+                return self._speech_pending_response(call, index)
             if index in call.speech_errors:
                 if call.speech_errors[index] in {
                     "call_video_outcome_unknown",
+                    "call_video_tracking_timeout",
                     "call_video_job_invalid",
                 }:
                     raise CallError(call.speech_errors[index], 502)
@@ -1656,7 +1664,7 @@ class CallService:
             call.speech_errors.pop(index, None)
             call.speech_requested_index = max(call.speech_requested_index, index)
             self._start_speech(call, index, parts[index])
-            return {"ok": True, "ready": False}
+            return self._speech_pending_response(call, index)
         raise CallError("call_invalid_operation")
 
     @staticmethod
@@ -1686,6 +1694,130 @@ class CallService:
             call.targets["tts"], call.profile["tts"], text
         )
 
+    @staticmethod
+    def _segment_audio_tts_view(call, output, reason_code):
+        slot = call.profile.get("tts") or {}
+        effective = str(
+            call.tts_effective_service or slot.get("target_id") or "audio_tts"
+        )
+        catalog = call.tts_catalog
+        if catalog is not None:
+            try:
+                effective_label = catalog.service_label(effective)
+            except Exception:
+                effective_label = effective
+        else:
+            target = call.targets.get("tts") or {}
+            effective_label = target.get("label") or effective
+        selected = output.selected_service_id
+        return {
+            "selected_service_id": selected,
+            "selected_service_label": selected,
+            "effective_service_id": effective,
+            "effective_service_label": effective_label,
+            "degraded": True,
+            "reason_code": reason_code,
+            "audio_reason_code": call.tts_fallback_reason_code or None,
+            "error_code": None,
+            "mode": "audio_fallback",
+            "status": "degraded",
+            "temporary": True,
+        }
+
+    def _publish_segment_audio(self, call, output, result, reason_code, segment):
+        output.note_transient_fallback(reason_code)
+        emit(
+            "tts_degraded",
+            **self._facts(call, call.turn),
+            stage="tts",
+            segment=segment,
+            from_service=output.selected_service_id,
+            to_service="audio_tts",
+            reason_code=reason_code,
+            temporary=True,
+        )
+        value = dict(result)
+        value["output"] = output.temporary_audio_view(reason_code)
+        value["tts"] = self._segment_audio_tts_view(call, output, reason_code)
+        call.tts_error_code = ""
+        call.tts_error_reason = ""
+        return value
+
+    async def _audio_for_segment(self, call, text, *, request_id):
+        self._privacy(call, "tts")
+        return await self._synthesize_audio_tts(call, text, request_id=request_id)
+
+    async def _race_deferred_video_with_audio(
+        self, call, output, deferred, text, *, request_id, segment
+    ):
+        audio_task = asyncio.create_task(
+            self._audio_for_segment(call, text, request_id=request_id)
+        )
+        video_wait = asyncio.create_task(deferred.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {audio_task, video_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if video_wait in done:
+                try:
+                    provider_result = video_wait.result()
+                    video_result = await deferred.prepare(provider_result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not output.can_audio_fallback(exc):
+                        raise
+                    reason_code = (
+                        exc.code
+                        if isinstance(exc, CallError)
+                        else "call_video_generation_failed"
+                    )
+                    deferred.abandon(reason_code)
+                else:
+                    if not audio_task.done():
+                        audio_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await audio_task
+                    emit(
+                        "video_tts_late_promoted",
+                        **self._facts(call, call.turn),
+                        stage="tts",
+                        segment=segment,
+                    )
+                    return video_result
+            else:
+                reason_code = "call_video_wait_timeout"
+                video_wait.cancel()
+                with suppress(asyncio.CancelledError):
+                    await video_wait
+                deferred.abandon(reason_code)
+            audio_result = await audio_task
+            return self._publish_segment_audio(
+                call, output, audio_result, reason_code, segment
+            )
+        except asyncio.CancelledError:
+            if not audio_task.done():
+                audio_task.cancel()
+            if not video_wait.done():
+                video_wait.cancel()
+            deferred.abandon("call_video_interrupted", update_health=False)
+            with suppress(asyncio.CancelledError, Exception):
+                await audio_task
+            with suppress(asyncio.CancelledError, Exception):
+                await video_wait
+            raise
+        except BaseException:
+            if not audio_task.done():
+                audio_task.cancel()
+            if not video_wait.done():
+                video_wait.cancel()
+            deferred.abandon("call_video_interrupted", update_health=False)
+            with suppress(asyncio.CancelledError, Exception):
+                await audio_task
+            with suppress(asyncio.CancelledError, Exception):
+                await video_wait
+            raise
+
     async def _synthesize_tts(self, call, text, *, request_id, segment=None):
         output = call.output
         if output is not None and output.video_enabled:
@@ -1695,6 +1827,15 @@ class CallService:
                 )
             except asyncio.CancelledError:
                 raise
+            except VideoTTSDeferred as deferred:
+                return await self._race_deferred_video_with_audio(
+                    call,
+                    output,
+                    deferred,
+                    text,
+                    request_id=request_id,
+                    segment=segment,
+                )
             except Exception as exc:
                 if (
                     call.phase != "active"
@@ -1707,16 +1848,26 @@ class CallService:
                     if isinstance(exc, CallError)
                     else "call_video_generation_failed"
                 )
-                first_failure = output.activate_audio_fallback(reason_code)
-                if first_failure:
-                    emit(
-                        "tts_degraded",
-                        **self._facts(call, call.turn),
-                        stage="tts",
-                        segment=segment,
-                        from_service=output.selected_service_id,
-                        to_service="audio_tts",
-                        reason_code=output.fallback_reason_code,
+                if output.requires_permanent_fallback(exc):
+                    first_failure = output.activate_audio_fallback(reason_code)
+                    if first_failure:
+                        emit(
+                            "tts_degraded",
+                            **self._facts(call, call.turn),
+                            stage="tts",
+                            segment=segment,
+                            from_service=output.selected_service_id,
+                            to_service="audio_tts",
+                            reason_code=output.fallback_reason_code,
+                            temporary=False,
+                        )
+                else:
+                    output.note_transient_fallback(reason_code)
+                    result = await self._audio_for_segment(
+                        call, text, request_id=request_id
+                    )
+                    return self._publish_segment_audio(
+                        call, output, result, reason_code, segment
                     )
         self._privacy(call, "tts")
         result = await self._synthesize_audio_tts(call, text, request_id=request_id)
@@ -2397,6 +2548,10 @@ class CallService:
         self.expire()
         if call.phase != "active" or call.turn.get("_speech_interrupted"):
             return
+        if call.output is not None and call.output.video_enabled:
+            call.speech_deadlines[index] = (
+                self.clock() + call.output.client_wait_seconds(text)
+            )
         call.speech_index = index
         call.speech_attempts[index] = call.speech_attempts.get(index, 0) + 1
         call.speech_delivered.discard(index)
