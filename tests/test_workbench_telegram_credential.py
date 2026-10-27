@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import orchestrator.telegram_credential as telegram_credential_module
+import orchestrator.workbench_api as workbench_api_module
+
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.connector_delivery_preferences import set_connector_preference
 from orchestrator.telegram_credential import (
@@ -174,6 +177,95 @@ async def test_status_and_replace_never_return_existing_or_new_token(tmp_path):
     assert stored["provider_api_key"] == "preserve-me"
     assert stored["workbench_admin_token"] == ADMIN_TOKEN
     assert result["credential_revision"] != stored.revision
+
+
+@pytest.mark.asyncio
+async def test_replace_preserves_explicit_runtime_principals_on_secret_write(
+    tmp_path,
+    monkeypatch,
+):
+    config_path, secrets_path = _write_config(tmp_path)
+    remote_sid = "S-1-5-19"
+    captured_sids = []
+    real_write_config_json = telegram_credential_module.write_config_json
+
+    def capture_secret_write(path, document, **kwargs):
+        if Path(path).resolve() == secrets_path.resolve():
+            captured_sids.append(
+                tuple(kwargs.get("private_full_control_sids") or ())
+            )
+            # Keep this contract test portable: applying a Windows SID is only
+            # meaningful on Windows, while the captured call is the invariant.
+            kwargs["private_full_control_sids"] = ()
+        return real_write_config_json(path, document, **kwargs)
+
+    monkeypatch.setattr(
+        telegram_credential_module,
+        "write_config_json",
+        capture_secret_write,
+    )
+
+    async def verify(_token):
+        return {"id": 123, "username": "safe_bot"}
+
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+        verify_bot=verify,
+        private_full_control_sids=(remote_sid,),
+    )
+    before = service.status("lily")
+
+    await service.replace(
+        "lily",
+        token=NEW_TOKEN,
+        expected_revision=before["credential_revision"],
+        replace_existing=True,
+    )
+
+    assert captured_sids == [(remote_sid,)]
+
+
+def test_server_supplies_registered_remote_runtime_principal(tmp_path, monkeypatch):
+    config_path, secrets_path = _write_config(tmp_path)
+    remote_sid = "S-1-5-19"
+    stored = read_config_json(secrets_path)
+    stored["hashi_remote_shared_token"] = "test-remote-shared-token"
+    write_config_json(secrets_path, stored)
+    resolved_roots = []
+
+    def resolve_runtime_sids(root):
+        resolved_roots.append(Path(root).resolve())
+        return (remote_sid,)
+
+    monkeypatch.setattr(
+        workbench_api_module,
+        "_windows_remote_runtime_sids",
+        resolve_runtime_sids,
+    )
+    global_config = SimpleNamespace(
+        authorized_id=42,
+        deployment_profile="personal",
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        workbench_port=18800,
+        secrets_path=secrets_path,
+        instance_id="TEST",
+        her_providers={},
+    )
+
+    server = WorkbenchApiServer(
+        config_path=config_path,
+        global_config=global_config,
+        secrets=dict(stored),
+        reconcile_session_runs=False,
+    )
+
+    assert resolved_roots == [tmp_path.resolve()]
+    assert (
+        server.telegram_credential_service.private_full_control_sids
+        == (remote_sid,)
+    )
 
 
 @pytest.mark.asyncio

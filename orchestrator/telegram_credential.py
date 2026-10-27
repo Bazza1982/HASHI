@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -161,11 +162,17 @@ class TelegramCredentialService:
         secrets_path: str | Path,
         state_root: str | Path | None = None,
         verify_bot: Callable[[str], Awaitable[dict]] = verify_telegram_bot_token,
+        private_full_control_sids: Iterable[str] = (),
     ):
+        if isinstance(private_full_control_sids, (str, bytes)):
+            raise TypeError(
+                "private_full_control_sids must be an iterable of SIDs"
+            )
         self.config_path = Path(config_path).expanduser().resolve()
         self.secrets_path = Path(secrets_path).expanduser().resolve()
         self.state_root = Path(state_root or self.config_path.parent).expanduser().resolve()
         self.verify_bot = verify_bot
+        self.private_full_control_sids = tuple(private_full_control_sids)
         self._revision_key = secrets.token_bytes(32)
 
     def _read_secrets(self) -> ConfigDocument:
@@ -486,7 +493,11 @@ class TelegramCredentialService:
                     )
                 latest_secrets[context.token_key] = token
                 try:
-                    write_config_json(self.secrets_path, latest_secrets)
+                    write_config_json(
+                        self.secrets_path,
+                        latest_secrets,
+                        private_full_control_sids=self.private_full_control_sids,
+                    )
                 except ConfigDurabilityError:
                     durability_warning = "credential_saved_durability_unconfirmed"
         except TelegramCredentialError:
