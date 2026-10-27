@@ -334,6 +334,34 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert "has no explicit type" not in caplog.text
 
 
+def test_agent_telegram_mirror_policy_is_parsed_and_defaults_to_inherit(tmp_path):
+    configured = _minimal_flex_agent()
+    configured["telegram_mirror_policy"] = "always_off"
+    config_path, secrets_path = _write_base_files(tmp_path, configured)
+
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    assert agents[0].telegram_mirror_policy == "always_off"
+
+    document = read_config_json(config_path)
+    document["agents"][0].pop("telegram_mirror_policy")
+    write_config_json(config_path, document)
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    assert agents[0].telegram_mirror_policy == "inherit"
+
+
+def test_invalid_agent_telegram_mirror_policy_is_rejected(tmp_path):
+    configured = _minimal_flex_agent()
+    configured["telegram_mirror_policy"] = "sometimes"
+    config_path, secrets_path = _write_base_files(tmp_path, configured)
+
+    with pytest.raises(ValueError, match="unsupported Agent Telegram mirror policy"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
 @pytest.mark.parametrize("default_mode", ["wrapper", "audit", "dual-brain"])
 def test_retired_default_mode_is_rejected(tmp_path, default_mode):
     config_path, secrets_path = _write_base_files(
