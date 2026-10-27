@@ -572,8 +572,10 @@ def telegram_delivery_for_admission(
     source: str,
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None = None,
+    agent_id: Any | None = None,
+    agent_config_path: Any | None = None,
 ) -> bool:
-    """Preserve Telegram primary replies; resolve mirrors from central state."""
+    """Preserve Telegram primaries and freeze the effective Agent mirror policy."""
 
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     from orchestrator.frontend_connector_registry import canonical_connector_id
@@ -585,12 +587,29 @@ def telegram_delivery_for_admission(
     )
     if connector_id == "telegram":
         return True
-    return owner_mirror_for_admission(
+    instance_enabled = owner_mirror_for_admission(
         request_metadata=metadata,
         state_root=state_root,
         connector_id="telegram",
         default=True,
     )
+    if agent_config_path is None or not str(agent_id or "").strip():
+        return instance_enabled
+    try:
+        from orchestrator.agent_delivery_policy import (
+            load_agent_telegram_mirror_policy,
+            resolve_telegram_mirror_policy,
+        )
+
+        policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
+        return resolve_telegram_mirror_policy(
+            policy,
+            instance_enabled=instance_enabled,
+        )
+    except (OSError, TypeError, ValueError):
+        # A missing/corrupt Agent policy must not accidentally enable a mirror.
+        # Telegram-origin traffic was returned above and remains deliverable.
+        return False
 
 
 def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:
