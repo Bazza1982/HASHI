@@ -369,6 +369,7 @@ def primary_telegram_chat_id(runtime: Any) -> int | None:
         agent_id=runtime.name,
         surface="telegram",
         actor_id=owner_actor_id,
+        channel_key=owner_actor_id,
     )
     if binding is not None:
         try:

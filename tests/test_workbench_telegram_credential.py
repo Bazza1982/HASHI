@@ -287,6 +287,34 @@ def test_explicit_telegram_owner_supersedes_stale_secret_fallback(tmp_path):
     assert service.status("lily")["authorized_user_configured"] is True
 
 
+def test_status_uses_stable_pao_scope_for_instance_mirror_preference(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path, authorized_id=7666)
+    config = read_config_json(config_path)
+    config["global"].update(
+        telegram_owner_id=7666,
+        owner_scope_id="user:8872",
+    )
+    write_config_json(config_path, config)
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 8872
+    write_config_json(secrets_path, secrets)
+    set_connector_preference(
+        tmp_path,
+        "user:8872",
+        "telegram",
+        "mirror",
+        False,
+    )
+
+    status = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    ).status("lily")
+
+    assert status["instance_mirror_enabled"] is False
+    assert status["resolved_mirror_enabled"] is False
+
+
 @pytest.mark.asyncio
 async def test_replace_rejects_stale_secret_revision_after_verification(tmp_path):
     config_path, secrets_path = _write_config(tmp_path)

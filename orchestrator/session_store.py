@@ -3433,6 +3433,7 @@ class SessionStore:
         agent_id: str,
         surface: str,
         actor_id: str | int | None = None,
+        channel_key: str | int | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest persisted endpoint for one owner/Agent surface."""
 
@@ -3440,6 +3441,7 @@ class SessionStore:
         if not normalized_surface:
             raise ValueError("channel binding surface is required")
         actor_clause = ""
+        channel_clause = ""
         args: list[Any] = [
             self.instance_id,
             str(owner_id),
@@ -3449,6 +3451,9 @@ class SessionStore:
         if actor_id is not None:
             actor_clause = " AND actor_id = ?"
             args.append(str(actor_id).strip())
+        if channel_key is not None:
+            channel_clause = " AND channel_key = ?"
+            args.append(str(channel_key).strip())
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 f"""
@@ -3456,7 +3461,7 @@ class SessionStore:
                        session_id, updated_at
                 FROM channel_bindings
                 WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
-                  AND surface = ?{actor_clause}
+                  AND surface = ?{actor_clause}{channel_clause}
                 ORDER BY updated_at DESC, rowid DESC
                 LIMIT 1
                 """,

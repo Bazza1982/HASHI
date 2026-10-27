@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from orchestrator.config_json import read_config_json, write_config_json
-from orchestrator.connector_delivery_preferences import get_connector_preference
+from orchestrator.connector_delivery_preferences import (
+    get_connector_preference,
+    set_connector_preference,
+)
 from orchestrator.session_store import SessionStore
 from orchestrator.telegram_owner import (
     TelegramOwnerMigrationError,
@@ -56,6 +60,15 @@ def _instance(root: Path) -> tuple[Path, Path, SessionStore]:
 
 def test_stage_uses_latest_direct_ingress_and_revokes_every_other_actor(tmp_path):
     config_path, secrets_path, _store = _instance(tmp_path)
+    set_connector_preference(
+        tmp_path,
+        "user:8872",
+        "telegram",
+        "mirror",
+        False,
+    )
+    preference_path = tmp_path / "state" / "frontend_delivery_preferences.json"
+    before_preferences = preference_path.read_bytes()
 
     result = stage_telegram_owner_replacement(
         bridge_home=tmp_path,
@@ -79,7 +92,8 @@ def test_stage_uses_latest_direct_ingress_and_revokes_every_other_actor(tmp_path
     assert read_config_json(secrets_path)["authorized_telegram_id"] == 8872
     assert get_connector_preference(
         tmp_path, "user:8872", "telegram", "mirror", default=False
-    ) is True
+    ) is False
+    assert preference_path.read_bytes() == before_preferences
 
 
 def test_stage_rejects_a_candidate_without_latest_direct_runtime_proof(tmp_path):
@@ -110,6 +124,49 @@ def test_stage_rejects_a_candidate_without_latest_direct_runtime_proof(tmp_path)
 
     assert config_path.read_bytes() == before_config
     assert secrets_path.read_bytes() == before_secrets
+
+
+def test_stage_rejects_direct_runtime_proof_older_than_ten_minutes(tmp_path):
+    config_path, secrets_path, store = _instance(tmp_path)
+    before_config = config_path.read_bytes()
+    before_secrets = secrets_path.read_bytes()
+    binding = store.latest_channel_binding(
+        owner_id="user:8872",
+        agent_id="hashiko",
+        surface="telegram",
+        actor_id=7666,
+        channel_key=7666,
+    )
+    observed_at = datetime.fromisoformat(
+        str(binding["updated_at"]).replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+
+    with pytest.raises(TelegramOwnerMigrationError, match="fresh within 10 minutes"):
+        stage_telegram_owner_replacement(
+            bridge_home=tmp_path,
+            new_owner_id=7666,
+            expected_current_owner_id=8872,
+            now=observed_at + timedelta(minutes=10, microseconds=1),
+        )
+
+    assert config_path.read_bytes() == before_config
+    assert secrets_path.read_bytes() == before_secrets
+
+
+def test_stage_resolves_existing_owner_with_legacy_secret_precedence(tmp_path):
+    config_path, _secrets_path, _store = _instance(tmp_path)
+    config = read_config_json(config_path)
+    config["global"]["authorized_id"] = 9999
+    write_config_json(config_path, config)
+
+    result = stage_telegram_owner_replacement(
+        bridge_home=tmp_path,
+        new_owner_id=7666,
+        expected_current_owner_id=8872,
+    )
+
+    assert result["previous_owner_id"] == 8872
+    assert result["owner_scope_id"] == "user:8872"
 
 
 def test_finalize_replaces_only_private_owner_fallback(tmp_path):

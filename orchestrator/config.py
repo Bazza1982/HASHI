@@ -35,6 +35,10 @@ from orchestrator.runtime_defaults import (
     DEFAULT_WORKBENCH_PORT,
 )
 from orchestrator.timezone_policy import canonical_timezone_name
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
+)
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -555,20 +559,8 @@ class ConfigManager:
         # legacy global field.  ``owner_scope_id`` deliberately remains stable
         # when the Telegram account changes so the same human keeps one PAO
         # Session/Workzone/preference scope.
-        _legacy_auth_id = int(g_raw.get("authorized_id", 0) or 0)
-        _auth_id = (
-            int(g_raw.get("telegram_owner_id", 0) or 0)
-            or int(secrets.get("authorized_telegram_id", 0) or 0)
-            or _legacy_auth_id
-        )
-        _owner_scope_id = str(g_raw.get("owner_scope_id") or "").strip()
-        if not _owner_scope_id:
-            _owner_scope_id = f"user:{_auth_id}"
-        if (
-            len(_owner_scope_id) > 256
-            or any(ord(character) < 33 for character in _owner_scope_id)
-        ):
-            raise ValueError("global.owner_scope_id is invalid")
+        _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
+        _owner_scope_id = resolve_owner_scope_id(g_raw, _auth_id)
 
         workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))

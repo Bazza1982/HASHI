@@ -34,6 +34,10 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
+)
 
 
 _TOKEN_PATTERN = re.compile(r"^[1-9][0-9]{4,19}:[A-Za-z0-9_-]{20,200}$")
@@ -63,6 +67,7 @@ class TelegramCredentialContext:
     configured: bool
     authorized_user_configured: bool
     authorized_owner_id: int | None
+    owner_scope_id: str
     shared_reference: bool
     credential_revision: str
     mirror_policy: str
@@ -119,13 +124,6 @@ async def verify_telegram_bot_token(token: str) -> dict:
     if first_name:
         public_bot["first_name"] = first_name[:128]
     return public_bot
-
-
-def _positive_integer(value) -> bool:
-    try:
-        return int(value) > 0
-    except (TypeError, ValueError):
-        return False
 
 
 def _opaque_revision(document: ConfigDocument, key: bytes, domain: str) -> str:
@@ -245,29 +243,31 @@ class TelegramCredentialService:
             str(secrets.get(token_key)).strip()
         )
         global_config = config.get("global")
-        explicit_owner = (
-            global_config.get("telegram_owner_id")
-            if isinstance(global_config, dict)
-            else None
-        )
-        config_fallback = (
-            global_config.get("authorized_id")
-            if isinstance(global_config, dict)
-            else None
-        )
-        if _positive_integer(explicit_owner):
-            owner_value = explicit_owner
-        elif _positive_integer(secrets.get("authorized_telegram_id")):
-            owner_value = secrets.get("authorized_telegram_id")
-        else:
-            owner_value = config_fallback
-        authorized_owner_id = int(owner_value) if _positive_integer(owner_value) else None
+        if not isinstance(global_config, dict):
+            raise TelegramCredentialError(
+                "Agent configuration is invalid.",
+                error_code="telegram_credential_config_invalid",
+                status_code=409,
+            )
+        try:
+            authorized_owner_id = resolve_telegram_owner_id(global_config, secrets)
+            owner_scope_id = resolve_owner_scope_id(
+                global_config,
+                authorized_owner_id,
+            )
+        except ValueError:
+            raise TelegramCredentialError(
+                "Telegram owner configuration is invalid.",
+                error_code="telegram_credential_config_invalid",
+                status_code=409,
+            ) from None
         return TelegramCredentialContext(
             agent_id=canonical_id,
             token_key=token_key,
             configured=configured,
             authorized_user_configured=authorized_owner_id is not None,
             authorized_owner_id=authorized_owner_id,
+            owner_scope_id=owner_scope_id,
             shared_reference=len(references) > 1,
             credential_revision=_credential_revision(secrets, self._revision_key),
             mirror_policy=telegram_mirror_policy_from_document(config, canonical_id),
@@ -293,10 +293,9 @@ class TelegramCredentialService:
         *,
         runtime_active: bool,
     ) -> dict:
-        owner_id = f"user:{context.authorized_owner_id or 0}"
         instance_mirror_enabled = get_connector_preference(
             self.state_root,
-            owner_id,
+            context.owner_scope_id,
             "telegram",
             "mirror",
             default=True,

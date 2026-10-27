@@ -7,11 +7,18 @@ human's Sessions, Workzones, or owner-scoped connector preferences.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from orchestrator.config_json import read_config_json, write_config_json
-from orchestrator.connector_delivery_preferences import set_connector_preference
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
+)
+
+
+TELEGRAM_OWNER_PROOF_MAX_AGE = timedelta(minutes=10)
 
 
 class TelegramOwnerMigrationError(RuntimeError):
@@ -33,12 +40,29 @@ def _positive_owner_id(value: Any) -> int:
 
 
 def _owner_scope(global_config: dict[str, Any], current_owner_id: int) -> str:
-    scope = str(global_config.get("owner_scope_id") or "").strip()
-    if not scope:
-        scope = f"user:{current_owner_id}"
-    if len(scope) > 256 or any(ord(character) < 33 for character in scope):
-        raise TelegramOwnerMigrationError("Configured PAO owner scope is invalid")
-    return scope
+    try:
+        return resolve_owner_scope_id(global_config, current_owner_id)
+    except ValueError as exc:
+        raise TelegramOwnerMigrationError(
+            "Configured PAO owner scope is invalid"
+        ) from exc
+
+
+def _proof_timestamp(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        observed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise TelegramOwnerMigrationError(
+            "The latest Telegram binding has no valid proof timestamp"
+        ) from exc
+    if observed.tzinfo is None:
+        raise TelegramOwnerMigrationError(
+            "The latest Telegram binding has no valid proof timestamp"
+        )
+    return observed.astimezone(timezone.utc)
 
 
 def _latest_direct_telegram_actor(
@@ -47,6 +71,7 @@ def _latest_direct_telegram_actor(
     instance_id: str,
     owner_scope_id: str,
     agent_id: str,
+    now: datetime | None = None,
 ) -> tuple[int, str]:
     if not sessions_path.is_file():
         raise TelegramOwnerMigrationError("PAO Session database is unavailable")
@@ -92,6 +117,15 @@ def _latest_direct_telegram_actor(
         raise TelegramOwnerMigrationError(
             "The latest Telegram binding has no authenticated actor role"
         )
+    observed_at = _proof_timestamp(row["updated_at"])
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        raise TelegramOwnerMigrationError("Proof validation time must include a timezone")
+    age = checked_at.astimezone(timezone.utc) - observed_at
+    if age < timedelta(0) or age > TELEGRAM_OWNER_PROOF_MAX_AGE:
+        raise TelegramOwnerMigrationError(
+            "Telegram owner migration proof must be fresh within 10 minutes"
+        )
     return actor_id, str(row["updated_at"] or "")
 
 
@@ -101,6 +135,7 @@ def stage_telegram_owner_replacement(
     new_owner_id: Any,
     expected_current_owner_id: Any,
     proof_agent_id: str = "hashiko",
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Stage the sole actor in instance config after runtime-observed proof.
 
@@ -113,6 +148,7 @@ def stage_telegram_owner_replacement(
 
     root = Path(bridge_home).expanduser().resolve()
     config_path = root / "agents.json"
+    secrets_path = root / "secrets.json"
     sessions_path = root / "state" / "sessions.sqlite3"
     candidate = _positive_owner_id(new_owner_id)
     expected_current = _positive_owner_id(expected_current_owner_id)
@@ -121,10 +157,14 @@ def stage_telegram_owner_replacement(
     agents = config.get("agents")
     if not isinstance(global_config, dict) or not isinstance(agents, list):
         raise TelegramOwnerMigrationError("Instance Agent configuration is invalid")
-    current = _positive_owner_id(
-        global_config.get("telegram_owner_id")
-        or global_config.get("authorized_id")
-    )
+    secrets = read_config_json(secrets_path)
+    try:
+        resolved_current = resolve_telegram_owner_id(global_config, secrets)
+    except ValueError as exc:
+        raise TelegramOwnerMigrationError(
+            "Configured Telegram owner is invalid"
+        ) from exc
+    current = _positive_owner_id(resolved_current)
     if current != expected_current:
         raise TelegramOwnerMigrationError(
             "Configured Telegram owner changed; reload before replacing it"
@@ -139,6 +179,7 @@ def stage_telegram_owner_replacement(
         instance_id=str(global_config.get("instance_id") or "HASHI"),
         owner_scope_id=owner_scope_id,
         agent_id=proof_agent_id,
+        now=now,
     )
     if observed_actor != candidate:
         raise TelegramOwnerMigrationError(
@@ -166,15 +207,6 @@ def stage_telegram_owner_replacement(
     global_config["authorized_id"] = candidate
     global_config["telegram_owner_id"] = candidate
 
-    # Enabling the existing logical owner's mirror is safe even if the later
-    # config publication conflicts; it cannot redirect a destination.
-    set_connector_preference(
-        root,
-        owner_scope_id,
-        "telegram",
-        "mirror",
-        True,
-    )
     revision = write_config_json(config_path, config)
     return {
         "staged": True,
@@ -248,6 +280,7 @@ def finalize_telegram_owner_secret(
 
 
 __all__ = [
+    "TELEGRAM_OWNER_PROOF_MAX_AGE",
     "TelegramOwnerMigrationError",
     "finalize_telegram_owner_secret",
     "stage_telegram_owner_replacement",

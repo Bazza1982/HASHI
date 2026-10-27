@@ -751,6 +751,38 @@ def test_secondary_telegram_user_cannot_replace_owner_proactive_route(tmp_path):
     assert FlexibleAgentRuntime._primary_chat_id(secondary_runtime) == 8872
 
 
+def test_owner_group_binding_never_becomes_proactive_telegram_route(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="MSI")
+    store.ensure_default_session(owner_id="user:8872", agent_id="hashiko")
+    runtime = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(authorized_id=8872),
+        session_store=store,
+        _authorized_telegram_ids=(8872,),
+        _active_chat_ids={},
+    )
+    runtime._is_authorized_user = lambda user_id: user_id == 8872
+    for chat_id in (8872, -1008872):
+        FlexibleAgentRuntime._record_active_chat(
+            runtime,
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=8872),
+                effective_chat=SimpleNamespace(id=chat_id),
+            ),
+        )
+
+    assert store.latest_channel_binding(
+        owner_id="user:8872",
+        agent_id="hashiko",
+        surface="telegram",
+        actor_id=8872,
+    )["channel_key"] == "-1008872"
+    assert FlexibleAgentRuntime._primary_chat_id(runtime) == 8872
+
+
 def test_configured_replacement_owner_promotes_existing_direct_route(tmp_path):
     from orchestrator import runtime_session
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
