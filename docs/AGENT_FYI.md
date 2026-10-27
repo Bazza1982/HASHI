@@ -134,11 +134,11 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Phone history uses dialogue-round HCC without raw metadata. Action snapshots do
-not consume history: keep them while their call is active, then replace them with
-complete ordinary history. Legacy cleanup validates exact source and fails closed;
-deterministic matching accepts multi-call, late and repeated text. HERV3 orders
-Phone and typed history by conversation time, never arrival/Message counters.
+Phone history uses dialogue-round HCC without raw metadata. Action snapshots
+survive call reconnection and preserve earlier constraints; authorization remains
+epoch-scoped. At hang-up, replace them with full ordinary history. Legacy cleanup
+validates exact source and fails closed. HERV3 orders Phone and typed Turns by
+conversation time; fixed incremental turns skip unused recent history.
 Failures preserve cause; resumes stop after five. See
 [Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).

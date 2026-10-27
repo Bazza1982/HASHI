@@ -88,6 +88,39 @@ def _conversation_timestamp(
     ).isoformat()
 
 
+def _live_epoch_starts(
+    connection: sqlite3.Connection,
+    session_id: str,
+    call_ids: set[str],
+) -> dict[tuple[str, int], str]:
+    """Return durable Provider replacement times for the requested calls."""
+    if not call_ids:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT json_extract(detail_json, '$.scope.call_id') AS call_id,
+               json_extract(detail_json, '$.scope.call_epoch') AS call_epoch,
+               created_at
+        FROM run_events
+        WHERE session_id=? AND kind='voice.live.call.state'
+          AND json_valid(detail_json)
+          AND json_extract(detail_json, '$.reason')='provider_replaced'
+        ORDER BY sequence
+        """,
+        (str(session_id),),
+    ).fetchall()
+    result: dict[tuple[str, int], str] = {}
+    for row in rows:
+        call_id = str(row["call_id"] or "")
+        if call_id in call_ids:
+            try:
+                epoch = int(row["call_epoch"])
+            except (TypeError, ValueError):
+                continue
+            result[(call_id, epoch)] = str(row["created_at"] or "")
+    return result
+
+
 def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
     normalized = str(policy or "standard").strip().casefold()
     if normalized == "standard":
@@ -8880,6 +8913,11 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            epoch_starts = _live_epoch_starts(
+                connection,
+                session_id,
+                {str(row["call_id"]) for row in rows if int(row["call_epoch"]) > 1},
+            )
 
         segments: list[dict[str, Any]] = []
         latest_by_speaker: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -8930,7 +8968,8 @@ class SessionStore:
                     "sequence": int(row["sequence"]),
                     "last_sequence": int(row["sequence"]),
                     "created_at": _conversation_timestamp(
-                        row["started_at"],
+                        row["started_at"] if call_key[1] == 1
+                        else epoch_starts.get(call_key),
                         start_ms,
                         fallback=row["created_at"],
                     ),

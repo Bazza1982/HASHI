@@ -45,22 +45,27 @@ fragment boundaries remain durable audit facts and are not placed in the prompt.
 The SessionStore query excludes already consumed fragment identities before
 loading transcript JSON; ordinary turns do not reparse the lifetime call history.
 Phone dialogue rounds and typed exchanges share one absolute conversation
-timestamp for presentation order. Phone time is call start plus speech offset;
-Provider arrival sequence remains an audit ledger and is never compared with a
-typed Message ordinal. HERV3 must preserve this order in its final materialized
-prompt, not merely in the pre-transport section list.
+timestamp for presentation order. GPT-Live offsets are relative to each Provider
+session; after recovery, the durable Provider-replacement event supplies that
+epoch's time origin. If an old recovery has no such event, the fragment arrival
+time is the conservative fallback. These times are approximate. Provider arrival
+sequence is never compared with a typed Message ordinal. HERV3 interleaves Phone
+PCM and completed native Turns in its final prompt using the canonical HASHI
+Message time; old Turns without that time fall back to HER acceptance time.
+Fixed incremental turns do not load unused Session recent history.
 
 A Phone action is the sole exception. PAO loads its immutable cutoff snapshot
 and PCM projects that snapshot as one protected `phone_action_context` history
 section. Every action also checks for unconsumed ended calls and sends them as
 ordinary history in the same request, independently of whether a representation
-migration is due. The ordinary recent-history view is removed only for the
-current call/epoch, preventing post-cutoff speech or duplication while retaining
-every earlier Phone call. Successful Provider completion checkpoints the ended
-history; failure leaves it pending. The action section carries a one-way digest
-of its owning call scope. Ordinary turns preserve it while that exact call
-remains active. Once the call is terminal, PCM first projects the complete call
-as ordinary dialogue-round history and then sends the action tombstone.
+migration is due. The ordinary recent-history view is removed for the current
+logical call across all epochs, preventing duplication. The frozen action includes
+earlier epochs as context but only the current epoch's cutoff-bound user speech
+can authorize the new action. Successful Provider completion checkpoints the
+ended history; failure leaves it pending. The action section carries a one-way
+digest of its owning call scope. Ordinary turns preserve it through Provider
+recovery while that logical call remains active. Once it is terminal, PCM first
+projects the complete call as ordinary history and then sends the action tombstone.
 
 Typed fixed PCM also performs a one-time representation migration. It reads
 the exact current sections and validates each deprecated
@@ -255,3 +260,17 @@ digest, retains it until terminal settlement, reconstructs legacy membership by
 arrival high-water while preserving chronological source order, and carries one
 absolute conversation timestamp into fixed PCM ordering. Focused tests assert
 the final HERV3 materialized prompt, not only intermediate section creation.
+
+
+## PR 110 recovery follow-up, 2026-10-28
+
+The requested branch-only fix preserves a logical call through Provider
+replacement, keeps authorization scoped to the new epoch, and orders native HER
+Turns and Phone history by their conversation times. The fixed incremental path
+does not load unused lifetime Phone history. The owning decision is implemented
+in Functions on the existing PR branch.
+
+Offline checks use durable test stores, a simulated Provider replacement, real
+fixed-HER materialization, and native Windows regression suites. GitHub CI,
+independent review, Worker adoption, and live Provider verification remain
+separate facts; no live adoption is claimed here.

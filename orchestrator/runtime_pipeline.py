@@ -1195,9 +1195,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         if isolated_activity_run and runtime_session.is_agent_activity_request(item)
         else []
     )
+    # Fixed incremental prompts use the Engine's durable history and explicit
+    # Phone deltas.  The PCM assembler does not inject recent_exchanges here.
     session_history = (
         activity_origin_history
         if isolated_activity_run
+        else None
+        if incremental
         else runtime_session.recent_exchanges(
             runtime,
             item,
@@ -1416,6 +1420,21 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and runtime.backend_manager.agent_mode == "fixed"
     ):
+        message_id = str(getattr(item, "message_id", "") or "")
+        session_id = str(getattr(item, "session_id", "") or "")
+        if message_id and session_id:
+            message = runtime_session.ensure_store(runtime).get_message(
+                message_id,
+                session_id=session_id,
+                owner_id=runtime_session.owner_id(
+                    runtime, str(getattr(item, "owner_id", "") or "") or None
+                ),
+            )
+            if int(message.get("context_generation") or 0) != int(
+                getattr(item, "context_generation", 1) or 1
+            ):
+                raise RuntimeError("HER message context generation changed")
+            request_meta["conversation_at"] = str(message.get("created_at") or "")
         prepare_fixed = getattr(backend, "prepare_fixed_turn_input", None)
         if not callable(prepare_fixed):
             raise RuntimeError(

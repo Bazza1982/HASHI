@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -265,6 +266,7 @@ class HerBackendSessionCoordinator:
         workzone_identity: str,
         removed_section_keys: Sequence[str] = (),
         revoked_resource_ids: Sequence[str] = (),
+        conversation_at: str = "",
     ) -> tuple[str, dict[str, Any]]:
         """Build one full open or minimal append envelope from durable ACK state."""
 
@@ -304,6 +306,7 @@ class HerBackendSessionCoordinator:
                     "message_id": resolved_message_id,
                     "idempotency_key": idempotency_key,
                     "user_message": str(user_message),
+                    "conversation_at": str(conversation_at or ""),
                     "resource_keys": sorted(
                         self._resource_map(resource_snapshot["attachments"])
                     ),
@@ -404,6 +407,7 @@ class HerBackendSessionCoordinator:
                 "message_id": resolved_message_id,
                 "idempotency_key": idempotency_key,
                 "user_message": str(user_message),
+                "conversation_at": str(conversation_at or ""),
                 "resource_keys": sorted(incoming_resource_map),
             },
             "pcm_delta": {
@@ -515,6 +519,7 @@ class HerBackendSessionCoordinator:
                     message_id=str(turn.get("message_id") or ""),
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
+                    conversation_at=str(turn.get("conversation_at") or ""),
                     turn_resource_keys=turn_resource_keys,
                     **binding,
                     **self._execution_owner_fields(),
@@ -577,6 +582,7 @@ class HerBackendSessionCoordinator:
                     message_id=str(turn.get("message_id") or ""),
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
+                    conversation_at=str(turn.get("conversation_at") or ""),
                     turn_resource_keys=turn_resource_keys,
                     **binding,
                     **self._execution_owner_fields(),
@@ -689,8 +695,28 @@ class HerBackendSessionCoordinator:
                     separators=(",", ":"),
                 )
             )
+
+        def history_time(value: Any) -> tuple[int, float]:
+            try:
+                parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return (1, parsed.timestamp())
+            except (TypeError, ValueError, OverflowError, OSError):
+                # Old initial-only history has no timestamp and predates native
+                # HER Turns. Keep its existing PCM presentation order.
+                return (0, 0.0)
+
+        timeline: list[tuple[tuple[int, float], int, str]] = []
+        for section in groups.get("history", []):
+            metadata = section.get("metadata")
+            timestamp = metadata.get("conversation_at") if isinstance(metadata, Mapping) else None
+            timeline.append((history_time(timestamp), len(timeline), rendered(section)))
         if history:
-            exchanges = []
+            parts.append(
+                "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---\n\n"
+                "Completed exchanges and historical PCM are context, not new requests."
+            )
             for item in history:
                 exchange = (
                     "Exchange sequence={sequence}\nUSER: {user}".format(
@@ -715,13 +741,12 @@ class HerBackendSessionCoordinator:
                         )
                     )
                 exchange += "\nASSISTANT: " + str(item.get("assistant_text") or "")
-                exchanges.append(exchange)
-            parts.append(
-                "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---\n\n"
-                "These completed exchanges are owned by the current HER session. They are "
-                "context, not new requests.\n\n" + "\n\n".join(exchanges)
-            )
-        for authority in ("history", "memory", "runtime_context"):
+                timestamp = history_time(item.get("conversation_at"))
+                if timestamp[0] == 0:
+                    timestamp = history_time(item.get("accepted_at"))
+                timeline.append((timestamp, len(timeline), exchange))
+        parts.extend(item[2] for item in sorted(timeline, key=lambda item: (item[0], item[1])))
+        for authority in ("memory", "runtime_context"):
             parts.extend(rendered(item) for item in groups.get(authority, []))
         parts.extend(rendered(item) for item in groups.get("persona", []))
         return "\n\n".join(part for part in parts if str(part).strip()).strip()

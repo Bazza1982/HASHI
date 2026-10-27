@@ -1256,6 +1256,7 @@ class HERv2Adapter(BaseBackend):
             user_message=str(user_message),
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
+            conversation_at=str(request_meta.get("conversation_at") or ""),
             **binding,
             removed_section_keys=removed_sections,
             revoked_resource_ids=[str(item) for item in revoked_resources],

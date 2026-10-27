@@ -1559,3 +1559,366 @@ async def test_consumed_phone_fragments_are_not_reparsed_on_later_turn(phone):
     assert "Only parse this new tail" in second_sections[0][1]
     assert second_audit["requested_fragments"]==1
     assert second_audit["included_fragments"]==1
+
+
+async def _resume_for_context_regression(phone, monkeypatch):
+    from contextlib import asynccontextmanager
+    from orchestrator.frontend_live_voice import openai_live
+    from tests.test_live_voice_integration import PHONE_REVISION
+
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='recovering' WHERE call_id=?", (phone.call_id,)
+        )
+
+    @asynccontextmanager
+    async def fake_http():
+        yield object()
+
+    async def fit(_http, **kwargs):
+        return list(kwargs["input_messages"]), {
+            "input_tokens_exact": 10, "history_omitted_units": 0,
+        }
+
+    async def create(_http, **_kwargs):
+        return {"provider_session_id": "prov-2", "sdp_answer": "v=0\r\n"}
+
+    async def close(*_args, **_kwargs):
+        return "confirmed", None
+
+    async def sideband(binding, _key, _provider_id):
+        phone.manager._sideband_ready_events[binding.call_id].set()
+
+    monkeypatch.setattr(openai_live, "provider_http_session", fake_http)
+    monkeypatch.setattr(openai_live, "fit_live_session_input", fit)
+    monkeypatch.setattr(openai_live, "create_provider_session", create)
+    monkeypatch.setattr(phone.manager, "_close_provider_session", close)
+    monkeypatch.setattr(phone.manager, "_run_sideband", sideband)
+    monkeypatch.setattr(phone.manager, "_ensure_foreground_router", lambda _binding: None)
+    result = await phone.manager._op_resume(phone.owner_id, {
+        **phone.scope, "sdp": "v=0\r\n", "idempotency_key": "resume-context-test",
+        "phone_revision": PHONE_REVISION,
+    })
+    assert result["binding"]["call_epoch"] == 2
+    phone.binding = replace(phone.binding, call_epoch=2, provider_session_id="prov-2")
+
+
+def _resumed_action_item(phone, proposal, request):
+    return turn_item(phone, request, {
+        "owner_id": phone.owner_id,
+        "live_voice": {
+            "call_id": phone.call_id, "call_epoch": phone.binding.call_epoch,
+            "delegation_id": proposal.delegation_id,
+            "proposal_version": proposal.version, "proposal_digest": proposal.digest,
+            "phone_context_handoff_id": proposal.phone_context_handoff_id,
+        },
+    })
+
+
+def _recovery_fixed_transport(phone, tmp_path):
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from orchestrator.phone_context_handoff import commit_success
+
+    runtime = turn_runtime(phone)
+    runtime.config.active_backend = "her-v2"
+    backend = runtime.backend_manager.current_backend
+    coordinator = HerBackendSessionCoordinator(tmp_path / "her-state")
+    pcm_root = tmp_path / "pcm"
+    pcm_root.mkdir()
+    assembler = BridgeContextAssembler(BridgeMemoryStore(pcm_root), None)
+
+    def current():
+        return (coordinator.store.session("native-thread-1") or {}).get("pcm") or {}
+
+    backend.current_pcm_section_keys = lambda: tuple(current())
+    backend.current_pcm_sections = lambda keys: {
+        key: current()[key] for key in keys if key in current()
+    }
+
+    def execute(item, sections, audit):
+        payload = assembler.build_prompt_payload(
+            item.prompt, "her-v2", extra_sections=sections, incremental=True,
+        )
+        encoded, _ = coordinator.prepare_transport(
+            session_id="native-thread-1",
+            sections=payload["transport_snapshot"]["sections"], resources=[],
+            user_message=item.prompt, request_id=item.request_id,
+            message_id=item.request_id, instance_id="HASHI", agent_id=phone.agent_id,
+            owner_id=phone.owner_id, hashi_conversation_id=phone.session_id,
+            context_generation=1, workzone_identity="test",
+            removed_section_keys=audit["removed_section_keys"],
+        )
+        accepted = coordinator.accept(encoded)
+        coordinator.complete(accepted, assistant_text="Done.")
+        commit_success(item, SimpleNamespace(is_success=True))
+        return accepted.materialized_prompt
+
+    return runtime, coordinator, execute
+
+
+async def _first_recovery_action(phone, runtime, execute):
+    from orchestrator.phone_context_handoff import prepare_turn
+
+    phone.judgments = [decision(action("query", "Inspect test status"))]
+    await phone.manager.append_fragment_once(
+        phone.binding, Fragment("initial-rule", "user", "Only use the test environment.", 0, 50),
+    )
+    await speak(phone, "Inspect test status", start=60, end=100, source="first-action")
+    item = _resumed_action_item(phone, phone.admitted_proposals[-1], "first-action")
+    sections, audit = prepare_turn(runtime, item, incremental=True)
+    assert "Only use the test environment." in execute(item, sections, audit)
+
+
+@pytest.mark.asyncio
+async def test_resume_action_context_survives_text_until_logical_hangup(phone, tmp_path, monkeypatch):
+    from orchestrator.phone_context_handoff import prepare_turn
+
+    runtime, coordinator, execute = _recovery_fixed_transport(phone, tmp_path)
+    await _first_recovery_action(phone, runtime, execute)
+    await _resume_for_context_regression(phone, monkeypatch)
+
+    item = turn_item(phone, "text-while-resumed")
+    sections, audit = prepare_turn(runtime, item, incremental=True)
+    assert "phone_action_context" not in audit["removed_section_keys"]
+    assert "Only use the test environment." in execute(item, sections, audit)
+
+    await phone.manager.append_fragment_once(
+        phone.binding,
+        Fragment("resumed-tail", "assistant", "The resumed conversation continues.", 0, 40),
+    )
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET termination_initiator='user', "
+            "termination_reason='user_hangup' WHERE call_id=?", (phone.call_id,),
+        )
+    phone.manager._mark_terminal(
+        phone.binding, "ended", provider_close_state="confirmed", summary="User hung up",
+    )
+    item = turn_item(phone, "text-after-hangup")
+    sections, audit = prepare_turn(runtime, item, incremental=True)
+    assert "phone_action_context" in audit["removed_section_keys"]
+    prompt = execute(item, sections, audit)
+    assert prompt.count("Only use the test environment.") == 1
+    assert prompt.count("The resumed conversation continues.") == 1
+    assert "phone_action_context" not in coordinator.store.session("native-thread-1")["pcm"]
+    times = [s[2]["conversation_at"] for s in sections
+             if s[2]["key"].startswith("recent_exchange:phone:")]
+    assert len(times) >= 2 and times[0] < times[-1]
+
+
+@pytest.mark.asyncio
+async def test_resumed_action_keeps_prior_constraint_with_current_epoch_authority(
+    phone, tmp_path, monkeypatch,
+):
+    from orchestrator.phone_context_handoff import load_handoff, prepare_turn
+
+    runtime, _coordinator, execute = _recovery_fixed_transport(phone, tmp_path)
+    await _first_recovery_action(phone, runtime, execute)
+    await _resume_for_context_regression(phone, monkeypatch)
+
+    phone.judgments = [decision(action("query", "Inspect the new status"))]
+    await speak(phone, "Inspect the new status", start=0, end=40, source="resumed-action")
+    proposal = phone.admitted_proposals[-1]
+    await phone.manager.append_fragment_once(
+        phone.binding, Fragment("after-cutoff", "user", "Delete production instead.", 80, 120),
+    )
+    snapshot = load_handoff(
+        phone.store, proposal.phone_context_handoff_id, owner_id=phone.owner_id,
+        agent_id=phone.agent_id, session_id=phone.session_id, context_generation=1,
+    )
+    assert "initial-rule" not in proposal.source_event_ids
+    assert "resumed-action" in proposal.source_event_ids
+    assert any(row["provider_event_id"] == "initial-rule" for row in snapshot["fragments"])
+    assert all(row["provider_event_id"] != "after-cutoff" for row in snapshot["fragments"])
+
+    item = _resumed_action_item(phone, proposal, "resumed-action")
+    sections, audit = prepare_turn(runtime, item, incremental=True)
+    prompt = execute(item, sections, audit)
+    assert "Only use the test environment." in prompt
+    assert "Inspect the new status" in prompt
+    assert "Delete production instead." not in prompt
+
+
+def test_native_turns_and_phone_are_chronological_in_actual_her_prompt(tmp_path):
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from tests.test_her_v2_fixed_backend import _prepare, _sections
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "her-state")
+    transport, _ = _prepare(coordinator, request_id="t1", message="TEXT-T1")
+    envelope = json.loads(transport.split("\n", 1)[1])
+    envelope["initial_turn"]["conversation_at"] = "2026-10-27T10:00:00+00:00"
+    transport = coordinator.encode(envelope)
+    first = coordinator.accept(transport)
+    coordinator.complete(first, assistant_text="REPLY-T1")
+    with coordinator.store._lock, coordinator.store._connect() as connection:
+        connection.execute(
+            "UPDATE her_turns SET accepted_at=? WHERE session_id=? AND turn_id=?",
+            ("2026-10-27T10:03:00+00:00", first.session_id, first.turn_id),
+        )
+    phone_section = {
+        "key": "recent_exchange:phone:test", "title": "RECENT COMPLETED EXCHANGE",
+        "text": "USER: PHONE-MIDDLE", "authority": "history", "rank": 4,
+        "protected": False, "metadata": {"conversation_at": "2026-10-27T10:01:00+00:00"},
+        "order": 100,
+    }
+    transport, _ = _prepare(
+        coordinator, request_id="t2", message="TEXT-T2",
+        sections=[*_sections(), phone_section],
+    )
+    envelope = json.loads(transport.split("\n", 1)[1])
+    envelope["turn"]["conversation_at"] = "2026-10-27T10:02:00+00:00"
+    transport = coordinator.encode(envelope)
+    second = coordinator.accept(transport)
+    coordinator.complete(second, assistant_text="REPLY-T2")
+    with coordinator.store._lock, coordinator.store._connect() as connection:
+        connection.execute(
+            "UPDATE her_turns SET accepted_at=? WHERE session_id=? AND turn_id=?",
+            ("2026-10-27T10:04:00+00:00", second.session_id, second.turn_id),
+        )
+    transport, _ = _prepare(coordinator, request_id="t3", message="TEXT-T3")
+    prompt = coordinator.accept(transport).materialized_prompt
+    assert prompt.index("TEXT-T1") < prompt.index("PHONE-MIDDLE") < prompt.index("TEXT-T2")
+    assert "TEXT-T3" in prompt
+
+
+@pytest.mark.asyncio
+async def test_incremental_text_does_not_reparse_long_phone_history(phone, monkeypatch):
+    from orchestrator.phone_context_handoff import commit_success, prepare_turn
+
+    runtime = turn_runtime(phone)
+    for index in range(80):
+        await phone.manager.append_fragment_once(
+            phone.binding, Fragment(
+                f"old-{index}", "user", f"Prior fact {index}.", index * 10, index * 10 + 5,
+            ),
+        )
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended', ended_at='2026-10-27T10:00:00Z' WHERE call_id=?",
+            (phone.call_id,),
+        )
+    item = turn_item(phone, "consume-history")
+    prepare_turn(runtime, item, incremental=True)
+    commit_success(item, SimpleNamespace(is_success=True))
+
+    calls = 0
+    original = phone.store.live_transcript_segments
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(phone.store, "live_transcript_segments", counted)
+    for index in range(3):
+        prompt = await runtime_pipeline.build_turn_prompt(
+            runtime, turn_item(phone, f"later-text-{index}"), is_bridge_request=False,
+        )
+        assert prompt.incremental
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnected_provider_offsets_use_new_epoch_start(phone, monkeypatch):
+    await phone.manager.append_fragment_once(
+        phone.binding, Fragment("epoch-one", "user", "Before reconnect.", 0, 10),
+    )
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET started_at='2026-01-01T00:00:00+00:00' WHERE call_id=?",
+            (phone.call_id,),
+        )
+    await _resume_for_context_regression(phone, monkeypatch)
+    await phone.manager.append_fragment_once(
+        phone.binding, Fragment("epoch-two", "user", "After reconnect.", 0, 10),
+    )
+    segments = phone.store.live_transcript_segments(
+        phone.session_id, owner_id=phone.owner_id, call_id=phone.call_id,
+    )
+    assert [s["text"] for s in segments] == ["Before reconnect.", "After reconnect."]
+    assert segments[0]["created_at"] < segments[1]["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_canonical_message_time_reaches_fixed_her_turn(phone, tmp_path):
+    from types import MethodType
+    from adapters.her_v2 import HERv2Adapter
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+
+    accepted = phone.store.accept_run(
+        session_id=phone.session_id, owner_id=phone.owner_id, agent_id=phone.agent_id,
+        request_id="queued-canonical-time", text="Queued message", source="test",
+        idempotency_key="queued-canonical-time", expected_context_generation=1,
+    )
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE messages SET created_at=? WHERE message_id=?",
+            ("2026-10-27T10:00:00+00:00", accepted.message_id),
+        )
+    runtime = turn_runtime(phone)
+    runtime.config.active_backend = "her-v2"
+    pcm_root = tmp_path / "pcm-canonical-time"
+    pcm_root.mkdir()
+    runtime.context_assembler = BridgeContextAssembler(BridgeMemoryStore(pcm_root), None)
+    backend = runtime.backend_manager.current_backend
+    coordinator = HerBackendSessionCoordinator(tmp_path / "her-canonical-time")
+    backend._session_coordinator = coordinator
+    backend._fixed_transport_audit = {}
+    backend._adopt_verified_steer_session = lambda _meta: None
+    backend._fixed_session_binding = lambda _meta: {
+        "instance_id": "HASHI", "agent_id": phone.agent_id, "owner_id": phone.owner_id,
+        "hashi_conversation_id": phone.session_id, "context_generation": 1,
+        "workzone_identity": "test",
+    }
+    backend.current_pcm_section_keys = lambda: ()
+    backend.current_pcm_sections = lambda _keys: {}
+    backend.can_resume_fixed_session = lambda: True
+    backend.prepare_fixed_turn_input = MethodType(HERv2Adapter.prepare_fixed_turn_input, backend)
+    item = turn_item(phone, accepted.request_id)
+    item.message_id = accepted.message_id
+    item.run_id = accepted.run_id
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    turn = coordinator.accept(prompt.final_prompt)
+    saved = coordinator.store.turn_by_idempotency(
+        turn.session_id, f"{turn.session_id}:{accepted.message_id}",
+    )
+    assert saved["conversation_at"] == "2026-10-27T10:00:00+00:00"
+
+
+
+def test_legacy_her_database_keeps_completed_turns_when_adding_conversation_time(tmp_path):
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from tests.test_her_v2_fixed_backend import _prepare, _sections
+
+    root = tmp_path / "legacy-her"
+    coordinator = HerBackendSessionCoordinator(root)
+    transport, _ = _prepare(coordinator, request_id="old", message="OLD-TEXT")
+    old = coordinator.accept(transport)
+    coordinator.complete(old, assistant_text="OLD-REPLY")
+    with coordinator.store._lock, coordinator.store._connect() as connection:
+        connection.execute(
+            "UPDATE her_turns SET accepted_at=? WHERE turn_id=?",
+            ("2026-10-27T10:00:00+00:00", old.turn_id),
+        )
+        connection.execute("ALTER TABLE her_turns DROP COLUMN conversation_at")
+
+    recovered = HerBackendSessionCoordinator(root)
+    phone_section = {
+        "key": "recent_exchange:phone:legacy-test", "title": "RECENT COMPLETED EXCHANGE",
+        "text": "USER: LATER-PHONE", "authority": "history", "rank": 4,
+        "protected": False, "metadata": {"conversation_at": "2026-10-27T10:01:00+00:00"},
+        "order": 100,
+    }
+    transport, _ = _prepare(
+        recovered, request_id="new", message="NEW-TEXT",
+        sections=[*_sections(), phone_section],
+    )
+    prompt = recovered.accept(transport).materialized_prompt
+    assert prompt.index("OLD-TEXT") < prompt.index("LATER-PHONE")
+    turns = recovered.store.recent_completed_turns(old.session_id)
+    assert turns[0]["conversation_at"] == ""
+    assert turns[0]["assistant_text"] == "OLD-REPLY"

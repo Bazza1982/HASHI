@@ -76,6 +76,7 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
                context_generation: int, call_id: str | None = None,
                call_epoch: int | None = None, cutoff_ms: int | None = None,
                ended_only: bool = False, consumer_key: str | None = None,
+               before_call_epoch: int | None = None,
                unconsumed_only: bool = False,
                exclude_call_scope: tuple[str, int] | None = None,
                ) -> list[dict[str, Any]]:
@@ -84,11 +85,13 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
     params: list[Any] = [owner_id, owner_id, session_id, session_id, agent_id, int(context_generation)]
     if call_id is not None: clauses.append("f.call_id=?"); params.append(call_id)
     if call_epoch is not None: clauses.append("f.call_epoch=?"); params.append(int(call_epoch))
+    if before_call_epoch is not None: clauses.append("f.call_epoch<?"); params.append(int(before_call_epoch))
     if ended_only: clauses.append("c.ended_at IS NOT NULL")
     if cutoff_ms is not None: clauses.append("f.start_ms < ?"); params.append(int(cutoff_ms))
     if exclude_call_scope is not None:
-        clauses.append("NOT (f.call_id=? AND f.call_epoch=?)")
-        params.extend((str(exclude_call_scope[0]), int(exclude_call_scope[1])))
+        # A frozen action covers every epoch of its logical call.
+        clauses.append("f.call_id<>?")
+        params.append(str(exclude_call_scope[0]))
     if unconsumed_only:
         if not consumer_key:
             raise PhoneContextError("phone_context_consumer_unavailable", source=session_id)
@@ -106,6 +109,11 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
         JOIN run_events AS e ON e.event_id=f.event_id
         WHERE {' AND '.join(clauses)}
         ORDER BY c.started_at,f.call_epoch,f.start_ms,f.end_ms,f.sequence,f.provider_event_id""", params).fetchall()
+    from orchestrator.session_store import _conversation_timestamp, _live_epoch_starts
+    epoch_starts = _live_epoch_starts(
+        connection, session_id,
+        {str(row["call_id"]) for row in rows if int(row["call_epoch"]) > 1},
+    )
     fragments=[]
     for row in rows:
         if cutoff_ms is not None and int(row["end_ms"])>cutoff_ms:
@@ -118,8 +126,10 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
             "provider_event_id":str(row["provider_event_id"]),"sequence":int(row["sequence"]),
             "role":str(row["speaker"]),"text":detail["text"],
             "start_ms":int(row["start_ms"]),"end_ms":int(row["end_ms"]),
-            "conversation_at":_conversation_at(
-                row["started_at"],int(row["start_ms"])
+            "conversation_at":_conversation_timestamp(
+                row["started_at"] if int(row["call_epoch"]) == 1
+                else epoch_starts.get((str(row["call_id"]), int(row["call_epoch"]))),
+                int(row["start_ms"]), fallback=row["created_at"],
             ),
             "source":"durable_phone_transcript"})
     return fragments
@@ -127,10 +137,12 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
 
 def _pending(connection, *, owner_id: str, session_id: str,
              call_id: str, call_epoch: int | None = None,
+             before_call_epoch: int | None = None,
              cutoff_ms: int | None = None) -> bool:
     clauses=["owner_id=?","session_id=?","call_id=?"]
     params:list[Any]=[owner_id,session_id,call_id]
     if call_epoch is not None: clauses.append("call_epoch=?"); params.append(int(call_epoch))
+    if before_call_epoch is not None: clauses.append("call_epoch<?"); params.append(int(before_call_epoch))
     if cutoff_ms is not None: clauses.append("start_ms < ?"); params.append(int(cutoff_ms))
     for table in ("live_provider_fragment_inbox","live_provider_event_inbox"):
         extra=" AND event_type='transcript'" if table.endswith("event_inbox") else ""
@@ -193,14 +205,24 @@ def freeze_action_handoff(store, binding, proposal) -> str:
         if call is None or any(str(call[name])!=str(getattr(binding,name)) for name in
             ("owner_id","agent_id","session_id","context_generation","instance_id","instance_generation","call_epoch","provider_session_id")):
             raise PhoneContextError("phone_context_scope_changed",source=binding.call_id)
-        if _pending(connection,owner_id=binding.owner_id,session_id=binding.session_id,
-            call_id=binding.call_id,call_epoch=binding.call_epoch,cutoff_ms=proposal.cutoff_ms):
+        if (
+            _pending(connection,owner_id=binding.owner_id,session_id=binding.session_id,
+                call_id=binding.call_id,call_epoch=binding.call_epoch,cutoff_ms=proposal.cutoff_ms)
+            or _pending(connection,owner_id=binding.owner_id,session_id=binding.session_id,
+                call_id=binding.call_id,before_call_epoch=binding.call_epoch)
+        ):
             raise PhoneContextError("phone_context_transcript_pending",source=binding.call_id)
-        fragments=_fragments(connection,owner_id=binding.owner_id,agent_id=binding.agent_id,
+        current_fragments=_fragments(connection,owner_id=binding.owner_id,agent_id=binding.agent_id,
             session_id=binding.session_id,context_generation=binding.context_generation,
             call_id=binding.call_id,call_epoch=binding.call_epoch,cutoff_ms=proposal.cutoff_ms)
-        if not fragments or not set(proposal.source_event_ids).issubset({r["provider_event_id"] for r in fragments}):
+        if not current_fragments or not set(proposal.source_event_ids).issubset(
+            {r["provider_event_id"] for r in current_fragments}
+        ):
             raise PhoneContextError("phone_context_transcript_unconfirmed",source=binding.call_id)
+        prior_fragments=_fragments(connection,owner_id=binding.owner_id,agent_id=binding.agent_id,
+            session_id=binding.session_id,context_generation=binding.context_generation,
+            call_id=binding.call_id,before_call_epoch=binding.call_epoch)
+        fragments=[*prior_fragments,*current_fragments]
         payload={**material,"handoff_id":key,"fragments":fragments}
         encoded=_encode_payload(payload)
         connection.execute("""INSERT INTO phone_context_handoffs VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -629,10 +651,8 @@ def _pending_ended_call(
         owner_id, agent_id, session_id, int(context_generation)
     ]
     if exclude_call_scope is not None:
-        call_clauses.append("NOT (c.call_id=? AND c.call_epoch=?)")
-        call_params.extend((
-            str(exclude_call_scope[0]), int(exclude_call_scope[1])
-        ))
+        call_clauses.append("c.call_id<>?")
+        call_params.append(str(exclude_call_scope[0]))
     row = connection.execute(f"""SELECT c.call_id FROM live_calls AS c
         WHERE {' AND '.join(call_clauses)} AND (
             EXISTS (
@@ -726,6 +746,19 @@ def _action_context_is_active(
                 AND context_generation=? AND ended_at IS NULL""",
             (owner_id, agent_id, session_id, int(context_generation)),
         ).fetchall()
+        # Existing fixed sections identify the epoch in which their snapshot was
+        # frozen.  A replacement Provider changes the epoch, not the logical call.
+        prior_epochs = connection.execute(
+            """SELECT DISTINCT h.call_id,h.call_epoch
+                FROM phone_context_handoffs AS h
+                JOIN live_calls AS c ON c.call_id=h.call_id
+                WHERE c.owner_id=? AND c.agent_id=? AND c.session_id=?
+                AND c.context_generation=? AND c.ended_at IS NULL
+                AND h.owner_id=c.owner_id AND h.agent_id=c.agent_id
+                AND h.session_id=c.session_id
+                AND h.context_generation=c.context_generation""",
+            (owner_id, agent_id, session_id, int(context_generation)),
+        ).fetchall()
     if not active_calls:
         return False
 
@@ -756,7 +789,7 @@ def _action_context_is_active(
             call_id=str(row["call_id"]),
             call_epoch=int(row["call_epoch"]),
         ) == declared
-        for row in active_calls
+        for row in [*active_calls, *prior_epochs]
     )
 
 
@@ -792,24 +825,27 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
             if key in live and str(live[key])!=str(snapshot[key]):
                 raise PhoneContextError("phone_context_scope_changed",source=handoff_id)
         action_fragments=list(snapshot["fragments"])
+        from orchestrator.session_store import _live_epoch_starts
         with store._lock, store._connection() as connection:
             call = connection.execute(
                 """SELECT started_at FROM live_calls
                     WHERE owner_id=? AND agent_id=? AND session_id=?
-                    AND context_generation=? AND call_id=? AND call_epoch=?""",
-                (
-                    owner_id,
-                    runtime.name,
-                    session_id,
-                    generation,
-                    str(snapshot["call_id"]),
-                    int(snapshot["call_epoch"]),
-                ),
+                    AND context_generation=? AND call_id=?""",
+                (owner_id, runtime.name, session_id, generation, str(snapshot["call_id"])),
             ).fetchone()
+            epoch_starts = _live_epoch_starts(
+                connection, session_id,
+                {str(snapshot["call_id"])} if any(
+                    int(fragment["call_epoch"]) > 1 for fragment in action_fragments
+                ) else set(),
+            )
         if call is not None:
             for fragment in action_fragments:
+                epoch = int(fragment["call_epoch"])
+                start = (call["started_at"] if epoch == 1
+                         else epoch_starts.get((str(snapshot["call_id"]), epoch)))
                 fragment["conversation_at"] = _conversation_at(
-                    call["started_at"], int(fragment["start_ms"])
+                    start, int(fragment["start_ms"])
                 )
 
     backend=runtime.backend_manager.current_backend
@@ -958,11 +994,12 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         return [],audit
     if live:
         audit["exclude_history_exchange_prefix"]=(
-            f"live:{snapshot['call_id']}:{int(snapshot['call_epoch'])}:"
+            f"live:{snapshot['call_id']}:"
         )
         body=(
             "Frozen Phone conversation for the current action. This is conversation "
-            "history. Only user speech captured before the action cutoff authorizes "
+            "history, including earlier connections of the same call. Only user speech "
+            "from the current connection captured before the action cutoff authorizes "
             "this action; later speech cannot change it.\n\n"
             + _semantic_transcript(included)
         )
