@@ -70,6 +70,7 @@ from orchestrator.telegram_credential import (
     TelegramCredentialService,
     verify_telegram_bot_token,
 )
+from orchestrator.workbench_auth import _windows_remote_runtime_sids
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.demo.api import DemoConnector
@@ -410,11 +411,25 @@ class WorkbenchApiServer:
             getattr(self.global_config, "secrets_path", None)
             or Path(self.config_path).parent / "secrets.json"
         )
+        remote_shared_token = self.secrets.get("hashi_remote_shared_token")
+        remote_access_configured = (
+            isinstance(remote_shared_token, str) and bool(remote_shared_token.strip())
+        ) or bool(os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip())
+        remote_runtime_sids = ()
+        if (
+            getattr(self.global_config, "deployment_profile", "personal")
+            == "personal"
+            and remote_access_configured
+        ):
+            remote_runtime_sids = _windows_remote_runtime_sids(
+                Path(secrets_path).expanduser().resolve().parent
+            )
         self.telegram_credential_service = TelegramCredentialService(
             config_path=self.config_path,
             secrets_path=secrets_path,
             state_root=getattr(self.global_config, "bridge_home", None),
             verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
+            private_full_control_sids=remote_runtime_sids,
         )
         self._agent_config_lock = asyncio.Lock()
         self._standalone_agent_management = None
