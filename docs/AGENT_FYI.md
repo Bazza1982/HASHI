@@ -134,15 +134,12 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Phone speech is recent-exchange/HCC role history; fixed PCM uses dialogue rounds
-without raw metadata or separate limits. Action snapshots never advance history
-and remain while their owning call is active; terminal settlement replaces them
-with complete ordinary history even without a tail. Legacy grouped/ungrouped and
-semantic cleanup requires exact scope, event identity, digest and text; multi-call,
-late and repeated-text source is reconstructed without bounded backtracking.
-Phone and typed history share conversation-time presentation order in HERV3;
-Provider arrival sequence is never compared with Message ordinal. Invalid source
-stays. Failures preserve cause; resumes stop after five. See
+Phone history uses dialogue-round HCC without raw metadata. Action snapshots do
+not consume history: keep them while their call is active, then replace them with
+complete ordinary history. Legacy cleanup validates exact source and fails closed;
+deterministic matching accepts multi-call, late and repeated text. HERV3 orders
+Phone and typed history by conversation time, never arrival/Message counters.
+Failures preserve cause; resumes stop after five. See
 [Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
