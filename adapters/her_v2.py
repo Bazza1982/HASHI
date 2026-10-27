@@ -1402,6 +1402,24 @@ class HERv2Adapter(BaseBackend):
             return ()
         return tuple(sorted(str(key) for key in pcm if str(key)))
 
+    def current_pcm_sections(
+        self, section_keys: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        """Expose copied typed PCM sections selected for verified migration."""
+
+        if self._session_coordinator is None or not self._session_id:
+            return {}
+        requested = {str(key) for key in section_keys if str(key)}
+        current = self._session_coordinator.store.session(self._session_id)
+        pcm = current.get("pcm") if isinstance(current, Mapping) else None
+        if not isinstance(pcm, Mapping):
+            return {}
+        return {
+            str(key): dict(value)
+            for key, value in pcm.items()
+            if str(key) in requested and isinstance(value, Mapping)
+        }
+
     def steer_continuation_evidence(
         self, request_id: str
     ) -> dict[str, Any] | None:

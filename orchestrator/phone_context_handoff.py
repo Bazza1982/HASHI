@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,7 +15,7 @@ FRAGMENT_ENCODING = "hashi.phone-fragments.grouped.v1"
 EVENT_COLUMNS = ("provider_event_id", "sequence", "start_ms", "end_ms")
 LEGACY_SECTION_PREFIX = "phone_external_context:"
 SEMANTIC_SECTION_PREFIX = "recent_exchange:phone:"
-SEMANTIC_CONSUMER_VERSION = "phone-semantic-history-v2"
+SEMANTIC_CONSUMER_VERSION = "phone-semantic-history-v3"
 
 
 class PhoneContextError(RuntimeError):
@@ -58,7 +59,10 @@ def _scope(store, *, owner_id: str, agent_id: str, session_id: str,
 def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
                context_generation: int, call_id: str | None = None,
                call_epoch: int | None = None, cutoff_ms: int | None = None,
-               ended_only: bool = False) -> list[dict[str, Any]]:
+               ended_only: bool = False, consumer_key: str | None = None,
+               unconsumed_only: bool = False,
+               exclude_call_scope: tuple[str, int] | None = None,
+               ) -> list[dict[str, Any]]:
     clauses = ["f.owner_id=?", "c.owner_id=?", "f.session_id=?", "c.session_id=?",
         "c.agent_id=?", "c.context_generation=?"]
     params: list[Any] = [owner_id, owner_id, session_id, session_id, agent_id, int(context_generation)]
@@ -66,6 +70,21 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
     if call_epoch is not None: clauses.append("f.call_epoch=?"); params.append(int(call_epoch))
     if ended_only: clauses.append("c.ended_at IS NOT NULL")
     if cutoff_ms is not None: clauses.append("f.start_ms < ?"); params.append(int(cutoff_ms))
+    if exclude_call_scope is not None:
+        clauses.append("NOT (f.call_id=? AND f.call_epoch=?)")
+        params.extend((str(exclude_call_scope[0]), int(exclude_call_scope[1])))
+    if unconsumed_only:
+        if not consumer_key:
+            raise PhoneContextError("phone_context_consumer_unavailable", source=session_id)
+        clauses.append("""NOT EXISTS (
+            SELECT 1 FROM phone_context_consumption AS pc
+            WHERE pc.owner_id=f.owner_id AND pc.agent_id=c.agent_id
+            AND pc.session_id=f.session_id AND pc.context_generation=c.context_generation
+            AND pc.consumer_key=? AND pc.call_id=f.call_id
+            AND pc.call_epoch=f.call_epoch
+            AND pc.provider_event_id=f.provider_event_id
+        )""")
+        params.append(str(consumer_key))
     rows = connection.execute(f"""SELECT f.*, c.started_at, e.detail_json
         FROM live_fragments AS f JOIN live_calls AS c ON c.call_id=f.call_id
         JOIN run_events AS e ON e.event_id=f.event_id
@@ -215,6 +234,232 @@ def _fixed_pcm_section_keys(backend: Any) -> tuple[str, ...]:
     return tuple(sorted({str(key) for key in keys if isinstance(key, str) and key}))
 
 
+def _fixed_pcm_sections(
+    backend: Any, section_keys: list[str]
+) -> dict[str, dict[str, Any]]:
+    resolver = getattr(backend, "current_pcm_sections", None)
+    if not callable(resolver):
+        raise PhoneContextError(
+            "phone_context_legacy_state_unavailable",
+            source=str(getattr(backend, "_session_id", "") or "fixed-session"),
+        )
+    try:
+        raw_sections = resolver(tuple(section_keys))
+    except Exception as exc:
+        raise PhoneContextError(
+            "phone_context_legacy_state_unavailable",
+            source=str(getattr(backend, "_session_id", "") or "fixed-session"),
+        ) from exc
+    if not isinstance(raw_sections, Mapping):
+        raise PhoneContextError(
+            "phone_context_legacy_state_unavailable",
+            source=str(getattr(backend, "_session_id", "") or "fixed-session"),
+        )
+    sections: dict[str, dict[str, Any]] = {}
+    for key, value in raw_sections.items():
+        if not isinstance(key, str) or not key or not isinstance(value, Mapping):
+            raise PhoneContextError(
+                "phone_context_legacy_state_unavailable",
+                source=str(getattr(backend, "_session_id", "") or "fixed-session"),
+            )
+        sections[key] = dict(value)
+    return sections
+
+
+def _fragment_identity(row: Mapping[str, Any]) -> tuple[str, int, str]:
+    return (
+        str(row["call_id"]),
+        int(row["call_epoch"]),
+        str(row["provider_event_id"]),
+    )
+
+
+def _canonical_fragment(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+    try:
+        fragment = {
+            "call_id": str(row["call_id"]),
+            "call_epoch": int(row["call_epoch"]),
+            "provider_event_id": str(row["provider_event_id"]),
+            "sequence": int(row["sequence"]),
+            "role": str(row["role"]),
+            "text": row["text"],
+            "start_ms": int(row["start_ms"]),
+            "end_ms": int(row["end_ms"]),
+            "source": str(row["source"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=source
+        ) from None
+    if (
+        fragment["role"] not in {"user", "assistant"}
+        or not isinstance(fragment["text"], str)
+        or not fragment["provider_event_id"]
+    ):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=source
+        )
+    return fragment
+
+
+def _fragment_digest(fragments: list[Mapping[str, Any]]) -> str:
+    identity = [_fragment_identity(row) for row in fragments]
+    return hashlib.sha256(
+        json.dumps(identity, separators=(",", ":")).encode()
+    ).hexdigest()[:24]
+
+
+def _legacy_payload(section: Mapping[str, Any], *, section_key: str) -> dict[str, Any]:
+    text = section.get("text")
+    if not isinstance(text, str):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        )
+    declared_hash = section.get("content_sha256")
+    if declared_hash and str(declared_hash) != hashlib.sha256(text.encode()).hexdigest():
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        )
+    marker = text.find("\n{")
+    encoded = text[marker + 1 :] if marker >= 0 else text.strip()
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, ValueError):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        ) from None
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("fragments"), list):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        )
+    return dict(payload)
+
+
+def _validate_legacy_sources(
+    sections: Mapping[str, Mapping[str, Any]],
+    legacy_section_keys: list[str],
+    replacement_fragments: list[dict[str, Any]],
+    *,
+    session_id: str,
+    agent_id: str,
+    context_generation: int,
+) -> None:
+    if not legacy_section_keys:
+        return
+    available = {
+        _fragment_identity(row): _canonical_fragment(row, source=session_id)
+        for row in replacement_fragments
+    }
+    for section_key in legacy_section_keys:
+        section = sections.get(section_key)
+        if section is None:
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+        payload = _legacy_payload(section, section_key=section_key)
+        scope = payload.get("scope")
+        try:
+            scope_generation = (
+                int(scope.get("context_generation") or 0)
+                if isinstance(scope, Mapping) else 0
+            )
+        except (TypeError, ValueError):
+            scope_generation = 0
+        if (
+            not isinstance(scope, Mapping)
+            or str(scope.get("session_id") or "") != session_id
+            or str(scope.get("agent_id") or "") != agent_id
+            or scope_generation != int(context_generation)
+        ):
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+        fragments = [
+            _canonical_fragment(row, source=section_key)
+            for row in payload["fragments"]
+            if isinstance(row, Mapping)
+        ]
+        if len(fragments) != len(payload["fragments"]) or not fragments:
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+        expected_key = LEGACY_SECTION_PREFIX + _fragment_digest(fragments)
+        if expected_key != section_key:
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+        identities = [_fragment_identity(row) for row in fragments]
+        if len(identities) != len(set(identities)):
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+        if any(available.get(identity) != fragment
+               for identity, fragment in zip(identities, fragments)):
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+
+
+def _semantic_source_matches(
+    section_key: str,
+    section: Mapping[str, Any],
+    replacement_fragments: list[dict[str, Any]],
+) -> bool:
+    text = section.get("text")
+    metadata = section.get("metadata")
+    if not isinstance(text, str) or not isinstance(metadata, Mapping):
+        return False
+    try:
+        start_sequence = int(metadata.get("sequence"))
+    except (TypeError, ValueError):
+        return False
+    starts = [
+        index
+        for index, row in enumerate(replacement_fragments)
+        if int(row["sequence"]) == start_sequence
+    ]
+    if len(starts) != 1:
+        return False
+    target_digest = section_key.removeprefix(SEMANTIC_SECTION_PREFIX)
+    if len(target_digest) != 24 or any(
+        character not in "0123456789abcdef" for character in target_digest
+    ):
+        return False
+    start = starts[0]
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for index in range(start, len(replacement_fragments)):
+        if index > start:
+            digest.update(b",")
+        digest.update(
+            json.dumps(
+                _fragment_identity(replacement_fragments[index]),
+                separators=(",", ":"),
+            ).encode()
+        )
+        candidate = digest.copy()
+        candidate.update(b"]")
+        if candidate.hexdigest()[:24] != target_digest:
+            continue
+        return _semantic_transcript(replacement_fragments[start : index + 1]) == text
+    return False
+
+
+def _validate_semantic_sources(
+    sections: Mapping[str, Mapping[str, Any]],
+    semantic_section_keys: list[str],
+    replacement_fragments: list[dict[str, Any]],
+) -> None:
+    for section_key in semantic_section_keys:
+        section = sections.get(section_key)
+        if section is None or not _semantic_source_matches(
+            section_key, section, replacement_fragments
+        ):
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            )
+
+
 def _semantic_transcript(fragments: list[dict[str, Any]]) -> str:
     segments: list[dict[str, Any]] = []
     for fragment in fragments:
@@ -232,14 +477,7 @@ def _semantic_transcript(fragments: list[dict[str, Any]]) -> str:
 
 
 def _ordinary_history_section(fragments: list[dict[str, Any]]) -> tuple:
-    identity = [
-        (row["call_id"], row["call_epoch"], row["provider_event_id"])
-        for row in fragments
-    ]
-    digest = hashlib.sha256(
-        json.dumps(identity, separators=(",", ":")).encode()
-    ).hexdigest()[:24]
-    key = f"recent_exchange:phone:{digest}"
+    key = f"recent_exchange:phone:{_fragment_digest(fragments)}"
     return (
         "RECENT COMPLETED EXCHANGE",
         _semantic_transcript(fragments),
@@ -254,19 +492,114 @@ def _ordinary_history_section(fragments: list[dict[str, Any]]) -> tuple:
     )
 
 
-def _ended_fragments(store: Any, *, owner_id: str, agent_id: str,
-                     session_id: str, context_generation: int) -> list[dict[str, Any]]:
-    with store._lock, store._connection() as connection:
-        calls = connection.execute("""SELECT call_id FROM live_calls
-            WHERE owner_id=? AND agent_id=? AND session_id=?
-            AND context_generation=? AND ended_at IS NOT NULL""",
-            (owner_id, agent_id, session_id, context_generation)).fetchall()
-        for call in calls:
-            if _pending(connection, owner_id=owner_id, session_id=session_id,
-                        call_id=str(call[0])):
-                raise PhoneContextError(
-                    "phone_context_transcript_pending", source=str(call[0])
+def _history_units(
+    fragments: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    units: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_scope: tuple[str, int] | None = None
+    current_has_user = False
+    for fragment in fragments:
+        scope = (str(fragment["call_id"]), int(fragment["call_epoch"]))
+        role = str(fragment["role"])
+        starts_next_round = (
+            bool(current)
+            and (
+                scope != current_scope
+                or (
+                    role == "user" and current_has_user
+                    and str(current[-1]["role"]) != "user"
                 )
+            )
+        )
+        if starts_next_round:
+            units.append(current)
+            current = []
+            current_has_user = False
+        if not current:
+            current_scope = scope
+        current.append(fragment)
+        current_has_user = current_has_user or role == "user"
+    if current:
+        units.append(current)
+    return units
+
+
+def _ordinary_history_sections(
+    fragments: list[dict[str, Any]],
+) -> list[tuple]:
+    return [
+        _ordinary_history_section(unit)
+        for unit in _history_units(fragments)
+        if unit
+    ]
+
+
+def _pending_ended_call(
+    connection: Any,
+    *,
+    owner_id: str,
+    agent_id: str,
+    session_id: str,
+    context_generation: int,
+    exclude_call_scope: tuple[str, int] | None = None,
+) -> str | None:
+    call_clauses = [
+        "c.owner_id=?",
+        "c.agent_id=?",
+        "c.session_id=?",
+        "c.context_generation=?",
+        "c.ended_at IS NOT NULL",
+    ]
+    call_params: list[Any] = [
+        owner_id, agent_id, session_id, int(context_generation)
+    ]
+    if exclude_call_scope is not None:
+        call_clauses.append("NOT (c.call_id=? AND c.call_epoch=?)")
+        call_params.extend((
+            str(exclude_call_scope[0]), int(exclude_call_scope[1])
+        ))
+    row = connection.execute(f"""SELECT c.call_id FROM live_calls AS c
+        WHERE {' AND '.join(call_clauses)} AND (
+            EXISTS (
+                SELECT 1 FROM live_provider_fragment_inbox AS p
+                WHERE p.owner_id=c.owner_id AND p.session_id=c.session_id
+                AND p.call_id=c.call_id AND p.call_epoch=c.call_epoch
+            )
+            OR EXISTS (
+                SELECT 1 FROM live_provider_event_inbox AS p
+                WHERE p.owner_id=c.owner_id AND p.session_id=c.session_id
+                AND p.call_id=c.call_id AND p.call_epoch=c.call_epoch
+                AND p.event_type='transcript'
+            )
+        ) LIMIT 1""", call_params).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def _ended_fragments(
+    store: Any,
+    *,
+    owner_id: str,
+    agent_id: str,
+    session_id: str,
+    context_generation: int,
+    consumer_key: str | None = None,
+    unconsumed_only: bool = False,
+    exclude_call_scope: tuple[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    with store._lock, store._connection() as connection:
+        pending_call = _pending_ended_call(
+            connection,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            context_generation=context_generation,
+            exclude_call_scope=exclude_call_scope,
+        )
+        if pending_call is not None:
+            raise PhoneContextError(
+                "phone_context_transcript_pending", source=pending_call
+            )
         return _fragments(
             connection,
             owner_id=owner_id,
@@ -274,42 +607,49 @@ def _ended_fragments(store: Any, *, owner_id: str, agent_id: str,
             session_id=session_id,
             context_generation=context_generation,
             ended_only=True,
+            consumer_key=consumer_key,
+            unconsumed_only=unconsumed_only,
+            exclude_call_scope=exclude_call_scope,
         )
-
 
 def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[str,Any]]:
     from orchestrator import runtime_session
     session_id=str(getattr(item,"session_id","") or "")
     if not session_id: return [],{}
     meta=getattr(item,"request_metadata",None) or {}
-    owner_id=runtime_session.owner_id(runtime,str(getattr(item,"owner_id","") or meta.get("owner_id") or "") or None)
+    owner_id=runtime_session.owner_id(
+        runtime,
+        str(getattr(item,"owner_id","") or meta.get("owner_id") or "") or None,
+    )
     store=runtime_session.ensure_store(runtime)
     generation=int(getattr(item,"context_generation",1) or 1)
-    _scope(store,owner_id=owner_id,agent_id=runtime.name,session_id=session_id,context_generation=generation)
+    _scope(
+        store,owner_id=owner_id,agent_id=runtime.name,session_id=session_id,
+        context_generation=generation,
+    )
     live=meta.get("live_voice") if isinstance(meta.get("live_voice"),dict) else None
     snapshot=None
+    action_fragments: list[dict[str,Any]] = []
     if live:
         handoff_id=str(live.get("phone_context_handoff_id") or "")
-        if not handoff_id: raise PhoneContextError("phone_context_handoff_unavailable",source=session_id)
-        snapshot=load_handoff(store,handoff_id,owner_id=owner_id,agent_id=runtime.name,
-            session_id=session_id,context_generation=generation)
-        for key in ("call_id","call_epoch","delegation_id","proposal_version","proposal_digest"):
+        if not handoff_id:
+            raise PhoneContextError("phone_context_handoff_unavailable",source=session_id)
+        snapshot=load_handoff(
+            store,handoff_id,owner_id=owner_id,agent_id=runtime.name,
+            session_id=session_id,context_generation=generation,
+        )
+        for key in (
+            "call_id","call_epoch","delegation_id","proposal_version","proposal_digest"
+        ):
             if key in live and str(live[key])!=str(snapshot[key]):
                 raise PhoneContextError("phone_context_scope_changed",source=handoff_id)
-        fragments=snapshot["fragments"]
-    else:
-        fragments = _ended_fragments(
-            store,
-            owner_id=owner_id,
-            agent_id=runtime.name,
-            session_id=session_id,
-            context_generation=generation,
-        )
+        action_fragments=list(snapshot["fragments"])
+
     backend=runtime.backend_manager.current_backend
     backend_id=str(runtime.config.active_backend)
     consumer=_consumer(backend_id,backend)
     typed_pcm = incremental and callable(
-        getattr(backend, "current_pcm_section_keys", None)
+        getattr(backend,"current_pcm_section_keys",None)
     )
     fixed_section_keys = _fixed_pcm_section_keys(backend) if typed_pcm else ()
     legacy_section_keys = [
@@ -318,63 +658,121 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
     semantic_section_keys = [
         key for key in fixed_section_keys if key.startswith(SEMANTIC_SECTION_PREFIX)
     ]
-    consumed=set()
+    has_action_section = "phone_action_context" in fixed_section_keys
+    has_consumption=False
     if incremental:
         with store._lock,store._connection() as connection:
-            consumed={(str(r[0]),int(r[1]),str(r[2])) for r in connection.execute("""SELECT call_id,call_epoch,provider_event_id
-                FROM phone_context_consumption WHERE owner_id=? AND agent_id=? AND session_id=?
-                AND context_generation=? AND consumer_key=?""",(owner_id,runtime.name,session_id,generation,consumer))}
-    has_action_section = "phone_action_context" in fixed_section_keys
+            has_consumption=connection.execute("""SELECT 1
+                FROM phone_context_consumption
+                WHERE owner_id=? AND agent_id=? AND session_id=?
+                AND context_generation=? AND consumer_key=? LIMIT 1""",(
+                    owner_id,runtime.name,session_id,generation,consumer,
+                )).fetchone() is not None
     migrate_history = bool(legacy_section_keys) or (
-        not consumed and bool(semantic_section_keys or has_action_section)
+        not has_consumption and bool(semantic_section_keys)
     )
-    history_fragments = list(fragments) if not live else []
-    if live and migrate_history:
-        action_scope = (str(snapshot["call_id"]), int(snapshot["call_epoch"]))
-        history_fragments = [
-            row
-            for row in _ended_fragments(
-                store,
+
+    history_fragments: list[dict[str,Any]] = []
+    action_scope = (
+        (str(snapshot["call_id"]),int(snapshot["call_epoch"]))
+        if snapshot else None
+    )
+    if incremental:
+        history_fragments=_ended_fragments(
+            store,
+            owner_id=owner_id,
+            agent_id=runtime.name,
+            session_id=session_id,
+            context_generation=generation,
+            consumer_key=consumer,
+            unconsumed_only=not migrate_history,
+            exclude_call_scope=action_scope,
+        )
+    else:
+        with store._lock,store._connection() as connection:
+            pending_call=_pending_ended_call(
+                connection,
                 owner_id=owner_id,
                 agent_id=runtime.name,
                 session_id=session_id,
                 context_generation=generation,
+                exclude_call_scope=action_scope,
             )
-            if (str(row["call_id"]), int(row["call_epoch"])) != action_scope
-        ]
-    history_included = (
-        list(history_fragments)
-        if migrate_history
-        else [
-            row for row in history_fragments
-            if (row["call_id"],row["call_epoch"],row["provider_event_id"])
-            not in consumed
-        ]
+        if pending_call is not None:
+            raise PhoneContextError(
+                "phone_context_transcript_pending", source=pending_call
+            )
+    included=action_fragments if live else history_fragments
+    replacement_by_identity: dict[tuple[str,int,str],dict[str,Any]] = {}
+    for fragment in [*history_fragments,*action_fragments]:
+        replacement_by_identity[_fragment_identity(fragment)]=fragment
+    replacement_fragments=list(replacement_by_identity.values())
+    semantic_migration_keys = semantic_section_keys if migrate_history else []
+    migration_keys = [*legacy_section_keys, *semantic_migration_keys]
+    migration_sections = (
+        _fixed_pcm_sections(backend, migration_keys) if migration_keys else {}
     )
-    included = list(fragments) if live else history_included
+    _validate_legacy_sources(
+        migration_sections,
+        legacy_section_keys,
+        replacement_fragments,
+        session_id=session_id,
+        agent_id=runtime.name,
+        context_generation=generation,
+    )
+    _validate_semantic_sources(
+        migration_sections, semantic_migration_keys, replacement_fragments
+    )
+
     migration_removals = (
-        [*legacy_section_keys, *semantic_section_keys] if migrate_history else []
+        [*legacy_section_keys,*semantic_section_keys] if migrate_history else []
     )
-    audit={"schema":"hashi.phone-context-handoff.v1","handoff_id":snapshot["handoff_id"] if snapshot else None,
+    audit={
+        "schema":"hashi.phone-context-handoff.v1",
+        "handoff_id":snapshot["handoff_id"] if snapshot else None,
         "cutoff_ms":snapshot["cutoff_ms"] if snapshot else None,
-        "requested_fragments":len(fragments),"included_fragments":len(included),
-        "consumer_key":consumer,"incremental":bool(incremental),
-        "source":"durable_phone_transcript","source_event_ids":[r["provider_event_id"] for r in included],
-        "history_migration_fragments":len(history_included) if live else 0,
-        "history_migration_source_event_ids":[
-            r["provider_event_id"] for r in history_included
+        "requested_fragments":len(action_fragments if live else history_fragments),
+        "included_fragments":len(included),
+        "consumer_key":consumer,
+        "incremental":bool(incremental),
+        "source":"durable_phone_transcript",
+        "source_event_ids":[row["provider_event_id"] for row in included],
+        "history_fragments":len(history_fragments) if live else 0,
+        "history_source_event_ids":[
+            row["provider_event_id"] for row in history_fragments
         ] if live else [],
-        "removed_section_keys":migration_removals if live else ["phone_action_context", *migration_removals]}
-    consumed_on_success = history_included if live and typed_pcm else included
-    plan={"store":store,"owner_id":owner_id,"agent_id":runtime.name,"session_id":session_id,
-        "context_generation":generation,"backend_id":backend_id,"backend":backend,
+        "history_migration_fragments":(
+            len(history_fragments) if live and migrate_history else 0
+        ),
+        "history_migration_source_event_ids":(
+            [row["provider_event_id"] for row in history_fragments]
+            if live and migrate_history else []
+        ),
+        "removed_section_keys":(
+            migration_removals
+            if live else [
+                *(["phone_action_context"] if has_action_section and history_fragments else []),
+                *migration_removals,
+            ]
+        ),
+    }
+    consumed_on_success=history_fragments if live and incremental else included
+    plan={
+        "store":store,
+        "owner_id":owner_id,
+        "agent_id":runtime.name,
+        "session_id":session_id,
+        "context_generation":generation,
+        "backend_id":backend_id,
+        "backend":backend,
         "fragments":consumed_on_success,
-        "consumer_key":consumer if getattr(backend,"_session_id",None) else None}
+        "consumer_key":consumer if getattr(backend,"_session_id",None) else None,
+    }
     item._phone_context_handoff=plan
     if not included:
         return [],audit
     if live:
-        audit["exclude_history_exchange_prefix"] = (
+        audit["exclude_history_exchange_prefix"]=(
             f"live:{snapshot['call_id']}:{int(snapshot['call_epoch'])}:"
         )
         body=(
@@ -383,9 +781,7 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
             "this action; later speech cannot change it.\n\n"
             + _semantic_transcript(included)
         )
-        sections = []
-        if history_included:
-            sections.append(_ordinary_history_section(history_included))
+        sections=_ordinary_history_sections(history_fragments)
         sections.append((
             "PHONE ACTION CONTEXT",
             body,
@@ -399,8 +795,7 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         return sections,audit
     if not incremental:
         return [],audit
-    return [_ordinary_history_section(included)],audit
-
+    return _ordinary_history_sections(included),audit
 
 def commit_success(item, response) -> None:
     plan=getattr(item,"_phone_context_handoff",None)

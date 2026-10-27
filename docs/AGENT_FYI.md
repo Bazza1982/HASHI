@@ -134,14 +134,14 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Phone speech is durable role history under recent-exchange/HCC. Fixed PCM gets
-semantic roles, no raw metadata or Phone-only limit. Actions freeze cutoff and
-hide only current call. Typed fixed PCM rebuilds legacy raw sections without
-consuming active snapshot; after hang-up, full call becomes ordinary history.
-Failures retain cause/panel; terminal calls settle busy and never reopen. Normal
-hang-up may dismiss. Replacement ignores old deadline while connecting and stops
-after five failed resumes. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md)
-and [handoff/recovery](HASHI_PHONE_CONTEXT_HANDOFF.md).
+Phone speech is durable role history under recent-exchange/HCC. Fixed PCM uses
+dialogue-round sections without raw metadata or a Phone-only limit. Actions freeze
+cutoff, carry unconsumed ended calls, and checkpoint only on success. Legacy raw
+sections require exact durable-source validation before removal; after hang-up,
+the full call is ordinary history. Failures settle calls and preserve cause/panel;
+replacement stops after five failed resumes. See
+[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
 neither translates replies/IDs. TUI switches freeze runtime identity/state.

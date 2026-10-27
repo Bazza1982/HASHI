@@ -38,26 +38,36 @@ PCM/HCC path as typed chat. No second Phone copy is injected.
 A fixed native thread already owns the earlier PCM snapshot. On an incremental
 turn, only unconsumed Phone speech is appended as ordinary, unprotected
 `history` sections whose keys use the standard `recent_exchange:` namespace.
-The model-visible body contains speaker text only. Provider event IDs, call IDs,
-epochs, timestamps and fragment boundaries remain durable audit facts and are
-not placed in the prompt. HERV3 keeps acknowledged batches across turns;
-same-batch retries remain idempotent.
+Each section is one stable dialogue round, so PCM can compact older rounds while
+retaining the newest rounds from the same long call. The model-visible body
+contains speaker text only. Provider event IDs, call IDs, epochs, timestamps and
+fragment boundaries remain durable audit facts and are not placed in the prompt.
+The SessionStore query excludes already consumed fragment identities before
+loading transcript JSON; ordinary turns do not reparse the lifetime call history.
 
 A Phone action is the sole exception. PAO loads its immutable cutoff snapshot
 and PCM projects that snapshot as one protected `phone_action_context` history
-section. The ordinary recent-history view is removed only for that same
-call/epoch, preventing post-cutoff speech or duplication while retaining every
-earlier Phone call. The next ordinary turn sends an explicit tombstone for the
-action section.
+section. Every action also checks for unconsumed ended calls and sends them as
+ordinary history in the same request, independently of whether a representation
+migration is due. The ordinary recent-history view is removed only for the
+current call/epoch, preventing post-cutoff speech or duplication while retaining
+every earlier Phone call. Successful Provider completion checkpoints the ended
+history; failure leaves it pending. The next ordinary turn sends an explicit
+tombstone for the action section.
 
 Typed fixed PCM also performs a one-time representation migration. It reads
-the exact current section identities, removes deprecated
-`phone_external_context:*` sections, and rebuilds their durable SessionStore
-source as ordinary semantic `recent_exchange:phone:*` history. If the first
-upgraded turn is a Phone action, earlier ended calls are rebuilt in that same
-request beside the protected action snapshot, so cleanup cannot create a
-history gap. Existing semantic Phone sections are replaced rather than copied
-when their new consumption ledger has not yet committed.
+the exact current sections and validates each deprecated
+`phone_external_context:*` identity, scope and fragment against durable
+SessionStore or the immutable current action snapshot before issuing a
+tombstone. Existing semantic Phone sections must likewise match their stable
+identity, start sequence and rendered text against one complete durable source
+range. Missing, malformed or incomplete source fails closed and preserves the
+old section. Verified source is rebuilt as ordinary semantic
+`recent_exchange:phone:*` history. If the first upgraded turn is a Phone
+action, earlier ended calls are rebuilt in that same request beside the
+protected action snapshot, so cleanup cannot create a history gap. Existing
+semantic Phone sections are replaced rather than copied when their new
+consumption ledger has not yet committed.
 
 Only a successful actual Provider result commits consumed fragment IDs.
 Failure/cancellation does not advance them; restart reads the same durable
@@ -189,3 +199,20 @@ Phone transport metadata in that semantic projection. Focused Phone and live
 voice regression passed 87 tests. This paragraph records defect evidence and
 offline qualification; committed source, Worker adoption and a later live turn
 remain separate facts.
+
+## HASHI3 cross-call continuity review correction, 2026-10-27
+
+PR review found that a second Phone action could omit an unconsumed earlier
+ended call, and that one long call was represented as one PCM history section.
+It also identified unsafe legacy cleanup when exact source was unavailable and
+repeated parsing of already consumed fragments. Four focused red tests
+reproduced those boundaries before implementation.
+
+The correction makes every fixed-session Phone action carry pending ended-call
+history, divides calls into stable dialogue-round history units, validates old
+Phone sections before removal, and excludes consumed identities in SQL before
+transcript JSON is loaded. After implementation, 30 focused Phone/FYI checks and
+475 related Phone, HERV3, PCM and runtime checks passed. Protected-Core, syntax
+and patch checks also passed. This is offline source qualification only;
+committed-source qualification, GitHub review, Worker adoption and live Phone
+acceptance remain separate facts.
