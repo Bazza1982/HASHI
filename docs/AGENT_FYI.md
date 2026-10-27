@@ -42,6 +42,9 @@ and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-202
 
 ## Configuration, identity, and persistence
 
+Isolated speech locks, runtimes and releases need separate proof. See
+[dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
+
 Configuration owns identity, ports, Workzones, endpoints and models; exclude
 secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
 shared compatibility uses the qualified registry. Unknown capability/price is
@@ -102,7 +105,6 @@ execution/delivery/receipts and show each final once. `/bg` freezes admission;
 schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
 
 HASHI3 Telegram health needs a bounded poll; startup preserves pending updates.
-HERV3 keeps complete WIP; source, Worker adoption and live proof stay separate.
 
 ## Engine, tools, and recovery
 
@@ -130,15 +132,18 @@ never long-retry or fallback. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
 Manual Desktop stale input stays unexecuted until a fresh frame and never replays;
 other failures release control. See [desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
-Local cascade speech is an opt-in Function sidecar; synthetic evidence is not
-physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
+defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
+settings/PCM do not prove provider readiness.
 
-Live Phone defaults on; missing provider key blocks and appears in `/phone`.
-Instance opt-out remains valid. Phone settings/PCM readiness do not prove provider readiness.
-
-Phone failures preserve causes: policy, auth, quota, rate limit, configuration,
-provider outage. Failed/interrupted panels persist until dismissal; normal
-hang-up may dismiss. Terminal calls settle attempts and busy state across replacement.
+Phone history uses dialogue-round HCC without raw metadata. Action snapshots
+survive call reconnection and preserve earlier constraints; authorization remains
+epoch-scoped. At hang-up, replace them with full ordinary history. Legacy cleanup
+validates exact source and fails closed. HERV3 orders Phone and typed Turns by
+conversation time; fixed incremental turns skip unused recent history.
+Failures preserve cause; resumes stop after five. See
+[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
 neither translates replies/IDs. TUI switches freeze runtime identity/state.
@@ -155,21 +160,14 @@ Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
 audio durable while hiding its duplicate generic player/bubble; ordinary audio
 stays visible. Telegram uses its renderer.
 
-Phone binds to the owner's foreground Conversation until hang-up. Actions get
-bounded original PCM/Conversation/job evidence, never scheduled prompts; lookups
-create no Run. See [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and
-[PAO](HASHI_PAO_SYSTEM_DESIGN.md).
-
-Phone speech is ordered and durable. Prove acceptance, execution, playback and
-listening separately; uncertain writes never auto-retry.
-
-Phone handoff freezes its ID only after scoped checks, preserves the full ordered
-snapshot and grants no authority. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
-
-Function adapters own next-call settings and recovery. Open once after readiness;
-window movement cannot hang up. Failed PCM refresh permits stop/inspection only;
-sideband follows the Session fence and explicit hang-up wins stale faults. Keep
-source, adoption and device acceptance separate.
+Phone binds to owner's foreground Conversation. Actions get bounded PCM/Conversation/job
+evidence, no scheduled prompts; lookups create no Run. Handoff freezes ID after
+checks, keeps ordered snapshot and grants no authority. Functions own settings
+and recovery; open after readiness. Failed PCM refresh allows stop/inspect only;
+Session fence and hang-up win. Do not retry uncertain writes. Verify
+acceptance/execution/playback/listening and source/adoption/device separately. See
+[PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md), and
+[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
 and remain owner-admitted during active Runs. `/new` preserves history; PAO owns
@@ -203,7 +201,6 @@ Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keep
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-See [Call](HASHI_CALL_INTERACTION_2026-10-04.md); device acceptance is separate.
 [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler

@@ -31,7 +31,7 @@ dlinfo==2.0.0
 docopt==0.6.2
 edge-tts==7.3.1
 espeakng-loader==0.2.4
-filelock==4.2.0
+filelock==4.2.1
 frozenlist==1.8.0
 fsspec==2026.9.0
 h11==0.16.0
@@ -88,7 +88,7 @@ rich==15.0.0
 rpds-py==2026.9.1
 safetensors==0.8.0
 segments==2.4.0
-setuptools==84.0.0
+setuptools==84.1.0
 shellingham==1.5.4
 six==1.17.0
 smart-open==8.0.3

@@ -68,6 +68,59 @@ HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
 HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
 
 
+def _conversation_timestamp(
+    started_at: Any,
+    start_ms: int,
+    *,
+    fallback: Any = "",
+) -> str:
+    try:
+        parsed = datetime.fromisoformat(
+            str(started_at or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return str(fallback or "")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        + timedelta(milliseconds=max(0, int(start_ms)))
+    ).isoformat()
+
+
+def _live_epoch_starts(
+    connection: sqlite3.Connection,
+    session_id: str,
+    call_ids: set[str],
+) -> dict[tuple[str, int], str]:
+    """Return durable Provider replacement times for the requested calls."""
+    if not call_ids:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT json_extract(detail_json, '$.scope.call_id') AS call_id,
+               json_extract(detail_json, '$.scope.call_epoch') AS call_epoch,
+               created_at
+        FROM run_events
+        WHERE session_id=? AND kind='voice.live.call.state'
+          AND json_valid(detail_json)
+          AND json_extract(detail_json, '$.reason')='provider_replaced'
+        ORDER BY sequence
+        """,
+        (str(session_id),),
+    ).fetchall()
+    result: dict[tuple[str, int], str] = {}
+    for row in rows:
+        call_id = str(row["call_id"] or "")
+        if call_id in call_ids:
+            try:
+                epoch = int(row["call_epoch"])
+            except (TypeError, ValueError):
+                continue
+            result[(call_id, epoch)] = str(row["created_at"] or "")
+    return result
+
+
 def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
     normalized = str(policy or "standard").strip().casefold()
     if normalized == "standard":
@@ -415,7 +468,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 28
+    SCHEMA_VERSION = 29
 
     def __init__(
         self,
@@ -1411,70 +1464,6 @@ class SessionStore:
                 stored_schema_version = int(schema_version_row["value"]) if schema_version_row else 0
             except (TypeError, ValueError):
                 stored_schema_version = 0
-            # Version 27 repaired legacy terminal live-call rows. Keep this
-            # migration pinned to its own introduction version so later schema
-            # additions do not reopen calls that ended under version 27.
-            if stored_schema_version < 27:
-                legacy_terminal_rows = connection.execute(
-                    """SELECT rowid, * FROM live_calls
-                       WHERE phase IN ('ended', 'failed', 'interrupted')"""
-                ).fetchall()
-                for row in legacy_terminal_rows:
-                    explicit_user_hangup = (
-                        str(row["termination_initiator"] or "") == "user"
-                        and str(row["termination_reason"] or "") == "user_hangup"
-                    )
-                    if not explicit_user_hangup:
-                        event_rows = connection.execute(
-                            "SELECT detail_json FROM run_events WHERE session_id = ? "
-                            "AND kind = 'voice.live.call.state'",
-                            (str(row["session_id"]),),
-                        ).fetchall()
-                        for event_row in event_rows:
-                            try:
-                                detail = json.loads(event_row["detail_json"] or "{}")
-                            except (TypeError, ValueError):
-                                continue
-                            call_scope = detail.get("scope") if isinstance(detail, Mapping) else None
-                            if not isinstance(call_scope, Mapping) or str(call_scope.get("call_id") or "") != str(row["call_id"]):
-                                continue
-                            if ((detail.get("termination_initiator") == "user"
-                                 and detail.get("termination_reason") == "user_hangup")
-                                    or detail.get("reason") == "user_hangup"):
-                                explicit_user_hangup = True
-                                break
-                    if explicit_user_hangup:
-                        continue
-                    legacy_phase = str(row["phase"])
-                    prior_close_state = str(row["provider_close_state"] or "unconfirmed")
-                    connection.execute(
-                        """UPDATE live_calls
-                           SET phase = 'recovering', ended_at = NULL,
-                               provider_close_state = CASE WHEN provider_close_state = 'confirmed'
-                                                           THEN 'confirmed' ELSE 'unconfirmed' END
-                           WHERE rowid = ?""",
-                        (int(row["rowid"]),),
-                    )
-                    self._append_event(
-                        connection, session_id=str(row["session_id"]), run_id=None,
-                        kind="voice.live.call.state",
-                        summary="Legacy call retained for explicit recovery",
-                        detail={
-                            "scope": {
-                                "instance_id": str(row["instance_id"]),
-                                "instance_generation": str(row["instance_generation"]),
-                                "agent_id": str(row["agent_id"]),
-                                "session_id": str(row["session_id"]),
-                                "context_generation": int(row["context_generation"]),
-                                "call_id": str(row["call_id"]),
-                                "call_epoch": int(row["call_epoch"]),
-                            },
-                            "phase": "recovering",
-                            "reason": "legacy_terminal_recovery",
-                            "legacy_phase": legacy_phase,
-                            "provider_close_state": prior_close_state,
-                        },
-                    )
             # A pre-qualified prototype could leave multiple live calls per owner.
             # Keep one foreground call and preserve every other call as recoverable
             # background state before installing the owner-level foreground invariant.
@@ -1712,11 +1701,98 @@ class SessionStore:
                 self._reconcile_legacy_output_audio(connection)
             if stored_schema_version < 27:
                 self._promote_legacy_session_workzones(connection)
+            if stored_schema_version < 29:
+                self._revert_legacy_terminal_recovery(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
         self._repair_pending_audio_projections()
+
+    def _revert_legacy_terminal_recovery(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Undo schema 27's accidental reopening of already terminal calls."""
+
+        rows = connection.execute(
+            "SELECT rowid, * FROM live_calls WHERE phase = 'recovering'"
+        ).fetchall()
+        terminal_phases = {"ended", "failed", "interrupted"}
+        for row in rows:
+            events = connection.execute(
+                """SELECT event_id, created_at, detail_json
+                   FROM run_events
+                   WHERE session_id = ? AND kind = 'voice.live.call.state'
+                   ORDER BY sequence DESC""",
+                (str(row["session_id"]),),
+            ).fetchall()
+            match: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None
+            for event in events:
+                try:
+                    detail = json.loads(event["detail_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                scope = detail.get("scope") if isinstance(detail, Mapping) else None
+                if (
+                    detail.get("reason") != "legacy_terminal_recovery"
+                    or str(detail.get("legacy_phase") or "") not in terminal_phases
+                    or not isinstance(scope, Mapping)
+                    or str(scope.get("call_id") or "") != str(row["call_id"])
+                    or str(scope.get("call_epoch") or "") != str(int(row["call_epoch"]))
+                ):
+                    continue
+                match = (event, detail)
+                break
+            if match is None:
+                continue
+            event, detail = match
+            legacy_phase = str(detail["legacy_phase"])
+            close_state = str(
+                detail.get("provider_close_state")
+                or row["provider_close_state"]
+                or "unconfirmed"
+            )
+            ended_at = str(
+                event["created_at"]
+                or datetime.now(timezone.utc).isoformat()
+            )
+            updated = connection.execute(
+                """UPDATE live_calls
+                   SET phase = ?, ended_at = ?, foreground = 0,
+                       provider_close_state = ?
+                   WHERE rowid = ? AND phase = 'recovering' AND call_epoch = ?""",
+                (
+                    legacy_phase,
+                    ended_at,
+                    close_state,
+                    int(row["rowid"]),
+                    int(row["call_epoch"]),
+                ),
+            )
+            if updated.rowcount != 1:
+                continue
+            self._append_event(
+                connection,
+                session_id=str(row["session_id"]),
+                run_id=None,
+                kind="voice.live.call.state",
+                summary="Accidentally reopened legacy call restored to terminal state",
+                detail={
+                    "scope": {
+                        "instance_id": str(row["instance_id"]),
+                        "instance_generation": str(row["instance_generation"]),
+                        "agent_id": str(row["agent_id"]),
+                        "session_id": str(row["session_id"]),
+                        "context_generation": int(row["context_generation"]),
+                        "call_id": str(row["call_id"]),
+                        "call_epoch": int(row["call_epoch"]),
+                    },
+                    "phase": legacy_phase,
+                    "reason": "legacy_terminal_recovery_reverted",
+                    "provider_close_state": close_state,
+                    "repaired_event_id": str(event["event_id"]),
+                },
+            )
 
     def _promote_legacy_session_workzones(
         self, connection: sqlite3.Connection
@@ -8847,6 +8923,11 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            epoch_starts = _live_epoch_starts(
+                connection,
+                session_id,
+                {str(row["call_id"]) for row in rows if int(row["call_epoch"]) > 1},
+            )
 
         segments: list[dict[str, Any]] = []
         latest_by_speaker: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -8896,7 +8977,12 @@ class SessionStore:
                     "end_ms": end_ms,
                     "sequence": int(row["sequence"]),
                     "last_sequence": int(row["sequence"]),
-                    "created_at": str(row["created_at"] or row["started_at"] or ""),
+                    "created_at": _conversation_timestamp(
+                        row["started_at"] if call_key[1] == 1
+                        else epoch_starts.get(call_key),
+                        start_ms,
+                        fallback=row["created_at"],
+                    ),
                     "provider_event_ids": [str(row["provider_event_id"])],
                 }
             segments.append(segment)

@@ -1256,6 +1256,7 @@ class HERv2Adapter(BaseBackend):
             user_message=str(user_message),
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
+            conversation_at=str(request_meta.get("conversation_at") or ""),
             **binding,
             removed_section_keys=removed_sections,
             revoked_resource_ids=[str(item) for item in revoked_resources],
@@ -1390,6 +1391,35 @@ class HERv2Adapter(BaseBackend):
         # A closed epoch is never resumed under the old ID.
         self._session_id = None
         return False
+
+    def current_pcm_section_keys(self) -> tuple[str, ...]:
+        """Expose section identities for exact, typed PCM tombstones."""
+
+        if self._session_coordinator is None or not self._session_id:
+            return ()
+        current = self._session_coordinator.store.session(self._session_id)
+        pcm = current.get("pcm") if isinstance(current, Mapping) else None
+        if not isinstance(pcm, Mapping):
+            return ()
+        return tuple(sorted(str(key) for key in pcm if str(key)))
+
+    def current_pcm_sections(
+        self, section_keys: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        """Expose copied typed PCM sections selected for verified migration."""
+
+        if self._session_coordinator is None or not self._session_id:
+            return {}
+        requested = {str(key) for key in section_keys if str(key)}
+        current = self._session_coordinator.store.session(self._session_id)
+        pcm = current.get("pcm") if isinstance(current, Mapping) else None
+        if not isinstance(pcm, Mapping):
+            return {}
+        return {
+            str(key): dict(value)
+            for key, value in pcm.items()
+            if str(key) in requested and isinstance(value, Mapping)
+        }
 
     def steer_continuation_evidence(
         self, request_id: str
