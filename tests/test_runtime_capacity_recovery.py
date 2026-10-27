@@ -95,6 +95,8 @@ def _item(**overrides):
         "owner_id": "owner-1",
         "source": "scheduler",
         "silent": True,
+        "request_mode": "text",
+        "request_metadata": {},
         "request_content": None,
     }
     values.update(overrides)
@@ -154,6 +156,77 @@ async def test_retry_runs_three_bounded_waits_and_honors_retry_after(tmp_path):
         True,
     ]
     assert runtime.backend_manager.fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_call_text_turn_never_waits_or_falls_back(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity() for _ in range(4)])
+    route = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_CODEX_CLI,
+        target_kind=policy_owner.TARGET_KIND_HERV3_MODEL,
+        provider="deepseek-api",
+        model="deepseek-v4-flash",
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_AUTO,
+            routes=(route,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    sleeper = AsyncMock()
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(request_mode="call"),
+        "call transcript text",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=sleeper,
+    )
+
+    assert response.error_code == policy_owner.CAPACITY_FAILURE_CODE
+    assert len(runtime.backend_manager.calls) == 1
+    sleeper.assert_not_awaited()
+    assert runtime.backend_manager.fallback_calls == []
+    recovery = response.stream_metadata["capacity_recovery"]
+    assert recovery["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert recovery["retry_delays_s"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item_overrides",
+    [
+        {"request_mode": "phone"},
+        {"request_mode": "voice"},
+        {"request_mode": "text", "request_metadata": {"voice_origin": True}},
+    ],
+    ids=["phone-mode", "voice-mode", "voice-origin"],
+)
+async def test_phone_and_voice_requests_never_enter_long_retry_waits(
+    tmp_path, item_overrides
+):
+    runtime = _runtime(tmp_path, [_capacity() for _ in range(4)])
+    _save(runtime, policy_owner.FallbackPolicy(mode=policy_owner.MODE_RETRY))
+    sleeper = AsyncMock()
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(**item_overrides),
+        "live request",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=sleeper,
+    )
+
+    assert response.error_code == policy_owner.CAPACITY_FAILURE_CODE
+    assert len(runtime.backend_manager.calls) == 1
+    sleeper.assert_not_awaited()
+    assert runtime.backend_manager.fallback_calls == []
+    recovery = response.stream_metadata["capacity_recovery"]
+    assert recovery["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert recovery["retry_delays_s"] == []
 
 
 @pytest.mark.asyncio

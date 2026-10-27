@@ -1289,6 +1289,31 @@ class FlexibleAgentRuntime:
                 candidate=metadata.get("live_voice"),
             )
             metadata["live_voice"] = live_voice_origin
+        voice_origin = metadata.get("voice_origin") is True
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import (
+                request_content_is_voice_origin,
+            )
+
+            voice_origin = bool(
+                voice_origin
+                or request_content_is_voice_origin(normalized_request_content)
+            )
+        request_mode = (
+            "phone"
+            if live_voice_origin is not None
+            else "call"
+            if isinstance(metadata.get("call_media"), Mapping)
+            else "voice"
+            if voice_origin
+            else "text"
+        )
+        # This admission-owned field deliberately overwrites caller input.
+        # Phone and call facts have already crossed their authoritative
+        # validation boundaries above; voice is backed by the admitted media
+        # envelope or an internal voice-origin marker.
+        metadata["request_mode"] = request_mode
+        metadata["voice_origin"] = voice_origin
         existing_idempotent_run = None
         if idempotency_key:
             existing_idempotent_run = await asyncio.to_thread(
@@ -1647,16 +1672,6 @@ class FlexibleAgentRuntime:
                 accepted.run_id,
                 accepted.request_id,
             )
-        if normalized_request_content is not None:
-            from orchestrator.multimodal_contract import (
-                request_content_is_voice_origin,
-            )
-
-            metadata.setdefault(
-                "voice_origin",
-                request_content_is_voice_origin(normalized_request_content),
-            )
-
         async def fail_unsubmitted_preparation(
             failure: BaseException,
             *,
@@ -1734,6 +1749,7 @@ class FlexibleAgentRuntime:
             source=source,
             summary=summary,
             created_at=datetime.now().isoformat(),
+            request_mode=request_mode,
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,

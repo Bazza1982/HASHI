@@ -1066,6 +1066,9 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "source": item.source,
         "summary": item.summary,
         "started_at": datetime.now().isoformat(),
+        "request_mode": str(
+            getattr(item, "request_mode", "text") or "text"
+        ),
         # Habit Meditation finishes asynchronously. Capture presentation
         # eligibility now so a later /verbose toggle cannot rewrite the
         # notification policy for this already-started task.

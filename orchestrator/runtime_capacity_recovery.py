@@ -305,15 +305,27 @@ def _interactive(item: Any) -> bool:
 
 
 def _modality(item: Any) -> str:
+    metadata = getattr(item, "request_metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    voice_origin = metadata.get("voice_origin") is True
     try:
         from orchestrator.multimodal_contract import request_content_is_voice_origin
 
         voice_origin = bool(
-            request_content_is_voice_origin(getattr(item, "request_content", None))
+            voice_origin
+            or request_content_is_voice_origin(
+                getattr(item, "request_content", None)
+            )
         )
     except Exception:
-        voice_origin = False
-    return policy_owner.request_modality(voice_origin=voice_origin)
+        pass
+    request_mode = getattr(item, "request_mode", None)
+    if not request_mode:
+        request_mode = metadata.get("request_mode")
+    return policy_owner.request_modality(
+        voice_origin=voice_origin,
+        request_mode=str(request_mode or "text"),
+    )
 
 
 def _target_label(route: policy_owner.FallbackRoute) -> str:
@@ -503,6 +515,7 @@ async def generate_with_capacity_recovery(
         return response
     recovery_backend, recovery_session_id = _session_identity(runtime)
     policy, _document = policy_owner.read_policy(runtime, _actor(item))
+    modality = _modality(item)
     retry_attempts = 0
     delays_s: list[float] = []
     side_effects_seen = _side_effects_possible(response)
@@ -545,6 +558,7 @@ async def generate_with_capacity_recovery(
                     expected_backend=recovery_backend,
                     expected_session_id=recovery_session_id,
                 ),
+                modality=modality,
             ),
         )
         if not decision.allowed:

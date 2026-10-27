@@ -138,6 +138,24 @@ class _TerminalRecordingDelivery(RecordingDelivery):
 
 
 @pytest.mark.asyncio
+async def test_authoritative_request_mode_reaches_stage_invocation(tmp_path):
+    provider = _MainProvider()
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Handle the active call turn.",
+        "request-call-mode",
+        request_mode="call",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert provider.calls
+    assert all(
+        request.context["request_mode"] == "call"
+        for _profile, request in provider.calls
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["zero", "low", "medium", "high", "xhigh", "max"])
 async def test_every_effort_uses_one_main_model_without_staged_calls(tmp_path, effort):
     provider = _MainProvider()

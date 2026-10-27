@@ -72,6 +72,10 @@ implementation on the current HASHI3 branch with these decisions:
   path. Engine-local short recovery runs first, then PAO permits at most three
   same-target retries after 60, 180, and 300 seconds. A valid Provider
   `Retry-After` value can lengthen, but never shorten, the applicable wait;
+- Live Phone, Call, and Voice requests never enter that long retry path and
+  never select a model fallback. PAO admission derives and freezes the
+  authoritative request mode from validated phone/call origin or admitted
+  voice-origin facts, and HERV3 receives the same mode on every Stage request;
 - after those retries, `RETRY` stops. `ASK` requires a one-time confirmation
   bound to the failed request and fails closed when no interactive confirmation
   channel exists. `AUTO` may follow only the user's ordered, exact routes and

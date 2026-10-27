@@ -2442,6 +2442,7 @@ class HERv2Adapter(BaseBackend):
                 request_id,
                 effort=effort_resolution.effective,
                 request_content=request_content,
+                request_mode=str(request_meta.get("request_mode") or "text"),
             )
         except asyncio.CancelledError:
             try:

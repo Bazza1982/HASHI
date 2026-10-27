@@ -531,6 +531,7 @@ class CapacityRetryFacts:
     retry_after_s: float | None = None
     side_effects_possible: bool = False
     resumable_session: bool = False
+    modality: str = "text"
 
 
 @dataclass(frozen=True)
@@ -583,6 +584,7 @@ def resolve_capacity_retry(
     """
 
     source = str(facts.source or "").strip().casefold()
+    modality = str(facts.modality or "text").strip().casefold()
     try:
         retry_index = int(facts.retry_index)
     except (TypeError, ValueError):
@@ -606,6 +608,8 @@ def resolve_capacity_retry(
             blocking_reason=reason,
         )
 
+    if modality in EXCLUDED_MODALITIES:
+        return decision(allowed=False, reason=REASON_MODALITY_EXCLUDED)
     if policy.mode == MODE_OFF:
         return decision(allowed=False, reason=REASON_DISABLED)
     if source not in FALLBACK_SOURCES:

@@ -27,6 +27,7 @@ from orchestrator import model_fallback_policy as policy_owner
 from adapters.openrouter_api import ProviderToolReplayError
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
+from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.model_fallback_policy import (
     MODE_AUTO,
     TARGET_KIND_CODEX_CLI,
@@ -147,6 +148,107 @@ async def test_herv3_capacity_retry_consumes_the_shared_per_source_policy(tmp_pa
     assert codex_provider_decision["allowed"] is True
     assert codex_provider_decision["continue_session"] is True
     assert codex_provider_decision["source"] == policy_owner.SOURCE_HERV3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_mode", ["call", "phone", "voice"])
+async def test_herv3_capacity_retry_excludes_live_request_modes(
+    tmp_path, request_mode
+):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=int(PrivacyLevel.PROVIDER_TRUST)
+        ),
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(mode=policy_owner.MODE_RETRY),
+        document=document,
+    )
+    request = _request(f"req-capacity-{request_mode}")
+    object.__setattr__(request, "context", {"request_mode": request_mode})
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=request,
+        selected=SimpleNamespace(
+            engine="deepseek-api", model="deepseek-v4-flash"
+        ),
+        failure_code=policy_owner.CAPACITY_FAILURE_CODE,
+        retryable=True,
+        retry_after_s=600,
+        retry_index=0,
+        side_effects_possible=False,
+    )
+
+    assert decision["allowed"] is False
+    assert decision["delay_s"] is None
+    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+
+
+@pytest.mark.asyncio
+async def test_herv3_capacity_retry_excludes_semantic_voice_origin(tmp_path):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=int(PrivacyLevel.PROVIDER_TRUST)
+        ),
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(mode=policy_owner.MODE_RETRY),
+        document=document,
+    )
+    request = _request("req-capacity-voice-origin")
+    object.__setattr__(
+        request,
+        "request_content",
+        canonical_request_content(
+            [
+                {
+                    "type": "media",
+                    "item_index": 1,
+                    "attachment_id": "att-voice-origin",
+                    "modality": "audio",
+                    "kind": "voice",
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                    "filename": "voice.wav",
+                    "caption": "",
+                    "local_ref": str(tmp_path / "voice.wav"),
+                    "size_bytes": 5,
+                    "sha256": "0" * 64,
+                    "transport": {},
+                }
+            ]
+        ),
+    )
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=request,
+        selected=SimpleNamespace(
+            engine="deepseek-api", model="deepseek-v4-flash"
+        ),
+        failure_code=policy_owner.CAPACITY_FAILURE_CODE,
+        retryable=True,
+        retry_after_s=600,
+        retry_index=0,
+        side_effects_possible=False,
+    )
+
+    assert decision["allowed"] is False
+    assert decision["delay_s"] is None
+    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
 
 
 def _checkpoint_registry(tmp_path, request):

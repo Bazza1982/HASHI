@@ -3502,6 +3502,12 @@ class HashiStageProvider(StageProvider):
             runtime, _fallback_actor(runtime)
         )
         source = policy_owner.SOURCE_HERV3
+        modality = _Herv3ProviderFallbackPort(
+            self,
+            request,
+            selected,
+            purpose="capacity_retry",
+        )._modality()
         decision = policy_owner.resolve_capacity_retry(
             policy,
             policy_owner.CapacityRetryFacts(
@@ -3514,6 +3520,7 @@ class HashiStageProvider(StageProvider):
                 # This call is made only while the durable HER Turn remains
                 # active; option B continues that Turn rather than replaying it.
                 resumable_session=bool(request.turn_id),
+                modality=modality,
             ),
         )
         return decision.to_dict()

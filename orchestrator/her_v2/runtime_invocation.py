@@ -276,6 +276,9 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        # The outer PAO admission owns this classification.  Stage-local
+        # callers cannot widen it back to ordinary text.
+        base_context["request_mode"] = state.request_mode
         registry = getattr(self.provider, "tool_registry", None)
         execution_cwd = (
             getattr(registry, "workspace_dir", None)

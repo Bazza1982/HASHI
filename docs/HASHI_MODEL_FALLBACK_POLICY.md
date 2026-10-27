@@ -14,10 +14,13 @@ Fallback applies only to ordinary general-model requests.  The default is
 installed CLI, available model, or catalogue entry proves capability only --
 never consent to spend money or send data to another destination.
 
-`/phone`, `/call`, and `/voice` requests are excluded at the policy evaluator
-itself (not merely hidden in UI), using authoritative request facts, so
-aliases, scheduler entry, Frontend Connector entry, and future renderers
-cannot bypass the exclusion.
+`/phone`, `/call`, and `/voice` requests are excluded from both the long
+same-target capacity retry and model fallback at the policy evaluator itself
+(not merely hidden in UI). PAO admission derives one authoritative
+`request_mode` from validated Live Phone origin, sealed Call media, or admitted
+voice-origin facts, overwrites caller-supplied mode hints, and propagates the
+same value through HERV3 Stage requests. Aliases, scheduler entry, Frontend
+Connector entry, and future renderers therefore cannot bypass the exclusion.
 
 Fallback is distinct from:
 
@@ -84,7 +87,8 @@ conflict instead of overwriting newer policy state.
 
 ## Attempt order and safety
 
-1. finish the existing bounded same-target local recovery decision;
+1. for ordinary text only, finish the existing bounded same-target local
+   recovery decision; phone/call/voice stops before any 60/180/300-second wait;
 2. if it still fails and the failure class is recoverable -- 429, retryable
    5xx, or the typed stream-inactivity timeout -- evaluate the effective
    user fallback policy; the stage consumer uses the shared

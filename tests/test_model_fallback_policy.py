@@ -216,6 +216,25 @@ def test_capacity_retry_is_explicit_bounded_and_honors_retry_after():
     assert exhausted.blocking_reason == REASON_RETRY_EXHAUSTED
 
 
+@pytest.mark.parametrize("modality", ["call", "phone", "voice"])
+def test_capacity_retry_excludes_live_request_modalities_before_waiting(modality):
+    decision = resolve_capacity_retry(
+        FallbackPolicy(mode=MODE_AUTO),
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=0,
+            retry_after_s=600,
+            modality=modality,
+        ),
+    )
+
+    assert decision.allowed is False
+    assert decision.delay_s is None
+    assert decision.blocking_reason == REASON_MODALITY_EXCLUDED
+
+
 def test_side_effect_recovery_is_independent_per_backend_and_defaults_to_pause():
     default = FallbackPolicy(mode=MODE_RETRY)
     blocked = resolve_capacity_retry(
