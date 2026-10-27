@@ -328,11 +328,21 @@ def _legacy_payload(section: Mapping[str, Any], *, section_key: str) -> dict[str
         raise PhoneContextError(
             "phone_context_legacy_source_incomplete", source=section_key
         ) from None
-    if not isinstance(payload, Mapping) or not isinstance(payload.get("fragments"), list):
+    if not isinstance(payload, Mapping):
         raise PhoneContextError(
             "phone_context_legacy_source_incomplete", source=section_key
         )
-    return dict(payload)
+    try:
+        payload = _expanded_payload(dict(payload), source=section_key)
+    except PhoneContextError:
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        ) from None
+    if not isinstance(payload.get("fragments"), list):
+        raise PhoneContextError(
+            "phone_context_legacy_source_incomplete", source=section_key
+        )
+    return payload
 
 
 def _validate_legacy_sources(
@@ -409,39 +419,68 @@ def _semantic_source_matches(
     metadata = section.get("metadata")
     if not isinstance(text, str) or not isinstance(metadata, Mapping):
         return False
-    try:
-        start_sequence = int(metadata.get("sequence"))
-    except (TypeError, ValueError):
-        return False
-    starts = [
-        index
-        for index, row in enumerate(replacement_fragments)
-        if int(row["sequence"]) == start_sequence
-    ]
-    if len(starts) != 1:
-        return False
     target_digest = section_key.removeprefix(SEMANTIC_SECTION_PREFIX)
     if len(target_digest) != 24 or any(
         character not in "0123456789abcdef" for character in target_digest
     ):
         return False
-    start = starts[0]
-    digest = hashlib.sha256()
-    digest.update(b"[")
-    for index in range(start, len(replacement_fragments)):
-        if index > start:
-            digest.update(b",")
-        digest.update(
-            json.dumps(
-                _fragment_identity(replacement_fragments[index]),
-                separators=(",", ":"),
-            ).encode()
-        )
-        candidate = digest.copy()
-        candidate.update(b"]")
-        if candidate.hexdigest()[:24] != target_digest:
-            continue
-        return _semantic_transcript(replacement_fragments[start : index + 1]) == text
+
+    # ``sequence`` is an arrival ledger, not transcript chronology.  A late
+    # fragment can therefore sort between events already represented by a v2
+    # semantic section.  Recover the exact old source as a chronological
+    # subsequence, then require both its stable identity digest and rendered
+    # text to match before allowing the old section to be removed.
+    by_call: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in replacement_fragments:
+        scope = (str(row["call_id"]), int(row["call_epoch"]))
+        by_call.setdefault(scope, []).append(row)
+
+    for rows in by_call.values():
+        selected: list[dict[str, Any]] = []
+        attempts = 0
+        max_attempts = max(4096, min(250_000, len(rows) * 8))
+        # Each frame is the next chronological row to try, the rendered-text
+        # offset and previous role, plus whether popping it also pops one
+        # selected fragment.  This is depth-first matching without Python call
+        # recursion, so long word-fragment calls cannot hit the recursion limit.
+        frames: list[list[Any]] = [[0, 0, None, False]]
+        while frames:
+            frame = frames[-1]
+            index = int(frame[0])
+            if index >= len(rows) or attempts >= max_attempts:
+                popped = frames.pop()
+                if bool(popped[3]):
+                    selected.pop()
+                continue
+            frame[0] = index + 1
+            attempts += 1
+            row = rows[index]
+            role = str(row["role"])
+            last_role = frame[2]
+            prefix = (
+                f"{'USER' if role == 'user' else 'ASSISTANT'}: "
+                if last_role is None
+                else (
+                    ""
+                    if role == last_role
+                    else f"\n{'USER' if role == 'user' else 'ASSISTANT'}: "
+                )
+            )
+            addition = prefix + str(row["text"])
+            offset = int(frame[1])
+            if not text.startswith(addition, offset):
+                continue
+            selected.append(row)
+            next_offset = offset + len(addition)
+            if next_offset == len(text):
+                if (
+                    _fragment_digest(selected) == target_digest
+                    and _semantic_transcript(selected) == text
+                ):
+                    return True
+                selected.pop()
+                continue
+            frames.append([index + 1, next_offset, role, True])
     return False
 
 
@@ -751,12 +790,15 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         "removed_section_keys":(
             migration_removals
             if live else [
-                *(["phone_action_context"] if has_action_section and history_fragments else []),
+                *(["phone_action_context"] if has_action_section else []),
                 *migration_removals,
             ]
         ),
     }
-    consumed_on_success=history_fragments if live and incremental else included
+    # The protected action snapshot is temporary transport context.  It must
+    # never advance ordinary-history consumption, including on the first HERV3
+    # full open.  Ended history delivered beside an action remains consumable.
+    consumed_on_success=history_fragments if live else included
     plan={
         "store":store,
         "owner_id":owner_id,

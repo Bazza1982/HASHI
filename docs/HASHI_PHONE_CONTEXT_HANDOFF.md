@@ -59,10 +59,13 @@ Typed fixed PCM also performs a one-time representation migration. It reads
 the exact current sections and validates each deprecated
 `phone_external_context:*` identity, scope and fragment against durable
 SessionStore or the immutable current action snapshot before issuing a
-tombstone. Existing semantic Phone sections must likewise match their stable
-identity, start sequence and rendered text against one complete durable source
-range. Missing, malformed or incomplete source fails closed and preserves the
-old section. Verified source is rebuilt as ordinary semantic
+tombstone. Both the original `fragments` payload and the grouped durable
+`fragment_groups` encoding are expanded through the same decoder before those
+checks. Existing semantic Phone sections must likewise match a chronological
+durable source subsequence by stable event-identity digest and rendered text;
+arrival sequence is not treated as transcript order, and unrelated late
+fragments may be skipped. Missing, malformed or incomplete source fails closed
+and preserves the old section. Verified source is rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing
@@ -76,8 +79,10 @@ A checkpoint I/O failure is reported separately and does not convert an
 already executed Provider result into an automatic action replay.
 For typed fixed PCM, the protected action snapshot itself never advances the
 ordinary-history watermark. After hang-up, the complete call enters ordinary
-semantic history before `phone_action_context` is removed. Any ended-call
-history migrated beside an action keeps its own normal success checkpoint.
+semantic history before `phone_action_context` is removed, including when no
+speech arrived after the action. The next non-Phone-action turn tombstones that
+temporary section even when it has no tail to append. Any ended-call history
+migrated beside an action keeps its own normal success checkpoint.
 
 `provider_request.prompt_audit.phone_context_handoff` records snapshot/cutoff,
 requested/included counts, safe consumer lane and exact source-event IDs.
@@ -216,3 +221,15 @@ transcript JSON is loaded. After implementation, 30 focused Phone/FYI checks and
 and patch checks also passed. This is offline source qualification only;
 committed-source qualification, GitHub review, Worker adoption and live Phone
 acceptance remain separate facts.
+
+## PR 110 final migration and first-open correction, 2026-10-27
+
+Final review found three remaining migration boundaries: grouped legacy payloads
+were rejected before exact-source validation, a successful first HERV3 full-open
+Phone action could consume its temporary snapshot, and semantic-v2 validation
+treated arrival sequence as chronology. The correction reuses the durable
+grouped decoder, keeps action snapshots outside ordinary consumption on every
+transport mode, removes their fixed-PCM section on the next ordinary turn, and
+matches old semantic source by stable identities, digest and text while allowing
+late unrelated fragments. Every invalid or incomplete source still fails closed
+without producing a removal plan.

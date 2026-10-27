@@ -134,12 +134,12 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Phone speech is durable role history under recent-exchange/HCC. Fixed PCM uses
-dialogue-round sections without raw metadata or a Phone-only limit. Actions freeze
-cutoff, carry unconsumed ended calls, and checkpoint only on success. Legacy raw
-sections require exact durable-source validation before removal; after hang-up,
-the full call is ordinary history. Failures settle calls and preserve cause/panel;
-replacement stops after five failed resumes. See
+Phone speech is recent-exchange/HCC role history; fixed PCM uses dialogue rounds
+without raw metadata or separate limits. Action snapshots never advance history.
+Hang-up records a call once and removes its snapshot even without a tail. Legacy
+grouped/ungrouped cleanup requires exact hash, scope, event identity, digest and
+text; arrival order is irrelevant and invalid source stays. Failures preserve
+cause; resumes stop after five. See
 [Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
