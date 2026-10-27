@@ -1383,11 +1383,38 @@ class FlexibleBackendManager:
             raw_her_v2 = extra.get("her_v2")
             if isinstance(raw_her_v2, dict):
                 try:
+                    if target_provider:
+                        if not str(target_model or "").strip():
+                            raise ValueError(
+                                "an exact HERV3 Provider target requires a model"
+                            )
+                        selected_target = HERv3ModelTarget(
+                            provider=target_provider,
+                            model=str(target_model),
+                        )
+                        self._validate_her_v3_target(selected_target)
+                        # This backend is request-local and authorised for one
+                        # exact target. Do not retain an otherwise valid
+                        # auxiliary profile that could execute a different
+                        # Provider/model during the temporary HERV3 Turn.
+                        raw_her_v2 = deepcopy(raw_her_v2)
+                        auxiliary = raw_her_v2.get("auxiliary")
+                        auxiliary = (
+                            dict(auxiliary)
+                            if isinstance(auxiliary, dict)
+                            else {}
+                        )
+                        auxiliary.update(selected_target.to_dict())
+                        raw_her_v2["auxiliary"] = auxiliary
+                    else:
+                        selected_target = self.get_her_v3_target()
                     extra["her_v2"] = apply_v3_target(
                         raw_her_v2,
-                        self.get_her_v3_target(),
+                        selected_target,
                     )
                 except (TypeError, ValueError) as exc:
+                    if target_provider:
+                        raise
                     self.logger.warning(
                         "Ignoring invalid HERV3 model target while building adapter config: %s",
                         exc,
@@ -2158,6 +2185,36 @@ class FlexibleBackendManager:
         if candidate is None:
             raise RuntimeError("fallback target could not be initialized")
         try:
+            if target_kind == fallback_policy.TARGET_KIND_HERV3_MODEL:
+                expected_target = HERv3ModelTarget(
+                    provider=str(target_provider or ""),
+                    model=str(target_model or ""),
+                )
+                initialized_config = getattr(candidate, "_v2_config", None)
+                all_provider_profiles = getattr(
+                    initialized_config, "all_provider_profiles", None
+                )
+                actual_targets = None
+                if callable(all_provider_profiles):
+                    try:
+                        actual_targets = {
+                            HERv3ModelTarget(
+                                provider=str(
+                                    getattr(profile, "engine", "") or ""
+                                ),
+                                model=str(
+                                    getattr(profile, "model", "") or ""
+                                ),
+                            )
+                            for profile in all_provider_profiles()
+                        }
+                    except (AttributeError, TypeError, ValueError):
+                        actual_targets = None
+                if actual_targets != {expected_target}:
+                    raise RuntimeError(
+                        "initialized backend did not retain the exact HERV3 "
+                        "fallback target"
+                    )
             set_session_mode = getattr(candidate, "set_session_mode", None)
             if callable(set_session_mode):
                 # A cross-Engine fallback receives the complete frozen PAO

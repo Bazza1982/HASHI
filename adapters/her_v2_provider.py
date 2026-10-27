@@ -2704,7 +2704,6 @@ class _Herv3ProviderFallbackPort:
     ) -> dict[str, Any]:
         from orchestrator import model_fallback_policy as policy_owner
         from orchestrator.flexible_backend_registry import canonical_backend_engine
-        from orchestrator.runtime_effort_options import get_available_models
 
         options: list[dict[str, Any]] = []
         try:
@@ -2729,12 +2728,6 @@ class _Herv3ProviderFallbackPort:
             if canonical_backend_engine(str(row.get("engine") or ""))
             == "codex-cli"
         ]
-        try:
-            codex_models = set(
-                get_available_models("codex-cli", allowed_backends=codex_rows)
-            )
-        except (TypeError, ValueError):
-            codex_models = set()
         required_modalities = {"text"}
         manifest = getattr(self.request, "attachment_manifest", ()) or ()
         if not manifest:
@@ -2764,17 +2757,13 @@ class _Herv3ProviderFallbackPort:
                     and option is not None
                     and option.get("available") is not False
                 )
-                model_ready = bool(
-                    not route.model or route.model in codex_models
-                )
-                # A Codex CLI switch is a clean pre-effect stage selection.
-                # Cross-Provider message continuation stays HERV3-only.
-                capability_ok = bool(
-                    credential_ready and model_ready and self.purpose == "stage"
-                )
+                # Codex CLI is a separate Engine. This HERV3-internal port can
+                # report that the runtime exists, but must never claim it can
+                # execute Codex as a Stage Provider. PAO performs that
+                # cross-Engine route after HERV3 returns its typed failure.
                 facts[route.key()] = policy_owner.FallbackRouteFacts(
                     credential_ready=credential_ready,
-                    capability_ok=capability_ok,
+                    capability_ok=False,
                     capability_reason=(
                         policy_owner.REASON_MISSING_KEY_OR_RUNTIME
                         if not credential_ready
@@ -2947,6 +2936,13 @@ class _Herv3ProviderFallbackPort:
             visible_partial_answer=bool(visible_partial_answer),
             checkpoint_safe=bool(checkpoint_safe),
             budget_used=self.provider._fallback_budget_used(key),
+            estimated_cost_used_usd=(
+                self.provider._fallback_cost_used(key)
+                if callable(
+                    getattr(self.provider, "_fallback_cost_used", None)
+                )
+                else 0.0
+            ),
             known_extra_cost_usd=None,
             interactive=self._interactive(),
             request_id=key,
@@ -3009,6 +3005,11 @@ class _Herv3ProviderFallbackPort:
             if confirmation is not None:
                 facts = replace(facts, confirmation=confirmation)
                 decision = policy_owner.resolve_fallback_decision(policy, facts)
+        route_cost = (
+            facts.facts_for(decision.route).known_extra_cost_usd
+            if decision.route is not None
+            else None
+        )
         return {
             "allowed": bool(decision.allowed),
             "disposition": decision.disposition,
@@ -3017,6 +3018,8 @@ class _Herv3ProviderFallbackPort:
             "mode": decision.mode,
             "additional_calls_limit": int(decision.additional_calls_limit),
             "additional_calls_used": int(decision.additional_calls_used),
+            "estimated_cost_usd": route_cost,
+            "estimated_cost_used_usd": decision.estimated_cost_used_usd,
             "route_key": (
                 decision.route.key() if decision.route is not None else None
             ),
@@ -3066,6 +3069,7 @@ class _Herv3ProviderFallbackPort:
                 budget_key,
                 limit=total_limit,
                 route_key=route_key,
+                estimated_cost_usd=kwargs.get("estimated_cost_usd"),
             )
 
             return await backend.continue_generation(
@@ -3170,6 +3174,7 @@ class HashiStageProvider(StageProvider):
         # it never limits the selected Provider's healthy continuation loop.
         self._provider_fallback_calls: dict[str, int] = {}
         self._provider_fallback_routes: dict[str, set[str]] = {}
+        self._provider_fallback_costs: dict[str, float | None] = {}
 
     def _create_provider_backend(self, engine: str, *, target_model: str):
         if int(getattr(self.backend_manager, "privacy_level", 1)) == 2:
@@ -3291,12 +3296,17 @@ class HashiStageProvider(StageProvider):
         with self._active_backend_lock:
             return int(self._provider_fallback_calls.get(str(key), 0))
 
+    def _fallback_cost_used(self, key: str) -> float | None:
+        with self._active_backend_lock:
+            return self._provider_fallback_costs.get(str(key), 0.0)
+
     def _consume_fallback_budget(
         self,
         key: str,
         *,
         limit: int | None = None,
         route_key: str = "",
+        estimated_cost_usd: float | None = None,
     ) -> int:
         with self._active_backend_lock:
             current = int(self._provider_fallback_calls.get(str(key), 0))
@@ -3308,11 +3318,44 @@ class HashiStageProvider(StageProvider):
                 )
             value = current + 1
             self._provider_fallback_calls[str(key)] = value
+            previous_cost = self._provider_fallback_costs.get(str(key), 0.0)
+            try:
+                current_cost = (
+                    None
+                    if estimated_cost_usd is None
+                    or isinstance(estimated_cost_usd, bool)
+                    else float(estimated_cost_usd)
+                )
+                if current_cost is not None and (
+                    not math.isfinite(current_cost) or current_cost < 0
+                ):
+                    current_cost = None
+            except (TypeError, ValueError):
+                current_cost = None
+            self._provider_fallback_costs[str(key)] = (
+                None
+                if previous_cost is None or current_cost is None
+                else float(previous_cost) + current_cost
+            )
             if route_key:
                 self._provider_fallback_routes.setdefault(str(key), set()).add(
                     str(route_key)
                 )
             return value
+
+    def fallback_accounting(self, key: str) -> dict[str, Any]:
+        with self._active_backend_lock:
+            return {
+                "additional_calls_used": int(
+                    self._provider_fallback_calls.get(str(key), 0)
+                ),
+                "estimated_cost_used_usd": self._provider_fallback_costs.get(
+                    str(key), 0.0
+                ),
+                "route_keys": sorted(
+                    self._provider_fallback_routes.get(str(key), set())
+                ),
+            }
 
     def _fallback_routes_used(self, key: str) -> frozenset[str]:
         with self._active_backend_lock:
@@ -3348,11 +3391,11 @@ class HashiStageProvider(StageProvider):
         tool_started: bool,
         visible_partial_answer: bool,
     ) -> Mapping[str, Any] | None:
-        """Resolve one pre-effect stage fallback (HERV3/Codex CLI switch).
+        """Resolve one pre-effect HERV3 Model Provider fallback.
 
         Stage-level switching runs only before any Tool execution or
-        user-visible partial answer, and never restarts the HER Turn or the
-        PAO Run.
+        user-visible partial answer. Cross-Engine Codex fallback belongs to PAO
+        and is therefore deliberately incompatible at this internal boundary.
         """
 
         from orchestrator import model_fallback_policy as policy_owner
@@ -3412,6 +3455,12 @@ class HashiStageProvider(StageProvider):
             ),
             "additional_calls_limit": int(decision.additional_calls_limit),
             "additional_calls_used": int(decision.additional_calls_used),
+            "estimated_cost_usd": (
+                facts.facts_for(decision.route).known_extra_cost_usd
+                if decision.route is not None
+                else None
+            ),
+            "estimated_cost_used_usd": decision.estimated_cost_used_usd,
             "tool_started": bool(tool_started),
             "visible_partial_answer": bool(visible_partial_answer),
         }
@@ -3423,6 +3472,7 @@ class HashiStageProvider(StageProvider):
                 route_key=(
                     decision.route.key() if decision.route is not None else ""
                 ),
+                estimated_cost_usd=result["estimated_cost_usd"],
             )
         return result
 

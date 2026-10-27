@@ -119,11 +119,11 @@ Privacy Level 2 is HERV3/DeepSeek-only, risk-accepted and fail-closed on
 detector errors. Isolated dependencies or synthetic readiness prove neither
 activation nor Worker adoption.
 
-Chat-only has no tools. PAO owns `/fallback`: existing settings stay `OFF`;
-new policies use `RETRY` at 60/180/300 seconds and honor longer `Retry-After`.
-`ASK` fails closed; `AUTO` follows exact ordered routes. A pauses after effects;
-per-backend B resumes unfinished work in the same Engine Session. Neither replays
-nor retargets. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
+Chat-only has no tools. PAO `/fallback` defaults `OFF`; `RETRY` waits
+60/180/300 seconds and honors longer `Retry-After`; `ASK` fails closed;
+`AUTO` uses exact routes. A pauses after effects; B resumes only the original
+Engine Session—never replay/retarget. HERV3 never embeds Codex: PAO switches
+Engine. Counts/costs accumulate. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
 
 ## UI, media, and Phone
 

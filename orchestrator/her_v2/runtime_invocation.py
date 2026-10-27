@@ -952,31 +952,35 @@ class RuntimeInvocationMixin:
                         and fallback_decision.get("tool_started") is not True
                         and fallback_decision.get("visible_partial_answer") is not True
                     ):
-                        target_engine, _separator, target_model = str(
-                            fallback_decision.get("target_label") or ""
-                        ).partition("/")
-                        target_model = target_model.strip()
                         if (
                             str(fallback_decision.get("target_kind") or "")
                             == "codex_cli"
                         ):
-                            from orchestrator.flexible_backend_registry import (
-                                get_default_model,
+                            # Defensive boundary: even a malformed/mocked
+                            # internal decision cannot turn Codex into a HERV3
+                            # Stage Provider. The typed failure returns to PAO,
+                            # which owns the cross-Engine request-local call.
+                            retry_reason = (
+                                "pao_cross_engine_fallback_required"
                             )
-
-                            target_model = target_model or str(
-                                get_default_model("codex-cli") or ""
+                        else:
+                            target_engine, _separator, target_model = str(
+                                fallback_decision.get("target_label") or ""
+                            ).partition("/")
+                            target_model = target_model.strip()
+                            fallback_choice = (
+                                fallback_level + 1,
+                                replace(
+                                    primary_selected,
+                                    engine=(
+                                        target_engine.strip()
+                                        or primary_selected.engine
+                                    ),
+                                    model=target_model or primary_selected.model,
+                                ),
                             )
-                        fallback_choice = (
-                            fallback_level + 1,
-                            replace(
-                                primary_selected,
-                                engine=target_engine.strip() or primary_selected.engine,
-                                model=target_model or primary_selected.model,
-                            ),
-                        )
-                        retry_kind = "provider_fallback"
-                        retry_reason = "fallback_eligible"
+                            retry_kind = "provider_fallback"
+                            retry_reason = "fallback_eligible"
                     elif fallback_decision is not None and fallback_decision.get(
                         "reason"
                     ):

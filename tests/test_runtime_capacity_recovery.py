@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -211,6 +212,95 @@ async def test_explicit_b_resumes_same_session_without_replaying_prompt(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_explicit_resume_remains_cumulative_across_later_retries(tmp_path):
+    runtime = _runtime(
+        tmp_path,
+        [_capacity(effects=True), _capacity(), _success()],
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_RETRY,
+            sources={
+                policy_owner.SOURCE_CODEX_CLI: policy_owner.FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_RESUME
+                ),
+                policy_owner.SOURCE_HERV3: policy_owner.FallbackSourceRule(),
+            },
+        ),
+    )
+    content = {"parts": [{"type": "image", "name": "original.png"}]}
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(request_content=content),
+        "SECRET ORIGINAL PROMPT",
+        {
+            "is_retry": False,
+            "silent": True,
+            "on_stream_event": None,
+            "request_content": content,
+        },
+        sleep=AsyncMock(),
+    )
+
+    assert response.is_success is True
+    assert len(runtime.backend_manager.calls) == 3
+    for retry_prompt, _request_id, retry_kwargs in runtime.backend_manager.calls[1:]:
+        assert "SECRET ORIGINAL PROMPT" not in retry_prompt
+        assert "unfinished work" in retry_prompt
+        assert "request_content" not in retry_kwargs
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_stops_when_original_session_disappears(tmp_path):
+    runtime = _runtime(
+        tmp_path,
+        [_capacity(effects=True), _capacity(), _success()],
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_RETRY,
+            sources={
+                policy_owner.SOURCE_CODEX_CLI: policy_owner.FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_RESUME
+                ),
+                policy_owner.SOURCE_HERV3: policy_owner.FallbackSourceRule(),
+            },
+        ),
+    )
+    original_generate = runtime.backend_manager.generate_response
+
+    async def _drop_session_after_first_resume(prompt, request_id, **kwargs):
+        response = await original_generate(prompt, request_id, **kwargs)
+        if len(runtime.backend_manager.calls) == 2:
+            runtime.backend_manager.current_backend._session_id = "replacement-session"
+        return response
+
+    runtime.backend_manager.generate_response = _drop_session_after_first_resume
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(request_content={"parts": [{"type": "image"}]}),
+        "SECRET ORIGINAL PROMPT",
+        {
+            "is_retry": False,
+            "silent": True,
+            "on_stream_event": None,
+            "request_content": {"parts": [{"type": "image"}]},
+        },
+        sleep=AsyncMock(),
+    )
+
+    assert response.is_success is False
+    assert len(runtime.backend_manager.calls) == 2
+    assert (
+        response.stream_metadata["capacity_recovery"]["blocking_reason"]
+        == policy_owner.REASON_RESUME_UNAVAILABLE
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_uses_one_exact_fallback_route_after_retries(tmp_path):
     runtime = _runtime(
         tmp_path,
@@ -325,6 +415,222 @@ async def test_auto_skips_a_stale_route_that_now_matches_the_current_codex_model
 
     assert response.is_success is True
     assert runtime.backend_manager.fallback_calls[0]["model"] == "gpt-5.1-codex"
+
+
+@pytest.mark.asyncio
+async def test_herv3_to_codex_fallback_is_executed_by_pao(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity()])
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.model = "deepseek-v4-flash"
+    route = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_HERV3,
+        target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
+        model="gpt-5.1-codex",
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_AUTO,
+            routes=(route,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    content = {"parts": [{"type": "text", "text": "preserve me"}]}
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(request_content=content),
+        "original HERV3 prompt",
+        {
+            "is_retry": False,
+            "silent": True,
+            "on_stream_event": None,
+            "request_content": content,
+        },
+        sleep=AsyncMock(),
+    )
+
+    assert response.text == "fallback done"
+    assert len(runtime.backend_manager.calls) == 1
+    assert len(runtime.backend_manager.fallback_calls) == 1
+    call = runtime.backend_manager.fallback_calls[0]
+    assert call["target_kind"] == policy_owner.TARGET_KIND_CODEX_CLI
+    assert call["model"] == "gpt-5.1-codex"
+    assert call["prompt"] == "original HERV3 prompt"
+    assert call["request_content"] == content
+
+
+@pytest.mark.asyncio
+async def test_herv3_default_off_never_crosses_engine(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity()])
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.config.active_backend = "her-v2"
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(),
+        "original HERV3 prompt",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=AsyncMock(),
+    )
+
+    assert response.error_code == policy_owner.CAPACITY_FAILURE_CODE
+    assert runtime.backend_manager.fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_herv3_to_codex_fallback_preserves_run_cancellation(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity()])
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.config.active_backend = "her-v2"
+    route = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_HERV3,
+        target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
+        model="gpt-5.1-codex",
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_AUTO,
+            routes=(route,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+
+    async def _cancel(**_kwargs):
+        raise asyncio.CancelledError
+
+    runtime.backend_manager.generate_fallback_response = _cancel
+    with pytest.raises(asyncio.CancelledError):
+        await generate_with_capacity_recovery(
+            runtime,
+            _item(),
+            "original HERV3 prompt",
+            {"is_retry": False, "silent": True, "on_stream_event": None},
+            sleep=AsyncMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_herv3_cost_handoff_limits_the_later_pao_codex_route(tmp_path):
+    initial = _capacity()
+    initial.stream_metadata = {
+        "her_v2": {
+            "fallback_accounting": {
+                "additional_calls_used": 1,
+                "estimated_cost_used_usd": 0.03,
+                "route_keys": [
+                    "herv3|herv3_model|openrouter-api|prior-model"
+                ],
+            }
+        }
+    }
+    runtime = _runtime(tmp_path, [initial])
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.model = "deepseek-v4-flash"
+    runtime.backend_manager.config.allowed_backends[0][
+        "estimated_fallback_call_cost_usd"
+    ] = 0.03
+    route = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_HERV3,
+        target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
+        model="gpt-5.1-codex",
+    )
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_AUTO,
+            routes=(route,),
+            max_additional_calls=2,
+            max_extra_cost_usd=0.05,
+        ),
+    )
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(),
+        "original HERV3 prompt",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=AsyncMock(),
+    )
+
+    assert runtime.backend_manager.fallback_calls == []
+    assert (
+        response.stream_metadata["capacity_recovery"]["blocking_reason"]
+        == policy_owner.REASON_BUDGET_EXHAUSTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_fallback_cost_ceiling_is_cumulative_across_attempted_targets(
+    tmp_path,
+):
+    runtime = _runtime(
+        tmp_path,
+        [_capacity(), _capacity(), _capacity(), _capacity()],
+    )
+    first = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_CODEX_CLI,
+        target_kind=policy_owner.TARGET_KIND_HERV3_MODEL,
+        provider="deepseek-api",
+        model="deepseek-v4-flash",
+    )
+    second = policy_owner.FallbackRoute(
+        source=policy_owner.SOURCE_CODEX_CLI,
+        target_kind=policy_owner.TARGET_KIND_HERV3_MODEL,
+        provider="openrouter-api",
+        model="deepseek/deepseek-v4-flash",
+    )
+    runtime.backend_manager.get_her_v2_provider_options = lambda: [
+        {
+            "engine": "deepseek-api",
+            "models": ["deepseek-v4-flash"],
+            "available": True,
+            "estimated_fallback_call_cost_usd": 0.03,
+        },
+        {
+            "engine": "openrouter-api",
+            "models": ["deepseek/deepseek-v4-flash"],
+            "available": True,
+            "estimated_fallback_call_cost_usd": 0.03,
+        },
+    ]
+    fallback_responses = [_capacity(), _success("must not run")]
+
+    async def _fallback(**kwargs):
+        runtime.backend_manager.fallback_calls.append(dict(kwargs))
+        return fallback_responses.pop(0)
+
+    runtime.backend_manager.generate_fallback_response = _fallback
+    _save(
+        runtime,
+        policy_owner.FallbackPolicy(
+            mode=policy_owner.MODE_AUTO,
+            routes=(first, second),
+            max_additional_calls=2,
+            max_extra_cost_usd=0.05,
+            allow_unknown_cost=False,
+        ),
+    )
+
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(),
+        "original prompt",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=AsyncMock(),
+    )
+
+    assert response.is_success is False
+    assert len(runtime.backend_manager.fallback_calls) == 1
+    recovery = response.stream_metadata["capacity_recovery"]
+    assert recovery["blocking_reason"] == policy_owner.REASON_BUDGET_EXHAUSTED
+    assert recovery["fallback_attempts"][0]["estimated_cost_usd"] == 0.03
+    assert recovery["fallback_attempts"][0]["estimated_cost_used_usd"] == 0.03
 
 
 @pytest.mark.asyncio

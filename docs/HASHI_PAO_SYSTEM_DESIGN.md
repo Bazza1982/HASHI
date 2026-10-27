@@ -78,6 +78,11 @@ implementation on the current HASHI3 branch with these decisions:
   call/cost/privacy limits. Routes may select another allowed model on the same
   Codex backend, an exact HERV3 Provider/model, or Codex from HERV3. Candidate
   models derive from instance `allowed_backends` and runtime capability views;
+- HERV3 remains the sole owner of its internal Model Provider loop. A HERV3
+  route to Codex is never materialized as a Stage Provider: the terminal typed
+  HERV3 capacity failure returns to PAO, which may run one request-local Codex
+  Engine candidate. An exact HERV3 fallback is checked again against the
+  initialized adapter's effective Provider/model before the request is sent;
 - fallback candidates are request-local. They neither change nor persist the
   Agent's default backend/model. A required progress event announces each
   selected fallback target;
@@ -87,7 +92,12 @@ implementation on the current HASHI3 branch with these decisions:
   unfinished work” instruction into the same resumable Engine Session. It does
   not resend the original prompt or attachments. Once any effect was observed,
   no model, Provider, or Engine switch is allowed even if continuation retries
-  later exhaust; and
+  later exhaust. If that original Session disappears, recovery stops rather
+  than replaying the original prompt or attachments;
+- additional-call and estimated-cost use is cumulative across the complete
+  ordered fallback chain, including HERV3 attempts handed back to PAO. A route
+  is blocked when its estimate exceeds the remaining ceiling; any unknown
+  cumulative estimate continues to follow the configured fail-closed rule; and
 - one admitted Run remains active during a scheduled wait; cancellation and
   normal Run fencing still apply. A log/audit receipt records the decision and
   delay. A process interruption is not evidence that the retry occurred and

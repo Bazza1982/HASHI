@@ -99,6 +99,49 @@ async def test_request_local_fallback_uses_exact_model_without_switching_backend
     assert after == before
 
 
+@pytest.mark.asyncio
+async def test_herv3_fallback_rejects_an_initialized_target_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    manager = _make_manager(tmp_path / "agent")
+    candidate = SimpleNamespace(
+        _v2_config=SimpleNamespace(
+            all_provider_profiles=lambda: (
+                SimpleNamespace(
+                    engine="openrouter-api",
+                    model="wrong-model",
+                ),
+            )
+        ),
+        set_session_mode=Mock(),
+        generate_response=AsyncMock(
+            return_value=BackendResponse(text="unsafe", duration_ms=1, is_success=True)
+        ),
+    )
+    create = AsyncMock(return_value=candidate)
+    dispose = AsyncMock()
+    monkeypatch.setattr(manager, "_create_initialized_backend", create)
+    monkeypatch.setattr(manager, "_dispose_backend", dispose)
+
+    with pytest.raises(RuntimeError, match="exact HERV3 fallback target"):
+        await manager.generate_fallback_response(
+            target_kind=fallback_policy.TARGET_KIND_HERV3_MODEL,
+            provider="openrouter-api",
+            model="deepseek/deepseek-v4-flash",
+            prompt="finish the task",
+            request_id="request-local-herv3-fallback",
+        )
+
+    create.assert_awaited_once_with(
+        "her-v2",
+        target_model="deepseek/deepseek-v4-flash",
+        target_provider="openrouter-api",
+    )
+    candidate.generate_response.assert_not_awaited()
+    dispose.assert_awaited_once_with(candidate)
+
+
 def test_stale_persisted_backend_falls_back_to_configured_allowed_backend(
     tmp_path,
     caplog,

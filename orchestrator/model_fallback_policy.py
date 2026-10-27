@@ -347,6 +347,7 @@ class FallbackDecision:
     confirmation: FallbackConfirmation | None = None
     tool_activity: bool = False
     visible_partial_answer: bool = False
+    estimated_cost_used_usd: float | None = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -363,6 +364,7 @@ class FallbackDecision:
             "cost_ceiling_usd": self.cost_ceiling_usd,
             "tool_activity": self.tool_activity,
             "visible_partial_answer": self.visible_partial_answer,
+            "estimated_cost_used_usd": self.estimated_cost_used_usd,
             "confirmation": (
                 self.confirmation.to_dict() if self.confirmation is not None else None
             ),
@@ -746,6 +748,10 @@ class FallbackRequestFacts:
     visible_partial_answer: bool = False
     checkpoint_safe: bool = False
     budget_used: int = 0
+    # Sum of every previously attempted fallback route. None means at least
+    # one paid attempt had an unknown estimate, so the cumulative total stays
+    # unknown and follows the existing fail-closed cost policy.
+    estimated_cost_used_usd: float | None = 0.0
     known_extra_cost_usd: float | None = None
     interactive: bool = True
     request_id: str = ""
@@ -804,6 +810,20 @@ def resolve_fallback_decision(
         privacy_valid = False
     limit = _narrowed_limit(policy, facts.privacy_level) if privacy_valid else 0
     allow_known = bool(policy.allow_unknown_cost)
+    try:
+        if isinstance(facts.estimated_cost_used_usd, bool):
+            estimated_cost_used_usd = None
+        elif facts.estimated_cost_used_usd is None:
+            estimated_cost_used_usd = None
+        else:
+            estimated_cost_used_usd = float(facts.estimated_cost_used_usd)
+            if (
+                not math.isfinite(estimated_cost_used_usd)
+                or estimated_cost_used_usd < 0
+            ):
+                estimated_cost_used_usd = None
+    except (TypeError, ValueError):
+        estimated_cost_used_usd = None
 
     def decision(
         *,
@@ -827,6 +847,7 @@ def resolve_fallback_decision(
             confirmation=confirmation,
             tool_activity=bool(facts.tool_activity),
             visible_partial_answer=bool(facts.visible_partial_answer),
+            estimated_cost_used_usd=estimated_cost_used_usd,
         )
 
     # 1. hard request-scope exclusion (phone/call/voice) evaluated first.
@@ -893,7 +914,9 @@ def resolve_fallback_decision(
     first_reason: str | None = None
     for route in candidates:
         if route.key() in facts.excluded_route_keys:
-            first_reason = first_reason or REASON_NO_ALLOWED_TARGET
+            # A route already attempted in this recovery chain is no longer a
+            # candidate; it must not mask the reason a later eligible route is
+            # blocked (for example, the remaining cumulative cost budget).
             continue
         if (
             route.target_kind == TARGET_KIND_HERV3_MODEL
@@ -954,18 +977,23 @@ def resolve_fallback_decision(
                     known_extra_cost_usd = None
         except (TypeError, ValueError):
             known_extra_cost_usd = None
-        if known_extra_cost_usd is None and not allow_known:
+        cumulative_cost_usd = (
+            None
+            if known_extra_cost_usd is None or estimated_cost_used_usd is None
+            else estimated_cost_used_usd + known_extra_cost_usd
+        )
+        if cumulative_cost_usd is None and not allow_known:
             if policy.mode == MODE_ASK and facts.interactive:
                 # The bound interactive confirmation is the user's explicit
-                # cost decision for an unknown price.
+                # cost decision for an unknown cumulative price.
                 pass
             else:
                 first_reason = first_reason or REASON_UNKNOWN_COST
                 continue
         if (
-            known_extra_cost_usd is not None
+            cumulative_cost_usd is not None
             and policy.max_extra_cost_usd is not None
-            and float(known_extra_cost_usd) > float(policy.max_extra_cost_usd)
+            and cumulative_cost_usd > float(policy.max_extra_cost_usd)
         ):
             first_reason = first_reason or REASON_BUDGET_EXHAUSTED
             continue

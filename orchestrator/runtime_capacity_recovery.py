@@ -37,8 +37,11 @@ def _source_for_engine(engine: str) -> str | None:
     canonical = canonical_backend_engine(engine)
     if canonical == "codex-cli":
         return policy_owner.SOURCE_CODEX_CLI
-    # HERV3 consumes the same policy inside its own durable Turn loop.  Replaying
-    # its outer fixed envelope here would violate PAO/HER idempotency.
+    if canonical == "her-v2":
+        # HERV3 owns same-Engine recovery. PAO recognizes the terminal typed
+        # capacity failure only so it can perform an authorised cross-Engine
+        # fallback without pretending Codex is an internal Model Provider.
+        return policy_owner.SOURCE_HERV3
     return None
 
 
@@ -57,12 +60,26 @@ def _side_effects_possible(response: Any) -> bool:
     )
 
 
-def _resumable_session(runtime: Any) -> bool:
+def _session_identity(runtime: Any) -> tuple[Any, str]:
     backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
     capabilities = getattr(backend, "capabilities", None)
+    session_id = str(getattr(backend, "_session_id", None) or "").strip()
+    if not getattr(capabilities, "supports_sessions", False) or not session_id:
+        return backend, ""
+    return backend, session_id
+
+
+def _resumable_session(
+    runtime: Any,
+    *,
+    expected_backend: Any,
+    expected_session_id: str,
+) -> bool:
+    backend, session_id = _session_identity(runtime)
     return bool(
-        getattr(capabilities, "supports_sessions", False)
-        and str(getattr(backend, "_session_id", None) or "").strip()
+        expected_session_id
+        and backend is expected_backend
+        and session_id == expected_session_id
     )
 
 
@@ -159,6 +176,40 @@ def _known_cost(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
+def _prior_fallback_accounting(
+    response: Any,
+) -> tuple[int | None, float | None, frozenset[str]]:
+    metadata = getattr(response, "stream_metadata", None)
+    her = metadata.get("her_v2") if isinstance(metadata, Mapping) else None
+    accounting = (
+        her.get("fallback_accounting") if isinstance(her, Mapping) else None
+    )
+    if not isinstance(accounting, Mapping):
+        return 0, 0.0, frozenset()
+    raw_calls = accounting.get("additional_calls_used")
+    try:
+        if isinstance(raw_calls, bool):
+            raise ValueError
+        calls = int(raw_calls)
+        if calls < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        calls = None
+    if "estimated_cost_used_usd" not in accounting:
+        cost: float | None = None
+    elif accounting.get("estimated_cost_used_usd") is None:
+        cost = None
+    else:
+        cost = _known_cost(accounting.get("estimated_cost_used_usd"))
+    raw_routes = accounting.get("route_keys")
+    routes = (
+        frozenset(str(value) for value in raw_routes if str(value))
+        if isinstance(raw_routes, (list, tuple, set, frozenset))
+        else frozenset()
+    )
+    return calls, cost, routes
+
+
 def _route_facts(runtime: Any, policy: policy_owner.FallbackPolicy) -> dict[str, Any]:
     from orchestrator.runtime_effort_options import get_available_models
 
@@ -204,6 +255,24 @@ def _route_facts(runtime: Any, policy: policy_owner.FallbackPolicy) -> dict[str,
             )
             continue
         model_ready = bool(not route.model or route.model in codex_models)
+        matching_codex_row = next(
+            (
+                row
+                for row in codex_rows
+                if not route.model
+                or route.model
+                in {
+                    str(value)
+                    for value in (
+                        row.get("models")
+                        or row.get("available_models")
+                        or [row.get("model")]
+                    )
+                    if value
+                }
+            ),
+            codex_rows[0] if codex_rows else {},
+        )
         facts[route.key()] = policy_owner.FallbackRouteFacts(
             credential_ready=bool(codex_rows),
             capability_ok=bool(codex_rows and model_ready),
@@ -211,6 +280,9 @@ def _route_facts(runtime: Any, policy: policy_owner.FallbackPolicy) -> dict[str,
                 policy_owner.REASON_MISSING_KEY_OR_RUNTIME
                 if not codex_rows
                 else policy_owner.REASON_INCOMPATIBLE_CAPABILITY
+            ),
+            known_extra_cost_usd=_known_cost(
+                matching_codex_row.get("estimated_fallback_call_cost_usd")
             ),
         )
     return facts
@@ -265,18 +337,33 @@ async def _attempt_fallback(
     side_effects_seen: bool,
     partial_answer_seen: bool,
 ) -> Any:
-    budget_used = 0
+    prior_calls, estimated_cost_used_usd, prior_routes = (
+        _prior_fallback_accounting(response)
+    )
+    budget_used = (
+        int(prior_calls)
+        if prior_calls is not None
+        else int(policy.max_additional_calls)
+    )
     source_model = _source_model(runtime)
-    excluded: set[str] = {
+    excluded: set[str] = set(prior_routes)
+    excluded.update(
         route.key()
         for route in policy.routes
-        if source == policy_owner.SOURCE_CODEX_CLI
-        and route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI
-        and (not route.model or route.model == source_model)
-    }
+        if (
+            source == policy_owner.SOURCE_CODEX_CLI
+            and route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI
+            and (not route.model or route.model == source_model)
+        )
+        or (
+            source == policy_owner.SOURCE_HERV3
+            and route.target_kind == policy_owner.TARGET_KIND_HERV3_MODEL
+        )
+    )
     attempts: list[dict[str, Any]] = []
     current = response
     while True:
+        route_facts = _route_facts(runtime, policy)
         facts = policy_owner.FallbackRequestFacts(
             source=source,
             source_provider=canonical_backend_engine(runtime.config.active_backend),
@@ -290,10 +377,11 @@ async def _attempt_fallback(
             ),
             checkpoint_safe=False,
             budget_used=budget_used,
+            estimated_cost_used_usd=estimated_cost_used_usd,
             known_extra_cost_usd=None,
             interactive=_interactive(item),
             request_id=str(item.request_id),
-            route_facts=_route_facts(runtime, policy),
+            route_facts=route_facts,
             excluded_route_keys=frozenset(excluded),
         )
         decision = policy_owner.resolve_fallback_decision(policy, facts)
@@ -323,6 +411,13 @@ async def _attempt_fallback(
             )
 
         route = decision.route
+        selected_facts = facts.facts_for(route)
+        route_cost_usd = (
+            selected_facts.known_extra_cost_usd
+            if selected_facts.known_extra_cost_usd is not None
+            else facts.known_extra_cost_usd
+        )
+        route_cost_usd = _known_cost(route_cost_usd)
         await _emit(
             on_stream_event,
             "fallback.runtime.switch",
@@ -359,6 +454,11 @@ async def _attempt_fallback(
                 error_retryable=False,
             )
         budget_used += 1
+        estimated_cost_used_usd = (
+            None
+            if estimated_cost_used_usd is None or route_cost_usd is None
+            else estimated_cost_used_usd + route_cost_usd
+        )
         excluded.add(route.key())
         attempts.append(
             {
@@ -366,6 +466,8 @@ async def _attempt_fallback(
                 "target": _target_label(route),
                 "success": bool(getattr(current, "is_success", False)),
                 "error_code": getattr(current, "error_code", None),
+                "estimated_cost_usd": route_cost_usd,
+                "estimated_cost_used_usd": estimated_cost_used_usd,
             }
         )
         if getattr(current, "is_success", False):
@@ -399,12 +501,35 @@ async def generate_with_capacity_recovery(
     source = _source_for_engine(str(runtime.config.active_backend or ""))
     if source is None:
         return response
+    recovery_backend, recovery_session_id = _session_identity(runtime)
     policy, _document = policy_owner.read_policy(runtime, _actor(item))
     retry_attempts = 0
     delays_s: list[float] = []
     side_effects_seen = _side_effects_possible(response)
     partial_answer_seen = bool(str(getattr(response, "text", "") or "").strip())
     on_stream_event = kwargs.get("on_stream_event")
+    if source == policy_owner.SOURCE_HERV3:
+        if (
+            str(getattr(response, "error_code", "") or "").upper()
+            == policy_owner.CAPACITY_FAILURE_CODE
+            and policy.mode in {policy_owner.MODE_ASK, policy_owner.MODE_AUTO}
+        ):
+            return await _attempt_fallback(
+                runtime,
+                item,
+                response,
+                policy=policy,
+                source=source,
+                original_prompt=prompt,
+                generation_kwargs=kwargs,
+                on_stream_event=on_stream_event,
+                retry_attempts=0,
+                delays_s=[],
+                side_effects_seen=side_effects_seen,
+                partial_answer_seen=partial_answer_seen,
+            )
+        # HERV3 already owns and has completed its same-Engine retry loop.
+        return response
     while True:
         decision = policy_owner.resolve_capacity_retry(
             policy,
@@ -414,8 +539,12 @@ async def generate_with_capacity_recovery(
                 retryable=getattr(response, "error_retryable", None) is True,
                 retry_index=retry_attempts,
                 retry_after_s=getattr(response, "retry_after_s", None),
-                side_effects_possible=_side_effects_possible(response),
-                resumable_session=_resumable_session(runtime),
+                side_effects_possible=side_effects_seen,
+                resumable_session=_resumable_session(
+                    runtime,
+                    expected_backend=recovery_backend,
+                    expected_session_id=recovery_session_id,
+                ),
             ),
         )
         if not decision.allowed:

@@ -5266,6 +5266,7 @@ class OpenRouterAdapter(BaseBackend):
                     additional_calls_limit=int(
                         decision.get("additional_calls_limit") or 0
                     ),
+                    estimated_cost_usd=decision.get("estimated_cost_usd"),
                 )
             except Exception as fallback_error:
                 attempt_record["error"] = type(fallback_error).__name__

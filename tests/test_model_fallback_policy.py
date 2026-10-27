@@ -617,6 +617,37 @@ def test_unknown_cost_is_blocked_by_default_and_budget_stops_the_chain():
     assert invalid_route_cost.blocking_reason == REASON_UNKNOWN_COST
 
 
+def test_cost_ceiling_applies_to_all_prior_fallback_attempts():
+    policy = _auto_policy(
+        HERV3_ROUTE,
+        max_additional_calls=2,
+        max_extra_cost_usd=0.05,
+    )
+    cumulative = resolve_fallback_decision(
+        policy,
+        _facts(
+            HERV3_ROUTE,
+            budget_used=1,
+            estimated_cost_used_usd=0.03,
+            known_extra_cost_usd=0.03,
+        ),
+    )
+    assert cumulative.allowed is False
+    assert cumulative.blocking_reason == REASON_BUDGET_EXHAUSTED
+
+    unknown_prior = resolve_fallback_decision(
+        policy,
+        _facts(
+            HERV3_ROUTE,
+            budget_used=1,
+            estimated_cost_used_usd=None,
+            known_extra_cost_usd=0.01,
+        ),
+    )
+    assert unknown_prior.allowed is False
+    assert unknown_prior.blocking_reason == REASON_UNKNOWN_COST
+
+
 @pytest.mark.parametrize("value", [False, float("nan"), float("inf"), -0.01])
 def test_invalid_cost_ceiling_is_rejected(value):
     with pytest.raises(ValueError, match="max_extra_cost_usd"):
