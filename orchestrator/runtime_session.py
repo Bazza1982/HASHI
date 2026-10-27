@@ -323,6 +323,32 @@ def _restore_telegram_chat_from_ingress(
     return matches[0]
 
 
+def _bind_owner_direct_telegram_chat(
+    runtime: Any,
+    *,
+    store: SessionStore,
+    resolved_owner: str,
+    owner_actor_id: int,
+) -> int:
+    """Persist the configured owner's unambiguous private Telegram route."""
+
+    selected = store.resolve_primary_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        establish=True,
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(owner_actor_id),
+        session_id=selected["session_id"],
+        actor_id=owner_actor_id,
+        actor_role="owner",
+    )
+    return owner_actor_id
+
+
 def primary_telegram_chat_id(runtime: Any) -> int | None:
     """Return a currently authorized owner route for proactive Telegram work.
 
@@ -343,14 +369,35 @@ def primary_telegram_chat_id(runtime: Any) -> int | None:
         agent_id=runtime.name,
         surface="telegram",
         actor_id=owner_actor_id,
+        channel_key=owner_actor_id,
     )
     if binding is not None:
         try:
             chat_id = int(str(binding["channel_key"]).strip())
         except (KeyError, TypeError, ValueError):
             chat_id = 0
-        if not chat_id or binding.get("actor_role") != "owner":
+        if not chat_id:
             return None
+        if binding.get("actor_role") != "owner":
+            # A replacement Telegram account can already have a durable direct
+            # route recorded as ``secondary`` under the same stable PAO owner
+            # scope.  Promote only the newly configured owner's unambiguous
+            # private chat; never promote a group, a legacy actor-less route,
+            # or an allowlist position.
+            if (
+                str(binding.get("actor_id") or "") != str(owner_actor_id)
+                or chat_id != owner_actor_id
+            ):
+                return None
+            store.bind_channel(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                surface="telegram",
+                channel_key=str(chat_id),
+                session_id=str(binding["session_id"]),
+                actor_id=owner_actor_id,
+                actor_role="owner",
+            )
         if _telegram_egress_allowed(
             runtime, actor_id=owner_actor_id, chat_id=chat_id
         ):
@@ -365,7 +412,25 @@ def primary_telegram_chat_id(runtime: Any) -> int | None:
         runtime, actor_id=owner_actor_id, chat_id=restored
     ):
         return restored
-    return None
+    if restored:
+        return None
+
+    # A Telegram private chat uses the same numeric identity as its user.  If
+    # no durable or legacy endpoint exists after a Worker restart, bootstrap
+    # only the explicitly configured owner -- never an allowlist position or
+    # secondary actor -- and re-run both authorization and channel governance.
+    if owner_actor_id <= 0:
+        return None
+    if not _telegram_egress_allowed(
+        runtime, actor_id=owner_actor_id, chat_id=owner_actor_id
+    ):
+        return None
+    return _bind_owner_direct_telegram_chat(
+        runtime,
+        store=store,
+        resolved_owner=resolved_owner,
+        owner_actor_id=owner_actor_id,
+    )
 
 
 def initialize_runtime_sessions(runtime: Any) -> dict[str, Any]:
