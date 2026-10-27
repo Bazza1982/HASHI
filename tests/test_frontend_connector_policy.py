@@ -17,6 +17,10 @@ from orchestrator.frontend_delivery import (
     tui_run_delivery_policy,
 )
 from orchestrator.connector_delivery_preferences import set_connector_preference
+from orchestrator.agent_delivery_policy import (
+    update_agent_telegram_mirror_policy,
+)
+from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.frontend_status import runtime_presentation_status
 
 
@@ -153,6 +157,105 @@ def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_vis
     assert telegram_delivery_for_admission(
         source="tui",
         request_metadata=None,
+    ) is True
+
+
+def test_agent_telegram_mirror_policy_overrides_instance_for_new_runs(tmp_path):
+    config_path = tmp_path / "agents.json"
+    write_config_json(
+        config_path,
+        {
+            "global": {"authorized_id": 42},
+            "agents": [
+                {"name": "lily", "type": "flex"},
+                {"name": "momo", "type": "flex"},
+            ],
+        },
+    )
+    metadata = {"owner_id": "user:42"}
+    set_connector_preference(tmp_path, "user:42", "telegram", "mirror", False)
+
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
+    ) is False
+
+    config = read_config_json(config_path)
+    update_agent_telegram_mirror_policy(config, "lily", "always_on")
+    write_config_json(config_path, config)
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
+    ) is True
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="momo",
+        agent_config_path=config_path,
+    ) is False
+
+    set_connector_preference(tmp_path, "user:42", "telegram", "mirror", True)
+    config = read_config_json(config_path)
+    update_agent_telegram_mirror_policy(config, "lily", "always_off")
+    write_config_json(config_path, config)
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
+    ) is False
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="momo",
+        agent_config_path=config_path,
+    ) is True
+    assert telegram_delivery_for_admission(
+        source="telegram",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
+    ) is True
+
+
+def test_invalid_agent_mirror_policy_fails_closed_for_mirrors_only(tmp_path):
+    config_path = tmp_path / "agents.json"
+    write_config_json(
+        config_path,
+        {
+            "agents": [
+                {
+                    "name": "lily",
+                    "type": "flex",
+                    "telegram_mirror_policy": "unexpected",
+                }
+            ]
+        },
+    )
+    metadata = {"owner_id": "user:42"}
+    assert telegram_delivery_for_admission(
+        source="api",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
+    ) is False
+    assert telegram_delivery_for_admission(
+        source="telegram",
+        request_metadata=metadata,
+        state_root=tmp_path,
+        agent_id="lily",
+        agent_config_path=config_path,
     ) is True
 
 

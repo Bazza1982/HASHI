@@ -7,6 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_delivery_policy import (
+    TELEGRAM_MIRROR_INHERIT,
+    normalize_telegram_mirror_policy,
+)
 from orchestrator.enterprise.profile import (
     parse_profile_context,
     validate_profile_context,
@@ -210,6 +214,7 @@ class FlexibleAgentConfig:
     access_scope: str = "project"
     extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
+    telegram_mirror_policy: str = TELEGRAM_MIRROR_INHERIT
 
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
@@ -802,6 +807,10 @@ class ConfigManager:
                 )
                 access_scope = "workspace"
 
+            telegram_mirror_policy = normalize_telegram_mirror_policy(
+                a_raw.pop("telegram_mirror_policy", TELEGRAM_MIRROR_INHERIT)
+            )
+
             extra = a_raw.pop("extra", None) or a_raw or None
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
@@ -809,6 +818,7 @@ class ConfigManager:
                 active_backend=active_backend, is_active=is_active, type=agent_type,
                 default_mode=default_mode, access_scope=access_scope, extra=extra,
                 project_root=code_root,
+                telegram_mirror_policy=telegram_mirror_policy,
             )
             agents.append(cfg)
 
