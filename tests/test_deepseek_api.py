@@ -698,6 +698,45 @@ def test_openai_compatible_http_failures_are_typed(status, code, retryable):
     assert result.retry_after_s == 2.0
 
 
+@pytest.mark.parametrize(
+    ("status", "payload"),
+    [
+        (
+            503,
+            {"error": {"message": "Selected model is at capacity."}},
+        ),
+        (
+            503,
+            {"error": {"code": "model_at_capacity", "message": "busy"}},
+        ),
+        (
+            529,
+            {"error": {"type": "overloaded_error", "message": "overloaded"}},
+        ),
+    ],
+)
+def test_openai_compatible_capacity_failures_share_the_typed_recovery_code(
+    status,
+    payload,
+):
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+    response = httpx.Response(
+        status,
+        request=request,
+        json=payload,
+        headers={"retry-after": "75"},
+    )
+    error = httpx.HTTPStatusError(
+        f"HTTP {status}", request=request, response=response
+    )
+
+    result = _backend_failure_response(error, duration_ms=1)
+
+    assert result.error_code == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert result.error_retryable is True
+    assert result.retry_after_s == 75.0
+
+
 def test_openai_compatible_connection_and_stream_failures_are_typed():
     request = httpx.Request("POST", "https://provider.invalid/v1/chat")
 

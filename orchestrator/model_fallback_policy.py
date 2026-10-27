@@ -43,9 +43,20 @@ POLICY_VERSION = 1
 STATE_FILENAME = "model_fallback_policy.json"
 
 MODE_OFF = "off"
+MODE_RETRY = "retry"
 MODE_ASK = "ask"
 MODE_AUTO = "auto"
-FALLBACK_MODES = (MODE_OFF, MODE_ASK, MODE_AUTO)
+FALLBACK_MODES = (MODE_OFF, MODE_RETRY, MODE_ASK, MODE_AUTO)
+
+EFFECT_PAUSE = "pause"
+EFFECT_RESUME = "resume"
+SIDE_EFFECT_MODES = (EFFECT_PAUSE, EFFECT_RESUME)
+
+# PAO-level retries begin only after an Engine has exhausted any short local
+# transport recovery.  These waits are intentionally deterministic so the
+# user-visible policy and durable audit agree exactly.
+CAPACITY_RETRY_DELAYS_S = (60.0, 180.0, 300.0)
+CAPACITY_FAILURE_CODE = "PROVIDER_CAPACITY_UNAVAILABLE"
 
 SOURCE_HERV3 = "herv3"
 SOURCE_CODEX_CLI = "codex-cli"
@@ -74,6 +85,10 @@ REASON_UNKNOWN_COST = "unknown_cost"
 REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 REASON_SOURCE_DISABLED = "source_disabled"
 REASON_INELIGIBLE_FAILURE = "ineligible_failure"
+REASON_RETRY_ONLY = "retry_only"
+REASON_RETRY_EXHAUSTED = "retry_exhausted"
+REASON_EFFECT_PAUSED = "side_effect_pause"
+REASON_RESUME_UNAVAILABLE = "resume_unavailable"
 
 DISPOSITION_DISABLED = "disabled"
 DISPOSITION_ASK_REQUIRED = "ask-required"
@@ -147,7 +162,8 @@ class FallbackRoute:
     user explicitly allowed.  When ``same_model`` is set, the authoritative
     compatibility registry must prove that the target serves the same
     canonical model as the failing source; string similarity never does.
-    ``codex_cli`` routes name the Codex CLI engine itself.
+    ``codex_cli`` routes name the Codex CLI engine and may pin one exact model;
+    an empty model remains valid for compatibility with existing policies.
     """
 
     source: str
@@ -220,6 +236,16 @@ class FallbackSourceRule:
     enabled: bool = True
     allow_herv3_targets: bool = True
     allow_codex_cli_targets: bool = True
+    # A (default): stop after possible effects and notify.  B: explicitly
+    # continue only through the same resumable Engine Session; it never grants
+    # whole-prompt replay or a cross-Engine switch after effects.
+    side_effect_mode: str = EFFECT_PAUSE
+
+    def __post_init__(self) -> None:
+        mode = str(self.side_effect_mode or "").strip().casefold()
+        if mode not in SIDE_EFFECT_MODES:
+            raise ValueError(f"unknown side-effect recovery mode: {self.side_effect_mode!r}")
+        object.__setattr__(self, "side_effect_mode", mode)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "FallbackSourceRule":
@@ -237,13 +263,15 @@ class FallbackSourceRule:
                 raw.get("allow_codex_cli_targets", True),
                 "source rule allow_codex_cli_targets",
             ),
+            side_effect_mode=str(raw.get("side_effect_mode") or EFFECT_PAUSE),
         )
 
-    def to_dict(self) -> dict[str, bool]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "allow_herv3_targets": self.allow_herv3_targets,
             "allow_codex_cli_targets": self.allow_codex_cli_targets,
+            "side_effect_mode": self.side_effect_mode,
         }
 
 
@@ -319,6 +347,7 @@ class FallbackDecision:
     confirmation: FallbackConfirmation | None = None
     tool_activity: bool = False
     visible_partial_answer: bool = False
+    estimated_cost_used_usd: float | None = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -335,6 +364,7 @@ class FallbackDecision:
             "cost_ceiling_usd": self.cost_ceiling_usd,
             "tool_activity": self.tool_activity,
             "visible_partial_answer": self.visible_partial_answer,
+            "estimated_cost_used_usd": self.estimated_cost_used_usd,
             "confirmation": (
                 self.confirmation.to_dict() if self.confirmation is not None else None
             ),
@@ -490,6 +520,130 @@ def default_policy() -> FallbackPolicy:
     return FallbackPolicy()
 
 
+@dataclass(frozen=True)
+class CapacityRetryFacts:
+    """Observable facts for one PAO-level same-target capacity retry."""
+
+    source: str
+    failure_code: str
+    retryable: bool
+    retry_index: int
+    retry_after_s: float | None = None
+    side_effects_possible: bool = False
+    resumable_session: bool = False
+    modality: str = "text"
+
+
+@dataclass(frozen=True)
+class CapacityRetryDecision:
+    """Resolved retry action; it never selects a different target."""
+
+    allowed: bool
+    mode: str
+    source: str
+    retry_number: int
+    delay_s: float | None
+    continue_session: bool
+    blocking_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "mode": self.mode,
+            "source": self.source,
+            "retry_number": self.retry_number,
+            "delay_s": self.delay_s,
+            "continue_session": self.continue_session,
+            "blocking_reason": self.blocking_reason,
+        }
+
+
+def _retry_after_seconds(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(parsed) or parsed < 0:
+        return 0.0
+    return parsed
+
+
+def resolve_capacity_retry(
+    policy: FallbackPolicy,
+    facts: CapacityRetryFacts,
+) -> CapacityRetryDecision:
+    """Resolve one bounded same-target retry after a typed capacity failure.
+
+    ``retry_index`` is zero-based and counts only PAO-level retries.  Provider
+    ``Retry-After`` may lengthen, but never shorten, the configured wait.  A
+    possible side effect fails closed unless that exact source has explicitly
+    selected high-risk same-Session continuation and a resumable Session is
+    observable.
+    """
+
+    source = str(facts.source or "").strip().casefold()
+    modality = str(facts.modality or "text").strip().casefold()
+    try:
+        retry_index = int(facts.retry_index)
+    except (TypeError, ValueError):
+        retry_index = -1
+    retry_number = max(0, retry_index + 1)
+
+    def decision(
+        *,
+        allowed: bool,
+        reason: str | None = None,
+        delay_s: float | None = None,
+        continue_session: bool = False,
+    ) -> CapacityRetryDecision:
+        return CapacityRetryDecision(
+            allowed=allowed,
+            mode=policy.mode,
+            source=source,
+            retry_number=retry_number,
+            delay_s=delay_s,
+            continue_session=continue_session,
+            blocking_reason=reason,
+        )
+
+    if modality in EXCLUDED_MODALITIES:
+        return decision(allowed=False, reason=REASON_MODALITY_EXCLUDED)
+    if policy.mode == MODE_OFF:
+        return decision(allowed=False, reason=REASON_DISABLED)
+    if source not in FALLBACK_SOURCES:
+        return decision(allowed=False, reason=REASON_NO_ALLOWED_TARGET)
+    rule = policy.source_rule(source)
+    if not rule.enabled:
+        return decision(allowed=False, reason=REASON_SOURCE_DISABLED)
+    if (
+        str(facts.failure_code or "").strip().upper() != CAPACITY_FAILURE_CODE
+        or facts.retryable is not True
+    ):
+        return decision(allowed=False, reason=REASON_INELIGIBLE_FAILURE)
+    if retry_index < 0 or retry_index >= len(CAPACITY_RETRY_DELAYS_S):
+        return decision(allowed=False, reason=REASON_RETRY_EXHAUSTED)
+
+    continue_session = False
+    if facts.side_effects_possible:
+        if rule.side_effect_mode != EFFECT_RESUME:
+            return decision(allowed=False, reason=REASON_EFFECT_PAUSED)
+        if not facts.resumable_session:
+            return decision(allowed=False, reason=REASON_RESUME_UNAVAILABLE)
+        continue_session = True
+
+    delay_s = max(
+        CAPACITY_RETRY_DELAYS_S[retry_index],
+        _retry_after_seconds(facts.retry_after_s),
+    )
+    return decision(
+        allowed=True,
+        delay_s=delay_s,
+        continue_session=continue_session,
+    )
+
+
 def request_modality(
     *,
     voice_origin: bool = False,
@@ -598,6 +752,10 @@ class FallbackRequestFacts:
     visible_partial_answer: bool = False
     checkpoint_safe: bool = False
     budget_used: int = 0
+    # Sum of every previously attempted fallback route. None means at least
+    # one paid attempt had an unknown estimate, so the cumulative total stays
+    # unknown and follows the existing fail-closed cost policy.
+    estimated_cost_used_usd: float | None = 0.0
     known_extra_cost_usd: float | None = None
     interactive: bool = True
     request_id: str = ""
@@ -656,6 +814,20 @@ def resolve_fallback_decision(
         privacy_valid = False
     limit = _narrowed_limit(policy, facts.privacy_level) if privacy_valid else 0
     allow_known = bool(policy.allow_unknown_cost)
+    try:
+        if isinstance(facts.estimated_cost_used_usd, bool):
+            estimated_cost_used_usd = None
+        elif facts.estimated_cost_used_usd is None:
+            estimated_cost_used_usd = None
+        else:
+            estimated_cost_used_usd = float(facts.estimated_cost_used_usd)
+            if (
+                not math.isfinite(estimated_cost_used_usd)
+                or estimated_cost_used_usd < 0
+            ):
+                estimated_cost_used_usd = None
+    except (TypeError, ValueError):
+        estimated_cost_used_usd = None
 
     def decision(
         *,
@@ -679,6 +851,7 @@ def resolve_fallback_decision(
             confirmation=confirmation,
             tool_activity=bool(facts.tool_activity),
             visible_partial_answer=bool(facts.visible_partial_answer),
+            estimated_cost_used_usd=estimated_cost_used_usd,
         )
 
     # 1. hard request-scope exclusion (phone/call/voice) evaluated first.
@@ -718,6 +891,12 @@ def resolve_fallback_decision(
             reason=REASON_DISABLED,
             disposition=DISPOSITION_DISABLED,
         )
+    if policy.mode == MODE_RETRY:
+        return decision(
+            allowed=False,
+            reason=REASON_RETRY_ONLY,
+            disposition=DISPOSITION_BLOCKED,
+        )
 
     # 4. source-backend rule.
     rule = policy.source_rule(source)
@@ -739,7 +918,9 @@ def resolve_fallback_decision(
     first_reason: str | None = None
     for route in candidates:
         if route.key() in facts.excluded_route_keys:
-            first_reason = first_reason or REASON_NO_ALLOWED_TARGET
+            # A route already attempted in this recovery chain is no longer a
+            # candidate; it must not mask the reason a later eligible route is
+            # blocked (for example, the remaining cumulative cost budget).
             continue
         if (
             route.target_kind == TARGET_KIND_HERV3_MODEL
@@ -769,9 +950,10 @@ def resolve_fallback_decision(
             first_reason = first_reason or REASON_INCOMPATIBLE_CAPABILITY
             continue
         # 8. checkpoint/current-call safety.
-        if route.target_kind == TARGET_KIND_CODEX_CLI and (
-            facts.tool_activity or facts.visible_partial_answer
-        ):
+        if facts.visible_partial_answer:
+            first_reason = first_reason or REASON_UNSAFE_CHECKPOINT
+            continue
+        if route.target_kind == TARGET_KIND_CODEX_CLI and facts.tool_activity:
             first_reason = first_reason or REASON_UNSAFE_CHECKPOINT
             continue
         if (
@@ -799,18 +981,23 @@ def resolve_fallback_decision(
                     known_extra_cost_usd = None
         except (TypeError, ValueError):
             known_extra_cost_usd = None
-        if known_extra_cost_usd is None and not allow_known:
+        cumulative_cost_usd = (
+            None
+            if known_extra_cost_usd is None or estimated_cost_used_usd is None
+            else estimated_cost_used_usd + known_extra_cost_usd
+        )
+        if cumulative_cost_usd is None and not allow_known:
             if policy.mode == MODE_ASK and facts.interactive:
                 # The bound interactive confirmation is the user's explicit
-                # cost decision for an unknown price.
+                # cost decision for an unknown cumulative price.
                 pass
             else:
                 first_reason = first_reason or REASON_UNKNOWN_COST
                 continue
         if (
-            known_extra_cost_usd is not None
+            cumulative_cost_usd is not None
             and policy.max_extra_cost_usd is not None
-            and float(known_extra_cost_usd) > float(policy.max_extra_cost_usd)
+            and cumulative_cost_usd > float(policy.max_extra_cost_usd)
         ):
             first_reason = first_reason or REASON_BUDGET_EXHAUSTED
             continue
@@ -937,6 +1124,12 @@ def write_policy(
 
 
 __all__ = [
+    "CAPACITY_FAILURE_CODE",
+    "CAPACITY_RETRY_DELAYS_S",
+    "CapacityRetryDecision",
+    "CapacityRetryFacts",
+    "EFFECT_PAUSE",
+    "EFFECT_RESUME",
     "FALLBACK_MODES",
     "FALLBACK_SOURCES",
     "FALLBACK_TARGET_KINDS",
@@ -950,6 +1143,10 @@ __all__ = [
     "MODE_ASK",
     "MODE_AUTO",
     "MODE_OFF",
+    "MODE_RETRY",
+    "REASON_EFFECT_PAUSED",
+    "REASON_RESUME_UNAVAILABLE",
+    "REASON_RETRY_EXHAUSTED",
     "SOURCE_CODEX_CLI",
     "SOURCE_HERV3",
     "TARGET_KIND_CODEX_CLI",
@@ -958,6 +1155,7 @@ __all__ = [
     "make_ask_confirmation",
     "policy_path",
     "read_policy",
+    "resolve_capacity_retry",
     "request_modality",
     "resolve_fallback_decision",
     "write_policy",

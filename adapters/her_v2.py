@@ -2442,6 +2442,7 @@ class HERv2Adapter(BaseBackend):
                 request_id,
                 effort=effort_resolution.effective,
                 request_content=request_content,
+                request_mode=str(request_meta.get("request_mode") or "text"),
             )
         except asyncio.CancelledError:
             try:
@@ -2615,6 +2616,11 @@ class HERv2Adapter(BaseBackend):
                 "effort": effort_resolution.metadata(),
             }
         }
+        fallback_accounting = getattr(provider, "fallback_accounting", None)
+        if callable(fallback_accounting):
+            metadata["her_v2"]["fallback_accounting"] = dict(
+                fallback_accounting(request_ref)
+            )
         if result.foreground_cleanup:
             metadata["her_v2"]["foreground_cleanup"] = dict(result.foreground_cleanup)
         if result.primary_failure:

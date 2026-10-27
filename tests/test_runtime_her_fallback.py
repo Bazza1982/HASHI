@@ -23,8 +23,19 @@ from orchestrator.runtime_her_fallback import (
 
 
 def _runtime(tmp_path, *, options=None, actor_free=True):
+    allowed_backends = [
+        {
+            "engine": "codex-cli",
+            "model": "gpt-6.1-sol",
+            "available_models": ["gpt-6.1-sol", "gpt-6-sol"],
+        }
+    ]
     manager = SimpleNamespace(
         privacy_level=1,
+        config=SimpleNamespace(allowed_backends=allowed_backends),
+        current_backend=SimpleNamespace(
+            config=SimpleNamespace(model="gpt-6.1-sol")
+        ),
         get_her_v2_provider_options=lambda: list(
             options
             if options is not None
@@ -58,6 +69,7 @@ def _runtime(tmp_path, *, options=None, actor_free=True):
     )
     runtime = SimpleNamespace(
         backend_manager=manager,
+        config=SimpleNamespace(allowed_backends=allowed_backends),
         global_config=SimpleNamespace(bridge_home=tmp_path, project_root=tmp_path),
         _is_authorized_user=lambda user_id: True,
         _reply_text=AsyncMock(),
@@ -102,12 +114,15 @@ def test_fallback_default_card_is_off_and_covers_the_required_facts(tmp_path):
         text = fallback_menu_text(runtime)
     assert "FALLBACK" in text.upper()
     assert "OFF" in text
+    assert "without PAO retries or fallback" in text
     assert "ordinary general-model requests only" in text
     assert "Privacy:" in text
     assert "Allowed targets, in order:" in text
     assert "No allowed target configured." in text
     assert "Codex CLI" in text
     assert "Extra paid calls" in text
+    assert "60 / 180 / 300" in text
+    assert "Pause and notify" in text
     assert "immediately and persist" in text
     assert "Phone, call, and voice requests are excluded." in text
 
@@ -119,10 +134,10 @@ def test_fallback_command_registration_matches_catalog_description():
     assert spec.guide.usage.startswith("/fallback")
     assert ui_language.command_description(
         "fallback", "fallback", locale="en"
-    ) == "Configure the consented model fallback policy"
+    ) == "Configure model-capacity retry and fallback"
     assert ui_language.command_description(
         "fallback", "fallback", locale="zh-CN"
-    ) == "配置模型备用路由（fallback）策略"
+    ) == "配置模型容量重试与 fallback"
 
 
 def test_fallback_card_escapes_configuration_values(tmp_path):
@@ -193,6 +208,7 @@ def test_fallback_callbacks_stay_short_and_language_neutral(tmp_path):
     assert payloads
     assert all(len(payload.encode("utf-8")) <= 64 for payload in payloads)
     assert all(payload.isascii() for payload in payloads)
+    assert "fallback:mode:retry" in payloads
 
 
 @pytest.mark.asyncio
@@ -318,6 +334,32 @@ async def test_fallback_source_and_privacy_callbacks_stay_independent(tmp_path):
     assert saved.privacy_narrowing.get("provider_trust", {}).get("blocked") is True
 
 
+@pytest.mark.asyncio
+async def test_fallback_effect_safety_is_independent_per_backend(tmp_path):
+    runtime = _runtime(tmp_path)
+    await callback_fallback(
+        runtime,
+        _update(_query("fallback:effect:codex-cli:resume")),
+        SimpleNamespace(),
+    )
+    saved, _document = _read(runtime)
+    assert (
+        saved.source_rule(policy_owner.SOURCE_CODEX_CLI).side_effect_mode
+        == policy_owner.EFFECT_RESUME
+    )
+    assert (
+        saved.source_rule(policy_owner.SOURCE_HERV3).side_effect_mode
+        == policy_owner.EFFECT_PAUSE
+    )
+
+    with ui_language.language_scope(None, locale="en"):
+        text = fallback_menu._sources_text(runtime)
+    assert "Codex CLI source" in text
+    assert "Resume unfinished work" in text
+    assert "HERV3 source" in text
+    assert "Pause and notify" in text
+
+
 def test_fallback_submenus_expose_independent_directions_and_short_callbacks(
     tmp_path,
 ):
@@ -391,6 +433,37 @@ async def test_fallback_codex_source_target_and_route_order_persist(tmp_path):
         policy_owner.SOURCE_HERV3,
         policy_owner.SOURCE_CODEX_CLI,
     ]
+
+
+@pytest.mark.asyncio
+async def test_fallback_codex_source_can_add_an_exact_alternative_codex_model(
+    tmp_path,
+):
+    runtime = _runtime(tmp_path)
+    query = _query("fallback:targets")
+    await callback_fallback(runtime, _update(query), SimpleNamespace())
+    keyboard = query.edit_message_text.await_args.kwargs["reply_markup"]
+    model_button = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith(
+            "fallback:add:codexmodel:codex-cli:"
+        )
+        and "gpt-6-sol" in button.text
+    )
+
+    added = _query(model_button.callback_data)
+    await callback_fallback(runtime, _update(added), SimpleNamespace())
+
+    saved, _document = _read(runtime)
+    route = next(
+        route
+        for route in saved.routes
+        if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI
+    )
+    assert route.source == policy_owner.SOURCE_CODEX_CLI
+    assert route.model == "gpt-6-sol"
 
 
 @pytest.mark.asyncio

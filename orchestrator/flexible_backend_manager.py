@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1382,11 +1383,38 @@ class FlexibleBackendManager:
             raw_her_v2 = extra.get("her_v2")
             if isinstance(raw_her_v2, dict):
                 try:
+                    if target_provider:
+                        if not str(target_model or "").strip():
+                            raise ValueError(
+                                "an exact HERV3 Provider target requires a model"
+                            )
+                        selected_target = HERv3ModelTarget(
+                            provider=target_provider,
+                            model=str(target_model),
+                        )
+                        self._validate_her_v3_target(selected_target)
+                        # This backend is request-local and authorised for one
+                        # exact target. Do not retain an otherwise valid
+                        # auxiliary profile that could execute a different
+                        # Provider/model during the temporary HERV3 Turn.
+                        raw_her_v2 = deepcopy(raw_her_v2)
+                        auxiliary = raw_her_v2.get("auxiliary")
+                        auxiliary = (
+                            dict(auxiliary)
+                            if isinstance(auxiliary, dict)
+                            else {}
+                        )
+                        auxiliary.update(selected_target.to_dict())
+                        raw_her_v2["auxiliary"] = auxiliary
+                    else:
+                        selected_target = self.get_her_v3_target()
                     extra["her_v2"] = apply_v3_target(
                         raw_her_v2,
-                        self.get_her_v3_target(),
+                        selected_target,
                     )
                 except (TypeError, ValueError) as exc:
+                    if target_provider:
+                        raise
                     self.logger.warning(
                         "Ignoring invalid HERV3 model target while building adapter config: %s",
                         exc,
@@ -2109,6 +2137,106 @@ class FlexibleBackendManager:
         if self.current_backend:
             await self._dispose_backend(self.current_backend)
             self.current_backend = None
+
+    async def generate_fallback_response(
+        self,
+        *,
+        target_kind: str,
+        provider: str,
+        model: str,
+        prompt: str,
+        request_id: str,
+        is_retry: bool = False,
+        silent: bool = False,
+        on_stream_event=None,
+        request_content: dict[str, Any] | None = None,
+    ):
+        """Invoke one exact user-authorised route without changing defaults.
+
+        PAO owns selection and consent.  The manager owns qualified Engine
+        construction and disposal.  The candidate is request-local: it never
+        replaces ``current_backend`` or writes the Agent's selected backend.
+        """
+
+        from orchestrator import model_fallback_policy as fallback_policy
+        from orchestrator.session_attachment_authorization import (
+            bind_backend_attachment_reads,
+            current_run_attachment_grants,
+        )
+
+        if target_kind == fallback_policy.TARGET_KIND_HERV3_MODEL:
+            engine = "her-v2"
+            target_provider = str(provider or "").strip()
+            target_model = str(model or "").strip()
+            if not target_provider or not target_model:
+                raise ValueError("HERV3 fallback requires an exact Provider/model")
+        elif target_kind == fallback_policy.TARGET_KIND_CODEX_CLI:
+            engine = "codex-cli"
+            target_provider = None
+            target_model = str(model or "").strip() or None
+        else:
+            raise ValueError(f"unsupported fallback target kind: {target_kind!r}")
+
+        candidate = await self._create_initialized_backend(
+            engine,
+            target_model=target_model,
+            target_provider=target_provider,
+        )
+        if candidate is None:
+            raise RuntimeError("fallback target could not be initialized")
+        try:
+            if target_kind == fallback_policy.TARGET_KIND_HERV3_MODEL:
+                expected_target = HERv3ModelTarget(
+                    provider=str(target_provider or ""),
+                    model=str(target_model or ""),
+                )
+                initialized_config = getattr(candidate, "_v2_config", None)
+                all_provider_profiles = getattr(
+                    initialized_config, "all_provider_profiles", None
+                )
+                actual_targets = None
+                if callable(all_provider_profiles):
+                    try:
+                        actual_targets = {
+                            HERv3ModelTarget(
+                                provider=str(
+                                    getattr(profile, "engine", "") or ""
+                                ),
+                                model=str(
+                                    getattr(profile, "model", "") or ""
+                                ),
+                            )
+                            for profile in all_provider_profiles()
+                        }
+                    except (AttributeError, TypeError, ValueError):
+                        actual_targets = None
+                if actual_targets != {expected_target}:
+                    raise RuntimeError(
+                        "initialized backend did not retain the exact HERV3 "
+                        "fallback target"
+                    )
+            set_session_mode = getattr(candidate, "set_session_mode", None)
+            if callable(set_session_mode):
+                # A cross-Engine fallback receives the complete frozen PAO
+                # prompt.  It is deliberately a request-local Engine Session,
+                # not a replacement for the Conversation's normal binding.
+                set_session_mode(False)
+            grants = current_run_attachment_grants(self, request_id, request_content)
+            with bind_backend_attachment_reads(candidate, grants):
+                kwargs = {
+                    "is_retry": bool(is_retry),
+                    "silent": bool(silent),
+                    "on_stream_event": on_stream_event,
+                }
+                if request_content is not None:
+                    kwargs["request_content"] = deepcopy(request_content)
+                return await candidate.generate_response(
+                    prompt,
+                    request_id,
+                    **kwargs,
+                )
+        finally:
+            await self._dispose_backend(candidate)
 
     async def generate_response(
         self,

@@ -27,6 +27,7 @@ from orchestrator import model_fallback_policy as policy_owner
 from adapters.openrouter_api import ProviderToolReplayError
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
+from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.model_fallback_policy import (
     MODE_AUTO,
     TARGET_KIND_CODEX_CLI,
@@ -47,9 +48,16 @@ HERV3_ROUTE = FallbackRoute(
     model="deepseek/deepseek-v4-flash",
     same_model=True,
 )
+SECOND_HERV3_ROUTE = FallbackRoute(
+    source=policy_owner.SOURCE_HERV3,
+    target_kind=TARGET_KIND_HERV3_MODEL,
+    provider="openrouter-api",
+    model="deepseek/deepseek-v4-pro",
+)
 CODEX_ROUTE = FallbackRoute(
     source=policy_owner.SOURCE_HERV3,
     target_kind=TARGET_KIND_CODEX_CLI,
+    model="gpt-6-sol",
 )
 
 
@@ -80,6 +88,167 @@ def _request(request_ref: str = "req-fallback") -> StageRequest:
         effort=Effort.HIGH,
         allow_tools=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_herv3_capacity_retry_consumes_the_shared_per_source_policy(tmp_path):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    manager = SimpleNamespace(privacy_level=int(PrivacyLevel.PROVIDER_TRUST))
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(
+            mode=policy_owner.MODE_RETRY,
+            sources={
+                policy_owner.SOURCE_HERV3: FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_RESUME
+                ),
+                policy_owner.SOURCE_CODEX_CLI: FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_PAUSE
+                ),
+            },
+        ),
+        document=document,
+    )
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=_request("req-capacity-policy"),
+        selected=SimpleNamespace(engine="deepseek-api", model="deepseek-v4-flash"),
+        failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        retryable=True,
+        retry_after_s=90,
+        retry_index=0,
+        side_effects_possible=True,
+    )
+
+    assert decision["allowed"] is True
+    assert decision["delay_s"] == 90
+    assert decision["continue_session"] is True
+    assert decision["source"] == policy_owner.SOURCE_HERV3
+
+    # The policy source is the selected outer Engine, not HERV3's current
+    # internal model Provider.  A Codex provider inside one HERV3 Turn must
+    # therefore keep using HERV3's independently configured A/B choice.
+    codex_provider_decision = await provider.resolve_stage_capacity_retry(
+        request=_request("req-capacity-policy-codex-provider"),
+        selected=SimpleNamespace(engine="codex-cli", model="gpt-6-sol"),
+        failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        retryable=True,
+        retry_after_s=None,
+        retry_index=0,
+        side_effects_possible=True,
+    )
+    assert codex_provider_decision["allowed"] is True
+    assert codex_provider_decision["continue_session"] is True
+    assert codex_provider_decision["source"] == policy_owner.SOURCE_HERV3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_mode", ["call", "phone", "voice"])
+async def test_herv3_capacity_retry_excludes_live_request_modes(
+    tmp_path, request_mode
+):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=int(PrivacyLevel.PROVIDER_TRUST)
+        ),
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(mode=policy_owner.MODE_RETRY),
+        document=document,
+    )
+    request = _request(f"req-capacity-{request_mode}")
+    object.__setattr__(request, "context", {"request_mode": request_mode})
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=request,
+        selected=SimpleNamespace(
+            engine="deepseek-api", model="deepseek-v4-flash"
+        ),
+        failure_code=policy_owner.CAPACITY_FAILURE_CODE,
+        retryable=True,
+        retry_after_s=600,
+        retry_index=0,
+        side_effects_possible=False,
+    )
+
+    assert decision["allowed"] is False
+    assert decision["delay_s"] is None
+    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+
+
+@pytest.mark.asyncio
+async def test_herv3_capacity_retry_excludes_semantic_voice_origin(tmp_path):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=int(PrivacyLevel.PROVIDER_TRUST)
+        ),
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(mode=policy_owner.MODE_RETRY),
+        document=document,
+    )
+    request = _request("req-capacity-voice-origin")
+    object.__setattr__(
+        request,
+        "request_content",
+        canonical_request_content(
+            [
+                {
+                    "type": "media",
+                    "item_index": 1,
+                    "attachment_id": "att-voice-origin",
+                    "modality": "audio",
+                    "kind": "voice",
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                    "filename": "voice.wav",
+                    "caption": "",
+                    "local_ref": str(tmp_path / "voice.wav"),
+                    "size_bytes": 5,
+                    "sha256": "0" * 64,
+                    "transport": {},
+                }
+            ]
+        ),
+    )
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=request,
+        selected=SimpleNamespace(
+            engine="deepseek-api", model="deepseek-v4-flash"
+        ),
+        failure_code=policy_owner.CAPACITY_FAILURE_CODE,
+        retryable=True,
+        retry_after_s=600,
+        retry_index=0,
+        side_effects_possible=False,
+    )
+
+    assert decision["allowed"] is False
+    assert decision["delay_s"] is None
+    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
 
 
 def _checkpoint_registry(tmp_path, request):
@@ -703,6 +872,15 @@ class _StubManager:
     def __init__(self, options):
         self.privacy_level = int(PrivacyLevel.PROVIDER_TRUST)
         self._options = list(options)
+        self.config = SimpleNamespace(
+            allowed_backends=[
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-sol",
+                    "available_models": ["gpt-6-sol"],
+                }
+            ]
+        )
 
     def get_her_v2_provider_options(self):
         return [dict(item) for item in self._options]
@@ -713,6 +891,8 @@ class _StubBridge:
         self.runtime_context = runtime
         self.backend_manager = manager
         self.budget = {}
+        self.cost = {}
+        self.routes = {}
 
     def _fallback_budget_key(self, request):
         return str(request.request_ref)
@@ -720,10 +900,33 @@ class _StubBridge:
     def _fallback_budget_used(self, key):
         return int(self.budget.get(key, 0))
 
-    def _consume_fallback_budget(self, key, *, limit=None, route_key=""):
+    def _fallback_cost_used(self, key):
+        return self.cost.get(key, 0.0)
+
+    def _fallback_routes_used(self, key):
+        return frozenset(self.routes.get(key, set()))
+
+    def _consume_fallback_budget(
+        self,
+        key,
+        *,
+        limit=None,
+        route_key="",
+        estimated_cost_usd=None,
+    ):
         self.budget[key] = int(self.budget.get(key, 0)) + 1
+        previous = self.cost.get(key, 0.0)
+        self.cost[key] = (
+            None
+            if previous is None or estimated_cost_usd is None
+            else float(previous) + float(estimated_cost_usd)
+        )
+        if route_key:
+            self.routes.setdefault(key, set()).add(route_key)
         return self.budget[key]
 
+    def _mark_fallback_route(self, key, route_key):
+        self.routes.setdefault(key, set()).add(route_key)
 
     def _create_provider_backend(self, engine, *, target_model):
         return SimpleNamespace(
@@ -737,8 +940,9 @@ class _StubBridge:
                 output_modalities=frozenset({"text"}),
             ),
             continue_generation=lambda *args, **kwargs: None,
-
         )
+
+
 def _runtime(tmp_path):
     return SimpleNamespace(
         global_config=SimpleNamespace(bridge_home=tmp_path),
@@ -753,7 +957,10 @@ def _model_options(*, openrouter=True, codex=True, known_cost=None):
             "engine": "openrouter-api",
             "label": "openrouter",
             "available": True,
-            "models": ["deepseek/deepseek-v4-flash"],
+            "models": [
+                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-pro",
+            ],
         }
         if known_cost is not None:
             option["estimated_fallback_call_cost_usd"] = known_cost
@@ -765,7 +972,7 @@ def _model_options(*, openrouter=True, codex=True, known_cost=None):
                 "engine": "codex-cli",
                 "label": "codex",
                 "available": True,
-                "models": [],
+                "models": ["gpt-6-sol"],
             }
         )
     return options
@@ -1009,7 +1216,60 @@ async def test_bridge_port_enforces_configured_route_cost_ceiling(
 
 
 @pytest.mark.asyncio
-async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypatch):
+async def test_bridge_port_accumulates_cost_across_fallback_routes(
+    tmp_path,
+    monkeypatch,
+):
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
+    _save_policy(
+        tmp_path,
+        "tester",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(HERV3_ROUTE, SECOND_HERV3_ROUTE),
+            max_additional_calls=2,
+            max_extra_cost_usd=0.05,
+        ),
+    )
+    request = _request("req-cumulative-cost")
+    bridge = _StubBridge(
+        _runtime(tmp_path),
+        _StubManager(_model_options(known_cost=0.03)),
+    )
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    resolve = bridge_module.HashiStageProvider.resolve_stage_provider_fallback
+
+    first = await resolve(
+        bridge,
+        request=request,
+        selected=profile,
+        tool_started=False,
+        visible_partial_answer=False,
+    )
+    assert first["allowed"] is True
+    assert first["route_key"] == HERV3_ROUTE.key()
+    assert bridge.cost["req-cumulative-cost"] == pytest.approx(0.03)
+
+    second = await resolve(
+        bridge,
+        request=request,
+        selected=profile,
+        tool_started=False,
+        visible_partial_answer=False,
+    )
+    assert second["allowed"] is False
+    assert second["reason"] == policy_owner.REASON_BUDGET_EXHAUSTED
+    assert bridge.budget["req-cumulative-cost"] == 1
+
+
+@pytest.mark.asyncio
+async def test_herv3_internal_stage_defers_codex_route_to_pao(tmp_path, monkeypatch):
     from adapters import her_v2_provider as bridge_module
 
     monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
@@ -1040,37 +1300,34 @@ async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, mo
         tool_started=False,
         visible_partial_answer=False,
     )
-    assert result["allowed"] is True
-    assert result["target_kind"] == TARGET_KIND_CODEX_CLI
-    assert result["target_label"] == "codex-cli"
-    # The explicit additional-call budget entry is consumed before the switch.
-    assert bridge.budget["req-stage"] == 1
+    assert result["allowed"] is False
+    assert result["reason"] == policy_owner.REASON_INCOMPATIBLE_CAPABILITY
+    assert result["target_label"] == ""
+    assert bridge.budget.get("req-stage", 0) == 0
 
-    # A second switch cannot exceed the configured additional-call limit.
-    exhausted = await resolve(
-        bridge,
-        request=request,
-        selected=profile,
-        tool_started=False,
-        visible_partial_answer=False,
+    # Keep the pre-existing safety coverage on an otherwise executable HERV3
+    # Model Provider route. Codex is rejected earlier at the Engine boundary.
+    _save_policy(
+        tmp_path,
+        "tester",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(HERV3_ROUTE,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
     )
-    assert exhausted["allowed"] is False
-    assert exhausted["reason"] == "budget_exhausted"
-
-    # After any Tool execution the cross-engine switch is blocked.
-    follow_up_request = _request("req-stage-2")
-    blocked = await resolve(
+    after_effect = await resolve(
         bridge,
-        request=follow_up_request,
+        request=_request("req-stage-after-effect"),
         selected=profile,
         tool_started=True,
         visible_partial_answer=False,
     )
-    assert blocked["allowed"] is False
-    assert blocked["reason"] == "unsafe_checkpoint"
+    assert after_effect["allowed"] is False
+    assert after_effect["reason"] == policy_owner.REASON_UNSAFE_CHECKPOINT
 
-    # Phone, call, and voice requests never reach target selection.
-    phone_request = _request("req-stage-3")
+    phone_request = _request("req-stage-phone")
     object.__setattr__(phone_request, "context", {"request_mode": "phone"})
     excluded = await resolve(
         bridge,
@@ -1080,7 +1337,65 @@ async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, mo
         visible_partial_answer=False,
     )
     assert excluded["allowed"] is False
-    assert excluded["reason"] == "modality_excluded"
+    assert excluded["reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+
+
+@pytest.mark.asyncio
+async def test_herv3_does_not_fallback_to_its_current_provider_and_model(
+    tmp_path,
+    monkeypatch,
+):
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "default")
+    current_route = FallbackRoute(
+        source=policy_owner.SOURCE_HERV3,
+        target_kind=TARGET_KIND_HERV3_MODEL,
+        provider="deepseek-api",
+        model="deepseek-v4-flash",
+    )
+    _save_policy(
+        tmp_path,
+        "default",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(current_route,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    manager = _StubManager(
+        [
+            {
+                "engine": "deepseek-api",
+                "available": True,
+                "models": ["deepseek-v4-flash"],
+            }
+        ]
+    )
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    port = _Herv3ProviderFallbackPort(
+        _StubBridge(_runtime(tmp_path), manager),
+        _request("req-current-target"),
+        profile,
+        purpose="stage",
+    )
+
+    decision = await port.evaluate_provider_fallback(
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=False,
+        visible_partial_answer=False,
+        primary_failure={"code": "PROVIDER_CAPACITY_UNAVAILABLE"},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == policy_owner.REASON_NO_ALLOWED_TARGET
 
 @pytest.mark.asyncio
 async def test_herv3_fallback_skips_permanent_failures(monkeypatch, tmp_path):

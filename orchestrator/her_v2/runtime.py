@@ -225,6 +225,7 @@ class _TurnState:
     effort: Effort
     ledger: ExecutionLedger
     control: TurnControl
+    request_mode: str = "text"
     task_state: HERTaskState | None = None
     request_content: Mapping[str, Any] | None = None
     attachment_manifest: tuple[Mapping[str, Any], ...] = ()
@@ -344,6 +345,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         effort: Effort | str = Effort.MEDIUM,
         turn_id: str | None = None,
         request_content: Mapping[str, Any] | None = None,
+        request_mode: str = "text",
     ) -> TurnResult:
         prompt = str(request or "").strip()
         if not prompt:
@@ -363,6 +365,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             effort=effort_value,
             ledger=ledger,
             control=control,
+            request_mode=(
+                str(request_mode or "text").strip().casefold() or "text"
+            ),
             # Cognitive control is a permanent HER v2 safety invariant, not an
             # Agent/configuration capability. Every Turn therefore owns one
             # lifecycle-wide TaskState before any stage is invoked.

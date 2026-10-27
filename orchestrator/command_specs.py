@@ -360,7 +360,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "fallback",
         "cmd_fallback",
-        "Configure the consented model fallback policy",
+        "Configure model-capacity retry and fallback",
         "models",
         guide=CommandGuide(
             "/fallback [status]",
