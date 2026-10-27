@@ -408,6 +408,130 @@ async def test_real_pcm_and_her_fixed_materialize_phone_prefix_and_tail_without_
 
 
 @pytest.mark.asyncio
+async def test_real_fixed_pcm_migrates_legacy_phone_sections_after_action(phone,tmp_path):  # noqa: F811
+    from adapters.her_v2 import HERv2Adapter
+    from orchestrator.phone_context_handoff import prepare_turn,commit_success
+    from orchestrator.bridge_memory import BridgeContextAssembler,BridgeMemoryStore
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+
+    runtime=turn_runtime(phone)
+    runtime.config.active_backend="her-v2"
+    coordinator=HerBackendSessionCoordinator(tmp_path/"her-state")
+    (tmp_path/"pcm").mkdir()
+    assembler=BridgeContextAssembler(BridgeMemoryStore(tmp_path/"pcm"),None)
+    legacy_key="phone_external_context:legacy-batch"
+    historic_call=f"{phone.call_id}-historic"
+    historic_binding=replace(
+        phone.binding,call_id=historic_call,provider_session_id="prov-historic"
+    )
+
+    with phone.store._lock,phone.store._connection() as connection:
+        connection.execute("""INSERT INTO live_calls(
+            call_id,owner_id,session_id,agent_id,instance_id,instance_generation,
+            context_generation,call_epoch,provider_session_id,phase,
+            controller_lease,lease_expiry,started_at,max_ends_at,ended_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,'ended',?,?,?,?,?)""",(
+            historic_call,phone.owner_id,phone.session_id,phone.agent_id,"HASHI","1",
+            1,1,"prov-historic","lease-historic","2099-01-01T00:00:00Z",
+            "2026-10-03T10:00:00Z","2099-01-01T00:00:00Z",
+            "2026-10-03T10:01:00Z",
+        ))
+    await phone.manager.append_fragment_once(
+        historic_binding,
+        Fragment("legacy-event","assistant","Remember the earlier phone history",0,30),
+    )
+    def transport(item,sections,removed=()):
+        payload=assembler.build_prompt_payload(
+            "Question","her-v2",extra_sections=sections,incremental=True
+        )
+        encoded,_=coordinator.prepare_transport(
+            session_id="her-phone",sections=payload["transport_snapshot"]["sections"],
+            resources=[],user_message="Question",request_id=item.request_id,
+            message_id=item.request_id,instance_id="HASHI",agent_id=phone.agent_id,
+            owner_id=phone.owner_id,hashi_conversation_id=phone.session_id,
+            context_generation=1,workzone_identity="test",removed_section_keys=removed,
+        )
+        return coordinator.accept(encoded)
+
+    seed=turn_item(phone,"legacy-seed")
+    opened=transport(seed,[("PHONE CONVERSATION CONTEXT",json.dumps({
+        "provider_event_id":"legacy-event","call_id":"legacy-call"
+    }),{"key":legacy_key,"authority":"history","protected":True})])
+    coordinator.complete(opened,assistant_text="seeded")
+
+    adapter=HERv2Adapter.__new__(HERv2Adapter)
+    adapter._session_coordinator=coordinator
+    adapter._session_id="her-phone"
+    assert legacy_key in adapter.current_pcm_section_keys()
+    runtime.backend_manager.current_backend.current_pcm_section_keys=(
+        adapter.current_pcm_section_keys
+    )
+
+    await phone.manager.append_fragment_once(
+        phone.binding,Fragment("before","assistant","Keep the earlier phone fact",0,30)
+    )
+    phone.judgments=[decision(action("query","Run the phone action"))]
+    await speak(phone,"Run the phone action",start=40,end=80,source="action")
+    proposal=phone.admitted_proposals[-1]
+    action_item=turn_item(phone,"phone-action",{"owner_id":phone.owner_id,"live_voice":{
+        "call_id":phone.call_id,"call_epoch":1,"delegation_id":proposal.delegation_id,
+        "proposal_version":proposal.version,"proposal_digest":proposal.digest,
+        "phone_context_handoff_id":proposal.phone_context_handoff_id}})
+    action_sections,action_audit=prepare_turn(runtime,action_item,incremental=True)
+    action_text="\n".join(section[1] for section in action_sections)
+    assert legacy_key in action_audit["removed_section_keys"]
+    assert action_audit["history_migration_fragments"]==1
+    assert action_audit["history_migration_source_event_ids"]==["legacy-event"]
+    assert "Remember the earlier phone history" in action_text
+    assert "Keep the earlier phone fact" in action_text
+    assert "Run the phone action" in action_text
+    assert "provider_event_id" not in action_text and "call_id" not in action_text
+    accepted=transport(action_item,action_sections,action_audit["removed_section_keys"])
+    assert "legacy-event" not in accepted.materialized_prompt
+    assert "Run the phone action" in accepted.materialized_prompt
+    coordinator.complete(accepted,assistant_text="action complete")
+    commit_success(action_item,SimpleNamespace(is_success=True))
+    with phone.store._lock,phone.store._connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM phone_context_consumption WHERE call_id=?",
+            (phone.call_id,),
+        ).fetchone()[0]==0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM phone_context_consumption WHERE call_id=?",
+            (historic_call,),
+        ).fetchone()[0]==1
+
+    await phone.manager.append_fragment_once(
+        phone.binding,Fragment("tail","assistant","Keep the final phone fact",100,130)
+    )
+    with phone.store._lock,phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",
+            (phone.call_id,),
+        )
+    ordinary=turn_item(phone,"post-phone")
+    ordinary_sections,ordinary_audit=prepare_turn(runtime,ordinary,incremental=True)
+    ordinary_text="\n".join(section[1] for section in ordinary_sections)
+    assert "phone_action_context" in ordinary_audit["removed_section_keys"]
+    assert "Keep the earlier phone fact" in ordinary_text
+    assert "Run the phone action" in ordinary_text
+    assert "Keep the final phone fact" in ordinary_text
+    assert "provider_event_id" not in ordinary_text and "call_id" not in ordinary_text
+    settled=transport(ordinary,ordinary_sections,ordinary_audit["removed_section_keys"])
+    assert "PHONE ACTION CONTEXT" not in settled.materialized_prompt
+    assert "legacy-event" not in settled.materialized_prompt
+    assert "Remember the earlier phone history" in settled.materialized_prompt
+    assert "Keep the earlier phone fact" in settled.materialized_prompt
+    assert "Keep the final phone fact" in settled.materialized_prompt
+    coordinator.complete(settled,assistant_text="settled")
+    commit_success(ordinary,SimpleNamespace(is_success=True))
+    later_sections,_=prepare_turn(
+        runtime,turn_item(phone,"post-phone-later"),incremental=True
+    )
+    assert later_sections==[]
+
+
+@pytest.mark.asyncio
 async def test_phone_checkpoint_io_failure_preserves_success_without_action_replay(phone,monkeypatch):
     await phone.manager.append_fragment_once(phone.binding,Fragment("text","user","The prior constraint",0,100))
     with phone.store._lock,phone.store._connection() as connection:

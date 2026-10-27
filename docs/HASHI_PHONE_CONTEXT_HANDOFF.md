@@ -50,11 +50,24 @@ call/epoch, preventing post-cutoff speech or duplication while retaining every
 earlier Phone call. The next ordinary turn sends an explicit tombstone for the
 action section.
 
+Typed fixed PCM also performs a one-time representation migration. It reads
+the exact current section identities, removes deprecated
+`phone_external_context:*` sections, and rebuilds their durable SessionStore
+source as ordinary semantic `recent_exchange:phone:*` history. If the first
+upgraded turn is a Phone action, earlier ended calls are rebuilt in that same
+request beside the protected action snapshot, so cleanup cannot create a
+history gap. Existing semantic Phone sections are replaced rather than copied
+when their new consumption ledger has not yet committed.
+
 Only a successful actual Provider result commits consumed fragment IDs.
 Failure/cancellation does not advance them; restart reads the same durable
 ledger. Background completion and capacity recovery use the same commit.
 A checkpoint I/O failure is reported separately and does not convert an
 already executed Provider result into an automatic action replay.
+For typed fixed PCM, the protected action snapshot itself never advances the
+ordinary-history watermark. After hang-up, the complete call enters ordinary
+semantic history before `phone_action_context` is removed. Any ended-call
+history migrated beside an action keeps its own normal success checkpoint.
 
 `provider_request.prompt_audit.phone_context_handoff` records snapshot/cutoff,
 requested/included counts, safe consumer lane and exact source-event IDs.
@@ -154,3 +167,25 @@ wrong separate limit and still exposed transport structure to the Agent. The
 durable action evidence remains lossless, while model input uses semantic
 Session history and PCM's existing context controls. Historical failed requests
 are never automatically replayed.
+
+## HASHI3 real-call legacy migration correction, 2026-10-27
+
+A real Agent 1 Phone action completed successfully and the Provider confirmed
+normal user hang-up. Its new `phone_action_context` contained clean semantic
+speaker text, but the resumed HERV3 PCM still carried six deprecated raw Phone
+sections. Those sections occupied 93,132 serialized bytes and made the actual
+Provider prompt 137,226 characters. The successful action had also advanced the
+old ordinary-history consumption lane, which would hide the call after the
+temporary action section was removed. This was a partial migration defect, not
+a Phone transport or Provider failure.
+
+The correction gives typed fixed PCM a versioned semantic consumer, enumerates
+and tombstones exact legacy section keys, preserves earlier ended calls during
+an in-call migration, and keeps the current action snapshot out of the ordinary
+history watermark. A read-only copy of the real Session/HERV3 state migrated
+all six legacy sections into one 3,315-character semantic history section,
+removed the temporary action section, and retained no legacy call values or
+Phone transport metadata in that semantic projection. Focused Phone and live
+voice regression passed 87 tests. This paragraph records defect evidence and
+offline qualification; committed source, Worker adoption and a later live turn
+remain separate facts.

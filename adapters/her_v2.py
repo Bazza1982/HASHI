@@ -1391,6 +1391,17 @@ class HERv2Adapter(BaseBackend):
         self._session_id = None
         return False
 
+    def current_pcm_section_keys(self) -> tuple[str, ...]:
+        """Expose section identities for exact, typed PCM tombstones."""
+
+        if self._session_coordinator is None or not self._session_id:
+            return ()
+        current = self._session_coordinator.store.session(self._session_id)
+        pcm = current.get("pcm") if isinstance(current, Mapping) else None
+        if not isinstance(pcm, Mapping):
+            return ()
+        return tuple(sorted(str(key) for key in pcm if str(key)))
+
     def steer_continuation_evidence(
         self, request_id: str
     ) -> dict[str, Any] | None:

@@ -144,7 +144,10 @@ Phone speech is ordinary role-preserving Session history. Full requests use the
 normal recent-exchange/HCC path; fixed Sessions receive only a semantic
 user/assistant delta. Provider fragment metadata stays in audit storage. Phone
 has no separate context-size ceiling. Action Runs alone use the frozen cutoff
-snapshot, and only that call's ordinary history view is suppressed. Terminal
+snapshot, and only that call's ordinary history view is suppressed. Typed fixed
+PCM replaces legacy raw Phone sections from durable Session speech and does not
+consume an action snapshot as ordinary history; the complete call enters the
+normal semantic history after hang-up. Terminal
 calls never reopen; replacement ignores the old provider deadline while
 connecting and stops after five consecutive failed resume attempts. See
 [handoff and recovery](HASHI_PHONE_CONTEXT_HANDOFF.md).

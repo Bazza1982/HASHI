@@ -493,6 +493,14 @@ PAO stops recovery after five consecutive replacement attempts since the last
 verified active state and settles the call as failed. Schema 29 repairs only
 rows carrying schema 27's matching same-epoch
 `legacy_terminal_recovery` evidence; a later real recovery epoch is preserved.
+
+Phone speech remains ordinary PCM history rather than a separate context lane.
+Typed fixed PCM migrates exact legacy raw Phone sections from their durable
+SessionStore source into semantic user/assistant history, including when the
+first upgraded turn is an action. The protected action snapshot does not
+consume that call's ordinary-history watermark; after hang-up the complete call
+is projected through normal PCM budgeting and compaction before the temporary
+action section is removed. Transport metadata remains audit-only.
 See [Phone Session context and action handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI
