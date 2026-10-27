@@ -222,6 +222,117 @@ async def test_second_action_phone_tail_then_hangup_preserves_provider_continuit
 
 
 @pytest.mark.asyncio
+async def test_active_action_context_survives_failure_and_repeated_action_until_hangup(
+    phone,
+):
+    from orchestrator.phone_context_handoff import prepare_turn, commit_success
+
+    runtime = turn_runtime(phone)
+    backend = runtime.backend_manager.current_backend
+    fixed_sections = {}
+    backend.current_pcm_section_keys = lambda: tuple(fixed_sections)
+    backend.current_pcm_sections = lambda keys: {
+        key: fixed_sections[key] for key in keys if key in fixed_sections
+    }
+
+    phone.judgments = [
+        decision(action("query", "First active-call action")),
+        decision(action("query", "Second active-call action")),
+    ]
+    await phone.manager.append_fragment_once(
+        phone.binding,
+        Fragment("active-prefix", "assistant", "Keep this active-call constraint", 0, 30),
+    )
+
+    def action_item(proposal, request):
+        return turn_item(
+            phone,
+            request,
+            {
+                "owner_id": phone.owner_id,
+                "live_voice": {
+                    "call_id": phone.call_id,
+                    "call_epoch": 1,
+                    "delegation_id": proposal.delegation_id,
+                    "proposal_version": proposal.version,
+                    "proposal_digest": proposal.digest,
+                    "phone_context_handoff_id": proposal.phone_context_handoff_id,
+                },
+            },
+        )
+
+    def retain_action_section(sections):
+        title, body, metadata = next(
+            section for section in sections if section[2]["key"] == "phone_action_context"
+        )
+        fixed_sections["phone_action_context"] = {
+            "key": "phone_action_context",
+            "title": title,
+            "text": body,
+            "authority": "history",
+            "protected": True,
+            "metadata": dict(metadata),
+        }
+
+    await speak(
+        phone,
+        "First active-call action",
+        start=40,
+        end=80,
+        source="active-action-one",
+    )
+    first_item = action_item(phone.admitted_proposals[-1], "active-action-one")
+    first_sections, _ = prepare_turn(runtime, first_item, incremental=True)
+    retain_action_section(first_sections)
+    commit_success(first_item, SimpleNamespace(is_success=False))
+
+    active_sections, active_audit = prepare_turn(
+        runtime, turn_item(phone, "active-ordinary-after-failure"), incremental=True
+    )
+    assert active_sections == []
+    assert "phone_action_context" not in active_audit["removed_section_keys"]
+    assert "phone_action_context" in fixed_sections
+
+    await speak(
+        phone,
+        "Second active-call action",
+        start=100,
+        end=140,
+        source="active-action-two",
+    )
+    second_item = action_item(phone.admitted_proposals[-1], "active-action-two")
+    second_sections, second_audit = prepare_turn(
+        runtime, second_item, incremental=True
+    )
+    assert "phone_action_context" not in second_audit["removed_section_keys"]
+    retain_action_section(second_sections)
+
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended',ended_at='2026-10-27T11:30:00Z' "
+            "WHERE call_id=?",
+            (phone.call_id,),
+        )
+
+    ended_item = turn_item(phone, "ordinary-after-hangup-no-tail")
+    ended_sections, ended_audit = prepare_turn(
+        runtime, ended_item, incremental=True
+    )
+    ended_text = "\n".join(section[1] for section in ended_sections)
+    assert "phone_action_context" in ended_audit["removed_section_keys"]
+    assert "Keep this active-call constraint" in ended_text
+    assert "First active-call action" in ended_text
+    assert "Second active-call action" in ended_text
+
+    commit_success(ended_item, SimpleNamespace(is_success=False))
+    retry_sections, retry_audit = prepare_turn(
+        runtime, turn_item(phone, "ordinary-after-hangup-retry"), incremental=True
+    )
+    assert "phone_action_context" in retry_audit["removed_section_keys"]
+    assert "\n".join(section[1] for section in retry_sections) == ended_text
+
+
+@pytest.mark.asyncio
 async def test_first_her_full_open_action_becomes_ordinary_history_once_without_tail(
     phone, tmp_path
 ):
@@ -634,6 +745,125 @@ async def test_real_pcm_and_her_fixed_materialize_phone_prefix_and_tail_without_
     second=transport(second_item,second_sections)
     assert "Retain the first phone constraint" in second.materialized_prompt
     assert "Retain the later phone detail" in second.materialized_prompt
+
+
+@pytest.mark.asyncio
+async def test_session_history_uses_phone_timeline_not_late_fragment_arrival(phone):
+    accepted = phone.store.accept_run(
+        session_id=phone.session_id,
+        owner_id=phone.owner_id,
+        agent_id=phone.agent_id,
+        request_id="typed-between-phone-and-arrival",
+        text="Typed history happened later",
+        source="test",
+        idempotency_key="typed-between-phone-and-arrival",
+        expected_context_generation=1,
+    )
+    fencing_token = phone.store.mark_request_running(
+        accepted.request_id, worker_id="test-worker"
+    )
+    phone.store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="Typed reply happened later",
+        assistant_source="test",
+        fencing_token=fencing_token,
+    )
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET started_at='2026-10-27T10:01:00+00:00' "
+            "WHERE call_id=?",
+            (phone.call_id,),
+        )
+        connection.execute(
+            """UPDATE messages SET created_at=
+                CASE role
+                    WHEN 'user' THEN '2026-10-27T10:02:00+00:00'
+                    ELSE '2026-10-27T10:02:10+00:00'
+                END
+                WHERE run_id=?""",
+            (accepted.run_id,),
+        )
+    await phone.manager.append_fragment_once(
+        phone.binding,
+        Fragment(
+            "late-arriving-phone-event",
+            "user",
+            "Phone history happened first",
+            0,
+            20,
+        ),
+    )
+
+    exchanges = phone.store.recent_exchanges(phone.session_id, limit=8)
+    rendered = [
+        item.get("user_text") or item.get("assistant_text")
+        for item in exchanges
+    ]
+    assert rendered.index("Phone history happened first") < rendered.index(
+        "Typed history happened later"
+    )
+
+
+def test_her_materialized_prompt_orders_typed_and_phone_history_by_conversation_time(
+    tmp_path,
+):
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from orchestrator.phone_context_handoff import _ordinary_history_section
+
+    (tmp_path / "pcm").mkdir()
+    assembler = BridgeContextAssembler(BridgeMemoryStore(tmp_path / "pcm"), None)
+    coordinator = HerBackendSessionCoordinator(tmp_path / "her-state")
+    typed_history = [{
+        "run_id": "typed-run",
+        "exchange_id": "typed-run",
+        "sequence": 900,
+        "user_message_id": "typed-user",
+        "assistant_message_id": "typed-assistant",
+        "user_ts": "2026-10-27T10:01:00+00:00",
+        "assistant_ts": "2026-10-27T10:01:10+00:00",
+        "user_text": "Typed history happened first",
+        "assistant_text": "Typed reply happened first",
+    }]
+    phone_section = _ordinary_history_section([{
+        "call_id": "chronology-call",
+        "call_epoch": 1,
+        "provider_event_id": "phone-event",
+        "sequence": 1,
+        "role": "user",
+        "text": "Phone history happened later",
+        "start_ms": 0,
+        "end_ms": 20,
+        "conversation_at": "2026-10-27T10:02:00+00:00",
+        "source": "durable_phone_transcript",
+    }])
+    payload = assembler.build_prompt_payload(
+        "Current question",
+        "her-v2",
+        extra_sections=[phone_section],
+        recent_exchanges=typed_history,
+        incremental=False,
+    )
+    encoded, _ = coordinator.prepare_transport(
+        session_id="her-phone-chronology",
+        sections=payload["transport_snapshot"]["sections"],
+        resources=[],
+        user_message="Current question",
+        request_id="chronology-request",
+        message_id="chronology-message",
+        instance_id="HASHI",
+        agent_id="agent",
+        owner_id="owner",
+        hashi_conversation_id="conversation",
+        context_generation=1,
+        workzone_identity="test",
+    )
+    accepted = coordinator.accept(encoded)
+
+    assert accepted.materialized_prompt.index(
+        "Typed history happened first"
+    ) < accepted.materialized_prompt.index("Phone history happened later")
 
 
 @pytest.mark.asyncio
@@ -1109,6 +1339,165 @@ async def test_existing_semantic_v2_matches_identity_when_events_arrive_out_of_o
     assert semantic_key in audit["removed_section_keys"]
     assert "Use the test environment. Late clarification." in rendered
     assert "Acknowledged." in rendered
+
+
+def test_semantic_v2_matches_multiple_calls_with_late_out_of_order_fragment():
+    from orchestrator.phone_context_handoff import (
+        _fragment_digest,
+        _semantic_source_matches,
+        _semantic_transcript,
+    )
+
+    source = [
+        {
+            "call_id": "call-a", "call_epoch": 1,
+            "provider_event_id": "a-user", "sequence": 4,
+            "role": "user", "text": "Same request.",
+            "start_ms": 0, "end_ms": 20, "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-a", "call_epoch": 1,
+            "provider_event_id": "a-answer", "sequence": 1,
+            "role": "assistant", "text": "Same reply.",
+            "start_ms": 30, "end_ms": 50, "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-b", "call_epoch": 1,
+            "provider_event_id": "b-user", "sequence": 5,
+            "role": "user", "text": "Same request.",
+            "start_ms": 0, "end_ms": 20, "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-b", "call_epoch": 1,
+            "provider_event_id": "b-answer", "sequence": 2,
+            "role": "assistant", "text": "Same reply.",
+            "start_ms": 30, "end_ms": 50, "source": "durable_phone_transcript",
+        },
+    ]
+    late = {
+        "call_id": "call-a", "call_epoch": 1,
+        "provider_event_id": "a-late", "sequence": 6,
+        "role": "user", "text": " Late detail.",
+        "start_ms": 21, "end_ms": 25, "source": "durable_phone_transcript",
+    }
+    replacement = [source[0], late, source[1], source[2], source[3]]
+    key = f"recent_exchange:phone:{_fragment_digest(source)}"
+    section = {
+        "text": _semantic_transcript(source),
+        "metadata": {"sequence": min(row["sequence"] for row in source)},
+    }
+
+    assert _semantic_source_matches(key, section, replacement)
+
+def test_semantic_v2_ignores_interleaved_arrival_from_later_dialogue_unit():
+    from orchestrator.phone_context_handoff import (
+        _fragment_digest,
+        _semantic_source_matches,
+        _semantic_transcript,
+    )
+
+    source = [
+        {
+            "call_id": "earlier-call", "call_epoch": 1,
+            "provider_event_id": "earlier-user", "sequence": 4,
+            "role": "user", "text": "Keep this request.",
+            "start_ms": 0, "end_ms": 20,
+            "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "earlier-call", "call_epoch": 1,
+            "provider_event_id": "earlier-answer", "sequence": 10,
+            "role": "assistant", "text": "Keep this answer.",
+            "start_ms": 30, "end_ms": 50,
+            "source": "durable_phone_transcript",
+        },
+    ]
+    later_unit = {
+        "call_id": "later-call", "call_epoch": 1,
+        "provider_event_id": "later-user", "sequence": 6,
+        "role": "user", "text": "Do not add this later call.",
+        "start_ms": 0, "end_ms": 20,
+        "source": "durable_phone_transcript",
+    }
+    replacement = [*source, later_unit]
+    key = f"recent_exchange:phone:{_fragment_digest(source)}"
+    section = {
+        "text": _semantic_transcript(source),
+        "metadata": {"sequence": 4},
+    }
+
+    assert _semantic_source_matches(key, section, replacement)
+
+
+def test_semantic_v2_spans_units_outside_arrival_extrema():
+    from orchestrator.phone_context_handoff import (
+        _fragment_digest,
+        _semantic_source_matches,
+        _semantic_transcript,
+    )
+
+    source = [
+        {
+            "call_id": "call-a", "call_epoch": 1,
+            "provider_event_id": "a-user", "sequence": 4,
+            "role": "user", "text": "Call A.",
+            "start_ms": 0, "end_ms": 20,
+            "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-b", "call_epoch": 1,
+            "provider_event_id": "b-user", "sequence": 1,
+            "role": "user", "text": "Call B question.",
+            "start_ms": 0, "end_ms": 20,
+            "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-b", "call_epoch": 1,
+            "provider_event_id": "b-answer", "sequence": 10,
+            "role": "assistant", "text": "Call B answer.",
+            "start_ms": 30, "end_ms": 50,
+            "source": "durable_phone_transcript",
+        },
+        {
+            "call_id": "call-c", "call_epoch": 1,
+            "provider_event_id": "c-user", "sequence": 7,
+            "role": "user", "text": "Call C.",
+            "start_ms": 0, "end_ms": 20,
+            "source": "durable_phone_transcript",
+        },
+    ]
+    key = f"recent_exchange:phone:{_fragment_digest(source)}"
+    section = {
+        "text": _semantic_transcript(source),
+        "metadata": {"sequence": 1},
+    }
+
+    assert _semantic_source_matches(key, section, source)
+
+
+
+def test_semantic_v2_repeated_text_has_no_bounded_backtracking_rejection():
+    from orchestrator.phone_context_handoff import (
+        _fragment_digest,
+        _semantic_source_matches,
+        _semantic_transcript,
+    )
+
+    replacement = [{
+        "call_id": "repeat-call", "call_epoch": 1,
+        "provider_event_id": f"repeat-{index:02d}", "sequence": index + 1,
+        "role": "user", "text": "x",
+        "start_ms": index * 10, "end_ms": index * 10 + 5,
+        "source": "durable_phone_transcript",
+    } for index in range(40)]
+    source = replacement[20:]
+    key = f"recent_exchange:phone:{_fragment_digest(source)}"
+    section = {
+        "text": _semantic_transcript(source),
+        "metadata": {"sequence": 21},
+    }
+
+    assert _semantic_source_matches(key, section, replacement)
 
 
 def test_semantic_v2_identity_match_handles_long_fragmented_dialogue():

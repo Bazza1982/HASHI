@@ -44,6 +44,11 @@ contains speaker text only. Provider event IDs, call IDs, epochs, timestamps and
 fragment boundaries remain durable audit facts and are not placed in the prompt.
 The SessionStore query excludes already consumed fragment identities before
 loading transcript JSON; ordinary turns do not reparse the lifetime call history.
+Phone dialogue rounds and typed exchanges share one absolute conversation
+timestamp for presentation order. Phone time is call start plus speech offset;
+Provider arrival sequence remains an audit ledger and is never compared with a
+typed Message ordinal. HERV3 must preserve this order in its final materialized
+prompt, not merely in the pre-transport section list.
 
 A Phone action is the sole exception. PAO loads its immutable cutoff snapshot
 and PCM projects that snapshot as one protected `phone_action_context` history
@@ -52,8 +57,10 @@ ordinary history in the same request, independently of whether a representation
 migration is due. The ordinary recent-history view is removed only for the
 current call/epoch, preventing post-cutoff speech or duplication while retaining
 every earlier Phone call. Successful Provider completion checkpoints the ended
-history; failure leaves it pending. The next ordinary turn sends an explicit
-tombstone for the action section.
+history; failure leaves it pending. The action section carries a one-way digest
+of its owning call scope. Ordinary turns preserve it while that exact call
+remains active. Once the call is terminal, PCM first projects the complete call
+as ordinary dialogue-round history and then sends the action tombstone.
 
 Typed fixed PCM also performs a one-time representation migration. It reads
 the exact current sections and validates each deprecated
@@ -62,10 +69,13 @@ SessionStore or the immutable current action snapshot before issuing a
 tombstone. Both the original `fragments` payload and the grouped durable
 `fragment_groups` encoding are expanded through the same decoder before those
 checks. Existing semantic Phone sections must likewise match a chronological
-durable source subsequence by stable event-identity digest and rendered text;
-arrival sequence is not treated as transcript order, and unrelated late
-fragments may be skipped. Missing, malformed or incomplete source fails closed
-and preserves the old section. Verified source is rebuilt as ordinary semantic
+durable source snapshot by stable event-identity digest and rendered text.
+Provider arrival sequence is used only to reconstruct the snapshot's first
+arrival through a candidate high-water mark; it is never compared with chat
+ordinals or used as transcript chronology. This deterministic reconstruction
+spans multiple calls and remains unambiguous when fragments repeat identical
+text. Missing, malformed or incomplete source fails closed and preserves the old
+section. Verified source is rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing
@@ -229,7 +239,19 @@ were rejected before exact-source validation, a successful first HERV3 full-open
 Phone action could consume its temporary snapshot, and semantic-v2 validation
 treated arrival sequence as chronology. The correction reuses the durable
 grouped decoder, keeps action snapshots outside ordinary consumption on every
-transport mode, removes their fixed-PCM section on the next ordinary turn, and
-matches old semantic source by stable identities, digest and text while allowing
-late unrelated fragments. Every invalid or incomplete source still fails closed
-without producing a removal plan.
+transport mode, removes their fixed-PCM section after the owning call becomes
+terminal, and matches old semantic source by stable identities, digest and text
+while allowing late unrelated fragments. Every invalid or incomplete source
+still fails closed without producing a removal plan.
+
+## PR 110 active-context and chronology correction, 2026-10-27
+
+Independent follow-up found that an ordinary action during the same active call
+could tombstone its protected Phone snapshot, that semantic-v2 migration could
+reject valid multi-call or repeated-text source after bounded backtracking, and
+that HERV3 transport compared Provider arrival sequence with typed Message
+ordinal. The correction binds each action snapshot to a one-way call-scope
+digest, retains it until terminal settlement, reconstructs legacy membership by
+arrival high-water while preserving chronological source order, and carries one
+absolute conversation timestamp into fixed PCM ordering. Focused tests assert
+the final HERV3 materialized prompt, not only intermediate section creation.

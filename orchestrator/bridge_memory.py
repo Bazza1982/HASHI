@@ -1543,8 +1543,23 @@ class BridgeContextAssembler:
 
         key = str(section.get("key") or "")
         stride = cls._TRANSPORT_ORDER_STRIDE
+        metadata = section.get("metadata") or {}
+        conversation_at = str(metadata.get("conversation_at") or "").strip()
+        if section.get("authority") == "history" and conversation_at:
+            try:
+                parsed = datetime.fromisoformat(
+                    conversation_at.replace("Z", "+00:00")
+                )
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return stride + max(
+                    0,
+                    int(parsed.astimezone(timezone.utc).timestamp() * 1_000_000),
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                pass
         if key.startswith("recent_exchange:"):
-            sequence = int((section.get("metadata") or {}).get("sequence") or 0)
+            sequence = int(metadata.get("sequence") or 0)
             return stride + max(0, min(sequence, stride - 1))
         if key.startswith("extra:"):
             identity = int.from_bytes(
@@ -1950,7 +1965,13 @@ class BridgeContextAssembler:
                 "RECENT COMPLETED EXCHANGE",
                 exchange_text,
                 "history",
-                metadata={"sequence": sequence, "exchange_id": exchange.get("exchange_id")},
+                metadata={
+                    "sequence": sequence,
+                    "exchange_id": exchange.get("exchange_id"),
+                    "conversation_at": (
+                        exchange.get("user_ts") or exchange.get("assistant_ts")
+                    ),
+                },
             )
             capsule_rows[exchange_key] = self._history_capsule_row(
                 exchange,

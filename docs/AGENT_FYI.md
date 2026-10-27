@@ -135,11 +135,14 @@ defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
 Phone speech is recent-exchange/HCC role history; fixed PCM uses dialogue rounds
-without raw metadata or separate limits. Action snapshots never advance history.
-Hang-up records a call once and removes its snapshot even without a tail. Legacy
-grouped/ungrouped cleanup requires exact hash, scope, event identity, digest and
-text; arrival order is irrelevant and invalid source stays. Failures preserve
-cause; resumes stop after five. See
+without raw metadata or separate limits. Action snapshots never advance history
+and remain while their owning call is active; terminal settlement replaces them
+with complete ordinary history even without a tail. Legacy grouped/ungrouped and
+semantic cleanup requires exact scope, event identity, digest and text; multi-call,
+late and repeated-text source is reconstructed without bounded backtracking.
+Phone and typed history share conversation-time presentation order in HERV3;
+Provider arrival sequence is never compared with Message ordinal. Invalid source
+stays. Failures preserve cause; resumes stop after five. See
 [Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 

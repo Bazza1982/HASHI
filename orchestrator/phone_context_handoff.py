@@ -8,14 +8,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 FRAGMENT_ENCODING = "hashi.phone-fragments.grouped.v1"
 EVENT_COLUMNS = ("provider_event_id", "sequence", "start_ms", "end_ms")
 LEGACY_SECTION_PREFIX = "phone_external_context:"
 SEMANTIC_SECTION_PREFIX = "recent_exchange:phone:"
-SEMANTIC_CONSUMER_VERSION = "phone-semantic-history-v3"
+SEMANTIC_CONSUMER_VERSION = "phone-semantic-history-v4"
+ACTION_OWNER_DIGEST_FIELD = "phone_action_owner_sha256"
 
 
 class PhoneContextError(RuntimeError):
@@ -54,6 +55,21 @@ def _scope(store, *, owner_id: str, agent_id: str, session_id: str,
     if int(session["context_generation"]) != int(context_generation):
         raise PhoneContextError("phone_context_scope_changed", source=session_id)
     return session
+
+
+def _conversation_at(started_at: Any, start_ms: int) -> str:
+    try:
+        parsed = datetime.fromisoformat(
+            str(started_at or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        + timedelta(milliseconds=max(0, int(start_ms)))
+    ).isoformat()
 
 
 def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
@@ -102,6 +118,9 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
             "provider_event_id":str(row["provider_event_id"]),"sequence":int(row["sequence"]),
             "role":str(row["speaker"]),"text":detail["text"],
             "start_ms":int(row["start_ms"]),"end_ms":int(row["end_ms"]),
+            "conversation_at":_conversation_at(
+                row["started_at"],int(row["start_ms"])
+            ),
             "source":"durable_phone_transcript"})
     return fragments
 
@@ -424,63 +443,71 @@ def _semantic_source_matches(
         character not in "0123456789abcdef" for character in target_digest
     ):
         return False
+    try:
+        first_arrival = int(metadata["sequence"])
+        arrivals = sorted({
+            int(row["sequence"])
+            for row in replacement_fragments
+            if int(row["sequence"]) >= first_arrival
+        })
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not arrivals:
+        return False
 
-    # ``sequence`` is an arrival ledger, not transcript chronology.  A late
-    # fragment can therefore sort between events already represented by a v2
-    # semantic section.  Recover the exact old source as a chronological
-    # subsequence, then require both its stable identity digest and rendered
-    # text to match before allowing the old section to be removed.
-    by_call: dict[tuple[str, int], list[dict[str, Any]]] = {}
-    for row in replacement_fragments:
-        scope = (str(row["call_id"]), int(row["call_epoch"]))
-        by_call.setdefault(scope, []).append(row)
-
-    for rows in by_call.values():
-        selected: list[dict[str, Any]] = []
-        attempts = 0
-        max_attempts = max(4096, min(250_000, len(rows) * 8))
-        # Each frame is the next chronological row to try, the rendered-text
-        # offset and previous role, plus whether popping it also pops one
-        # selected fragment.  This is depth-first matching without Python call
-        # recursion, so long word-fragment calls cannot hit the recursion limit.
-        frames: list[list[Any]] = [[0, 0, None, False]]
-        while frames:
-            frame = frames[-1]
-            index = int(frame[0])
-            if index >= len(rows) or attempts >= max_attempts:
-                popped = frames.pop()
-                if bool(popped[3]):
-                    selected.pop()
+    # Old v2 sections were snapshots of every unconsumed Phone event from their
+    # first arrival through one durable high-water mark.  Arrival sequence only
+    # bounds membership; it is not transcript order, and calls that were still
+    # active at that high-water may now appear between completed history units.
+    # Rebuild every aligned dialogue-unit interval deterministically.  Exact
+    # rendered text locates viable intervals before the stable identity digest
+    # is checked, avoiding the old bounded exponential subsequence search.
+    for last_arrival in arrivals:
+        eligible = [
+            row
+            for row in replacement_fragments
+            if first_arrival <= int(row["sequence"]) <= last_arrival
+        ]
+        units = _history_units(eligible)
+        unit_texts = [_semantic_transcript(unit) for unit in units]
+        joined_text = "\n".join(unit_texts)
+        unit_starts: list[int] = []
+        unit_end_to_index: dict[int, int] = {}
+        cursor = 0
+        for index, unit_text in enumerate(unit_texts):
+            unit_starts.append(cursor)
+            cursor += len(unit_text)
+            unit_end_to_index[cursor] = index
+            cursor += 1
+        first_units = [
+            index
+            for index, unit in enumerate(units)
+            if any(int(row["sequence"]) == first_arrival for row in unit)
+        ]
+        last_units = [
+            index
+            for index, unit in enumerate(units)
+            if any(int(row["sequence"]) == last_arrival for row in unit)
+        ]
+        for lower, start in enumerate(unit_starts):
+            if not joined_text.startswith(text, start):
                 continue
-            frame[0] = index + 1
-            attempts += 1
-            row = rows[index]
-            role = str(row["role"])
-            last_role = frame[2]
-            prefix = (
-                f"{'USER' if role == 'user' else 'ASSISTANT'}: "
-                if last_role is None
-                else (
-                    ""
-                    if role == last_role
-                    else f"\n{'USER' if role == 'user' else 'ASSISTANT'}: "
-                )
-            )
-            addition = prefix + str(row["text"])
-            offset = int(frame[1])
-            if not text.startswith(addition, offset):
+            upper = unit_end_to_index.get(start + len(text))
+            if upper is None or upper < lower:
                 continue
-            selected.append(row)
-            next_offset = offset + len(addition)
-            if next_offset == len(text):
-                if (
-                    _fragment_digest(selected) == target_digest
-                    and _semantic_transcript(selected) == text
-                ):
-                    return True
-                selected.pop()
+            if not any(lower <= index <= upper for index in first_units):
                 continue
-            frames.append([index + 1, next_offset, role, True])
+            if not any(lower <= index <= upper for index in last_units):
+                continue
+            selected = [
+                row for unit in units[lower : upper + 1] for row in unit
+            ]
+            if (
+                selected
+                and _fragment_digest(selected) == target_digest
+                and _semantic_transcript(selected) == text
+            ):
+                return True
     return False
 
 
@@ -517,17 +544,25 @@ def _semantic_transcript(fragments: list[dict[str, Any]]) -> str:
 
 def _ordinary_history_section(fragments: list[dict[str, Any]]) -> tuple:
     key = f"recent_exchange:phone:{_fragment_digest(fragments)}"
+    conversation_times = sorted({
+        str(row.get("conversation_at") or "").strip()
+        for row in fragments
+        if str(row.get("conversation_at") or "").strip()
+    })
+    metadata = {
+        "key": key,
+        "authority": "history",
+        "protected": False,
+        "sequence": min(int(row["sequence"]) for row in fragments),
+        "exchange_id": key.removeprefix("recent_exchange:"),
+        "source": "live-phone",
+    }
+    if conversation_times:
+        metadata["conversation_at"] = conversation_times[0]
     return (
         "RECENT COMPLETED EXCHANGE",
         _semantic_transcript(fragments),
-        {
-            "key": key,
-            "authority": "history",
-            "protected": False,
-            "sequence": min(int(row["sequence"]) for row in fragments),
-            "exchange_id": key.removeprefix("recent_exchange:"),
-            "source": "live-phone",
-        },
+        metadata,
     )
 
 
@@ -651,6 +686,80 @@ def _ended_fragments(
             exclude_call_scope=exclude_call_scope,
         )
 
+
+def _action_owner_digest(
+    *,
+    owner_id: str,
+    agent_id: str,
+    session_id: str,
+    context_generation: int,
+    call_id: str,
+    call_epoch: int,
+) -> str:
+    material = [
+        "hashi.phone-action-owner.v1",
+        str(owner_id),
+        str(agent_id),
+        str(session_id),
+        int(context_generation),
+        str(call_id),
+        int(call_epoch),
+    ]
+    return hashlib.sha256(
+        json.dumps(material, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _action_context_is_active(
+    store: Any,
+    backend: Any,
+    *,
+    owner_id: str,
+    agent_id: str,
+    session_id: str,
+    context_generation: int,
+) -> bool:
+    with store._lock, store._connection() as connection:
+        active_calls = connection.execute(
+            """SELECT call_id,call_epoch FROM live_calls
+                WHERE owner_id=? AND agent_id=? AND session_id=?
+                AND context_generation=? AND ended_at IS NULL""",
+            (owner_id, agent_id, session_id, int(context_generation)),
+        ).fetchall()
+    if not active_calls:
+        return False
+
+    try:
+        action = _fixed_pcm_sections(
+            backend, ["phone_action_context"]
+        ).get("phone_action_context")
+    except PhoneContextError:
+        return True
+    metadata = action.get("metadata") if isinstance(action, Mapping) else None
+    declared = (
+        str(metadata.get(ACTION_OWNER_DIGEST_FIELD) or "")
+        if isinstance(metadata, Mapping)
+        else ""
+    )
+    if len(declared) != 64 or any(
+        character not in "0123456789abcdef" for character in declared
+    ):
+        # Pre-v4 action sections have no owner digest.  While any scoped call is
+        # still active, preserving the temporary section is the safe migration.
+        return True
+    return any(
+        _action_owner_digest(
+            owner_id=owner_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            context_generation=context_generation,
+            call_id=str(row["call_id"]),
+            call_epoch=int(row["call_epoch"]),
+        ) == declared
+        for row in active_calls
+    )
+
+
 def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[str,Any]]:
     from orchestrator import runtime_session
     session_id=str(getattr(item,"session_id","") or "")
@@ -683,6 +792,25 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
             if key in live and str(live[key])!=str(snapshot[key]):
                 raise PhoneContextError("phone_context_scope_changed",source=handoff_id)
         action_fragments=list(snapshot["fragments"])
+        with store._lock, store._connection() as connection:
+            call = connection.execute(
+                """SELECT started_at FROM live_calls
+                    WHERE owner_id=? AND agent_id=? AND session_id=?
+                    AND context_generation=? AND call_id=? AND call_epoch=?""",
+                (
+                    owner_id,
+                    runtime.name,
+                    session_id,
+                    generation,
+                    str(snapshot["call_id"]),
+                    int(snapshot["call_epoch"]),
+                ),
+            ).fetchone()
+        if call is not None:
+            for fragment in action_fragments:
+                fragment["conversation_at"] = _conversation_at(
+                    call["started_at"], int(fragment["start_ms"])
+                )
 
     backend=runtime.backend_manager.current_backend
     backend_id=str(runtime.config.active_backend)
@@ -698,6 +826,18 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         key for key in fixed_section_keys if key.startswith(SEMANTIC_SECTION_PREFIX)
     ]
     has_action_section = "phone_action_context" in fixed_section_keys
+    action_context_active = bool(
+        has_action_section
+        and not live
+        and _action_context_is_active(
+            store,
+            backend,
+            owner_id=owner_id,
+            agent_id=runtime.name,
+            session_id=session_id,
+            context_generation=generation,
+        )
+    )
     has_consumption=False
     if incremental:
         with store._lock,store._connection() as connection:
@@ -790,7 +930,10 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         "removed_section_keys":(
             migration_removals
             if live else [
-                *(["phone_action_context"] if has_action_section else []),
+                *(
+                    ["phone_action_context"]
+                    if has_action_section and not action_context_active else []
+                ),
                 *migration_removals,
             ]
         ),
@@ -824,15 +967,31 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
             + _semantic_transcript(included)
         )
         sections=_ordinary_history_sections(history_fragments)
+        action_metadata = {
+            "key":"phone_action_context",
+            "authority":"history",
+            "protected":True,
+            "source":"live-phone",
+            ACTION_OWNER_DIGEST_FIELD:_action_owner_digest(
+                owner_id=owner_id,
+                agent_id=runtime.name,
+                session_id=session_id,
+                context_generation=generation,
+                call_id=str(snapshot["call_id"]),
+                call_epoch=int(snapshot["call_epoch"]),
+            ),
+        }
+        action_times = sorted({
+            str(row.get("conversation_at") or "").strip()
+            for row in action_fragments
+            if str(row.get("conversation_at") or "").strip()
+        })
+        if action_times:
+            action_metadata["conversation_at"] = action_times[0]
         sections.append((
             "PHONE ACTION CONTEXT",
             body,
-            {
-                "key":"phone_action_context",
-                "authority":"history",
-                "protected":True,
-                "source":"live-phone",
-            },
+            action_metadata,
         ))
         return sections,audit
     if not incremental:

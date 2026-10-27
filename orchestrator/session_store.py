@@ -68,6 +68,26 @@ HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
 HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
 
 
+def _conversation_timestamp(
+    started_at: Any,
+    start_ms: int,
+    *,
+    fallback: Any = "",
+) -> str:
+    try:
+        parsed = datetime.fromisoformat(
+            str(started_at or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return str(fallback or "")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        + timedelta(milliseconds=max(0, int(start_ms)))
+    ).isoformat()
+
+
 def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
     normalized = str(policy or "standard").strip().casefold()
     if normalized == "standard":
@@ -8909,7 +8929,11 @@ class SessionStore:
                     "end_ms": end_ms,
                     "sequence": int(row["sequence"]),
                     "last_sequence": int(row["sequence"]),
-                    "created_at": str(row["created_at"] or row["started_at"] or ""),
+                    "created_at": _conversation_timestamp(
+                        row["started_at"],
+                        start_ms,
+                        fallback=row["created_at"],
+                    ),
                     "provider_event_ids": [str(row["provider_event_id"])],
                 }
             segments.append(segment)
