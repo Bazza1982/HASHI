@@ -80,6 +80,9 @@ Accepted non-voice attachments commit atomically to the target Agent's ignored
 Session retention removes them. Safe Voice has its own lifecycle.
 
 Telegram proactive routes are owner-only and revalidate actor/egress after restart.
+With no saved endpoint, PAO may bind only the configured owner's same-ID private
+chat after those checks; never infer a group, allowlist position, or secondary user.
+An unresolved/zero endpoint is omitted from the frozen Run route.
 Question `unknown` neither cancels nor retries; Codex expiry preserves authenticated
 partial answers. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
 [questions](HASHI_RUN_QUESTIONS.md).

@@ -280,10 +280,15 @@ secondary user's activity never selects or replaces the owner's proactive
 route. On every lookup, including after Worker restart, PAO revalidates the
 persisted owner actor against the current Telegram allowlist and the current
 channel-egress policy. Revocation therefore disables the old route without
-deleting audit evidence. A legacy Session with no actor-bound route may recover
-one only by matching the canonical ingress envelope's opaque `endpoint_id`
-against the currently authorized configured owner. An authorization-list
-position never selects a destination, and an unresolved route sends nothing.
+deleting audit evidence. A legacy Session with no actor-bound route first tries
+to recover one by matching the canonical ingress envelope's opaque
+`endpoint_id` against the currently authorized configured owner. If no endpoint
+can be recovered, PAO may bootstrap only that configured owner's direct private
+chat because Telegram defines its chat ID as the same numeric user ID. The same
+authorization and channel-egress checks run before PAO persists the owner
+binding. This fallback never guesses a group chat, chooses an authorization-list
+position, or selects a secondary actor. An unresolved or zero route is omitted
+from the frozen Run destinations and sends nothing.
 
 AgentPresence is an optional local desktop-companion egress Connector. Its
 owner-scoped `/agentpresence on|off` preference defaults off and is shared by
