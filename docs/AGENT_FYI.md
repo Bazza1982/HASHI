@@ -115,21 +115,15 @@ the public ID. JEV defaults off.
 Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
 counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
 
-Privacy Level 2 is HERV3/DeepSeek only, needs risk acceptance and blocks on
-local-detector failure. Its dependencies use a separate interpreter; install or
-synthetic readiness does not activate privacy or prove Worker adoption.
+Privacy Level 2 is HERV3/DeepSeek-only, risk-accepted and fail-closed on
+detector errors. Isolated dependencies or synthetic readiness prove neither
+activation nor Worker adoption.
 
-Model/provider cards share a contract; chat-only has no tools. Fallback is opt-in
-and never replays uncertain effects. Capacity recovery is PAO-owned and configured
-through `/fallback`: `OFF` remains the compatible default; `RETRY` waits
-60/180/300 seconds with `Retry-After` taking precedence; `ASK` fails closed when
-confirmation is unavailable; and `AUTO` uses only ordered exact routes. Effect
-mode A pauses by default. Per-backend mode B continues only unfinished work in
-the same resumable Engine Session and never permits a later target switch. See
-[PAO](HASHI_PAO_SYSTEM_DESIGN.md#11-user-controlled-model-capacity-recovery-2026-10-27).
-Codex `/steer` keeps its Run; HERV3 links one verified successor. Command
-frontend stays primary; receipts omit reasoning and recovery grants no authority.
-HERV3 resumes only its exact running PAO child.
+Chat-only has no tools. PAO owns `/fallback`: existing settings stay `OFF`;
+new policies use `RETRY` at 60/180/300 seconds and honor longer `Retry-After`.
+`ASK` fails closed; `AUTO` follows exact ordered routes. A pauses after effects;
+per-backend B resumes unfinished work in the same Engine Session. Neither replays
+nor retargets. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
 
 ## UI, media, and Phone
 

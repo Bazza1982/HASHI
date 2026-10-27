@@ -342,7 +342,7 @@ async def test_privacy_and_frozen_origin_precede_render_submission():
 @pytest.mark.anyio
 async def test_async_video_queue_accepts_busy_capability_but_sync_does_not():
     node = validate_compute_node(
-        {"id": "studio", "location": "lan", "base_url": "https://192.168.0.41"}
+        {"id": "studio", "location": "lan", "base_url": "https://10.0.0.41"}
     )
     payload = manifest()
     payload["privacy_location"] = "lan"
