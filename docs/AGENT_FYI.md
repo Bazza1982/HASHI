@@ -132,15 +132,18 @@ never long-retry or fallback. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
 Manual Desktop stale input stays unexecuted until a fresh frame and never replays;
 other failures release control. See [desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
-Local cascade speech is an opt-in Function sidecar; synthetic evidence is not
-physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
+defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
+settings/PCM do not prove provider readiness.
 
-Live Phone defaults on; missing provider key blocks and appears in `/phone`.
-Instance opt-out remains valid. Phone settings/PCM readiness do not prove provider readiness.
-
-Phone failures preserve causes: policy, auth, quota, rate limit, configuration,
-provider outage. Failed/interrupted panels persist until dismissal; normal
-hang-up may dismiss. Terminal calls settle attempts and busy state across replacement.
+Phone history uses dialogue-round HCC without raw metadata. Action snapshots
+survive call reconnection and preserve earlier constraints; authorization remains
+epoch-scoped. At hang-up, replace them with full ordinary history. Legacy cleanup
+validates exact source and fails closed. HERV3 orders Phone and typed Turns by
+conversation time; fixed incremental turns skip unused recent history.
+Failures preserve cause; resumes stop after five. See
+[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
 neither translates replies/IDs. TUI switches freeze runtime identity/state.
@@ -157,21 +160,14 @@ Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
 audio durable while hiding its duplicate generic player/bubble; ordinary audio
 stays visible. Telegram uses its renderer.
 
-Phone binds to the owner's foreground Conversation until hang-up. Actions get
-bounded original PCM/Conversation/job evidence, never scheduled prompts; lookups
-create no Run. See [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and
-[PAO](HASHI_PAO_SYSTEM_DESIGN.md).
-
-Phone speech is ordered and durable. Prove acceptance, execution, playback and
-listening separately; uncertain writes never auto-retry.
-
-Phone handoff freezes its ID only after scoped checks, preserves the full ordered
-snapshot and grants no authority. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
-
-Function adapters own next-call settings and recovery. Open once after readiness;
-window movement cannot hang up. Failed PCM refresh permits stop/inspection only;
-sideband follows the Session fence and explicit hang-up wins stale faults. Keep
-source, adoption and device acceptance separate.
+Phone binds to owner's foreground Conversation. Actions get bounded PCM/Conversation/job
+evidence, no scheduled prompts; lookups create no Run. Handoff freezes ID after
+checks, keeps ordered snapshot and grants no authority. Functions own settings
+and recovery; open after readiness. Failed PCM refresh allows stop/inspect only;
+Session fence and hang-up win. Do not retry uncertain writes. Verify
+acceptance/execution/playback/listening and source/adoption/device separately. See
+[PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md), and
+[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
 and remain owner-admitted during active Runs. `/new` preserves history; PAO owns

@@ -1195,9 +1195,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         if isolated_activity_run and runtime_session.is_agent_activity_request(item)
         else []
     )
+    # Fixed incremental prompts use the Engine's durable history and explicit
+    # Phone deltas.  The PCM assembler does not inject recent_exchanges here.
     session_history = (
         activity_origin_history
         if isolated_activity_run
+        else None
+        if incremental
         else runtime_session.recent_exchanges(
             runtime,
             item,
@@ -1221,11 +1225,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     phone_sections, phone_audit = (
         ([], {}) if isolated_activity_run else prepare_phone_context(runtime, item, incremental=incremental)
     )
-    # The quoted Phone history has its own durable external-event watermark.
-    # Exclude the old lossy display timeline so post-cutoff speech cannot leak
-    # into a frozen action and stateless prompts cannot duplicate the transcript.
-    if phone_audit and session_history is not None:
-        session_history = [row for row in session_history if not str(row.get("exchange_id") or "").startswith("live:")]
+    # A Phone action carries a frozen transcript for its own call and cutoff.
+    # Remove only that call's ordinary history projection. Earlier calls remain
+    # normal Session history, and ordinary Phone turns need no special filtering.
+    excluded_phone_prefix = str(
+        phone_audit.get("exclude_history_exchange_prefix") or ""
+    )
+    if excluded_phone_prefix and session_history is not None:
+        session_history = [
+            row
+            for row in session_history
+            if not str(row.get("exchange_id") or "").startswith(
+                excluded_phone_prefix
+            )
+        ]
     # This is a mandatory PAO -> PCM projection, not an optional observer.
     # Supplying the same fixed key on every Turn makes HER fixed-session
     # transport issue an upsert whenever the source or authorization changes,
@@ -1321,11 +1334,19 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     def assemble(sections: list[tuple]) -> dict[str, Any]:
         current_kwargs = dict(prompt_kwargs)
         current_kwargs["extra_sections"] = sections
-        return prompt_builder(
+        payload = prompt_builder(
             effective_prompt,
             runtime.config.active_backend,
             **current_kwargs,
         )
+        phone_removals = list(phone_audit.get("removed_section_keys") or [])
+        if phone_removals:
+            transport = payload.setdefault("transport_snapshot", {})
+            removed = list(transport.get("removed_section_keys") or [])
+            transport["removed_section_keys"] = list(
+                dict.fromkeys([*removed, *phone_removals])
+            )
+        return payload
 
     prompt_payload = assemble(extra_sections)
     context_warnings: list[str] = []
@@ -1399,6 +1420,21 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and runtime.backend_manager.agent_mode == "fixed"
     ):
+        message_id = str(getattr(item, "message_id", "") or "")
+        session_id = str(getattr(item, "session_id", "") or "")
+        if message_id and session_id:
+            message = runtime_session.ensure_store(runtime).get_message(
+                message_id,
+                session_id=session_id,
+                owner_id=runtime_session.owner_id(
+                    runtime, str(getattr(item, "owner_id", "") or "") or None
+                ),
+            )
+            if int(message.get("context_generation") or 0) != int(
+                getattr(item, "context_generation", 1) or 1
+            ):
+                raise RuntimeError("HER message context generation changed")
+            request_meta["conversation_at"] = str(message.get("created_at") or "")
         prepare_fixed = getattr(backend, "prepare_fixed_turn_input", None)
         if not callable(prepare_fixed):
             raise RuntimeError(

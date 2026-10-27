@@ -247,6 +247,7 @@ class HerSessionStore:
                     error_text TEXT,
                     status TEXT NOT NULL,
                     accepted_at TEXT NOT NULL,
+                    conversation_at TEXT NOT NULL DEFAULT '',
                     completed_at TEXT,
                     routing_revision INTEGER NOT NULL DEFAULT 0,
                     capability_revision INTEGER NOT NULL DEFAULT 0,
@@ -404,6 +405,7 @@ class HerSessionStore:
                     "pcm_revision": "INTEGER NOT NULL DEFAULT 0",
                     "resource_revision": "INTEGER NOT NULL DEFAULT 0",
                     "authority_digest": "TEXT NOT NULL DEFAULT ''",
+                    "conversation_at": "TEXT NOT NULL DEFAULT ''",
                     "resource_refs_json": "TEXT NOT NULL DEFAULT '[]'",
                     "routing_revision": "INTEGER NOT NULL DEFAULT 0",
                     "capability_revision": "INTEGER NOT NULL DEFAULT 0",
@@ -819,6 +821,7 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        conversation_at: str = "",
         turn_resource_keys: Sequence[str] = (),
         execution_owner_id: str = "",
         execution_owner_pid: int = 0,
@@ -972,8 +975,8 @@ class HerSessionStore:
                     authority_digest, user_message, resource_refs_json,
                     execution_owner_id,
                     execution_owner_pid, execution_owner_started_at,
-                    execution_lease_updated_at, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                    execution_lease_updated_at, status, accepted_at, conversation_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 """,
                 (
                     session_id,
@@ -991,6 +994,7 @@ class HerSessionStore:
                     str(execution_owner_started_at),
                     now,
                     now,
+                    str(conversation_at or ""),
                 ),
             )
             connection.execute(
@@ -2988,6 +2992,7 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        conversation_at: str = "",
         turn_resource_keys: Sequence[str] = (),
         execution_owner_id: str = "",
         execution_owner_pid: int = 0,
@@ -3149,8 +3154,8 @@ class HerSessionStore:
                     authority_digest, user_message, resource_refs_json,
                     execution_owner_id,
                     execution_owner_pid, execution_owner_started_at,
-                    execution_lease_updated_at, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                    execution_lease_updated_at, status, accepted_at, conversation_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 """,
                 (
                     session_id,
@@ -3169,6 +3174,7 @@ class HerSessionStore:
                     str(execution_owner_started_at),
                     now,
                     now,
+                    str(conversation_at or ""),
                 ),
             )
             connection.execute(
