@@ -105,3 +105,39 @@ active Core environment. The model cache remains a separate user/platform
 asset and is populated by faster-whisper when the selected model is first
 used. `VoiceTranscriber` communicates with the generation-pinned helper over
 versioned JSON and retires its pipe when the Function Worker closes.
+
+## Security maintenance of optional runtime locks
+
+Decision: 2026-10-26; source repair: 2026-10-28. Owner: PAO runtime
+deployment, Platform Configuration. The Core standard dependency baseline is
+unchanged.
+
+The transcription and full TTS locks pin `filelock==4.2.1` and
+`setuptools==84.1.0`. Earlier transcription `filelock==3.25.2`, full TTS
+`filelock==4.2.0`, and both profiles' `setuptools==84.0.0` have published
+security advisories. The compact Edge-only profile does not contain these
+packages and does not acquire the full Kokoro/Torch profile for this repair.
+
+Git checks out these locks with LF so their byte-level runtime identities stay
+stable across platform Git settings. Changing lock contents still selects a new
+isolated runtime.
+
+An audit receipt must identify its interpreter, installed versions and audit
+input. Auditing a requirements file or another Python environment does not
+prove that the running Core contains the reported packages. A repair of a
+standalone audit/development environment is a separate operation from fixing
+the deployment lock that creates an isolated Function environment.
+
+For an installed transcription helper, the owning provisioner prepares the new
+lock-derived runtime directory, probes it, and publishes its platform selection
+through revision-checked configuration persistence. It leaves the earlier
+runtime intact. Without an explicit `HASHI_TRANSCRIPTION_PYTHON` override,
+`VoiceTranscriber` reads that platform selection for each transcription request;
+that configuration path does not require restarting Core or a Worker. An
+explicit interpreter override remains authoritative and must not be silently
+replaced or described as having adopted a platform selection.
+
+A source lock edit does not update an existing helper or rebuild an already
+published installer. Record source validation, installed-environment readiness,
+and actual use separately. Never install this optional profile into a running
+Core, or restart any instance merely to make a dependency audit green.
