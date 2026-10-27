@@ -65,6 +65,11 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
+from orchestrator.telegram_credential import (
+    TelegramCredentialError,
+    TelegramCredentialService,
+    verify_telegram_bot_token,
+)
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.demo.api import DemoConnector
@@ -393,6 +398,7 @@ class WorkbenchApiServer:
         orchestrator=None,
         connectors: list | None = None,
         reconcile_session_runs: bool = True,
+        telegram_bot_verifier=None,
     ):
         self.config_path = config_path
         self.global_config = global_config
@@ -400,6 +406,15 @@ class WorkbenchApiServer:
         self.orchestrator = orchestrator
         self.secrets = dict(secrets or {})
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
+        secrets_path = (
+            getattr(self.global_config, "secrets_path", None)
+            or Path(self.config_path).parent / "secrets.json"
+        )
+        self.telegram_credential_service = TelegramCredentialService(
+            config_path=self.config_path,
+            secrets_path=secrets_path,
+            verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
+        )
         self._agent_config_lock = asyncio.Lock()
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
@@ -683,6 +698,14 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_post(
             "/api/admin/add-agent", self.handle_admin_add_agent
+        )
+        self.app.router.add_get(
+            "/api/admin/agents/{agent_id}/telegram-credential",
+            self.handle_admin_agent_telegram_credential,
+        )
+        self.app.router.add_put(
+            "/api/admin/agents/{agent_id}/telegram-credential",
+            self.handle_admin_agent_telegram_credential_replace,
         )
         self.app.router.add_post(
             "/api/admin/agents/{agent_id}/deletion-preview",
@@ -5036,6 +5059,126 @@ class WorkbenchApiServer:
             },
             status=int(outcome.get("status", 201)),
         )
+
+    def _telegram_credential_response(self, payload: dict, *, status: int = 200):
+        return web.json_response(
+            payload,
+            status=status,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def _telegram_credential_runtime_active(self, agent_id: str) -> bool:
+        return str(agent_id or "").strip().casefold() in self._runtime_map()
+
+    async def handle_admin_agent_telegram_credential(self, request):
+        """Return credential status without ever reading the token back."""
+        if not self._check_admin_auth(request):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        try:
+            payload = self.telegram_credential_service.status(
+                agent_id,
+                runtime_active=self._telegram_credential_runtime_active(agent_id),
+            )
+        except TelegramCredentialError as exc:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                },
+                status=exc.status_code,
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram credential status is unavailable.",
+                    "error_code": "telegram_credential_unavailable",
+                },
+                status=500,
+            )
+        return self._telegram_credential_response(payload)
+
+    async def handle_admin_agent_telegram_credential_replace(self, request):
+        """Verify and atomically replace one Agent's Telegram Bot token."""
+        if not self._check_admin_auth(request):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "invalid JSON",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        allowed = {"token", "expected_revision", "replace_existing"}
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - allowed
+            or "token" not in payload
+            or "expected_revision" not in payload
+        ):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram credential request is invalid.",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        runtime_active = self._telegram_credential_runtime_active(agent_id)
+        try:
+            result = await self.telegram_credential_service.replace(
+                agent_id,
+                token=payload.get("token"),
+                expected_revision=payload.get("expected_revision"),
+                replace_existing=payload.get("replace_existing", False),
+                runtime_active=runtime_active,
+            )
+        except TelegramCredentialError as exc:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                },
+                status=exc.status_code,
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram credential could not be saved.",
+                    "error_code": "telegram_credential_save_failed",
+                },
+                status=500,
+            )
+        logger.info(
+            "telegram_credential.updated agent_name=%s replaced=%s runtime_active=%s",
+            result["agent_id"],
+            result["replaced"],
+            runtime_active,
+        )
+        return self._telegram_credential_response(result)
 
     async def handle_admin_agent_deletion_preview(self, request):
         if not self._check_admin_auth(request):

@@ -92,6 +92,14 @@ connection page. Telegram configuration uses the agent's telegram_token_key
 reference and the configured authorized user ID. Do not paste credentials
 into ordinary model chat.
 
+Workbench can replace an individual Agent's Bot token from **Manage Agents →
+Manage → Telegram**. HASHI returns only configured status and an opaque
+revision, validates a submitted token with Telegram `getMe`, and publishes it
+with revision-checked private-file replacement. Shared credential references
+and missing authorized-user configuration fail closed. A running Agent is not
+restarted automatically; apply the new token by restarting that Agent when it
+is idle.
+
 Keep secrets and OAuth stores private and out of source control. CLI engines
 manage their own authentication; HERV3 uses configured provider profiles and
 secret references.
