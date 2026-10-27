@@ -41,6 +41,10 @@ SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
 # Progress is durable before cutover. Optional chat delivery gets a bounded
 # head start, never a permission gate or a browser-render dependency.
 REBOOT_START_NOTICE_TIMEOUT_SECONDS = 2.0
+# Workbench submits /reboot max through the same shared HTTP runtime that
+# Core must quiesce. Let that single control request leave admission tracking
+# before publishing the handoff; unrelated work remains a fail-fast blocker.
+WORKBENCH_CONTROL_RELEASE_TIMEOUT_SECONDS = 2.0
 
 TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
 BROAD_REBOOT_MODES = frozenset({"max"})
@@ -649,6 +653,34 @@ class RebootManager:
         bridge_logger.info(
             "Whole-Function replacement submitted: operation=%s", request_id
         )
+
+    async def _wait_for_workbench_control_release(
+        self, record: Mapping[str, Any]
+    ) -> None:
+        """Let the initiating Workbench POST leave admission tracking."""
+
+        origin = record.get("origin") or {}
+        if str(origin.get("surface") or "") != "workbench":
+            return
+        outstanding = max(
+            0, int(getattr(self.kernel, "_handoff_requests", 0) or 0)
+        )
+        if outstanding != 1:
+            return
+        request_idle = getattr(self.kernel, "_handoff_requests_idle", None)
+        if request_idle is None:
+            return
+        try:
+            await asyncio.wait_for(
+                request_idle.wait(),
+                timeout=WORKBENCH_CONTROL_RELEASE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            bridge_logger.warning(
+                "Workbench reboot control request did not release before "
+                "shared handoff: operation=%s",
+                record["id"],
+            )
 
     async def _replacement_worker_evidence(
         self,
@@ -1608,6 +1640,7 @@ class RebootManager:
             self.active_operation = None
             if staged_shared is not None:
                 try:
+                    await self._wait_for_workbench_control_release(record)
                     self._publish_shared_replacement(staged_shared)
                 except Exception:
                     await self._release_reboot_fences(record)

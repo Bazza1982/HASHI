@@ -510,7 +510,16 @@ class ConfigManager:
                 migrated_names.append(name)
         return migrated_names
 
-    def load(self) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
+    def load(
+        self,
+        *,
+        bootstrap_local_api_credential: bool = False,
+    ) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
+        """Load configuration, with credential maintenance only by explicit owner.
+
+        Function Workers and ordinary readers must remain side-effect free.
+        The shared Function bootstrap opts in once before any Workers start.
+        """
         raw_cfg = read_config_json(self.config_path)
 
         migrated_fixed_agents = self._migrate_legacy_fixed_agents(raw_cfg)
@@ -803,6 +812,7 @@ class ConfigManager:
             )
             agents.append(cfg)
 
-        from orchestrator.workbench_auth import ensure_local_api_credential
-        secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
+        if bootstrap_local_api_credential:
+            from orchestrator.workbench_auth import ensure_local_api_credential
+            secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
         return global_cfg, agents, secrets

@@ -689,3 +689,28 @@ HASHI3 当前只有 11 个 Worker，因此上述实机结果不能冒充 26-Work
 7. **它不要求 Core 迁移，也不改变 `/restart`。**
    修复位于 PAO、Worker 和 Frontend Connector Functions，符合当前工程边界，
    能在 HASHI3 独立完成、验证后再整体推广。
+
+## 18. 2026-10-27 凭据维护放大回归
+
+合并后的实机数据发现，普通配置读取新增了本地 API 凭据维护。每个 Function
+Worker 启动时都会解析 Windows Remote 计划任务身份，并对同一个
+`secrets.json` 重做 ACL。该工作随 Agent 数量放大，且多个 Worker 会并发
+访问 Windows Task Scheduler 和同一文件；它不是 Worker 就绪所需的检查。
+
+当前决定：
+
+- `ConfigManager.load()` 默认只读取，不创建凭据、不解析 Remote SID、不修改
+  ACL；
+- 共享 Function 候选进程在任何 Agent Worker 启动前显式执行一次凭据发布与
+  ACL 修复；
+- `/reboot max` 每个共享候选最多执行一次；`min|same|<agent>` 不执行；
+- Workbench 发起 `/reboot max` 时，先让这一个已认证控制 POST 退出共享
+  请求计数，再向 Core 发布 handoff；额外的共享 API 工作仍由 Core 按 busy
+  fail-fast，不能被控制请求本身误判为业务负载；
+- 缺少凭据、SID 查询失败或 ACL 修复失败仍然阻止共享候选采用，安全边界不降级；
+- 不通过增加 Worker 并发掩盖串行外部进程与 ACL 争用。
+
+回归测试必须证明：默认配置读取不会调用维护函数；共享候选准备明确选择一次
+维护；现有凭据保留、缺失凭据原子生成、Remote 主体 ACL 修复的安全测试继续
+通过。实机验收分别测量指定 Agent 重启和独立的冷、热 `/reboot max`，不得与
+另一实例同时重启。
