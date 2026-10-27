@@ -37,8 +37,6 @@ adopts only by reboot; docs do not. Workbench config preserves `AGENT_BUSY`;
 retry only before a durable receipt; durable `target_busy` stays pending. `max`
 rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
-For Workbench `max`, publish to Core only after its own authenticated control
-POST leaves shared request accounting; other shared work remains a blocker.
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
 
@@ -67,11 +65,6 @@ Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 JSON writers validate private candidates under lock/revision and atomically replace.
 Display fallback is read-only; conflicts require fresh state/action, never blind
 retry or stale restore. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
-
-Local API credential publication and Remote-principal ACL repair run once in
-shared Function bootstrap. Ordinary config reads and Agent Workers are
-read-only; never move this maintenance back into `ConfigManager.load()` by
-default or multiply it across `/reboot max`.
 
 Endpoint publication may retry only bounded Windows rename blocking of the same
 fsynced candidate; permanent failure keeps prior state and never replays actions.
