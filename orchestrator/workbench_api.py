@@ -413,6 +413,7 @@ class WorkbenchApiServer:
         self.telegram_credential_service = TelegramCredentialService(
             config_path=self.config_path,
             secrets_path=secrets_path,
+            state_root=getattr(self.global_config, "bridge_home", None),
             verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
         )
         self._agent_config_lock = asyncio.Lock()
@@ -706,6 +707,10 @@ class WorkbenchApiServer:
         self.app.router.add_put(
             "/api/admin/agents/{agent_id}/telegram-credential",
             self.handle_admin_agent_telegram_credential_replace,
+        )
+        self.app.router.add_put(
+            "/api/admin/agents/{agent_id}/telegram-mirror-policy",
+            self.handle_admin_agent_telegram_mirror_policy_update,
         )
         self.app.router.add_post(
             "/api/admin/agents/{agent_id}/deletion-preview",
@@ -5176,6 +5181,76 @@ class WorkbenchApiServer:
             "telegram_credential.updated agent_name=%s replaced=%s runtime_active=%s",
             result["agent_id"],
             result["replaced"],
+            runtime_active,
+        )
+        return self._telegram_credential_response(result)
+
+    async def handle_admin_agent_telegram_mirror_policy_update(self, request):
+        """Persist one Agent override; new Runs observe it without a restart."""
+        if not self._check_admin_auth(request):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "invalid JSON",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"policy", "expected_revision"}
+        ):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram mirror policy request is invalid.",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        runtime_active = self._telegram_credential_runtime_active(agent_id)
+        try:
+            async with self._agent_config_lock:
+                result = self.telegram_credential_service.update_mirror_policy(
+                    agent_id,
+                    policy=payload.get("policy"),
+                    expected_revision=payload.get("expected_revision"),
+                    runtime_active=runtime_active,
+                )
+        except TelegramCredentialError as exc:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                },
+                status=exc.status_code,
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram mirror policy could not be saved.",
+                    "error_code": "telegram_mirror_policy_save_failed",
+                },
+                status=500,
+            )
+        logger.info(
+            "telegram_mirror_policy.updated agent_name=%s policy=%s runtime_active=%s",
+            result["agent_id"],
+            result["mirror_policy"],
             runtime_active,
         )
         return self._telegram_credential_response(result)

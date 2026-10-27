@@ -1138,6 +1138,10 @@ class FlexibleAgentRuntime:
             state_root=getattr(
                 getattr(self, "global_config", None), "bridge_home", None
             ),
+            agent_id=self.name,
+            agent_config_path=getattr(
+                getattr(self, "global_config", None), "config_path", None
+            ),
         )
         silent = False
         normalized_request_content = None
@@ -1339,6 +1343,8 @@ class FlexibleAgentRuntime:
             source=source,
             request_metadata=metadata,
             state_root=getattr(self.global_config, "bridge_home", None),
+            agent_id=self.name,
+            agent_config_path=getattr(self.global_config, "config_path", None),
         )
         from orchestrator.session_store import SessionConflict, SessionNotFound
 

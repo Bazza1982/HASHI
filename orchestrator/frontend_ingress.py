@@ -682,6 +682,8 @@ def admit_frontend_ingress(
             source=connector_id,
             request_metadata=delivery_metadata,
             state_root=state_root,
+            agent_id=runtime.name,
+            agent_config_path=getattr(runtime.global_config, "config_path", None),
         ),
         whatsapp_requested=bool(whatsapp_channel) and owner_mirror_for_admission(
             request_metadata=delivery_metadata,

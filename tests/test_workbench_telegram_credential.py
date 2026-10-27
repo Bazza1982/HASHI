@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.config_json import read_config_json, write_config_json
+from orchestrator.connector_delivery_preferences import set_connector_preference
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
     TelegramCredentialService,
@@ -304,3 +305,88 @@ async def test_endpoint_requires_admin_auth_and_rejects_unknown_fields(tmp_path)
         json.loads(unconfirmed_replace.text)["error_code"]
         == "telegram_replace_confirmation_required"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_mirror_policy_is_revision_checked_and_applies_without_restart(tmp_path):
+    async def verify(_token):
+        raise AssertionError("mirror policy updates must not inspect the Bot token")
+
+    server = _server(tmp_path, verifier=verify, runtime_active=True)
+    headers = {"X-Workbench-Token": ADMIN_TOKEN}
+    initial = server.telegram_credential_service.status(
+        "lily", runtime_active=True
+    )
+    assert initial["mirror_policy"] == "inherit"
+    assert initial["instance_mirror_enabled"] is True
+    assert initial["resolved_mirror_enabled"] is True
+    assert initial["mirror_delivery_ready"] is True
+    assert len(initial["mirror_policy_revision"]) == 64
+
+    disabled_response = await server.handle_admin_agent_telegram_mirror_policy_update(
+        _Request(
+            headers=headers,
+            payload={
+                "policy": "always_off",
+                "expected_revision": initial["mirror_policy_revision"],
+            },
+        )
+    )
+    assert disabled_response.status == 200
+    disabled = json.loads(disabled_response.text)
+    assert disabled["mirror_policy"] == "always_off"
+    assert disabled["resolved_mirror_enabled"] is False
+    assert disabled["activation_required"] is None
+    assert disabled["runtime_active"] is True
+    stored = read_config_json(tmp_path / "agents.json")
+    assert stored["agents"][0]["telegram_mirror_policy"] == "always_off"
+
+    stale = await server.handle_admin_agent_telegram_mirror_policy_update(
+        _Request(
+            headers=headers,
+            payload={
+                "policy": "always_on",
+                "expected_revision": initial["mirror_policy_revision"],
+            },
+        )
+    )
+    assert stale.status == 409
+    assert json.loads(stale.text)["error_code"] == "telegram_mirror_policy_changed"
+
+    set_connector_preference(tmp_path, "user:42", "telegram", "mirror", False)
+    enabled_response = await server.handle_admin_agent_telegram_mirror_policy_update(
+        _Request(
+            headers=headers,
+            payload={
+                "policy": "always_on",
+                "expected_revision": disabled["mirror_policy_revision"],
+            },
+        )
+    )
+    enabled = json.loads(enabled_response.text)
+    assert enabled_response.status == 200
+    assert enabled["instance_mirror_enabled"] is False
+    assert enabled["mirror_policy"] == "always_on"
+    assert enabled["resolved_mirror_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_always_on_still_reports_missing_telegram_delivery_prerequisites(tmp_path):
+    async def verify(_token):
+        raise AssertionError("mirror policy updates must not verify a token")
+
+    server = _server(
+        tmp_path,
+        verifier=verify,
+        configured=False,
+        authorized_id=0,
+    )
+    status = server.telegram_credential_service.status("lily")
+    result = server.telegram_credential_service.update_mirror_policy(
+        "lily",
+        policy="always_on",
+        expected_revision=status["mirror_policy_revision"],
+    )
+    assert result["mirror_policy"] == "always_on"
+    assert result["resolved_mirror_enabled"] is True
+    assert result["mirror_delivery_ready"] is False

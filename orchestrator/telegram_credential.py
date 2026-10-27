@@ -17,6 +17,13 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
+from orchestrator.agent_delivery_policy import (
+    normalize_telegram_mirror_policy,
+    resolve_telegram_mirror_policy,
+    telegram_mirror_policy_from_document,
+    update_agent_telegram_mirror_policy,
+)
+from orchestrator.connector_delivery_preferences import get_connector_preference
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDocument,
@@ -54,8 +61,11 @@ class TelegramCredentialContext:
     token_key: str
     configured: bool
     authorized_user_configured: bool
+    authorized_owner_id: int | None
     shared_reference: bool
     credential_revision: str
+    mirror_policy: str
+    mirror_policy_revision: str
     config_revision: str
     secrets: ConfigDocument
 
@@ -117,6 +127,15 @@ def _positive_integer(value) -> bool:
         return False
 
 
+def _opaque_revision(document: ConfigDocument, key: bytes, domain: str) -> str:
+    source_revision = document.revision or "absent"
+    return hmac.new(
+        key,
+        f"{domain}\0{source_revision}".encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _credential_revision(document: ConfigDocument, key: bytes) -> str:
     """Return a process-scoped opaque revision, never a raw secrets-file hash."""
 
@@ -128,18 +147,24 @@ def _credential_revision(document: ConfigDocument, key: bytes) -> str:
     ).hexdigest()
 
 
+def _mirror_policy_revision(document: ConfigDocument, key: bytes) -> str:
+    return _opaque_revision(document, key, "telegram-mirror-policy")
+
+
 class TelegramCredentialService:
-    """Read status and replace a single, unshared Agent Telegram credential."""
+    """Manage one Agent's Telegram credential and outbound mirror policy."""
 
     def __init__(
         self,
         *,
         config_path: str | Path,
         secrets_path: str | Path,
+        state_root: str | Path | None = None,
         verify_bot: Callable[[str], Awaitable[dict]] = verify_telegram_bot_token,
     ):
         self.config_path = Path(config_path).expanduser().resolve()
         self.secrets_path = Path(secrets_path).expanduser().resolve()
+        self.state_root = Path(state_root or self.config_path.parent).expanduser().resolve()
         self.verify_bot = verify_bot
         self._revision_key = secrets.token_bytes(32)
 
@@ -218,16 +243,22 @@ class TelegramCredentialService:
             if isinstance(global_config, dict)
             else None
         )
+        owner_value = (
+            secrets.get("authorized_telegram_id")
+            if _positive_integer(secrets.get("authorized_telegram_id"))
+            else config_owner
+        )
+        authorized_owner_id = int(owner_value) if _positive_integer(owner_value) else None
         return TelegramCredentialContext(
             agent_id=canonical_id,
             token_key=token_key,
             configured=configured,
-            authorized_user_configured=(
-                _positive_integer(secrets.get("authorized_telegram_id"))
-                or _positive_integer(config_owner)
-            ),
+            authorized_user_configured=authorized_owner_id is not None,
+            authorized_owner_id=authorized_owner_id,
             shared_reference=len(references) > 1,
             credential_revision=_credential_revision(secrets, self._revision_key),
+            mirror_policy=telegram_mirror_policy_from_document(config, canonical_id),
+            mirror_policy_revision=_mirror_policy_revision(config, self._revision_key),
             config_revision=str(config.revision or ""),
             secrets=secrets,
         )
@@ -241,6 +272,26 @@ class TelegramCredentialService:
 
     def status(self, agent_id: str, *, runtime_active: bool = False) -> dict:
         context = self.context(agent_id)
+        return self._status_payload(context, runtime_active=runtime_active)
+
+    def _status_payload(
+        self,
+        context: TelegramCredentialContext,
+        *,
+        runtime_active: bool,
+    ) -> dict:
+        owner_id = f"user:{context.authorized_owner_id or 0}"
+        instance_mirror_enabled = get_connector_preference(
+            self.state_root,
+            owner_id,
+            "telegram",
+            "mirror",
+            default=True,
+        )
+        resolved_mirror_enabled = resolve_telegram_mirror_policy(
+            context.mirror_policy,
+            instance_enabled=instance_mirror_enabled,
+        )
         return {
             "ok": True,
             "schema_version": 1,
@@ -252,7 +303,94 @@ class TelegramCredentialService:
             "credential_revision": context.credential_revision,
             "runtime_active": bool(runtime_active),
             "activation_required": None,
+            "mirror_policy": context.mirror_policy,
+            "mirror_policy_revision": context.mirror_policy_revision,
+            "instance_mirror_enabled": instance_mirror_enabled,
+            "resolved_mirror_enabled": resolved_mirror_enabled,
+            "mirror_delivery_ready": bool(
+                context.configured and context.authorized_user_configured
+            ),
         }
+
+    def update_mirror_policy(
+        self,
+        agent_id: str,
+        *,
+        policy: str,
+        expected_revision: str,
+        runtime_active: bool = False,
+    ) -> dict:
+        try:
+            normalized_policy = normalize_telegram_mirror_policy(policy)
+        except (TypeError, ValueError):
+            raise TelegramCredentialError(
+                "Telegram mirror policy is invalid.",
+                error_code="invalid_request",
+                status_code=400,
+            ) from None
+        if (
+            not isinstance(expected_revision, str)
+            or not _REVISION_PATTERN.fullmatch(expected_revision)
+        ):
+            raise TelegramCredentialError(
+                "Telegram mirror policy revision is invalid.",
+                error_code="invalid_request",
+                status_code=400,
+            )
+
+        config = read_config_json(self.config_path)
+        secrets_document = self._read_secrets()
+        context = self._context_from_documents(
+            agent_id=agent_id,
+            config=config,
+            secrets=secrets_document,
+        )
+        if expected_revision != context.mirror_policy_revision:
+            raise TelegramCredentialError(
+                "Telegram mirror policy changed. Reload and try again.",
+                error_code="telegram_mirror_policy_changed",
+                status_code=409,
+            )
+
+        durability_warning = None
+        try:
+            update_agent_telegram_mirror_policy(
+                config,
+                context.agent_id,
+                normalized_policy,
+            )
+            try:
+                write_config_json(self.config_path, config)
+            except ConfigDurabilityError:
+                durability_warning = "mirror_policy_saved_durability_unconfirmed"
+        except ConfigConflictError:
+            raise TelegramCredentialError(
+                "Telegram mirror policy changed. Reload and try again.",
+                error_code="telegram_mirror_policy_changed",
+                status_code=409,
+            ) from None
+        except TelegramCredentialError:
+            raise
+        except (OSError, TypeError, ValueError):
+            raise TelegramCredentialError(
+                "Telegram mirror policy could not be saved.",
+                error_code="telegram_mirror_policy_save_failed",
+                status_code=500,
+            ) from None
+
+        published_context = self._context_from_documents(
+            agent_id=agent_id,
+            config=config,
+            secrets=secrets_document,
+        )
+        result = self._status_payload(
+            published_context,
+            runtime_active=runtime_active,
+        )
+        result["mirror_policy_updated"] = True
+        if durability_warning:
+            result["warning_code"] = durability_warning
+        return result
 
     async def replace(
         self,
@@ -366,20 +504,20 @@ class TelegramCredentialService:
                 status_code=500,
             ) from None
 
-        return {
-            "ok": True,
-            "schema_version": 1,
-            "agent_id": context.agent_id,
-            "configured": True,
-            "authorized_user_configured": True,
-            "manageable": True,
-            "shared_reference": False,
-            "credential_revision": _credential_revision(
-                latest_secrets, self._revision_key
-            ),
-            "runtime_active": bool(runtime_active),
-            "activation_required": "agent_restart" if runtime_active else None,
-            "replaced": context.configured,
-            "verified_bot": bot,
-            **({"warning_code": durability_warning} if durability_warning else {}),
-        }
+        published_context = self._context_from_documents(
+            agent_id=agent_id,
+            config=latest_config,
+            secrets=latest_secrets,
+        )
+        result = self._status_payload(
+            published_context,
+            runtime_active=runtime_active,
+        )
+        result.update(
+            activation_required="agent_restart" if runtime_active else None,
+            replaced=context.configured,
+            verified_bot=bot,
+        )
+        if durability_warning:
+            result["warning_code"] = durability_warning
+        return result
