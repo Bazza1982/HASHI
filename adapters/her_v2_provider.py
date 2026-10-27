@@ -2704,6 +2704,7 @@ class _Herv3ProviderFallbackPort:
     ) -> dict[str, Any]:
         from orchestrator import model_fallback_policy as policy_owner
         from orchestrator.flexible_backend_registry import canonical_backend_engine
+        from orchestrator.runtime_effort_options import get_available_models
 
         options: list[dict[str, Any]] = []
         try:
@@ -2714,6 +2715,26 @@ class _Herv3ProviderFallbackPort:
             canonical_backend_engine(str(item.get("engine") or "")): item
             for item in options
         }
+        allowed_backends = list(
+            getattr(
+                getattr(self.provider.backend_manager, "config", None),
+                "allowed_backends",
+                (),
+            )
+            or ()
+        )
+        codex_rows = [
+            row
+            for row in allowed_backends
+            if canonical_backend_engine(str(row.get("engine") or ""))
+            == "codex-cli"
+        ]
+        try:
+            codex_models = set(
+                get_available_models("codex-cli", allowed_backends=codex_rows)
+            )
+        except (TypeError, ValueError):
+            codex_models = set()
         required_modalities = {"text"}
         manifest = getattr(self.request, "attachment_manifest", ()) or ()
         if not manifest:
@@ -2739,12 +2760,17 @@ class _Herv3ProviderFallbackPort:
             if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI:
                 option = by_engine.get("codex-cli")
                 credential_ready = bool(
-                    option is not None and option.get("available") is not False
+                    codex_rows
+                    and option is not None
+                    and option.get("available") is not False
+                )
+                model_ready = bool(
+                    not route.model or route.model in codex_models
                 )
                 # A Codex CLI switch is a clean pre-effect stage selection.
                 # Cross-Provider message continuation stays HERV3-only.
                 capability_ok = bool(
-                    credential_ready and self.purpose == "stage"
+                    credential_ready and model_ready and self.purpose == "stage"
                 )
                 facts[route.key()] = policy_owner.FallbackRouteFacts(
                     credential_ready=credential_ready,
@@ -2873,6 +2899,7 @@ class _Herv3ProviderFallbackPort:
         visible_partial_answer: bool,
     ) -> Any:
         from orchestrator import model_fallback_policy as policy_owner
+        from orchestrator.flexible_backend_registry import canonical_backend_engine
         from orchestrator.privacy_levels import PrivacyLevel
 
         key = self.provider._fallback_budget_key(self.request)
@@ -2887,6 +2914,29 @@ class _Herv3ProviderFallbackPort:
             # Preserve the invalid state so the policy resolver can block it;
             # silently substituting a valid level could widen its narrowing.
             privacy_level = -1
+        excluded_routes = set(
+            self.provider._fallback_routes_used(key)
+            if callable(
+                getattr(self.provider, "_fallback_routes_used", None)
+            )
+            else ()
+        )
+        source_engine = canonical_backend_engine(source_provider)
+        for route in policy.routes:
+            if route.source != source:
+                continue
+            if (
+                route.target_kind == policy_owner.TARGET_KIND_HERV3_MODEL
+                and canonical_backend_engine(route.provider) == source_engine
+                and route.model == source_model
+            ):
+                excluded_routes.add(route.key())
+            elif (
+                route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI
+                and source_engine == "codex-cli"
+                and (not route.model or route.model == source_model)
+            ):
+                excluded_routes.add(route.key())
         return policy_owner.FallbackRequestFacts(
             source=source,
             source_provider=source_provider,
@@ -2904,13 +2954,7 @@ class _Herv3ProviderFallbackPort:
                 policy,
                 tool_activity=bool(tool_activity),
             ),
-            excluded_route_keys=(
-                self.provider._fallback_routes_used(key)
-                if callable(
-                    getattr(self.provider, "_fallback_routes_used", None)
-                )
-                else frozenset()
-            ),
+            excluded_route_keys=frozenset(excluded_routes),
         )
 
     @staticmethod
@@ -2919,7 +2963,7 @@ class _Herv3ProviderFallbackPort:
         if route is None:
             return ""
         if route.target_kind == "codex_cli":
-            return "codex-cli"
+            return "codex-cli" + (f"/{route.model}" if route.model else "")
         return f"{route.provider}/{route.model}"
 
     async def evaluate_provider_fallback(
@@ -3320,11 +3364,10 @@ class HashiStageProvider(StageProvider):
         policy, _document = policy_owner.read_policy(
             runtime, _fallback_actor(runtime)
         )
-        source = (
-            policy_owner.SOURCE_CODEX_CLI
-            if canonical_backend_engine(selected.engine) == "codex-cli"
-            else policy_owner.SOURCE_HERV3
-        )
+        # This port exists only inside an active HERV3 Turn.  The selected
+        # profile may itself use Codex as a model Provider, but that does not
+        # change the outer Engine or silently substitute Codex's policy.
+        source = policy_owner.SOURCE_HERV3
         port = _Herv3ProviderFallbackPort(
             self, request, selected, purpose="stage"
         )
@@ -3382,6 +3425,48 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         return result
+
+    async def resolve_stage_capacity_retry(
+        self,
+        *,
+        request: StageRequest,
+        selected: ProviderProfile,
+        failure_code: str,
+        retryable: bool,
+        retry_after_s: float | None,
+        retry_index: int,
+        side_effects_possible: bool,
+    ) -> Mapping[str, Any] | None:
+        """Resolve one long same-target retry inside the active HER Turn.
+
+        HERV3 owns the Turn and can therefore continue its unfinished work
+        without replaying the enclosing PAO Run.  Consent and the per-source
+        A/B side-effect choice remain owned by PAO's fallback policy.
+        """
+
+        from orchestrator import model_fallback_policy as policy_owner
+        runtime = self.runtime_context
+        if runtime is None:
+            return None
+        policy, _document = policy_owner.read_policy(
+            runtime, _fallback_actor(runtime)
+        )
+        source = policy_owner.SOURCE_HERV3
+        decision = policy_owner.resolve_capacity_retry(
+            policy,
+            policy_owner.CapacityRetryFacts(
+                source=source,
+                failure_code=str(failure_code or ""),
+                retryable=bool(retryable),
+                retry_index=int(retry_index),
+                retry_after_s=retry_after_s,
+                side_effects_possible=bool(side_effects_possible),
+                # This call is made only while the durable HER Turn remains
+                # active; option B continues that Turn rather than replaying it.
+                resumable_session=bool(request.turn_id),
+            ),
+        )
+        return decision.to_dict()
 
     def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
         """Interrupt active provider subprocesses from the control thread."""

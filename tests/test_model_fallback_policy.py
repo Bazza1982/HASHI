@@ -14,6 +14,9 @@ from orchestrator.flexible_backend_registry import (
     same_model_target,
 )
 from orchestrator.model_fallback_policy import (
+    CapacityRetryFacts,
+    EFFECT_PAUSE,
+    EFFECT_RESUME,
     DISPOSITION_ASK_REQUIRED,
     DISPOSITION_BLOCKED,
     DISPOSITION_DISABLED,
@@ -22,9 +25,11 @@ from orchestrator.model_fallback_policy import (
     MODE_ASK,
     MODE_AUTO,
     MODE_OFF,
+    MODE_RETRY,
     REASON_BUDGET_EXHAUSTED,
     REASON_CONFIRMATION_REQUIRED,
     REASON_DISABLED,
+    REASON_EFFECT_PAUSED,
     REASON_INCOMPATIBLE_CAPABILITY,
     REASON_MISSING_KEY_OR_RUNTIME,
     REASON_MODALITY_EXCLUDED,
@@ -32,6 +37,8 @@ from orchestrator.model_fallback_policy import (
     REASON_PRIVACY_BLOCKED,
     REASON_UNKNOWN_COST,
     REASON_UNSAFE_CHECKPOINT,
+    REASON_RETRY_EXHAUSTED,
+    REASON_RESUME_UNAVAILABLE,
     SOURCE_CODEX_CLI,
     SOURCE_HERV3,
     TARGET_KIND_CODEX_CLI,
@@ -45,6 +52,7 @@ from orchestrator.model_fallback_policy import (
     make_ask_confirmation,
     policy_path,
     read_policy,
+    resolve_capacity_retry,
     resolve_fallback_decision,
     write_policy,
 )
@@ -156,6 +164,124 @@ def test_default_and_migrated_policy_is_off_and_never_falls_back(tmp_path):
     assert decision.allowed is False
     assert decision.blocking_reason == REASON_DISABLED
     assert decision.disposition == DISPOSITION_DISABLED
+
+
+def test_capacity_retry_is_explicit_bounded_and_honors_retry_after():
+    policy = FallbackPolicy(mode=MODE_RETRY)
+
+    first = resolve_capacity_retry(
+        policy,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=0,
+            retry_after_s=120,
+        ),
+    )
+    assert first.allowed is True
+    assert first.delay_s == 120
+    assert first.retry_number == 1
+    assert first.continue_session is False
+
+    assert resolve_capacity_retry(
+        policy,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=1,
+        ),
+    ).delay_s == 180
+    assert resolve_capacity_retry(
+        policy,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=2,
+        ),
+    ).delay_s == 300
+
+    exhausted = resolve_capacity_retry(
+        policy,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=3,
+        ),
+    )
+    assert exhausted.allowed is False
+    assert exhausted.blocking_reason == REASON_RETRY_EXHAUSTED
+
+
+def test_side_effect_recovery_is_independent_per_backend_and_defaults_to_pause():
+    default = FallbackPolicy(mode=MODE_RETRY)
+    blocked = resolve_capacity_retry(
+        default,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=0,
+            side_effects_possible=True,
+            resumable_session=True,
+        ),
+    )
+    assert blocked.allowed is False
+    assert blocked.blocking_reason == REASON_EFFECT_PAUSED
+
+    configured = FallbackPolicy(
+        mode=MODE_RETRY,
+        sources={
+            SOURCE_CODEX_CLI: FallbackSourceRule(
+                side_effect_mode=EFFECT_RESUME
+            ),
+            SOURCE_HERV3: FallbackSourceRule(
+                side_effect_mode=EFFECT_PAUSE
+            ),
+        },
+    )
+    unavailable = resolve_capacity_retry(
+        configured,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=0,
+            side_effects_possible=True,
+            resumable_session=False,
+        ),
+    )
+    assert unavailable.allowed is False
+    assert unavailable.blocking_reason == REASON_RESUME_UNAVAILABLE
+
+    resumed = resolve_capacity_retry(
+        configured,
+        CapacityRetryFacts(
+            source=SOURCE_CODEX_CLI,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=True,
+            retry_index=0,
+            side_effects_possible=True,
+            resumable_session=True,
+        ),
+    )
+    assert resumed.allowed is True
+    assert resumed.continue_session is True
+    assert configured.source_rule(SOURCE_HERV3).side_effect_mode == EFFECT_PAUSE
+
+
+def test_retry_mode_never_authorizes_a_target_switch():
+    policy = FallbackPolicy(
+        mode=MODE_RETRY,
+        routes=(HERV3_ROUTE,),
+        max_additional_calls=1,
+    )
+    decision = resolve_fallback_decision(policy, _facts(HERV3_ROUTE))
+    assert decision.allowed is False
+    assert decision.route is None
 
 
 def test_auto_without_an_allowed_target_never_falls_back():
@@ -427,6 +553,22 @@ def test_checkpoint_safety_rules_for_model_and_cross_engine_targets():
     assert partial.allowed is False
     assert partial.blocking_reason == REASON_UNSAFE_CHECKPOINT
 
+    partial_model = resolve_fallback_decision(
+        _auto_policy(HERV3_ROUTE),
+        _facts(
+            HERV3_ROUTE,
+            visible_partial_answer=True,
+            checkpoint_safe=True,
+            route_facts={
+                HERV3_ROUTE.key(): FallbackRouteFacts(
+                    credential_ready=True, capability_ok=True
+                )
+            },
+        ),
+    )
+    assert partial_model.allowed is False
+    assert partial_model.blocking_reason == REASON_UNSAFE_CHECKPOINT
+
 
 def test_unknown_cost_is_blocked_by_default_and_budget_stops_the_chain():
     policy = _auto_policy(HERV3_ROUTE)
@@ -611,6 +753,22 @@ def test_route_validation_rejects_internal_names_and_unknown_kinds():
             target_kind=TARGET_KIND_CODEX_CLI,
             provider="openrouter-api",
         )
+
+
+def test_version_one_policy_without_effect_settings_migrates_to_safe_pause():
+    policy = FallbackPolicy.from_mapping(
+        {
+            "version": 1,
+            "mode": MODE_RETRY,
+            "routes": [],
+            "sources": {
+                SOURCE_CODEX_CLI: {"enabled": True},
+                SOURCE_HERV3: {"enabled": True},
+            },
+        }
+    )
+    assert policy.source_rule(SOURCE_CODEX_CLI).side_effect_mode == EFFECT_PAUSE
+    assert policy.source_rule(SOURCE_HERV3).side_effect_mode == EFFECT_PAUSE
 
 
 def test_policy_defaults_off_and_never_stores_credentials():

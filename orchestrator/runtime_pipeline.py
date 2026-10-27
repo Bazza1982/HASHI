@@ -1533,6 +1533,9 @@ async def run_backend_generation(
     audit_active: bool,
 ) -> BackendGeneration:
     from orchestrator.runtime_cancel import requested_ids
+    from orchestrator.runtime_capacity_recovery import (
+        generate_with_capacity_recovery,
+    )
 
     if item.request_id in requested_ids(runtime):
         runtime.is_generating = False
@@ -1576,10 +1579,11 @@ async def run_backend_generation(
     try:
         if background_mode:
             generation_task = asyncio.create_task(
-                runtime.backend_manager.generate_response(
+                generate_with_capacity_recovery(
+                    runtime,
+                    item,
                     final_prompt,
-                    item.request_id,
-                    **generation_kwargs,
+                    generation_kwargs,
                 )
             )
             tasks[item.request_id] = generation_task
@@ -1644,8 +1648,11 @@ async def run_backend_generation(
         try:
             response = await _await_targeted_generation(
                 runtime, item.request_id,
-                runtime.backend_manager.generate_response(
-                    final_prompt, item.request_id, **generation_kwargs,
+                generate_with_capacity_recovery(
+                    runtime,
+                    item,
+                    final_prompt,
+                    generation_kwargs,
                 ),
             )
         finally:

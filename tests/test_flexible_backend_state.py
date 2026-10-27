@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -23,6 +24,7 @@ from orchestrator.flexible_backend_manager import (
     FlexibleBackendManager,
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator import model_fallback_policy as fallback_policy
 from orchestrator.privacy_levels import PrivacyLevel, PrivacyPolicyError
 from orchestrator.wrapper_mode import load_wrapper_config
 
@@ -53,6 +55,48 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
 
 def _read_state(workspace: Path) -> dict:
     return json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_request_local_fallback_uses_exact_model_without_switching_backend(
+    tmp_path,
+    monkeypatch,
+):
+    manager = _make_manager(tmp_path / "agent")
+    original_backend = object()
+    manager.current_backend = original_backend
+    candidate = SimpleNamespace(
+        set_session_mode=Mock(),
+        generate_response=AsyncMock(
+            return_value=BackendResponse(text="fallback", duration_ms=1, is_success=True)
+        ),
+    )
+    create = AsyncMock(return_value=candidate)
+    dispose = AsyncMock()
+    monkeypatch.setattr(manager, "_create_initialized_backend", create)
+    monkeypatch.setattr(manager, "_dispose_backend", dispose)
+    state_path = tmp_path / "agent" / "state.json"
+    before = state_path.read_bytes() if state_path.exists() else None
+
+    response = await manager.generate_fallback_response(
+        target_kind=fallback_policy.TARGET_KIND_CODEX_CLI,
+        provider="codex-cli",
+        model="gpt-5.1-codex",
+        prompt="finish the task",
+        request_id="request-local-fallback",
+    )
+
+    assert response.text == "fallback"
+    create.assert_awaited_once_with(
+        "codex-cli",
+        target_model="gpt-5.1-codex",
+        target_provider=None,
+    )
+    candidate.set_session_mode.assert_called_once_with(False)
+    dispose.assert_awaited_once_with(candidate)
+    assert manager.current_backend is original_backend
+    after = state_path.read_bytes() if state_path.exists() else None
+    assert after == before
 
 
 def test_stale_persisted_backend_falls_back_to_configured_allowed_backend(

@@ -50,6 +50,7 @@ HERV3_ROUTE = FallbackRoute(
 CODEX_ROUTE = FallbackRoute(
     source=policy_owner.SOURCE_HERV3,
     target_kind=TARGET_KIND_CODEX_CLI,
+    model="gpt-6-sol",
 )
 
 
@@ -80,6 +81,66 @@ def _request(request_ref: str = "req-fallback") -> StageRequest:
         effort=Effort.HIGH,
         allow_tools=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_herv3_capacity_retry_consumes_the_shared_per_source_policy(tmp_path):
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    manager = SimpleNamespace(privacy_level=int(PrivacyLevel.PROVIDER_TRUST))
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        runtime_context=runtime,
+    )
+    _old, document = read_policy(runtime, "user:0", for_update=True)
+    write_policy(
+        runtime,
+        "user:0",
+        FallbackPolicy(
+            mode=policy_owner.MODE_RETRY,
+            sources={
+                policy_owner.SOURCE_HERV3: FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_RESUME
+                ),
+                policy_owner.SOURCE_CODEX_CLI: FallbackSourceRule(
+                    side_effect_mode=policy_owner.EFFECT_PAUSE
+                ),
+            },
+        ),
+        document=document,
+    )
+
+    decision = await provider.resolve_stage_capacity_retry(
+        request=_request("req-capacity-policy"),
+        selected=SimpleNamespace(engine="deepseek-api", model="deepseek-v4-flash"),
+        failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        retryable=True,
+        retry_after_s=90,
+        retry_index=0,
+        side_effects_possible=True,
+    )
+
+    assert decision["allowed"] is True
+    assert decision["delay_s"] == 90
+    assert decision["continue_session"] is True
+    assert decision["source"] == policy_owner.SOURCE_HERV3
+
+    # The policy source is the selected outer Engine, not HERV3's current
+    # internal model Provider.  A Codex provider inside one HERV3 Turn must
+    # therefore keep using HERV3's independently configured A/B choice.
+    codex_provider_decision = await provider.resolve_stage_capacity_retry(
+        request=_request("req-capacity-policy-codex-provider"),
+        selected=SimpleNamespace(engine="codex-cli", model="gpt-6-sol"),
+        failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        retryable=True,
+        retry_after_s=None,
+        retry_index=0,
+        side_effects_possible=True,
+    )
+    assert codex_provider_decision["allowed"] is True
+    assert codex_provider_decision["continue_session"] is True
+    assert codex_provider_decision["source"] == policy_owner.SOURCE_HERV3
 
 
 def _checkpoint_registry(tmp_path, request):
@@ -703,6 +764,15 @@ class _StubManager:
     def __init__(self, options):
         self.privacy_level = int(PrivacyLevel.PROVIDER_TRUST)
         self._options = list(options)
+        self.config = SimpleNamespace(
+            allowed_backends=[
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-sol",
+                    "available_models": ["gpt-6-sol"],
+                }
+            ]
+        )
 
     def get_her_v2_provider_options(self):
         return [dict(item) for item in self._options]
@@ -765,7 +835,7 @@ def _model_options(*, openrouter=True, codex=True, known_cost=None):
                 "engine": "codex-cli",
                 "label": "codex",
                 "available": True,
-                "models": [],
+                "models": ["gpt-6-sol"],
             }
         )
     return options
@@ -1042,7 +1112,7 @@ async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, mo
     )
     assert result["allowed"] is True
     assert result["target_kind"] == TARGET_KIND_CODEX_CLI
-    assert result["target_label"] == "codex-cli"
+    assert result["target_label"] == "codex-cli/gpt-6-sol"
     # The explicit additional-call budget entry is consumed before the switch.
     assert bridge.budget["req-stage"] == 1
 
@@ -1081,6 +1151,64 @@ async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, mo
     )
     assert excluded["allowed"] is False
     assert excluded["reason"] == "modality_excluded"
+
+
+@pytest.mark.asyncio
+async def test_herv3_does_not_fallback_to_its_current_provider_and_model(
+    tmp_path,
+    monkeypatch,
+):
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "default")
+    current_route = FallbackRoute(
+        source=policy_owner.SOURCE_HERV3,
+        target_kind=TARGET_KIND_HERV3_MODEL,
+        provider="deepseek-api",
+        model="deepseek-v4-flash",
+    )
+    _save_policy(
+        tmp_path,
+        "default",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(current_route,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    manager = _StubManager(
+        [
+            {
+                "engine": "deepseek-api",
+                "available": True,
+                "models": ["deepseek-v4-flash"],
+            }
+        ]
+    )
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    port = _Herv3ProviderFallbackPort(
+        _StubBridge(_runtime(tmp_path), manager),
+        _request("req-current-target"),
+        profile,
+        purpose="stage",
+    )
+
+    decision = await port.evaluate_provider_fallback(
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=False,
+        visible_partial_answer=False,
+        primary_failure={"code": "PROVIDER_CAPACITY_UNAVAILABLE"},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == policy_owner.REASON_NO_ALLOWED_TARGET
 
 @pytest.mark.asyncio
 async def test_herv3_fallback_skips_permanent_failures(monkeypatch, tmp_path):

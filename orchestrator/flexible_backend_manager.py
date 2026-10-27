@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -2109,6 +2110,76 @@ class FlexibleBackendManager:
         if self.current_backend:
             await self._dispose_backend(self.current_backend)
             self.current_backend = None
+
+    async def generate_fallback_response(
+        self,
+        *,
+        target_kind: str,
+        provider: str,
+        model: str,
+        prompt: str,
+        request_id: str,
+        is_retry: bool = False,
+        silent: bool = False,
+        on_stream_event=None,
+        request_content: dict[str, Any] | None = None,
+    ):
+        """Invoke one exact user-authorised route without changing defaults.
+
+        PAO owns selection and consent.  The manager owns qualified Engine
+        construction and disposal.  The candidate is request-local: it never
+        replaces ``current_backend`` or writes the Agent's selected backend.
+        """
+
+        from orchestrator import model_fallback_policy as fallback_policy
+        from orchestrator.session_attachment_authorization import (
+            bind_backend_attachment_reads,
+            current_run_attachment_grants,
+        )
+
+        if target_kind == fallback_policy.TARGET_KIND_HERV3_MODEL:
+            engine = "her-v2"
+            target_provider = str(provider or "").strip()
+            target_model = str(model or "").strip()
+            if not target_provider or not target_model:
+                raise ValueError("HERV3 fallback requires an exact Provider/model")
+        elif target_kind == fallback_policy.TARGET_KIND_CODEX_CLI:
+            engine = "codex-cli"
+            target_provider = None
+            target_model = str(model or "").strip() or None
+        else:
+            raise ValueError(f"unsupported fallback target kind: {target_kind!r}")
+
+        candidate = await self._create_initialized_backend(
+            engine,
+            target_model=target_model,
+            target_provider=target_provider,
+        )
+        if candidate is None:
+            raise RuntimeError("fallback target could not be initialized")
+        try:
+            set_session_mode = getattr(candidate, "set_session_mode", None)
+            if callable(set_session_mode):
+                # A cross-Engine fallback receives the complete frozen PAO
+                # prompt.  It is deliberately a request-local Engine Session,
+                # not a replacement for the Conversation's normal binding.
+                set_session_mode(False)
+            grants = current_run_attachment_grants(self, request_id, request_content)
+            with bind_backend_attachment_reads(candidate, grants):
+                kwargs = {
+                    "is_retry": bool(is_retry),
+                    "silent": bool(silent),
+                    "on_stream_event": on_stream_event,
+                }
+                if request_content is not None:
+                    kwargs["request_content"] = deepcopy(request_content)
+                return await candidate.generate_response(
+                    prompt,
+                    request_id,
+                    **kwargs,
+                )
+        finally:
+            await self._dispose_backend(candidate)
 
     async def generate_response(
         self,
