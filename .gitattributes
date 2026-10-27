@@ -11,6 +11,10 @@
 # Python files should use LF
 *.py text eol=lf
 
+# Isolated runtime locks are hashed byte-for-byte across installations.
+constraints/transcription-py312.lock text eol=lf
+constraints/tts-py312.lock text eol=lf
+
 # JSON, YAML, Markdown should use LF
 *.json text eol=lf
 *.yaml text eol=lf

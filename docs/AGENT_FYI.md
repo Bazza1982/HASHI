@@ -42,6 +42,9 @@ and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-202
 
 ## Configuration, identity, and persistence
 
+Isolated speech locks, runtimes and releases need separate proof. See
+[dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
+
 Configuration owns identity, ports, Workzones, endpoints and models; exclude
 secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
 shared compatibility uses the qualified registry. Unknown capability/price is
@@ -102,7 +105,6 @@ execution/delivery/receipts and show each final once. `/bg` freezes admission;
 schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
 
 HASHI3 Telegram health needs a bounded poll; startup preserves pending updates.
-HERV3 keeps complete WIP; source, Worker adoption and live proof stay separate.
 
 ## Engine, tools, and recovery
 
@@ -199,7 +201,6 @@ Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keep
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-See [Call](HASHI_CALL_INTERACTION_2026-10-04.md); device acceptance is separate.
 [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
