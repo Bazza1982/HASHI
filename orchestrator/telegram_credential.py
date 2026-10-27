@@ -245,16 +245,22 @@ class TelegramCredentialService:
             str(secrets.get(token_key)).strip()
         )
         global_config = config.get("global")
-        config_owner = (
+        explicit_owner = (
+            global_config.get("telegram_owner_id")
+            if isinstance(global_config, dict)
+            else None
+        )
+        config_fallback = (
             global_config.get("authorized_id")
             if isinstance(global_config, dict)
             else None
         )
-        owner_value = (
-            secrets.get("authorized_telegram_id")
-            if _positive_integer(secrets.get("authorized_telegram_id"))
-            else config_owner
-        )
+        if _positive_integer(explicit_owner):
+            owner_value = explicit_owner
+        elif _positive_integer(secrets.get("authorized_telegram_id")):
+            owner_value = secrets.get("authorized_telegram_id")
+        else:
+            owner_value = config_fallback
         authorized_owner_id = int(owner_value) if _positive_integer(owner_value) else None
         return TelegramCredentialContext(
             agent_id=canonical_id,

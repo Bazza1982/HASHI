@@ -100,6 +100,14 @@ and missing authorized-user configuration fail closed. A running Agent is not
 restarted automatically; apply the new token by restarting that Agent when it
 is idle.
 
+Replacing the human Telegram account is a separate instance lifecycle. HASHI
+requires a recent runtime-observed direct private-chat binding, preserves the
+same PAO `owner_scope_id`, reduces every Agent allowlist to the one replacement
+actor, and keeps the previous private fallback only until the new Function
+generation is adopted. Finalization then revision-checks and replaces that
+fallback without exposing Bot tokens. Historical channel bindings are retained
+only as inert audit evidence; they are not authorization or delivery targets.
+
 Keep secrets and OAuth stores private and out of source control. CLI engines
 manage their own authentication; HERV3 uses configured provider profiles and
 secret references.

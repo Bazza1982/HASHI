@@ -290,6 +290,16 @@ binding. This fallback never guesses a group chat, chooses an authorization-list
 position, or selects a secondary actor. An unresolved or zero route is omitted
 from the frozen Run destinations and sends nothing.
 
+The PAO owner scope is also distinct from the replaceable Telegram actor. A
+runtime-proven direct Telegram account replacement retains the same explicit
+`owner_scope_id`, changes the canonical Telegram owner, and reduces every Agent
+allowlist to that one actor. If the new actor previously had a direct binding as
+`secondary`, PAO may promote only the binding whose actor ID and private chat ID
+both equal the newly configured owner. It never promotes a group or an
+actor-less legacy endpoint. Old actor bindings remain audit evidence but fail
+authorization and cannot be selected for a future Workbench or other Connector
+mirror.
+
 AgentPresence is an optional local desktop-companion egress Connector. Its
 owner-scoped `/agentpresence on|off` preference defaults off and is shared by
 existing and future Agents through the connector-neutral preference store. The

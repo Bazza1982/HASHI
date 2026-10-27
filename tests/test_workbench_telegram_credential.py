@@ -268,6 +268,25 @@ def test_server_supplies_registered_remote_runtime_principal(tmp_path, monkeypat
     )
 
 
+def test_explicit_telegram_owner_supersedes_stale_secret_fallback(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path, authorized_id=8872)
+    config = read_config_json(config_path)
+    config["global"]["telegram_owner_id"] = 7666
+    write_config_json(config_path, config)
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 8872
+    write_config_json(secrets_path, secrets)
+
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    context = service.context("lily")
+
+    assert context.authorized_owner_id == 7666
+    assert service.status("lily")["authorized_user_configured"] is True
+
+
 @pytest.mark.asyncio
 async def test_replace_rejects_stale_secret_revision_after_verification(tmp_path):
     config_path, secrets_path = _write_config(tmp_path)

@@ -751,6 +751,81 @@ def test_secondary_telegram_user_cannot_replace_owner_proactive_route(tmp_path):
     assert FlexibleAgentRuntime._primary_chat_id(secondary_runtime) == 8872
 
 
+def test_configured_replacement_owner_promotes_existing_direct_route(tmp_path):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_delivery import (
+        freeze_run_delivery_route,
+        route_destination,
+    )
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="MSI")
+    stable_owner = "user:8872"
+    store.ensure_default_session(owner_id=stable_owner, agent_id="hashiko")
+    before = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(
+            authorized_id=8872,
+            owner_scope_id=stable_owner,
+        ),
+        session_store=store,
+        _authorized_telegram_ids=(8872, 7666),
+        _active_chat_ids={},
+    )
+    before._is_authorized_user = (
+        lambda user_id: user_id in before._authorized_telegram_ids
+    )
+    FlexibleAgentRuntime._record_active_chat(
+        before,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=7666),
+            effective_chat=SimpleNamespace(id=7666),
+        ),
+    )
+    secondary = store.latest_channel_binding(
+        owner_id=stable_owner,
+        agent_id="hashiko",
+        surface="telegram",
+        actor_id=7666,
+    )
+    assert secondary is not None
+    assert secondary["actor_role"] == "secondary"
+
+    promoted = SimpleNamespace(
+        name="hashiko",
+        global_config=SimpleNamespace(
+            authorized_id=7666,
+            owner_scope_id=stable_owner,
+        ),
+        session_store=SessionStore(store.db_path, instance_id="MSI"),
+        _authorized_telegram_ids=(7666,),
+        _active_chat_ids={},
+    )
+    assert runtime_session.owner_id(promoted) == stable_owner
+    assert FlexibleAgentRuntime._primary_chat_id(promoted) == 7666
+
+    owner_binding = promoted.session_store.latest_channel_binding(
+        owner_id=stable_owner,
+        agent_id="hashiko",
+        surface="telegram",
+        actor_id=7666,
+    )
+    assert owner_binding is not None
+    assert owner_binding["actor_role"] == "owner"
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="workbench",
+        session_channel_key="default",
+        chat_id=FlexibleAgentRuntime._primary_chat_id(promoted),
+        telegram_requested=True,
+    )
+    assert route_destination(route, "telegram") == {
+        "surface": "telegram",
+        "channel_key": "7666",
+    }
+
+
 def test_telegram_actor_binding_schema_upgrades_from_version_27(tmp_path):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.session_store import SessionStore

@@ -2062,6 +2062,11 @@ class SessionStore:
     def owner_id_for(global_config: Any, explicit: str | None = None) -> str:
         if explicit and str(explicit).strip():
             return str(explicit).strip()
+        configured = str(
+            getattr(global_config, "owner_scope_id", None) or ""
+        ).strip()
+        if configured:
+            return configured
         return f"user:{int(getattr(global_config, 'authorized_id', 0) or 0)}"
 
     @staticmethod

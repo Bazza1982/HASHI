@@ -375,8 +375,28 @@ def primary_telegram_chat_id(runtime: Any) -> int | None:
             chat_id = int(str(binding["channel_key"]).strip())
         except (KeyError, TypeError, ValueError):
             chat_id = 0
-        if not chat_id or binding.get("actor_role") != "owner":
+        if not chat_id:
             return None
+        if binding.get("actor_role") != "owner":
+            # A replacement Telegram account can already have a durable direct
+            # route recorded as ``secondary`` under the same stable PAO owner
+            # scope.  Promote only the newly configured owner's unambiguous
+            # private chat; never promote a group, a legacy actor-less route,
+            # or an allowlist position.
+            if (
+                str(binding.get("actor_id") or "") != str(owner_actor_id)
+                or chat_id != owner_actor_id
+            ):
+                return None
+            store.bind_channel(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                surface="telegram",
+                channel_key=str(chat_id),
+                session_id=str(binding["session_id"]),
+                actor_id=owner_actor_id,
+                actor_role="owner",
+            )
         if _telegram_egress_allowed(
             runtime, actor_id=owner_actor_id, chat_id=chat_id
         ):

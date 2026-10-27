@@ -123,6 +123,53 @@ def test_global_timezone_uses_explicit_iana_name(tmp_path):
     assert global_cfg.timezone == "Australia/Sydney"
 
 
+def test_telegram_owner_can_change_without_changing_pao_owner_scope(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    config = read_config_json(config_path)
+    config["global"].update(
+        {
+            "authorized_id": 7666,
+            "telegram_owner_id": 7666,
+            "owner_scope_id": "user:8872",
+        }
+    )
+    write_config_json(config_path, config)
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 8872
+    write_config_json(secrets_path, secrets)
+
+    global_cfg, _, _ = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+    ).load()
+
+    assert global_cfg.authorized_id == 7666
+    assert global_cfg.owner_scope_id == "user:8872"
+
+
+def test_legacy_owner_scope_defaults_to_effective_telegram_owner(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 7666
+    write_config_json(secrets_path, secrets)
+
+    global_cfg, _, _ = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+    ).load()
+
+    assert global_cfg.authorized_id == 7666
+    assert global_cfg.owner_scope_id == "user:7666"
+
+
 def test_invalid_global_timezone_is_rejected(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,
