@@ -38,12 +38,45 @@ async def test_fixed_resumed_text_gets_complete_role_phone_tail_then_no_repeat(p
     assert prompt.incremental
     assert "Keep the budget under 100" in prompt.final_prompt
     assert "I understand the limit" in prompt.final_prompt
-    assert '"role":"user"' in prompt.final_prompt
-    assert '"role":"assistant"' in prompt.final_prompt
+    assert "USER: Keep the budget under 100" in prompt.final_prompt
+    assert "ASSISTANT: I understand the limit" in prompt.final_prompt
+    assert "provider_event_id" not in prompt.final_prompt
     await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None,audit_active=False)
     later=await runtime_pipeline.build_turn_prompt(runtime,turn_item(phone,"req-phone-2"),is_bridge_request=False)
     assert "Keep the budget under 100" not in later.final_prompt
     assert later.prompt_audit["phone_context_handoff"]["included_fragments"]==0
+
+
+@pytest.mark.asyncio
+async def test_nonincremental_phone_uses_canonical_session_history_once(phone,tmp_path):  # noqa: F811
+    from orchestrator.bridge_memory import BridgeContextAssembler,BridgeMemoryStore
+    await phone.manager.append_fragment_once(
+        phone.binding,Fragment("canonical-user","user","Canonical phone request",0,100)
+    )
+    await phone.manager.append_fragment_once(
+        phone.binding,Fragment("canonical-assistant","assistant","Canonical phone reply",120,200)
+    )
+    with phone.store._lock,phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",
+            (phone.call_id,),
+        )
+    runtime=turn_runtime(phone,fixed=False)
+    (tmp_path/"pcm").mkdir()
+    runtime.context_assembler=BridgeContextAssembler(
+        BridgeMemoryStore(tmp_path/"pcm"),None
+    )
+    prompt=await runtime_pipeline.build_turn_prompt(
+        runtime,turn_item(phone),is_bridge_request=False
+    )
+    assert prompt.final_prompt.count("Canonical phone request")==1
+    assert prompt.final_prompt.count("Canonical phone reply")==1
+    assert "canonical-user" not in prompt.final_prompt
+    assert "provider_event_id" not in prompt.final_prompt
+    assert not any(
+        section[0] in {"PHONE CONVERSATION CONTEXT","PHONE ACTION CONTEXT"}
+        for section in prompt.extra_sections
+    )
 
 
 @pytest.mark.asyncio
@@ -121,14 +154,19 @@ async def test_second_action_phone_tail_then_hangup_preserves_provider_continuit
     second_prompt=await runtime_pipeline.build_turn_prompt(runtime,second,is_bridge_request=False)
     assert "First query complete" in second_prompt.final_prompt
     assert "Second query" in second_prompt.final_prompt
-    assert ("The important earlier restriction" in second_prompt.final_prompt) is (not fixed)
+    assert "The important earlier restriction" in second_prompt.final_prompt
     await runtime_pipeline.run_backend_generation(runtime,second,second_prompt.final_prompt,on_stream_event=None,audit_active=False)
     await phone.manager.append_fragment_once(phone.binding,Fragment("tail","assistant","The final phone detail",160,180))
     with phone.store._lock,phone.store._connection() as connection:
         connection.execute("UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",(phone.call_id,))
     last=await runtime_pipeline.build_turn_prompt(runtime,turn_item(phone,"req-tail"),is_bridge_request=False)
-    assert "The final phone detail" in last.final_prompt
-    assert ("Second query" in last.final_prompt) is (not fixed)
+    if fixed:
+        assert "The final phone detail" in last.final_prompt
+        assert "Second query" not in last.final_prompt
+    else:
+        canonical = phone.store.recent_exchanges(phone.session_id, limit=8)
+        assert "The final phone detail" in str(canonical)
+        assert "Second query" in str(canonical)
 
 
 @pytest.mark.asyncio
@@ -160,7 +198,7 @@ async def test_provider_failure_no_watermark_and_restart_model_or_thread_isolati
 
 @pytest.mark.asyncio
 async def test_action_retry_snapshot_exact_and_cross_scope_cannot_read(phone):
-    from orchestrator.phone_context_handoff import freeze_action_handoff,load_handoff,PhoneContextError
+    from orchestrator.phone_context_handoff import freeze_action_handoff,load_handoff
     await speak(phone,"Read the scoped file",source="action")
     proposal=phone.admitted_proposals[-1]
     original=load_handoff(phone.store,proposal.phone_context_handoff_id,owner_id=phone.owner_id,
@@ -175,26 +213,39 @@ async def test_action_retry_snapshot_exact_and_cross_scope_cannot_read(phone):
 
 
 @pytest.mark.asyncio
-async def test_long_context_failclosed_without_silent_tail_or_source_mutation(phone,monkeypatch):
-    from orchestrator.phone_context_handoff import PhoneContextError
-    await phone.manager.append_fragment_once(phone.binding,Fragment("long","user","X"*6000,0,100))
+async def test_long_phone_history_uses_pcm_budget_without_a_separate_phone_limit(phone):
+    for i in range(750):
+        await phone.manager.append_fragment_once(phone.binding, Fragment(
+            f"production-shaped-{i:04d}",
+            "user" if i % 2 else "assistant",
+            " word" if i % 2 else "原话",
+            i * 200,
+            i * 200 + 100,
+        ))
     with phone.store._lock,phone.store._connection() as connection:
         connection.execute("UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",(phone.call_id,))
-    monkeypatch.setattr("orchestrator.phone_context_handoff.MAX_CONTEXT_BYTES",1000)
     runtime=turn_runtime(phone)
-    with pytest.raises(PhoneContextError,match="phone_context_budget_exceeded") as rejected:
-        await runtime_pipeline.build_turn_prompt(runtime,turn_item(phone),is_bridge_request=False)
-    assert phone.session_id in str(rejected.value)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime, turn_item(phone), is_bridge_request=False
+    )
+    assert "USER:" in prompt.final_prompt and "ASSISTANT:" in prompt.final_prompt
+    assert "production-shaped-" not in prompt.final_prompt
+    assert "provider_event_id" not in prompt.final_prompt
+    assert prompt.prompt_audit["phone_context_handoff"]["included_fragments"] == 750
     assert runtime.backend_manager.calls==[]
-    assert phone.store.live_transcript_segments(phone.session_id)[0]["text"]=="X"*6000
+    with phone.store._lock, phone.store._connection() as connection:
+        durable_count = connection.execute(
+            "SELECT COUNT(*) FROM live_fragments WHERE call_id=?", (phone.call_id,)
+        ).fetchone()[0]
+    assert durable_count == 750
 
 
 @pytest.mark.asyncio
-async def test_word_stream_full_phone_context_fits_on_new_engine_without_losing_events(phone):
-    from orchestrator.phone_context_handoff import MAX_CONTEXT_BYTES, prepare_turn
+async def test_word_stream_projects_speech_without_provider_fragment_metadata(phone):
+    from orchestrator.phone_context_handoff import prepare_turn
     fragments = [Fragment(f"event_stream_{i:020d}", "user" if i % 2 else "assistant",
                           " word" if i % 2 else "原话", i * 200, i * 200 + 100)
-                 for i in range(320)]
+                 for i in range(750)]
     for fragment in fragments:
         await phone.manager.append_fragment_once(phone.binding, fragment)
     with phone.store._lock, phone.store._connection() as connection:
@@ -202,27 +253,28 @@ async def test_word_stream_full_phone_context_fits_on_new_engine_without_losing_
     runtime = turn_runtime(phone)
     runtime.config.active_backend = "codex-cli"
     sections, audit = prepare_turn(runtime, turn_item(phone), incremental=True)
-    wire = json.loads(sections[0][1].split("\n", 1)[1])
-    assert len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode()) <= MAX_CONTEXT_BYTES
-    records = [f for group in wire["fragment_groups"] for f in group["fragments"]]
-    assert [(f["role"], f["text"], f["event"][0], f["event"][2], f["event"][3]) for f in records] == [
-        (f.speaker, f.text, f.provider_event_id, f.start_ms, f.end_ms) for f in fragments]
-    assert wire["fragment_groups"][0]["call_id"] == phone.call_id
-    assert wire["fragment_groups"][0]["source"] == "durable_phone_transcript"
+    rendered = "\n".join(section[1] for section in sections)
+    assert "USER:" in rendered
+    assert "ASSISTANT:" in rendered
+    assert "event_stream_" not in rendered
+    assert "provider_event_id" not in rendered
     assert audit["source_event_ids"] == [f.provider_event_id for f in fragments]
     assert audit["included_fragments"] == len(fragments)
-    assert sections[0][2]["authority"] == "history"
+    assert sections
+    assert all(section[2]["authority"] == "history" for section in sections)
+    assert all(section[2]["protected"] is False for section in sections)
+    assert all(section[2]["key"].startswith("recent_exchange:") for section in sections)
     assert runtime.backend_manager.calls == []
     with phone.store._lock, phone.store._connection() as connection:
         durable = connection.execute("SELECT provider_event_id,sequence FROM live_fragments WHERE call_id=? ORDER BY start_ms",
                                      (phone.call_id,)).fetchall()
-    assert [(f["event"][0], f["event"][1]) for f in records] == [(r[0], r[1]) for r in durable]
+    assert audit["source_event_ids"] == [str(row[0]) for row in durable]
     assert len(durable) == len(fragments)
 
 
 @pytest.mark.asyncio
 async def test_word_stream_action_snapshot_roundtrip_and_legacy_storage_compatibility(phone):
-    from orchestrator.phone_context_handoff import MAX_CONTEXT_BYTES, load_handoff
+    from orchestrator.phone_context_handoff import load_handoff
     for i in range(320):
         await phone.manager.append_fragment_once(phone.binding, Fragment(
             f"event_stream_{i:020d}", "assistant", "原话", i * 200, i * 200 + 100))
@@ -236,11 +288,7 @@ async def test_word_stream_action_snapshot_roundtrip_and_legacy_storage_compatib
     assert frozen["fragments"][0]["text"] == "原话"
     assert frozen["fragments"][-1]["text"] == "Read the scoped file"
     assert frozen["cutoff_ms"] == 65201
-    assert len(json.dumps(frozen, ensure_ascii=False).encode()) > MAX_CONTEXT_BYTES
     with phone.store._lock, phone.store._connection() as connection:
-        stored = connection.execute("SELECT payload_json FROM phone_context_handoffs WHERE handoff_id=?",
-                                    (proposal.phone_context_handoff_id,)).fetchone()[0]
-        assert len(stored.encode()) <= MAX_CONTEXT_BYTES
         # Old Functions persisted the ungrouped representation; it remains readable.
         connection.execute("UPDATE phone_context_handoffs SET payload_json=? WHERE handoff_id=?",
                            (json.dumps(frozen, ensure_ascii=False), proposal.phone_context_handoff_id))
@@ -273,9 +321,53 @@ async def test_shared_phone_projection_contract_independent_of_engine(phone,engi
     runtime.config.active_backend=engine
     sections,audit=prepare_turn(runtime,turn_item(phone),incremental=True)
     assert audit["included_fragments"]==2
-    assert sections[0][2]["protected"] is True
+    assert sections[0][2]["protected"] is False
     assert sections[0][2]["authority"]=="history"
-    assert '"role":"user"' in sections[0][1] and '"role":"assistant"' in sections[0][1]
+    rendered = "\n".join(section[1] for section in sections)
+    assert "USER: User role" in rendered
+    assert "ASSISTANT: Frontend role" in rendered
+    assert "provider_event_id" not in rendered
+    assert '"role"' not in rendered
+
+
+@pytest.mark.asyncio
+async def test_incremental_phone_history_uses_standard_pcm_compaction(phone,tmp_path):  # noqa: F811
+    from orchestrator.phone_context_handoff import prepare_turn
+    from orchestrator.bridge_memory import BridgeContextAssembler,BridgeMemoryStore
+    for i in range(80):
+        await phone.manager.append_fragment_once(
+            phone.binding,
+            Fragment(
+                f"budget-source-{i}",
+                "user" if i % 2 else "assistant",
+                (" important detail" * 20),
+                i * 200,
+                i * 200 + 100,
+            ),
+        )
+    with phone.store._lock,phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",
+            (phone.call_id,),
+        )
+    runtime=turn_runtime(phone)
+    sections,_=prepare_turn(runtime,turn_item(phone),incremental=True)
+    (tmp_path/"pcm").mkdir()
+    assembler=BridgeContextAssembler(BridgeMemoryStore(tmp_path/"pcm"),None)
+    payload=assembler.build_prompt_payload(
+        "Question",
+        "codex-cli",
+        extra_sections=sections,
+        incremental=True,
+        prompt_budget_tokens=500,
+    )
+    assert payload["audit"]["budget_applied"]
+    assert payload["audit"]["history_capsule"]["present"]
+    assert payload["audit"]["history_omitted"][0]["key"].startswith(
+        "recent_exchange:phone:"
+    )
+    assert "COMPACTED HISTORY CONTINUITY CAPSULE" in payload["final_prompt"]
+    assert "budget-source-" not in payload["final_prompt"]
 
 
 @pytest.mark.asyncio
@@ -295,9 +387,9 @@ async def test_real_pcm_and_her_fixed_materialize_phone_prefix_and_tail_without_
     sections,_=prepare_turn(runtime,first_item,incremental=True)
     def transport(item,sections):
         payload=assembler.build_prompt_payload("Question","her-v2",extra_sections=sections,incremental=True)
-        phone_parts=[s for s in payload["transport_snapshot"]["sections"] if s["key"].startswith("phone_external_context:")]
+        phone_parts=[s for s in payload["transport_snapshot"]["sections"] if s["key"].startswith("recent_exchange:phone:")]
         assert len(phone_parts)==1
-        assert phone_parts[0]["authority"]=="history" and phone_parts[0]["protected"]
+        assert phone_parts[0]["authority"]=="history" and not phone_parts[0]["protected"]
         encoded,_=coordinator.prepare_transport(session_id="her-phone",sections=payload["transport_snapshot"]["sections"],
             resources=[],user_message="Question",request_id=item.request_id,message_id=item.request_id,
             instance_id="HASHI",agent_id=phone.agent_id,owner_id=phone.owner_id,

@@ -1221,11 +1221,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     phone_sections, phone_audit = (
         ([], {}) if isolated_activity_run else prepare_phone_context(runtime, item, incremental=incremental)
     )
-    # The quoted Phone history has its own durable external-event watermark.
-    # Exclude the old lossy display timeline so post-cutoff speech cannot leak
-    # into a frozen action and stateless prompts cannot duplicate the transcript.
-    if phone_audit and session_history is not None:
-        session_history = [row for row in session_history if not str(row.get("exchange_id") or "").startswith("live:")]
+    # A Phone action carries a frozen transcript for its own call and cutoff.
+    # Remove only that call's ordinary history projection. Earlier calls remain
+    # normal Session history, and ordinary Phone turns need no special filtering.
+    excluded_phone_prefix = str(
+        phone_audit.get("exclude_history_exchange_prefix") or ""
+    )
+    if excluded_phone_prefix and session_history is not None:
+        session_history = [
+            row
+            for row in session_history
+            if not str(row.get("exchange_id") or "").startswith(
+                excluded_phone_prefix
+            )
+        ]
     # This is a mandatory PAO -> PCM projection, not an optional observer.
     # Supplying the same fixed key on every Turn makes HER fixed-session
     # transport issue an upsert whenever the source or authorization changes,
@@ -1321,11 +1330,19 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     def assemble(sections: list[tuple]) -> dict[str, Any]:
         current_kwargs = dict(prompt_kwargs)
         current_kwargs["extra_sections"] = sections
-        return prompt_builder(
+        payload = prompt_builder(
             effective_prompt,
             runtime.config.active_backend,
             **current_kwargs,
         )
+        phone_removals = list(phone_audit.get("removed_section_keys") or [])
+        if phone_removals:
+            transport = payload.setdefault("transport_snapshot", {})
+            removed = list(transport.get("removed_section_keys") or [])
+            transport["removed_section_keys"] = list(
+                dict.fromkeys([*removed, *phone_removals])
+            )
+        return payload
 
     prompt_payload = assemble(extra_sections)
     context_warnings: list[str] = []

@@ -1,10 +1,12 @@
-# Phone external context handoff
+# Phone Session context and action handoff
 
-PCM owns projection of Phone transcript context. PAO owns Session attribution,
-action authorization cutoffs, admission and durable handoff/consumption facts.
-This is shared Functions behavior for every Phone provider and text Engine;
-the front-end intent judge is not a substitute for the acting Agent's context.
-It supplements `HASHI_PCM_SYSTEM_DESIGN.md` and `HASHI_PAO_SYSTEM_DESIGN.md`.
+Phone speech is ordinary Session conversation history. PCM owns its projection,
+budgeting and compaction exactly as it owns typed chat history. PAO owns Session
+attribution, action authorization cutoffs, admission and durable
+handoff/consumption facts. This shared Functions behavior applies to every Phone
+provider and text Engine; the front-end intent judge is not a substitute for the
+acting Agent's context. It supplements `HASHI_PCM_SYSTEM_DESIGN.md` and
+`HASHI_PAO_SYSTEM_DESIGN.md`.
 
 ## Freeze before action admission
 
@@ -15,7 +17,7 @@ Session/context generation, call/epoch, delegation/version/digest and cutoff.
 The snapshot preserves roles, source event IDs, temporal order, sequence and
 exact text, without the intent judge's 60-fragment/eight-turn truncation.
 Missing source events, crossing fragments, pending durable provider fragments,
-scope mismatch or an oversized context reject admission with an explicit
+or a scope mismatch reject admission with an explicit
 `phone_context_*` code before tool work.
 
 The immutable `phone_context_handoff_id` is stored with the Proposal and carried
@@ -28,25 +30,25 @@ reinterpret the old Run.
 
 ## Materialize before the real Provider request
 
-The shared runtime prepares the external Phone history on every persistent
-Session turn, including a fixed native-thread resume (`incremental=true`).
-Phone action Runs read only their frozen snapshot. Ordinary post-call text
-reads ended calls' durable fragments after checking pending transcript inboxes.
-The old lossy Phone rows are removed from that turn's generic recent-history
-projection; the single display call record stays `history_eligible=false`.
+For a full or stateless request, ordinary Phone speech reaches the Agent only
+through SessionStore's canonical recent-exchange timeline. It is rendered as
+`USER` and `ASSISTANT` conversation, then budgeted and compacted by the same
+PCM/HCC path as typed chat. No second Phone copy is injected.
 
-Phone context is quoted history with explicit speaker/source and no new
-authority. Its section is mandatory for budgeting but retains `history`
-authority. Fixed native threads receive only unconsumed fragments; a new
-Engine/native thread or a stateless/full request materializes the complete
-relevant transcript. Consumption is per owner/Agent/Session/context and actual
-Engine/native-session lane, using stable call/epoch/event identities.
+A fixed native thread already owns the earlier PCM snapshot. On an incremental
+turn, only unconsumed Phone speech is appended as ordinary, unprotected
+`history` sections whose keys use the standard `recent_exchange:` namespace.
+The model-visible body contains speaker text only. Provider event IDs, call IDs,
+epochs, timestamps and fragment boundaries remain durable audit facts and are
+not placed in the prompt. HERV3 keeps acknowledged batches across turns;
+same-batch retries remain idempotent.
 
-For HERV3, Phone history section keys bind the stable source-event batch.
-An incremental tail appends a new history resource rather than replacing the
-previous batch. Omitting an already received batch does not revoke it.
-The real fixed-session coordinator retains both batches in the next model
-input. Same-batch retries remain idempotent.
+A Phone action is the sole exception. PAO loads its immutable cutoff snapshot
+and PCM projects that snapshot as one protected `phone_action_context` history
+section. The ordinary recent-history view is removed only for that same
+call/epoch, preventing post-cutoff speech or duplication while retaining every
+earlier Phone call. The next ordinary turn sends an explicit tombstone for the
+action section.
 
 Only a successful actual Provider result commits consumed fragment IDs.
 Failure/cancellation does not advance them; restart reads the same durable
@@ -56,26 +58,38 @@ already executed Provider result into an automatic action replay.
 
 `provider_request.prompt_audit.phone_context_handoff` records snapshot/cutoff,
 requested/included counts, safe consumer lane and exact source-event IDs.
-This audit reflects the actual assembled Provider input, rather than merely
-proving that SessionStore contains a transcript.
+These content-free audit identities prove the source without exposing transport
+metadata to the Agent.
 
-## Bounded failure behavior
+## Unified context budgeting
 
-Each full frozen snapshot or turn projection is limited to 65,536 UTF-8 bytes
-and 10,000 fragments. The byte bound applies to the lossless serialized form.
-`hashi.phone-fragments.grouped.v1` declares event columns once and groups only
-adjacent fragments with the same call, epoch and source. Every fragment retains
-its exact role, text, source event ID, sequence and time range. Neither speech
-nor event boundaries are merged or omitted. Snapshot loading expands this form
-for existing owners and also accepts previously persisted ungrouped snapshots.
-This representation avoids repeating long call IDs and field labels for every
-word received from a streaming provider. There is no silent tail truncation or
-invented summary.
-If complete necessary context cannot fit, `phone_context_budget_exceeded`
-keeps the complete durable source and explicitly names its Session/handoff.
-No retrieval tool has been added by this change. Long-context failures remain
-conservative refusals; this is not evidence of successful full long-call
-understanding by a model.
+Phone has no separate byte or fragment limit. Ordinary speech uses PCM's normal
+prompt budget and HCC/history compaction. Long Phone history can therefore
+produce the same deterministic continuity capsule as long typed-chat history;
+it does not fail with `phone_context_budget_exceeded`.
+
+The immutable action snapshot remains lossless in SessionStore.
+`hashi.phone-fragments.grouped.v1` is retained as a durable storage encoding:
+it declares event columns once and groups adjacent fragments with the same call,
+epoch and source. Snapshot loading expands this form and also accepts older
+ungrouped snapshots. This encoding is audit storage only and is never the
+model-visible conversation format.
+
+## Logical-call recovery
+
+Terminal Phone phases are irreversible. Schema 29 does not reopen old
+`ended`, `failed` or `interrupted` rows. It repairs the earlier schema 27
+mistake only when a currently recovering row has the matching
+`legacy_terminal_recovery` event for the same call epoch; a later genuine
+resume epoch is left untouched.
+
+A replacement transport in `connecting` is governed by its fresh controller
+lease. The previous provider's `max_ends_at` applies only while `active`, so
+it cannot immediately push a new connection back to `recovering`. Workbench
+may retry recovery with exponential delay, but PAO permits at most five
+consecutive replacement attempts since the last verified `active` state.
+Exhaustion settles the logical call as `failed` and publishes the terminal
+state instead of leaving an endless recovery loop.
 
 SessionStore schema 23 adds `phone_context_handoffs` and
 `phone_context_consumption`. They are Session-owned data, distinct from the
@@ -132,10 +146,11 @@ which completed without tools. Speaker-to-microphone stimulus was generated;
 this does not establish human listening or mobile handset acceptance.
 
 Switching that same QA Session to Codex exposed a further representation defect:
-309 genuine word fragments contained 1,447 bytes of speech but the repeated
-metadata occupied 67,052 bytes, exceeding the unchanged bound before Provider
-work. The new lossless representation addresses both action snapshots and
-post-call projections. Focused regressions cover full new-Engine input, exact
-event provenance, immutable cutoff, unchanged durable source and old snapshot
-compatibility. Actual new-Engine adoption is recorded separately; the failed
-request is not automatically replayed.
+309 genuine word fragments contained 1,447 bytes of speech but repeated metadata
+occupied 67,052 bytes, exceeding the then-current Phone-specific bound before
+Provider work. Grouped snapshot storage reduced that overhead but retained the
+wrong separate limit and still exposed transport structure to the Agent. The
+2026-10-27 unified-context decision above supersedes that interim design:
+durable action evidence remains lossless, while model input uses semantic
+Session history and PCM's existing context controls. Historical failed requests
+are never automatically replayed.

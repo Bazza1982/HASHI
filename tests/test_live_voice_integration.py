@@ -471,6 +471,23 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertTrue(any(json.loads(event["detail_json"]).get("reason") == "provider_rollover_due"
                             for event in events))
 
+    def test_connecting_resume_ignores_expired_previous_provider_deadline(self):
+        lease = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+        expired = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute(
+                """UPDATE live_calls
+                   SET phase = 'connecting', lease_expiry = ?, max_ends_at = ?
+                   WHERE call_id = ?""",
+                (lease, expired, self.call_id),
+            )
+        asyncio.run(self.manager._sweep_expiring_transports())
+        with self.store._lock, self.store._connection() as connection:
+            row = connection.execute(
+                "SELECT phase FROM live_calls WHERE call_id = ?", (self.call_id,)
+            ).fetchone()
+        self.assertEqual(row["phase"], "connecting")
+
     def test_events_reading(self):
         frag = Fragment("e1", "user", "check status", 0, 500)
         asyncio.run(self.manager.append_fragment_once(self.binding, frag))
@@ -869,6 +886,52 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         snap = asyncio.run(manager._op_snapshot(self.owner_id, self.scope))
         self.assertEqual(snap["snapshot"]["phase"], "connecting")
         self.assertEqual(snap["snapshot"]["scope"]["call_epoch"], 2)
+
+    def test_repeated_failed_resume_attempts_terminalize_the_call(self):
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute(
+                "UPDATE live_calls SET phase = 'recovering' WHERE call_id = ?",
+                (self.call_id,),
+            )
+            for attempt in range(5):
+                self.store._append_event(
+                    connection,
+                    session_id=self.session_id,
+                    run_id=None,
+                    kind="voice.live.call.state",
+                    summary="Replacing phone transport",
+                    detail={
+                        "scope": self.scope,
+                        "phase": "connecting",
+                        "reason": "transport_resume_requested",
+                        "attempt": attempt + 1,
+                    },
+                )
+        self.manager._phone_session = lambda *_args, **_kwargs: self.fail(
+            "provider setup must not run after the recovery limit"
+        )
+        with self.assertRaisesRegex(
+            LiveVoiceError, "live_recovery_attempts_exhausted"
+        ):
+            asyncio.run(self.manager._op_resume(self.owner_id, {
+                **self.scope,
+                "sdp": "v=0\r\n",
+                "idempotency_key": "resume-after-limit",
+                "phone_revision": PHONE_REVISION,
+            }))
+        with self.store._lock, self.store._connection() as connection:
+            row = connection.execute(
+                "SELECT phase, ended_at FROM live_calls WHERE call_id = ?",
+                (self.call_id,),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT 1 FROM live_call_attempts WHERE attempt_id = ?",
+                ("resume-after-limit",),
+            ).fetchone()
+        self.assertEqual(row["phase"], "failed")
+        self.assertIsNotNone(row["ended_at"])
+        self.assertIsNone(attempt)
+
 
     def test_provider_close_reason_is_preserved_in_independent_call_audit(self):
         class ProviderSocket:
@@ -2227,7 +2290,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(foreground["binding"]["call_id"], self.call_id)
         self.assertEqual(foreground["binding"]["call_epoch"], 1)
 
-    def test_legacy_unconfirmed_terminal_calls_recover_but_user_hangup_stays_ended(self):
+    def test_schema_upgrade_never_reopens_terminal_calls(self):
         user_call_id = "call-legacy-user-ended"
         with self.store._lock, self.store._connection() as conn:
             conn.execute(
@@ -2280,19 +2343,110 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                 "AND json_extract(detail_json, '$.reason') = 'legacy_terminal_recovery'",
                 (self.session_id,),
             ).fetchone()[0]
-        self.assertEqual(passive["phase"], "recovering")
-        self.assertIsNone(passive["ended_at"])
-        self.assertEqual(passive["foreground"], 1)
+        self.assertEqual(passive["phase"], "ended")
+        self.assertIsNotNone(passive["ended_at"])
         self.assertEqual(user_ended["phase"], "ended")
         self.assertIsNotNone(user_ended["ended_at"])
-        self.assertEqual(migration_count, 1)
+        self.assertEqual(migration_count, 0)
         SessionStore(self.db_path, instance_id="HASHI")
         with reopened._lock, reopened._connection() as conn:
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM run_events WHERE session_id = ? AND kind = 'voice.live.call.state' "
                 "AND json_extract(detail_json, '$.reason') = 'legacy_terminal_recovery'",
                 (self.session_id,),
-            ).fetchone()[0], 1)
+            ).fetchone()[0], 0)
+    def test_schema_29_restores_rows_reopened_by_legacy_migration(self):
+        with self.store._lock, self.store._connection() as conn:
+            conn.execute(
+                """UPDATE live_calls
+                   SET phase = 'recovering', ended_at = NULL, foreground = 1,
+                       provider_close_state = 'unconfirmed'
+                   WHERE call_id = ?""",
+                (self.call_id,),
+            )
+            self.store._append_event(
+                conn,
+                session_id=self.session_id,
+                run_id=None,
+                kind="voice.live.call.state",
+                summary="Legacy call retained for explicit recovery",
+                detail={
+                    "scope": {
+                        "instance_id": "HASHI",
+                        "instance_generation": "1",
+                        "agent_id": self.agent_id,
+                        "session_id": self.session_id,
+                        "context_generation": 1,
+                        "call_id": self.call_id,
+                        "call_epoch": 1,
+                    },
+                    "phase": "recovering",
+                    "reason": "legacy_terminal_recovery",
+                    "legacy_phase": "failed",
+                    "provider_close_state": "confirmed",
+                },
+            )
+            conn.execute(
+                "UPDATE schema_metadata SET value = '28' WHERE key = 'schema_version'"
+            )
+        reopened = SessionStore(self.db_path, instance_id="HASHI")
+        with reopened._lock, reopened._connection() as conn:
+            row = conn.execute(
+                """SELECT phase, ended_at, foreground, provider_close_state
+                   FROM live_calls WHERE call_id = ?""",
+                (self.call_id,),
+            ).fetchone()
+            repaired_count = conn.execute(
+                "SELECT COUNT(*) FROM run_events WHERE session_id = ? "
+                "AND kind = 'voice.live.call.state' "
+                "AND json_extract(detail_json, '$.reason') = 'legacy_terminal_recovery_reverted'",
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertEqual(row["phase"], "failed")
+        self.assertIsNotNone(row["ended_at"])
+        self.assertEqual(row["foreground"], 0)
+        self.assertEqual(row["provider_close_state"], "confirmed")
+        self.assertEqual(repaired_count, 1)
+
+    def test_schema_29_keeps_a_later_real_recovery_epoch(self):
+        with self.store._lock, self.store._connection() as conn:
+            conn.execute(
+                """UPDATE live_calls
+                   SET phase = 'recovering', ended_at = NULL, call_epoch = 2
+                   WHERE call_id = ?""",
+                (self.call_id,),
+            )
+            self.store._append_event(
+                conn,
+                session_id=self.session_id,
+                run_id=None,
+                kind="voice.live.call.state",
+                summary="Legacy call retained for explicit recovery",
+                detail={
+                    "scope": {**self.scope, "call_epoch": 1},
+                    "phase": "recovering",
+                    "reason": "legacy_terminal_recovery",
+                    "legacy_phase": "ended",
+                },
+            )
+            conn.execute(
+                "UPDATE schema_metadata SET value = '28' WHERE key = 'schema_version'"
+            )
+        reopened = SessionStore(self.db_path, instance_id="HASHI")
+        with reopened._lock, reopened._connection() as conn:
+            row = conn.execute(
+                "SELECT phase, call_epoch FROM live_calls WHERE call_id = ?",
+                (self.call_id,),
+            ).fetchone()
+            repaired_count = conn.execute(
+                "SELECT COUNT(*) FROM run_events WHERE session_id = ? "
+                "AND kind = 'voice.live.call.state' "
+                "AND json_extract(detail_json, '$.reason') = 'legacy_terminal_recovery_reverted'",
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertEqual((row["phase"], row["call_epoch"]), ("recovering", 2))
+        self.assertEqual(repaired_count, 0)
+
     def test_schema_upgrade_backgrounds_duplicate_calls_without_reactivating_them(self):
         newer_id = "call-newer-migration"
         with self.store._lock, self.store._connection() as conn:

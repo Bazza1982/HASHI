@@ -140,6 +140,15 @@ Phone failures preserve causes: policy, auth, quota, rate limit, configuration,
 provider outage. Failed/interrupted panels persist until dismissal; normal
 hang-up may dismiss. Terminal calls settle attempts and busy state across replacement.
 
+Phone speech is ordinary role-preserving Session history. Full requests use the
+normal recent-exchange/HCC path; fixed Sessions receive only a semantic
+user/assistant delta. Provider fragment metadata stays in audit storage. Phone
+has no separate context-size ceiling. Action Runs alone use the frozen cutoff
+snapshot, and only that call's ordinary history view is suppressed. Terminal
+calls never reopen; replacement ignores the old provider deadline while
+connecting and stops after five consecutive failed resume attempts. See
+[handoff and recovery](HASHI_PHONE_CONTEXT_HANDOFF.md).
+
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
 neither translates replies/IDs. TUI switches freeze runtime identity/state.
 Remote authenticates. Mirror opt-outs preserve origin replies; `/think` and

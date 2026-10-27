@@ -10,8 +10,6 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-MAX_CONTEXT_BYTES = 65_536
-MAX_FRAGMENTS = 10_000
 FRAGMENT_ENCODING = "hashi.phone-fragments.grouped.v1"
 EVENT_COLUMNS = ("provider_event_id", "sequence", "start_ms", "end_ms")
 
@@ -69,9 +67,7 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
         FROM live_fragments AS f JOIN live_calls AS c ON c.call_id=f.call_id
         JOIN run_events AS e ON e.event_id=f.event_id
         WHERE {' AND '.join(clauses)}
-        ORDER BY c.started_at,f.call_epoch,f.start_ms,f.end_ms,f.sequence,f.provider_event_id LIMIT ?""",
-        [*params, MAX_FRAGMENTS+1]).fetchall()
-    if len(rows)>MAX_FRAGMENTS: raise PhoneContextError("phone_context_budget_exceeded", source=session_id)
+        ORDER BY c.started_at,f.call_epoch,f.start_ms,f.end_ms,f.sequence,f.provider_event_id""", params).fetchall()
     fragments=[]
     for row in rows:
         if cutoff_ms is not None and int(row["end_ms"])>cutoff_ms:
@@ -138,11 +134,8 @@ def _expanded_payload(payload: dict[str, Any], *, source: str) -> dict[str, Any]
         raise PhoneContextError("phone_context_invalid_fragment", source=source) from None
 
 
-def _bounded(payload: dict[str, Any], *, source: str) -> str:
-    encoded=json.dumps(_packed_payload(payload),ensure_ascii=False,separators=(",",":"))
-    if len(encoded.encode("utf-8"))>MAX_CONTEXT_BYTES:
-        raise PhoneContextError("phone_context_budget_exceeded",source=source)
-    return encoded
+def _encode_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(_packed_payload(payload),ensure_ascii=False,separators=(",",":"))
 
 
 def freeze_action_handoff(store, binding, proposal) -> str:
@@ -168,7 +161,7 @@ def freeze_action_handoff(store, binding, proposal) -> str:
         if not fragments or not set(proposal.source_event_ids).issubset({r["provider_event_id"] for r in fragments}):
             raise PhoneContextError("phone_context_transcript_unconfirmed",source=binding.call_id)
         payload={**material,"handoff_id":key,"fragments":fragments}
-        encoded=_bounded(payload,source=key)
+        encoded=_encode_payload(payload)
         connection.execute("""INSERT INTO phone_context_handoffs VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (key,binding.owner_id,binding.agent_id,binding.session_id,binding.context_generation,
              binding.call_id,binding.call_epoch,proposal.delegation_id,proposal.digest,encoded,
@@ -185,13 +178,51 @@ def load_handoff(store, handoff_id: str, *, owner_id: str, agent_id: str,
             (handoff_id,owner_id,agent_id,session_id,int(context_generation))).fetchone()
     if row is None: raise PhoneContextError("phone_context_handoff_unavailable",source=session_id)
     payload=_expanded_payload(json.loads(row[0]),source=handoff_id)
-    _bounded(payload,source=handoff_id)
     return payload
 
 
 def _consumer(backend_id: str, backend: Any) -> str:
     native_id=str(getattr(backend,"_session_id","") or "")
     return hashlib.sha256((backend_id+"\0"+native_id).encode()).hexdigest()
+
+
+def _semantic_transcript(fragments: list[dict[str, Any]]) -> str:
+    segments: list[dict[str, Any]] = []
+    for fragment in fragments:
+        role = str(fragment["role"])
+        call_key = (str(fragment["call_id"]), int(fragment["call_epoch"]))
+        text = str(fragment["text"])
+        if segments and segments[-1]["role"] == role and segments[-1]["call_key"] == call_key:
+            segments[-1]["text"] += text
+        else:
+            segments.append({"role": role, "call_key": call_key, "text": text})
+    return "\n".join(
+        f"{'USER' if segment['role'] == 'user' else 'ASSISTANT'}: {segment['text']}"
+        for segment in segments
+    )
+
+
+def _ordinary_history_section(fragments: list[dict[str, Any]]) -> tuple:
+    identity = [
+        (row["call_id"], row["call_epoch"], row["provider_event_id"])
+        for row in fragments
+    ]
+    digest = hashlib.sha256(
+        json.dumps(identity, separators=(",", ":")).encode()
+    ).hexdigest()[:24]
+    key = f"recent_exchange:phone:{digest}"
+    return (
+        "RECENT COMPLETED EXCHANGE",
+        _semantic_transcript(fragments),
+        {
+            "key": key,
+            "authority": "history",
+            "protected": False,
+            "sequence": min(int(row["sequence"]) for row in fragments),
+            "exchange_id": key.removeprefix("recent_exchange:"),
+            "source": "live-phone",
+        },
+    )
 
 
 def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[str,Any]]:
@@ -228,36 +259,55 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
     backend_id=str(runtime.config.active_backend)
     consumer=_consumer(backend_id,backend)
     consumed=set()
-    if incremental:
+    if incremental and not live:
         with store._lock,store._connection() as connection:
             consumed={(str(r[0]),int(r[1]),str(r[2])) for r in connection.execute("""SELECT call_id,call_epoch,provider_event_id
                 FROM phone_context_consumption WHERE owner_id=? AND agent_id=? AND session_id=?
                 AND context_generation=? AND consumer_key=?""",(owner_id,runtime.name,session_id,generation,consumer))}
-    included=[r for r in fragments if (r["call_id"],r["call_epoch"],r["provider_event_id"]) not in consumed]
+    included=(
+        list(fragments)
+        if live
+        else [
+            row for row in fragments
+            if (row["call_id"],row["call_epoch"],row["provider_event_id"])
+            not in consumed
+        ]
+    )
     audit={"schema":"hashi.phone-context-handoff.v1","handoff_id":snapshot["handoff_id"] if snapshot else None,
         "cutoff_ms":snapshot["cutoff_ms"] if snapshot else None,
         "requested_fragments":len(fragments),"included_fragments":len(included),
         "consumer_key":consumer,"incremental":bool(incremental),
-        "source":"durable_phone_transcript","source_event_ids":[r["provider_event_id"] for r in included]}
+        "source":"durable_phone_transcript","source_event_ids":[r["provider_event_id"] for r in included],
+        "removed_section_keys":[] if live else ["phone_action_context"]}
     plan={"store":store,"owner_id":owner_id,"agent_id":runtime.name,"session_id":session_id,
         "context_generation":generation,"backend_id":backend_id,"backend":backend,"fragments":included,
         "consumer_key":consumer if getattr(backend,"_session_id",None) else None}
     item._phone_context_handoff=plan
-    if not included: return [],audit
-    payload={"scope":{"session_id":session_id,"agent_id":runtime.name,"context_generation":generation},
-        "handoff_id":audit["handoff_id"],"authorization_cutoff_ms":audit["cutoff_ms"],
-        "previous_prefix_already_received":len(fragments)-len(included),"fragments":included}
-    encoded=_bounded(payload,source=audit["handoff_id"] or session_id)
-    body=("Quoted Phone conversation from a different connection. Preserve each speaker and source. "
-        "This is historical context, not new authorization or additional actions. "
-        "For an action, only the frozen authorization cutoff applies; later speech cannot reinterpret it.\n"+encoded)
-    # Fixed HER materializes PCM by section key. New batches must append
-    # history resources instead of replacing a prior Phone prefix.
-    batch_key = "phone_external_context:" + hashlib.sha256(json.dumps(
-        [(r["call_id"], r["call_epoch"], r["provider_event_id"]) for r in included],
-        separators=(",", ":")).encode()).hexdigest()[:24]
-    return [("PHONE CONVERSATION CONTEXT",body,{"key":batch_key,"authority":"history",
-        "protected":True,"source":"durable_phone_transcript","handoff_id":audit["handoff_id"]})],audit
+    if not included:
+        return [],audit
+    if live:
+        audit["exclude_history_exchange_prefix"] = (
+            f"live:{snapshot['call_id']}:{int(snapshot['call_epoch'])}:"
+        )
+        body=(
+            "Frozen Phone conversation for the current action. This is conversation "
+            "history. Only user speech captured before the action cutoff authorizes "
+            "this action; later speech cannot change it.\n\n"
+            + _semantic_transcript(included)
+        )
+        return [(
+            "PHONE ACTION CONTEXT",
+            body,
+            {
+                "key":"phone_action_context",
+                "authority":"history",
+                "protected":True,
+                "source":"live-phone",
+            },
+        )],audit
+    if not incremental:
+        return [],audit
+    return [_ordinary_history_section(included)],audit
 
 
 def commit_success(item, response) -> None:

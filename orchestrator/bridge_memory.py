@@ -2051,6 +2051,20 @@ class BridgeContextAssembler:
                 item_count=1,
                 metadata=options,
             )
+            if (
+                authority == "history"
+                and section_key.startswith("recent_exchange:")
+                and section_key not in capsule_rows
+            ):
+                source_text = str(body).strip()
+                sequence = int(options.get("sequence") or 0)
+                source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+                capsule_rows[section_key] = (
+                    f"Exchange sequence={sequence}; user_ts=unknown-time; "
+                    f"assistant_ts=unknown-time; source_sha256={source_hash}\n"
+                    f"HISTORY_EXCERPT: {self._history_excerpt(source_text) or '(empty)'}"
+                )
+
             if isinstance(raw_section, CallMessageContextSection):
                 # Application-owned presentation policy must reach the model's
                 # instruction channel. Camera facts remain the runtime-data

@@ -485,6 +485,16 @@ wire commands from the selected Connector adapter. The same logical call
 retains this record across transport replacement, and never repeats an opening
 merely because a provider emitted ready again.
 
+A Phone provider/browser connection is a replaceable transport for one logical
+call. A terminal logical-call phase is never reopened by schema migration.
+During replacement, `connecting` observes only its fresh controller lease;
+the old provider deadline applies after the replacement becomes `active`.
+PAO stops recovery after five consecutive replacement attempts since the last
+verified active state and settles the call as failed. Schema 29 repairs only
+rows carrying schema 27's matching same-epoch
+`legacy_terminal_recovery` evidence; a later real recovery epoch is preserved.
+See [Phone Session context and action handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
+
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI
 instances, including:
 
