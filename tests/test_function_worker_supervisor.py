@@ -216,8 +216,10 @@ def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
     kernel = _Kernel()
     client = _Client("alpha", 101)
     handle = _handle(kernel, client)
-    handle.metadata.update(telegram_connected=True, worker_phase="ACTIVE", worker_accepting=True)
-    ingress = {"configured": True, "running": False, "connected": False}
+    handle.metadata.update(telegram_connected=True, telegram_outbound_connected=True,
+        telegram_bot_fingerprint="current-bot", worker_phase="ACTIVE", worker_accepting=True)
+    ingress = {"configured": True, "running": False, "connected": False,
+        "bot_fingerprint": "current-bot"}
     kernel.function_workers = SimpleNamespace(telegram_ingress_snapshot=lambda _: ingress)
     metadata = handle.get_runtime_metadata()
     assert metadata["online"]
@@ -225,8 +227,15 @@ def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
     assert not metadata["telegram_connected"]
     ingress.update(running=True, connected=True)
     assert handle.get_runtime_metadata()["telegram_connected"]
+    ingress["bot_fingerprint"] = "previous-bot"
+    assert not handle.get_runtime_metadata()["telegram_connected"]
+    ingress["bot_fingerprint"] = "current-bot"
+    handle.metadata.pop("telegram_outbound_connected")
+    assert not handle.get_runtime_metadata()["telegram_connected"]  # Legacy ingress flag is not outbound evidence.
+    handle.metadata["telegram_outbound_connected"] = True
     client.process.alive = False
     assert not handle.get_runtime_metadata()["online"]
+    assert not handle.get_runtime_metadata()["telegram_connected"]
 
 
 def test_topology_publishes_live_source_adoption_commit():
@@ -275,6 +284,7 @@ async def test_topology_adopts_saved_telegram_credentials_after_worker_cutover(
         telegram_token_key="alpha.telegram",
         telegram_bot_fingerprint=telegram_bot_fingerprint(token),
         telegram_connected=True,
+        telegram_outbound_connected=True,
     )
     kernel.runtimes = [handle]
     supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
@@ -576,13 +586,16 @@ async def test_shutdown_status_change_does_not_call_exiting_worker():
     kernel.is_stopping = True
     client = _Client("alpha", 101)
     handle = _handle(kernel, client)
+    handle.metadata.update(telegram_connected=True, telegram_outbound_connected=True)
     kernel.runtimes.append(handle)
     supervisor = FunctionWorkerSupervisor(kernel)
 
     await supervisor.set_worker_telegram_status("alpha", False)
 
     assert client.calls == []
-    assert handle.metadata["telegram_connected"] is False
+    assert handle.metadata["telegram_ingress_connected"] is False
+    assert handle.metadata["telegram_connected"] is True
+    assert handle.metadata["telegram_outbound_connected"] is True
 
 
 @pytest.mark.asyncio

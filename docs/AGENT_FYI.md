@@ -5,6 +5,8 @@ Current decisions, with full rationale in the linked owners:
 - Telegram credential saves request exact-Agent activation; shared receivers
   adopt fresh credentials after cutover. Saved/verified/mirrored is not two-way
   connected, and pending activation retains the token without a save replay.
+  Receiver status cannot overwrite application-owned outbound readiness;
+  legacy ambiguous Worker metadata is not proof of a ready sender.
   See [Connector activation](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
 
 - Legacy audio migration is fail-closed on verified ownership and safe paths;

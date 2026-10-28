@@ -88,6 +88,15 @@ the paired record and reject a different Bot's cursor. Legacy checkpoints
 without identity retain their existing compatibility behavior until rebound
 by the receiving owner.
 
+Worker application preparation owns outbound readiness. The receiver's
+`worker.telegram_status` RPC updates only its independent inbound observation;
+it must neither enable a failed sender nor disable a healthy sender. The
+Worker publishes explicit `telegram_outbound_connected` evidence only while
+its prepared application is running. The supervisor does not infer that fact
+from an older Worker's ambiguous `telegram_connected` field. Public connection
+projections also require a live Worker and a receiver with the same Bot
+fingerprint; the credential service separately checks the currently saved Bot.
+
 Credential status projects `inbound_connected`, `outbound_connected` and
 `bidirectional_ready` from the live Worker and actual receiver, bound to the
 currently saved Bot fingerprint. Token verification, Worker presence, a saved

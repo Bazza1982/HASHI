@@ -639,7 +639,11 @@ class AgentRuntimeHandle:
 
     @property
     def telegram_connected(self) -> bool:
-        return bool(self.metadata.get("telegram_connected", False))
+        # Retain a conservative legacy signal for lifecycle rollback guards.
+        # Public readiness below requires explicit application-owned evidence.
+        return bool(self.metadata.get(
+            "telegram_outbound_connected", self.metadata.get("telegram_connected", False)
+        ))
 
     @property
     def workspace_dir(self) -> Path:
@@ -722,11 +726,17 @@ class AgentRuntimeHandle:
         workers = getattr(self.kernel, "function_workers", None)
         snapshot = getattr(workers, "telegram_ingress_snapshot", None)
         ingress = dict(snapshot(self.name) or {}) if callable(snapshot) else {}
-        outbound = self.telegram_connected
-        inbound = bool(ingress.get("running") and ingress.get("connected"))
+        # Older Workers coupled telegram_connected to ingress. Do not use the
+        # lifecycle compatibility flag as proof of outbound application readiness.
+        outbound = bool(metadata.get("telegram_outbound_connected", False))
+        bot = metadata.get("telegram_bot_fingerprint")
+        inbound = bool(
+            bot and ingress.get("bot_fingerprint") == bot
+            and ingress.get("running") and ingress.get("connected")
+        )
         metadata["telegram_outbound_connected"] = outbound
         metadata["telegram_ingress"] = ingress
-        metadata["telegram_connected"] = bool(outbound and inbound)
+        metadata["telegram_connected"] = bool(metadata["online"] and outbound and inbound)
         channels = dict(metadata.get("channels") or {})
         channels["telegram"] = metadata["telegram_connected"]
         metadata["channels"] = channels
@@ -1797,7 +1807,7 @@ class FunctionWorkerSupervisor:
         if not isinstance(handle, AgentRuntimeHandle):
             return
         if self._shutting_down or bool(getattr(self.kernel, "is_stopping", False)):
-            handle.metadata["telegram_connected"] = bool(connected)
+            handle.metadata["telegram_ingress_connected"] = bool(connected)
             bridge_logger.debug(
                 "Skipped Function Worker Telegram status propagation during shutdown: agent=%s connected=%s",
                 name,

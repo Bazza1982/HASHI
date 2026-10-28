@@ -253,6 +253,17 @@ async def test_saved_credential_is_not_reported_connected_when_activation_fails(
     assert NEW_TOKEN not in response.text
     assert NEW_TOKEN not in caplog.text
 
+    saved_bytes = (tmp_path / "secrets.json").read_bytes()
+    refreshed = await server.handle_admin_agent_telegram_credential(
+        _Request(headers={"X-Workbench-Token": ADMIN_TOKEN})
+    )
+    refreshed_payload = json.loads(refreshed.text)
+    assert refreshed_payload["activation_status"] == "pending"
+    assert refreshed_payload["activation_required"] == "agent_restart"
+    assert refreshed_payload["bidirectional_ready"] is False
+    assert (tmp_path / "secrets.json").read_bytes() == saved_bytes
+    assert NEW_TOKEN not in refreshed.text
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outbound,running,inbound,current_bot,current_receiver,ready", [

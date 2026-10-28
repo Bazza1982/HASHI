@@ -20,6 +20,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
     from orchestrator.runtime_app_host import RuntimeAppHost
     from orchestrator.startup_manager import StartupManager
     from orchestrator.telegram_ingress import CoreTelegramIngress
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
     from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
 
     monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
@@ -33,8 +34,8 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             if method == "worker.telegram_status":
                 if self.fail_status:
                     raise ConnectionResetError("worker IPC disconnected")
-                return {"metadata": {"worker_phase": "ACTIVE", "worker_accepting": True,
-                                     "telegram_connected": params["connected"]}}
+                return {"metadata": {**handles[self.agent_name].metadata,
+                                     "telegram_ingress_connected": params["connected"]}}
             assert method == "runtime.enqueue_startup_bootstrap"
             return True
     reports = []
@@ -61,7 +62,9 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
                 {"code": "agent_telegram_unavailable", "severity": "warning", "details": {"agents": ["alpha", "beta"]}}]})
     for name in ["alpha", "beta"]:
         handles[name] = AgentRuntimeHandle(app, WorkerClient(name),
-            {"worker_phase": "ACTIVE", "worker_accepting": True, "telegram_connected": False})
+            {"worker_phase": "ACTIVE", "worker_accepting": True,
+             "telegram_connected": True, "telegram_outbound_connected": True,
+             "telegram_bot_fingerprint": telegram_bot_fingerprint(name)})
     app.function_workers = FunctionWorkerSupervisor(app)
     ingress = app.function_workers._telegram_ingress
     snapshot = app.function_workers.telegram_ingress_snapshot
