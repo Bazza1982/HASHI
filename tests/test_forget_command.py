@@ -137,6 +137,17 @@ async def test_forget_waits_for_background_memory_writers(tmp_path):
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_forget_preview_has_readable_line_breaks(locale):
+    from orchestrator import ui_language
+
+    text = ui_language.tr(
+        "forget.preview", locale=locale, agent="agent", start="start", end="end", token="token",
+    )
+    assert "\n" in text
+    assert "\\n" not in text
+
+
 @pytest.mark.parametrize("duration", ["0h", "1w", "-1h", "9999d", "3", "1.5d"])
 def test_invalid_durations_are_rejected(duration):
     from orchestrator.commands.forget import _duration

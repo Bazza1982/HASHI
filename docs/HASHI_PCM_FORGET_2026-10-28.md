@@ -58,5 +58,10 @@ unverifiable isolation is a release blocker, never a successful forget.
 - Offline validation: 364 relevant tests passed, including owner authorization,
   audit retention, failure and resume, isolation, continuity, and Session
   history. The protected Core check passed.
-- Live validation: not performed. No production deployment or user acceptance
-  is implied; the limitations above remain open release concerns.
+- HASHI3 live validation: after the user authorized commit and reboot, commit
+  `49ae6555` was adopted through `/reboot max`, with 13 Agents online.
+  The authenticated command usage and non-destructive preview worked in
+  Workbench; the preview formatting defect was then corrected in source.
+- A real-Agent destructive confirmation has not been exercised. No production
+  deployment or user acceptance is implied; the limitations above remain open
+  release concerns.
