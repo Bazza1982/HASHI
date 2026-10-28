@@ -114,7 +114,9 @@ class HandoffBuilder:
             if not assistant_entries:
                 continue
             completed.append([entries[user_index], assistant_entries[-1]])
-        return completed
+        from orchestrator.pcm_forget_memory import filter_transcript_rounds
+
+        return filter_transcript_rounds(self.workspace_dir, completed)
 
     @staticmethod
     def _word_count(text: str) -> int:
@@ -323,16 +325,23 @@ class HandoffBuilder:
             if rendered_entries:
                 rendered_rounds.append({"index": round_index, "entries": rendered_entries})
 
-        handoff_summary = self._read_optional_text(self.handoff_path)
-        if not handoff_summary:
-            self.build_handoff()
-            handoff_summary = self._read_optional_text(self.handoff_path)
+        from orchestrator.pcm_forget_memory import has_forget_boundary
 
         memory_files = {}
-        for name in ("project.md", "decisions.md", "tasks.md"):
-            text = self._read_optional_text(self.memory_dir / name)
-            if text:
-                memory_files[name] = text
+        if has_forget_boundary(self.workspace_dir):
+            # Untimestamped handoffs and notes have no reliable provenance.
+            # Use only filtered transcript rounds until those files are reviewed.
+            handoff_summary = context_block
+        else:
+            handoff_summary = self._read_optional_text(self.handoff_path)
+            if not handoff_summary:
+                self.build_handoff()
+                handoff_summary = self._read_optional_text(self.handoff_path)
+
+            for name in ("project.md", "decisions.md", "tasks.md"):
+                text = self._read_optional_text(self.memory_dir / name)
+                if text:
+                    memory_files[name] = text
 
         task_state = {
             "latest_user_request": last_user_text,
@@ -436,6 +445,14 @@ class HandoffBuilder:
 
     def build_handoff(self):
         """Synthesizes handoff.md from memory files and recent context."""
+        from orchestrator.pcm_forget_memory import has_forget_boundary
+
+        if has_forget_boundary(self.workspace_dir):
+            # Do not rebuild from untimestamped memory or an unfiltered cache.
+            safe_context, _, _ = self.build_recent_context_block()
+            self.handoff_path.write_text("# Handoff Summary\n\n" + safe_context, encoding="utf-8")
+            return
+
         handoff_content = ["# Handoff Summary\n\n"]
         
         # Read key memory files if they exist

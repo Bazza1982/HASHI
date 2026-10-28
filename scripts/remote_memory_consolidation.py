@@ -206,9 +206,31 @@ def print_header(mode: str, cfg: RemoteConfig, args: argparse.Namespace) -> None
     print(f"[remote-memory] logs_root={cfg.logs_root}")
 
 
+def _forget_export_quarantined(workspace: Path) -> bool:
+    """Standalone fail-closed guard for audit transcripts after /forget."""
+    database = workspace / "bridge_memory.sqlite"
+    if not database.exists():
+        return False
+    if database.is_symlink():
+        raise RuntimeError("memory export boundary is a link")
+    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        tables = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pcm_forgotten_%'"
+        )}
+        if not tables:
+            return False
+        if not {"pcm_forgotten_ranges", "pcm_forgotten_origins"}.issubset(tables):
+            raise RuntimeError("memory export boundary is incomplete")
+        return connection.execute("SELECT 1 FROM pcm_forgotten_ranges LIMIT 1").fetchone() is not None
+
+
 def iter_source_records(root: Path, instance_id: str, agent_ids: Iterable[str]) -> Iterable[dict[str, Any]]:
     for agent_id in agent_ids:
         workspace = root / "workspaces" / agent_id
+        # Retained audit logs and legacy summaries lack complete lineage.
+        # Avoid republishing them until a safe consolidation path exists.
+        if _forget_export_quarantined(workspace):
+            continue
         sources = (
             ("transcript", workspace / "transcript.jsonl"),
             ("left_brain_notepad", workspace / "memory" / "left_brain_continuity.jsonl"),

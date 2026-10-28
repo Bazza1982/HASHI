@@ -1975,7 +1975,7 @@ class ToolRegistry:
             if global_config is None:
                 return "Error: memory_search is unavailable without HASHI global context"
             service = MemorySearchService(
-                workspace_dir=self.workspace_dir,
+                workspace_dir=Path(self._read_scope()[1].get("agent_home") or self.workspace_dir),
                 global_config=global_config,
                 agent_id=str(context.get("agent_name") or self.workspace_dir.name),
                 trusted_authorization=context.get("memory_search_authorization"),
@@ -1988,8 +1988,12 @@ class ToolRegistry:
                 return f"Error: {exc}"
 
         if tool_name == "wiki_search":
+            from orchestrator.pcm_forget_memory import has_forget_boundary
             from tools.wiki_search import execute_wiki_search
 
+            agent_home = Path(self._read_scope()[1].get("agent_home") or self.workspace_dir)
+            if has_forget_boundary(agent_home):
+                return "Error: wiki search is quarantined after forget because source lineage is unverified."
             return await execute_wiki_search(
                 arguments,
                 global_config=self._effective_audit_context().get("global_config"),

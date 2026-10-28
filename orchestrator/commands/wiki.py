@@ -47,6 +47,12 @@ def build_wiki_prompt(*, query: str, provider_id: str, capability: str) -> str:
 async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
     if not _is_authorized(runtime, update):
         return
+    from orchestrator.pcm_forget_memory import has_forget_boundary
+
+    workspace = getattr(runtime, "workspace_dir", None)
+    if workspace is not None and has_forget_boundary(workspace):
+        await _reply(runtime, update, ui_language.tr("forget.wiki_blocked"))
+        return
     query = " ".join(
         str(value).strip()
         for value in (getattr(context, "args", None) or [])

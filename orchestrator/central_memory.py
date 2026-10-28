@@ -250,8 +250,15 @@ class MemorySearchService:
             )
         central_status = "not_requested"
         if source in {"central", "all"}:
-            central_status = "configured" if self.central.configured else "unconfigured"
-            results.extend(self.central.search(query, scope=scope, limit=limit))
+            from orchestrator.pcm_forget_memory import has_forget_boundary
+
+            if has_forget_boundary(self.workspace_dir):
+                # Consolidated records do not currently prove their complete
+                # source lineage. Do not reintroduce an unverifiable summary.
+                central_status = "quarantined_after_forget"
+            else:
+                central_status = "configured" if self.central.configured else "unconfigured"
+                results.extend(self.central.search(query, scope=scope, limit=limit))
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return {
             "query": query,

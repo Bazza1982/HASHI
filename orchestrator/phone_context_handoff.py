@@ -83,7 +83,8 @@ def _fragments(connection, *, owner_id: str, agent_id: str, session_id: str,
                exclude_call_scope: tuple[str, int] | None = None,
                ) -> list[dict[str, Any]]:
     clauses = ["f.owner_id=?", "c.owner_id=?", "f.session_id=?", "c.session_id=?",
-        "c.agent_id=?", "c.context_generation=?"]
+        "c.agent_id=?", "c.context_generation=?",
+        "NOT EXISTS (SELECT 1 FROM pcm_forget_live_calls forgotten WHERE forgotten.call_id=f.call_id)"]
     params: list[Any] = [owner_id, owner_id, session_id, session_id, agent_id, int(context_generation)]
     if call_id is not None: clauses.append("f.call_id=?"); params.append(call_id)
     if call_epoch is not None: clauses.append("f.call_epoch=?"); params.append(int(call_epoch))

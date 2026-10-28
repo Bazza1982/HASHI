@@ -134,6 +134,8 @@ class _FakeUpdate:
             "context_generation"
         )
         self._hashi_ui_locale = metadata.get("ui_locale")
+        # Set only by the Backend API after strict owner/Agent authentication.
+        self._hashi_forget_authenticated = metadata.get("_hashi_forget_authenticated") is True
         # Local command projections have no Telegram update number.  Preserve
         # the typed frontend invocation identity so each command response gets
         # its own stable Session presentation idempotency key.

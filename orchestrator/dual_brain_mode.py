@@ -380,7 +380,9 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         wiki_query = str(fyi.get("wiki_query") or request.user_text).strip()
         wiki_candidates: list[dict[str, str]] = []
 
-        if bool(fyi.get("wiki_needed")):
+        from orchestrator.pcm_forget_memory import has_forget_boundary
+
+        if bool(fyi.get("wiki_needed")) and not has_forget_boundary(self.workspace_dir):
             wiki_used = True
             wiki_candidates = _wiki_candidates(self._wiki_roots(), cfg.wiki_candidate_limit, query=wiki_query)
             wiki_schema = {
