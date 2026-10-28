@@ -1475,6 +1475,13 @@ def session_memory_store(runtime: Any, item: Any) -> Any:
     if store is None:
         store = BridgeMemoryStore(workspace)
         stores[key] = store
+    from orchestrator.pcm_forget_audit import audit_scope
+    from orchestrator.pcm_forget_memory import inherit_forget_fences
+
+    agent_home = getattr(runtime, "workspace_dir", None)
+    if agent_home is not None:
+        with audit_scope(getattr(runtime, "canonical_audit", None)):
+            inherit_forget_fences(Path(agent_home), store)
     return store
 
 

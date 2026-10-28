@@ -59,6 +59,7 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
     provider = dict(getattr(runtime.global_config, "wiki_provider", None) or {})
     provider_id = str(provider.get("id") or "").strip()
     capability = str(provider.get("capability") or "").strip()
+    # Wiki entries may contain information from multiple time periods.
     if not provider_id or not capability:
         await _reply(
             runtime,

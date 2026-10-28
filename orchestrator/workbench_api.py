@@ -8952,6 +8952,10 @@ class WorkbenchApiServer:
             runtime = self._runtime_map().get(str(session.get("agent_id") or ""))
             if runtime is None:
                 raise SessionNotFound("agent runtime not found")
+            if command == "forget":
+                denied = self._guard_agent_management_access(request, str(session["agent_id"]))
+                if denied is not None:
+                    return denied
 
             request_metadata = payload.get("request_metadata")
             connector_claims = None
@@ -9095,6 +9099,7 @@ class WorkbenchApiServer:
                 "source_channel": source_channel,
                 "frontend_operation": frontend_command["operation"],
                 "fc_compatibility_adapter_id": compatibility_adapter_id,
+                **({"_hashi_forget_authenticated": True} if command == "forget" else {}),
             }
             if connector_claims is not None:
                 metadata["origin_instance"] = str(
@@ -11045,6 +11050,11 @@ class WorkbenchApiServer:
 
             request_ids = []
             if text and not uploads:
+                if re.match(r"^/forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", text, re.IGNORECASE):
+                    denied = self._guard_agent_management_access(request, str(agent_name))
+                    if denied is not None:
+                        return denied
+                    session_metadata["_hashi_forget_authenticated"] = True
                 slash_result = await try_execute_slash_command_text(
                     runtime,
                     text,
@@ -12144,6 +12154,11 @@ class WorkbenchApiServer:
             except SessionNotFound:
                 pass
             return web.json_response(response_payload)
+        if re.match(r"^/forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", text, re.IGNORECASE):
+            denied = self._guard_agent_management_access(request, str(agent_name))
+            if denied is not None:
+                return denied
+            session_metadata["_hashi_forget_authenticated"] = True
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
@@ -13178,6 +13193,12 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "command is required"}, status=400
             )
 
+        from orchestrator.command_interaction_transport import is_forget_interaction
+        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE)) or is_forget_interaction(command)
+        if forget_command:
+            denied = self._guard_agent_management_access(request, str(agent_name))
+            if denied is not None:
+                return denied
         result = await execute_local_command(
             runtime,
             command,
@@ -13186,6 +13207,7 @@ class WorkbenchApiServer:
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.admin_command",
                 "_hashi_owner_id": owner_id,
+                **({"_hashi_forget_authenticated": True} if forget_command else {}),
             },
         )
         status = 200 if result.get("ok") else 400
@@ -13217,6 +13239,12 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "command is required"}, status=400
             )
 
+        from orchestrator.command_interaction_transport import is_forget_interaction
+        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE)) or is_forget_interaction(command)
+        if forget_command:
+            denied = self._guard_agent_management_access(request, str(agent_name))
+            if denied is not None:
+                return denied
         result = await execute_local_command(
             runtime,
             command,
@@ -13224,6 +13252,7 @@ class WorkbenchApiServer:
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.agent_command",
                 "_hashi_owner_id": owner_id,
+                **({"_hashi_forget_authenticated": True} if forget_command else {}),
             },
         )
         status_code = 200 if result.get("ok") else 400

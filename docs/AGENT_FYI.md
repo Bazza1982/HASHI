@@ -1,24 +1,27 @@
 # HASHI Agent FYI
 
+- `/forget` removes traceable period data; untraceable summaries may remain.
+  Audit copies stay outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
+
 - Task/local /sys deletion: authenticated management + current snapshot;
   exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
   [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
-- Legacy audio migration is fail-closed on verified ownership and safe paths;
-  PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
-  See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
-  [PAO](HASHI_PAO_SYSTEM_DESIGN.md) and [HERV3](HERV3_UPGRADE.md#completed-tool-checkpoint-provider-call-continuation).
+- Legacy audio migration requires verified ownership and safe paths; PAO
+  settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
+  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
 - PAO strips internal control envelopes before judging deliverability. A result
   containing only Memory+ state fails terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Keep full state and
-  evidence; explicit cancellation, safety, transport, Provider and single-Tool
-  limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state and
+  evidence; cancellation, safety, transport, Provider and single-Tool limits
+  remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Agent Move qualifies mutable state at staging, becomes forward-only after
   confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
-- Image fallback is selected model, same-Provider visual model, then LAN Compute;
-  it is visible/request-only and shares these [admission facts](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
-- Compute services resolve through PAO's fail-closed Function directory; no
-  silent LAN-to-internet fallback. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+- Image fallback: selected model, same-Provider visual model, then LAN Compute;
+  visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+- Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
+  fallback. [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
 - Call frames are input-only/cleared camera-off; LAN targets are literal private
   IPv4 without redirects. Preview is not Agent vision. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
 - Tool screenshots use provider-native image input, never Base64 text. Ollama
@@ -26,19 +29,19 @@
 
 ## Authority and ownership
 
-PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones
-and delivery; HERV3 owns Engine Turns/model/tool loop/cost; Frontends
-authenticate/render. Use the narrowest Function/config owner. Core has no product
-policy/imports. Core changes need explicit major-migration approval, version
-bump, label and independent review; flags grant nothing.
+PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones and
+delivery; HERV3 owns Engine Turns/model/tool loop/cost; Frontends authenticate and
+render. Use the narrowest Function/config owner. Core has no product policy or
+imports. Core changes require major-migration approval, version bump, label and
+independent review; flags grant nothing.
 
-Source, Worker adoption and delivery need separate proof. Tools cannot edit/kill
+Prove source, Worker adoption and delivery separately. Tools cannot edit/kill
 Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
 Worker; `max` replaces shared Functions/Workers, not Core/Remote. Code adopts by
 reboot, docs do not. Workbench preserves `AGENT_BUSY`; retry only before a durable
 receipt; `target_busy` stays pending. `max` rejects shared API/background work
-before and after fencing. See [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
-and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
+before and after fencing. [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
+[fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
 
@@ -53,7 +56,7 @@ uses the qualified registry. Unknown capability/price is neither unsupported nor
 zero; explicit choices persist. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md)
 without Engine grants.
 
-Agent name/Emoji come from revisioned config; failed post-save refresh cannot reverse durable success.
+Agent name/Emoji use revisioned config; post-save refresh cannot reverse durable success.
 
 Verified model capabilities survive lookup failure until identity/source changes;
 pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).

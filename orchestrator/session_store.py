@@ -43,6 +43,7 @@ from orchestrator.session_titles import (
     is_system_session_title,
 )
 from orchestrator.storage_profile import removable_storage_profile
+from orchestrator import pcm_forget_preview, pcm_forget_session
 
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
@@ -468,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 29
+    SCHEMA_VERSION = 30
 
     def __init__(
         self,
@@ -1703,6 +1704,8 @@ class SessionStore:
                 self._promote_legacy_session_workzones(connection)
             if stored_schema_version < 29:
                 self._revert_legacy_terminal_recovery(connection)
+            pcm_forget_session.install_schema(connection)
+            pcm_forget_preview.install_schema(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -3255,6 +3258,195 @@ class SessionStore:
             ).fetchall()
         return [self._run_dict(row) for row in rows]
 
+    def preview_pcm_forget(
+        self, *, owner_id: str, agent_id: str, session_id: str,
+        duration: timedelta, naive_timezone: str | None = None, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_preview.create(
+                    connection, instance_id=self.instance_id, owner_id=owner_id, agent_id=agent_id,
+                    session_id=session_id, duration=duration, naive_timezone=naive_timezone,
+                    now=now or datetime.now(timezone.utc),
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def confirm_pcm_forget(
+        self, *, owner_id: str, agent_id: str, session_id: str, token: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_preview.confirm(
+                    connection, instance_id=self.instance_id, owner_id=owner_id, agent_id=agent_id,
+                    session_id=session_id, token=token, now=now or datetime.now(timezone.utc),
+                    now_text=_utc_now(),
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def forget_pcm_window(
+        self, *, owner_id: str, agent_id: str, start: datetime, end: datetime,
+        naive_timezone: str | None = None, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Redact one Agent's local Session projections, retaining audit rows."""
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_session.forget_window(
+                    connection, instance_id=self.instance_id, owner_id=owner_id,
+                    agent_id=agent_id, start=start, end=end, now=_utc_now(),
+                    naive_timezone=naive_timezone, operation_id=operation_id,
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def pending_pcm_forget(
+        self, *, owner_id: str, agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return recovery metadata without exposing retained content."""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations
+                   WHERE instance_id=? AND owner_id=? AND agent_id=? AND state='pending'""",
+                (self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "operation_id": str(row["operation_id"]),
+            "start_epoch": float(row["start_epoch"]), "end_epoch": float(row["end_epoch"]),
+            "steps": json.loads(str(row["steps_json"])),
+            "result": json.loads(str(row["result_json"])),
+        }
+
+    def audit_pcm_forget_artifact(
+        self, *, owner_id: str, agent_id: str, operation_id: str,
+        identity: str, content: str,
+    ) -> None:
+        """Persist an immutable recovery copy before changing an opaque artifact."""
+        key = str(operation_id) + ":" + str(identity)
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = connection.execute(
+                """SELECT 1 FROM pcm_forget_operations
+                   WHERE instance_id=? AND owner_id=? AND agent_id=?
+                     AND operation_id=? AND state='pending'""",
+                (self.instance_id, str(owner_id), str(agent_id).lower(), str(operation_id)),
+            ).fetchone()
+            if operation is None:
+                raise SessionConflict("forget operation unavailable")
+            scope = (self.instance_id, str(owner_id), str(agent_id).lower(), "artifact", key)
+            row = connection.execute(
+                """SELECT payload_json FROM pcm_forget_audit
+                   WHERE instance_id=? AND owner_id=? AND agent_id=?
+                     AND source_kind=? AND source_id=?""", scope,
+            ).fetchone()
+            from orchestrator.pcm_forget_audit import payload_digest, protect
+
+            evidence = {"content": content}
+            if row is not None:
+                stored = json.loads(str(row["payload_json"]))
+                if (isinstance(stored, dict) and "canonical_audit_ref" in stored):
+                    unchanged = stored.get("sha256") == payload_digest(evidence)
+                else:
+                    unchanged = stored == evidence
+                if not unchanged:
+                    raise SessionConflict("forget artifact changed since its audit copy")
+            else:
+                payload = _json(protect("artifact", key, evidence))
+                connection.execute(
+                    """INSERT INTO pcm_forget_audit(instance_id, owner_id, agent_id,
+                       source_kind, source_id, payload_json) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (*scope, payload),
+                )
+
+    def record_pcm_forget_step(
+        self, *, owner_id: str, agent_id: str, operation_id: str, step: str,
+    ) -> None:
+        if step not in {"local_memory", "continuity"}:
+            raise ValueError("unknown forget step")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE operation_id=?
+                   AND instance_id=? AND owner_id=? AND agent_id=?""",
+                (str(operation_id), self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+            if row is None or str(row["state"]) != "pending":
+                raise SessionConflict("forget operation unavailable")
+            steps = set(json.loads(str(row["steps_json"])))
+            steps.add(step)
+            connection.execute(
+                "UPDATE pcm_forget_operations SET steps_json=?, updated_at=? WHERE operation_id=?",
+                (_json(sorted(steps)), _utc_now(), str(operation_id)),
+            )
+
+    def record_pcm_forget_new_session(
+        self, *, owner_id: str, agent_id: str, operation_id: str, session_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            scope = (self.instance_id, str(owner_id), str(agent_id).lower())
+            session = connection.execute(
+                """SELECT 1 FROM sessions WHERE instance_id=? AND owner_id=?
+                   AND agent_id=? AND session_id=? AND status!='deleted'""", (*scope, str(session_id)),
+            ).fetchone()
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
+                   AND agent_id=? AND operation_id=? AND state='pending'""", (*scope, str(operation_id)),
+            ).fetchone()
+            if session is None or row is None:
+                raise SessionConflict("forget new session unavailable")
+            result = json.loads(str(row["result_json"]))
+            if result.get("new_session_id") not in (None, str(session_id)):
+                raise SessionConflict("forget already activated a different session")
+            result["new_session_id"] = str(session_id)
+            steps = set(json.loads(str(row["steps_json"])))
+            steps.add("backend")
+            connection.execute(
+                """UPDATE pcm_forget_operations SET result_json=?, steps_json=?, updated_at=?
+                   WHERE operation_id=?""",
+                (_json(result), _json(sorted(steps)), _utc_now(), str(operation_id)),
+            )
+
+    def complete_pcm_forget(
+        self, *, owner_id: str, agent_id: str, operation_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE operation_id=?
+                   AND instance_id=? AND owner_id=? AND agent_id=?""",
+                (str(operation_id), self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+            if row is None:
+                raise SessionConflict("forget operation unavailable")
+            if str(row["state"]) == "completed":
+                return
+            steps = set(json.loads(str(row["steps_json"])))
+            result = json.loads(str(row["result_json"]))
+            if (not {"session", "local_memory", "continuity", "backend"}.issubset(steps)
+                    or not result.get("new_session_id")):
+                raise SessionConflict("forget operation is incomplete")
+            connection.execute(
+                """UPDATE pcm_forget_operations SET state='completed', updated_at=?
+                   WHERE operation_id=?""", (_utc_now(), str(operation_id)),
+            )
+
+    def pcm_forget_projection_policy(
+        self, session_id: str, *, owner_id: str,
+    ) -> dict[str, Any]:
+        session = self.get_session(session_id, owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            return pcm_forget_session.projection_policy(
+                connection, instance_id=self.instance_id, owner_id=owner_id,
+                agent_id=str(session["agent_id"]), session_id=session_id,
+            )
+
     def purge_owner(
         self,
         *,
@@ -3930,6 +4122,12 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(session_id)
+            if connection.execute(
+                """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
+                   AND agent_id=? AND state='pending'""",
+                (self.instance_id, str(agent_id).lower()),
+            ).fetchone():
+                raise SessionConflict("pcm_forget_in_progress")
             if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
                 raise SessionConflict("session_context_generation_changed")
             audio_rows: list[sqlite3.Row] = []
@@ -8661,6 +8859,10 @@ class SessionStore:
                 """SELECT request_id, run_id, session_id, agent_id, context_generation,
                           state, created_at, completed_at, final_message_id
                    FROM runs WHERE session_id = ? AND context_generation = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM messages m WHERE m.message_id=runs.user_message_id
+                           AND m.visibility='forgotten'
+                     )
                    ORDER BY (state IN ('queued', 'running', 'awaiting_approval')) DESC,
                             created_at DESC, run_id DESC LIMIT ?""",
                 (session_id, context_generation if context_generation is not None else session["context_generation"], max(1, min(int(limit), 64))),
@@ -8846,6 +9048,23 @@ class SessionStore:
             raise SessionNotFound(str(message_id))
         return self._message_dict(row)
 
+    def _visible_history_generations(self, session_id: str, generation: int) -> tuple[int, ...]:
+        """Bridge forget-only generations without crossing a prior /fresh boundary."""
+        target = int(generation)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT generation, reason FROM session_context_generations
+                   WHERE session_id=? AND generation<=? ORDER BY generation DESC""",
+                (str(session_id), target),
+            ).fetchall()
+        reasons = {int(row["generation"]): str(row["reason"]) for row in rows}
+        result = [target]
+        current = target
+        while reasons.get(current) == "forget" and current - 1 in reasons:
+            current -= 1
+            result.append(current)
+        return tuple(result)
+
     def recent_messages(
         self,
         session_id: str,
@@ -8863,15 +9082,17 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM messages
-                WHERE session_id=? AND context_generation=?
+                WHERE session_id=? AND context_generation IN ({placeholders})
                   AND visibility='visible' AND history_eligible=1
                 ORDER BY ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, bounded),
+                (str(session_id), *generations, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
@@ -8892,15 +9113,18 @@ class SessionStore:
             if context_generation is not None
             else session["context_generation"]
         )
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         clauses = [
             "f.session_id = ?",
             "f.owner_id = ?",
-            "c.context_generation = ?",
+            f"c.context_generation IN ({placeholders})",
+            "NOT EXISTS (SELECT 1 FROM pcm_forget_live_calls forgotten WHERE forgotten.call_id=f.call_id)",
         ]
         params: list[Any] = [
             str(session_id),
             str(session["owner_id"]),
-            generation,
+            *generations,
         ]
         if call_id is not None:
             clauses.append("f.call_id = ?")
@@ -9063,19 +9287,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1000))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.* FROM messages AS m
                 JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible' AND m.history_eligible=1
                   AND r.state='completed'
                   AND (m.message_id=r.user_message_id OR m.message_id=r.final_message_id)
                 ORDER BY m.created_at DESC, m.ordinal DESC
                 LIMIT ?
                 """,
-                (str(session_id), generation, bounded * 2),
+                (str(session_id), *generations, bounded * 2),
             ).fetchall()
         normal: list[dict[str, Any]] = []
         for row in reversed(rows):
@@ -9241,19 +9467,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
                        r.final_message_id AS run_final_message_id
                 FROM messages AS m
                 LEFT JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible'
                 ORDER BY m.ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, bounded),
+                (str(session_id), *generations, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
@@ -9565,19 +9793,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
                        r.final_message_id AS run_final_message_id
                 FROM messages AS m
                 LEFT JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible' AND m.ordinal>?
                 ORDER BY m.ordinal ASC LIMIT ?
                 """,
-                (str(session_id), generation, max(0, int(after_ordinal)), bounded),
+                (str(session_id), *generations, max(0, int(after_ordinal)), bounded),
             ).fetchall()
         return [self._message_dict(row) for row in rows]
 
@@ -9789,6 +10019,13 @@ class SessionStore:
 
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            try:
+                pcm_forget_session.assert_continuity_safe(
+                    connection, instance_id=self.instance_id, owner_id=owner,
+                    agent_id=agent, sessions=normalized_sessions,
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
             existing_batch = connection.execute(
                 "SELECT * FROM conversation_continuity_batches WHERE transfer_id = ?",
                 (transfer,),
@@ -10669,9 +10906,11 @@ class SessionStore:
         high_water = (
             None if max_user_ordinal is None else max(0, int(max_user_ordinal))
         )
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT r.run_id, u.ordinal AS sequence, u.message_id AS user_message_id,
                        a.message_id AS assistant_message_id,
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
@@ -10688,7 +10927,7 @@ class SessionStore:
                 FROM runs AS r
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
-                WHERE r.session_id = ? AND r.context_generation = ?
+                WHERE r.session_id = ? AND r.context_generation IN ({placeholders})
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
                   AND u.history_eligible = 1 AND a.history_eligible = 1
@@ -10697,7 +10936,7 @@ class SessionStore:
                 """,
                 (
                     str(session_id),
-                    generation,
+                    *generations,
                     high_water,
                     high_water,
                     max(1, min(int(limit), 100)),
@@ -13064,6 +13303,8 @@ class SessionStore:
             "r.state = 'completed'",
             "p.run_id IS NULL",
             "s.session_kind = 'conversation'",
+            "u.visibility = 'visible' AND a.visibility = 'visible'",
+            "u.history_eligible = 1 AND a.history_eligible = 1",
         ]
         params: list[Any] = [str(agent_id).lower()]
         selected = [str(item) for item in (session_ids or ()) if str(item)]

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from orchestrator.command_interactions import ID_PATTERN, safe_url
+from orchestrator.pcm_forget_session import transcript_blocked
 
 if TYPE_CHECKING:
     from orchestrator.session_store import SessionStore
@@ -43,6 +44,9 @@ def build_chat_projection(
         session=session,
         offset=None if history_reset else offset,
         limit=limit,
+        forget_policy=store.pcm_forget_projection_policy(
+            session["session_id"], owner_id=owner_id,
+        ),
     )
     message_cursor = max(0, int(after_message_ordinal or 0))
     if snapshot:
@@ -465,7 +469,7 @@ def _cursor_at_record_boundary(stream, offset: int, size: int) -> bool:
 
 
 def read_chat_transcript(path: Path, *, session: dict, offset: int | None = None,
-                         limit: int = 200) -> dict:
+                         limit: int = 200, forget_policy: dict | None = None) -> dict:
     limit = max(1, min(int(limit), 200))
     messages, position, matched = deque(maxlen=limit), 0, 0
     epoch = hashlib.sha256(b'').hexdigest()[:24]
@@ -494,6 +498,8 @@ def read_chat_transcript(path: Path, *, session: dict, offset: int | None = None
                 except (ValueError, UnicodeDecodeError):
                     continue
                 if not isinstance(item, dict) or item.get('role') not in {'user', 'assistant', 'thinking'} or not item.get('text'):
+                    continue
+                if forget_policy and transcript_blocked(item, forget_policy):
                     continue
                 # The resolved path provides scope for untagged legacy rows;
                 # it cannot override an explicitly different source identity.

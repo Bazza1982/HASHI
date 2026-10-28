@@ -18,6 +18,7 @@ from typing import Any, ClassVar
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
+from orchestrator import pcm_forget_memory
 from orchestrator.config_json import (
     ConfigConflictError,
     new_config_json,
@@ -324,6 +325,7 @@ class BridgeMemoryStore:
     def _init_db(self):
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            pcm_forget_memory.install_schema(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turns (
@@ -500,7 +502,7 @@ class BridgeMemoryStore:
                 )
 
     def _now(self) -> str:
-        return datetime.now().isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _timestamp_epoch(value: Any) -> float:
@@ -533,14 +535,18 @@ class BridgeMemoryStore:
         clean = (text or "").strip()
         if not clean:
             return None
+        recorded_at = self._now()
         embedding = self.encoder.encode(clean)
         emb = json.dumps(embedding)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if pcm_forget_memory.blocked(conn, timestamps=(recorded_at,)):
+                return None
             cur = conn.execute(
                 "INSERT INTO turns "
                 "(ts, role, source, text, embedding, embedding_version) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (self._now(), role, source, clean, emb, self.encoder.encoder_id),
+                (recorded_at, role, source, clean, emb, self.encoder.encoder_id),
             )
             if cur.lastrowid is not None:
                 self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
@@ -558,6 +564,9 @@ class BridgeMemoryStore:
         embedding = self.encoder.encode(clean)
         encoded_embedding = json.dumps(embedding)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if pcm_forget_memory.blocked(conn, origin_ref=source):
+                return None
             conn.execute(
                 """
                 INSERT OR IGNORE INTO turns(
@@ -615,6 +624,7 @@ class BridgeMemoryStore:
             return None
         now = self._now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             if user_turn_id and not user_ts:
                 row = conn.execute(
                     "SELECT ts FROM turns WHERE id = ?", (int(user_turn_id),)
@@ -627,6 +637,10 @@ class BridgeMemoryStore:
                 assistant_ts = str(row["ts"] or "") if row is not None else ""
             user_ts = str(user_ts or now)
             assistant_ts = str(assistant_ts or now)
+            if pcm_forget_memory.blocked(
+                conn, timestamps=(user_ts, assistant_ts), origin_ref=origin_ref
+            ):
+                return None
             completed_at = self._timestamp_epoch(assistant_ts)
             if completed_at <= 0:
                 completed_at = self._timestamp_epoch(now)
@@ -905,9 +919,15 @@ class BridgeMemoryStore:
         clean = (content or "").strip()
         if not clean:
             return None
+        recorded_at = self._now()
         embedding = self.encoder.encode(clean)
         emb = json.dumps(embedding)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if pcm_forget_memory.blocked(
+                conn, timestamps=(recorded_at,), origin_ref=origin_ref
+            ):
+                return None
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO memories (
@@ -916,7 +936,7 @@ class BridgeMemoryStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self._now(),
+                    recorded_at,
                     memory_type,
                     source,
                     clean,
@@ -1105,6 +1125,27 @@ class BridgeMemoryStore:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [row for _, row in scored[:limit]]
+
+    def forget_window(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        naive_timezone: str | None = None,
+        origin_refs: tuple[str, ...] = (),
+        quarantine_late: bool = True,
+    ) -> dict[str, int]:
+        """Remove selected derived PCM rows while retaining audit transcripts."""
+        pcm_forget_memory.validate_window(start, end)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            result = pcm_forget_memory.forget_window(
+                conn, start=start, end=end,
+                naive_timezone=naive_timezone, origin_refs=origin_refs,
+                quarantine_late=quarantine_late,
+            )
+            conn.commit()
+            return result
 
     def get_stats(self) -> dict[str, int]:
         with self._connect() as conn:
