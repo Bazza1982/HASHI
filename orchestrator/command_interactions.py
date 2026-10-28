@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from orchestrator.sys_command_contract import (
     MAX_SYS_COMMAND_CHARS,
     SysCommandContractError,
+    is_sys_command_line,
     validate_command_line_length,
 )
 
@@ -30,6 +31,16 @@ MAX_REQUEST_TEXT = MAX_SYS_COMMAND_CHARS + 4096
 MAX_BUTTONS = 100
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 _UNSET = object()
+
+
+def _request_text_size(payload: Mapping, encoded: str) -> int:
+    """Measure /sys command text logically, without JSON escape inflation."""
+
+    command = payload.get("command")
+    if not isinstance(command, str) or not is_sys_command_line(command):
+        return len(encoded)
+    encoded_command = json.dumps(command, ensure_ascii=False, allow_nan=False)
+    return len(encoded) - len(encoded_command) + len(command) + 2
 
 
 class InteractionError(Exception):
@@ -252,7 +263,7 @@ class MenuStore:
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise InteractionError("command_menu_request_invalid", 400) from exc
-        if len(encoded) > MAX_REQUEST_TEXT:
+        if _request_text_size(payload, encoded) > MAX_REQUEST_TEXT:
             raise InteractionError("command_menu_request_too_large", 413)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         key = (binding, request_id)

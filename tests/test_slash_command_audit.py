@@ -285,7 +285,10 @@ def test_parse_slash_command_text_preserves_windows_paths():
 
 
 def test_parse_sys_command_text_keeps_prompt_as_one_lossless_argument():
-    prompt = 'first  line\nsecond\tline with "quotes" and  repeated spaces'
+    prompt = (
+        '  indented first line\n\nsecond\tline with "quotes", '
+        'C:\\Temp\\rule and  repeated spaces  '
+    )
     command, arguments = parse_slash_command_text(f"/sys 3 save {prompt}")
 
     assert command == "sys"

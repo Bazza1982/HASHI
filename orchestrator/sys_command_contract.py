@@ -51,6 +51,16 @@ def _next_token(value: str, offset: int) -> tuple[str, int]:
     return value[start:end], end
 
 
+def _prompt_body_after_separator(value: str, offset: int) -> str:
+    """Consume one syntax separator and preserve every prompt character after it."""
+
+    if value.startswith("\r\n", offset):
+        return value[offset + 2 :]
+    if offset < len(value) and value[offset] in " \t\r\n":
+        return value[offset + 1 :]
+    return value[offset:]
+
+
 def _validate_prompt_text(value: str) -> str:
     if len(value) > MAX_SYS_PROMPT_CHARS:
         raise SysCommandContractError(
@@ -96,9 +106,9 @@ def parse_sys_command_arguments(remainder: str) -> list[str]:
         return args
     args.append(action)
     if action.casefold() in SYS_TEXT_ACTIONS:
-        # Whitespace separating syntax from content is not part of the prompt;
-        # every character after that separator remains byte-for-byte text.
-        body = raw[offset:].lstrip(" \t\r\n")
+        # Exactly one separator belongs to the command grammar. Additional
+        # indentation, blank lines, and trailing whitespace belong to the prompt.
+        body = _prompt_body_after_separator(raw, offset)
         if body:
             args.append(body)
         return args

@@ -591,7 +591,7 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> dict[str, Any] | N
         is_active_global = scope == "global" and bool(
             manager.get_slot(slot).get("active")
         )
-        confirmed_match = re.match(r"^CONFIRM(?:[ \t\r\n]+)([\s\S]*)$", text)
+        confirmed_match = re.match(r"^CONFIRM(?:\r\n|[ \t\r\n])([\s\S]*)$", text)
         if is_active_global and confirmed_match is None:
             return await _reject(
                 runtime,

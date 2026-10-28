@@ -179,7 +179,7 @@ def _local_command_session_metadata(
 
 
 def _split_command(command_line: str) -> tuple[str, list[str]]:
-    raw = (command_line or "").strip()
+    raw = (command_line or "").lstrip()
     if not raw:
         return "", []
     if not raw.startswith("/"):

@@ -436,6 +436,30 @@ async def test_global_activation_and_active_replace_require_explicit_confirmatio
 
 
 @pytest.mark.asyncio
+async def test_active_global_replace_preserves_text_after_one_confirm_separator(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.global_sys_prompt_manager.save("1", "Original global rule.")
+    runtime.global_sys_prompt_manager.activate("1")
+    update = _update()
+    prompt = '  indented first line\n\n"quoted" C:\\Prompt\\rule\t  '
+    update.message.text = f"/sys global 1 replace CONFIRM {prompt}"
+    update.effective_message = update.message
+
+    await runtime_sys_prompts.cmd_sys(
+        runtime,
+        update,
+        _context("global", "1", "replace", "incorrectly", "split"),
+    )
+
+    assert runtime.global_sys_prompt_manager.get_slot("1") == {
+        "text": prompt,
+        "active": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_global_save_cannot_overwrite_an_existing_slot(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     runtime.global_sys_prompt_manager.save("2", "Keep this rule.")
