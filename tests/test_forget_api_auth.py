@@ -121,3 +121,131 @@ async def test_legacy_agent_command_and_chat_require_credentials_before_forget(t
     allowed = await server.handle_chat(chat)
     assert allowed.status == 200, allowed.text
     assert seen[0][1]["session_metadata"]["_hashi_forget_authenticated"] is True
+
+
+@pytest.mark.asyncio
+async def test_encoded_forget_command_requires_strict_auth_before_worker_dispatch(tmp_path, monkeypatch):
+    from tests.test_command_interaction_transport import _wire
+
+    server, _ = _server(tmp_path)
+    server.admin_token = ""
+    seen = []
+
+    async def dispatch(_runtime, text, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("orchestrator.workbench_api.execute_local_command", dispatch)
+    request = _Request({"agent": "lily", "command": _wire("open", command="/forget 2h")})
+    denied = await server.handle_admin_command(request)
+    assert denied.status == 401
+    assert seen == []
+
+    server.admin_token = "test-secret"
+    request.headers["Authorization"] = "Bearer test-secret"
+    allowed = await server.handle_admin_command(request)
+    assert allowed.status == 200
+    assert seen[0]["session_metadata"]["_hashi_forget_authenticated"] is True
+    assert seen[0]["session_metadata"]["_hashi_owner_id"] == "user:7"
+
+
+@pytest.mark.asyncio
+async def test_encoded_forget_auth_is_bound_to_the_worker_owner(monkeypatch):
+    from orchestrator.admin_local_testing import try_execute_slash_command_text
+    from tests.test_command_interaction_transport import _runtime, _wire
+
+    observed = []
+    monkeypatch.setattr(
+        "orchestrator.runtime_session.current_session",
+        lambda _runtime, **_kwargs: {"session_id": "safe-session", "context_generation": 1},
+    )
+    monkeypatch.setattr("orchestrator.runtime_session.owner_id", lambda _runtime: "user:7")
+
+    async def dispatch(_runtime, _payload, metadata):
+        observed.append(metadata)
+        return {"ok": True, "command_ui_version": 2}
+
+    monkeypatch.setattr(
+        "orchestrator.command_interaction_bridge.dispatch_command_interaction", dispatch
+    )
+    text = _wire("open", command="/forget 2h")
+    for credentials in (
+        {},
+        {"_hashi_forget_authenticated": True, "_hashi_owner_id": "user:8"},
+        {"_hashi_forget_authenticated": True, "_hashi_owner_id": "user:7"},
+    ):
+        await try_execute_slash_command_text(
+            _runtime(), text, source_channel="workbench_api", session_metadata=credentials,
+        )
+    assert observed[0].get("_hashi_forget_authenticated") is not True
+    assert observed[1].get("_hashi_forget_authenticated") is not True
+    assert observed[2]["_hashi_forget_authenticated"] is True
+
+
+@pytest.mark.asyncio
+async def test_authenticated_command_ui_can_forget_and_start_a_new_session(tmp_path, monkeypatch):
+    import re
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from orchestrator import runtime_session
+    from orchestrator.admin_local_testing import try_execute_slash_command_text
+    from orchestrator.canonical_audit import CanonicalAuditStore
+    from tests.test_command_interaction_transport import _wire
+    from tests.test_forget_command import Runtime
+    from tests.test_session_store import _complete
+
+    server, _ = _server(tmp_path)
+    server.admin_token = "test-secret"
+    home = tmp_path / "agent"
+    home.mkdir()
+    (home / "agent.md").write_text(
+        "[persona]\nPersona\n[persona_end]\n[sys]\nRules\n[sys_end]\n",
+        encoding="utf-8",
+    )
+    worker = Runtime(home, server.session_store)
+    worker.global_config = server.global_config
+    worker.canonical_audit = CanonicalAuditStore(
+        tmp_path / "audit-home", instance_id="HASHI1", agent_id="lily",
+    )
+    backend = AsyncMock(return_value=True)
+    worker.backend_manager = SimpleNamespace(current_backend=SimpleNamespace(
+        capabilities=SimpleNamespace(supports_sessions=True), handle_new_session=backend,
+    ))
+    monkeypatch.setattr(runtime_session, "_discard_session_transients", lambda runtime: None)
+
+    class Proxy:
+        name = "lily"
+        is_function_worker_proxy = True
+
+        async def execute_slash_command(self, text, **kwargs):
+            return await try_execute_slash_command_text(worker, text, **kwargs)
+
+    server.runtimes = [Proxy()]
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True,
+    )
+    _complete(server.session_store, session_id=session["session_id"], owner_id="user:7",
+              agent_id="lily", request_id="old", key="old",
+              text="wrong idea", answer="wrong answer")
+    headers = {"Authorization": "Bearer test-secret"}
+
+    preview = await server.handle_admin_command(_Request(
+        {"agent": "lily", "command": _wire("open", command="/forget 2h",
+                                            request_id="request-preview-1234")},
+        headers=headers,
+    ))
+    assert preview.status == 200, preview.text
+    token = re.search(r"/forget confirm ([A-Za-z0-9_-]+)", preview.text).group(1)
+    confirmation = await server.handle_admin_command(_Request(
+        {"agent": "lily", "command": _wire("open", command=f"/forget confirm {token}",
+                                            request_id="request-confirm-1234")},
+        headers=headers,
+    ))
+    assert confirmation.status == 200, confirmation.text
+    result = json.loads(confirmation.text)
+    assert result["result"]["new_session_id"] != session["session_id"]
+    backend.assert_awaited_once()
+    assert "wrong idea" not in str(
+        server.session_store.agent_history_page(owner_id="user:7", agent_id="lily")
+    )

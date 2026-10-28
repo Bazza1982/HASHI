@@ -256,6 +256,7 @@ async def try_execute_slash_command_text(
         runtime,
         text,
         source_channel=source_channel,
+        session_metadata=session_metadata,
     )
     if interaction is not None:
         return interaction

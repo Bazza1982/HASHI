@@ -11,6 +11,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -67,11 +68,26 @@ def _decode_transport(text: str) -> dict[str, Any]:
     return payload
 
 
+def is_forget_interaction(text: str) -> bool:
+    """Identify a validated encoded forget command without trusting its contents."""
+    if not isinstance(text, str) or not text.startswith(TRANSPORT_PREFIX):
+        return False
+    try:
+        payload = _decode_transport(text)
+    except InteractionError:
+        return False
+    return payload.get("op") == "open" and bool(
+        re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)",
+                 str(payload.get("command") or "").strip(), re.IGNORECASE)
+    )
+
+
 async def try_dispatch_command_interaction_transport(
     runtime: Any,
     text: str,
     *,
     source_channel: str,
+    session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return ``None`` for ordinary text and a terminal result for this wire."""
     if not isinstance(text, str) or not text.startswith(TRANSPORT_PREFIX):
@@ -114,6 +130,13 @@ async def try_dispatch_command_interaction_transport(
                     connector_id="workbench",
                     ingress_transport="workbench-command-ui",
                 )
+                # Only the Backend API may grant this owner-scoped capability.
+                # Encoded client fields cannot assert it.
+                if (is_forget_interaction(text)
+                        and isinstance(session_metadata, Mapping)
+                        and session_metadata.get("_hashi_forget_authenticated") is True
+                        and str(session_metadata.get("_hashi_owner_id") or "") == metadata["owner_id"]):
+                    metadata["_hashi_forget_authenticated"] = True
             except InteractionError:
                 raise
             except Exception:

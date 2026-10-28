@@ -13113,7 +13113,8 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "command is required"}, status=400
             )
 
-        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE))
+        from orchestrator.command_interaction_transport import is_forget_interaction
+        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE)) or is_forget_interaction(command)
         if forget_command:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
@@ -13154,7 +13155,8 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "command is required"}, status=400
             )
 
-        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE))
+        from orchestrator.command_interaction_transport import is_forget_interaction
+        forget_command = bool(re.match(r"^/?forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", command, re.IGNORECASE)) or is_forget_interaction(command)
         if forget_command:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
