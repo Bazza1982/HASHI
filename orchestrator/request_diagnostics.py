@@ -162,6 +162,7 @@ def build_request_diagnostics(
     request_id: str,
     background_jobs: Iterable[Any] = (),
     background_history: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
+    _include_reconciliation: bool = True,
 ) -> dict[str, Any]:
     """Join sanitised terminal, tool, and background evidence by request id."""
 
@@ -209,7 +210,7 @@ def build_request_diagnostics(
     provider = terminal_projection.get("provider")
     effects = terminal_projection.get("effects")
     retry = terminal_projection.get("safe_retry_evidence")
-    return {
+    report = {
         "format": FORMAT,
         "request_id": request,
         "terminal": (
@@ -238,6 +239,110 @@ def build_request_diagnostics(
             "smart_log_missing": not (workspace / "tool_ledger.jsonl").is_file(),
         },
     }
+    if _include_reconciliation:
+        terminal_map = report["terminal"]
+        effects_map = report["effects"]
+        try:
+            tool_count = max(0, int(effects_map.get("tool_call_count") or 0))
+        except (TypeError, ValueError):
+            tool_count = 0
+        side_effects = effects_map.get("side_effects_possible")
+        summary = build_user_effect_reconciliation(
+            workspace_dir=workspace,
+            request_id=request,
+            tool_call_count=tool_count,
+            side_effects_possible=side_effects is not False,
+            _prefetched_reports={workspace: report},
+        )
+        # The saved terminal summary can include other authorized workspaces.
+        # A later, narrower query must not erase evidence it already confirmed.
+        saved = effects_map.get("reconciliation")
+        if isinstance(saved, Mapping):
+            for key in (
+                "confirmed_read_count", "confirmed_write_count", "observed_tool_count",
+                "unverified_action_count", "completed_background_job_count",
+                "no_change_count", "completed_action_count", "pending_action_count",
+            ):
+                value = saved.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    summary[key] = max(summary[key], value)
+            if saved.get("evidence_limited") is True:
+                summary["evidence_limited"] = True
+        known_effects = []
+        seen_writes: set[str] = set()
+        for action in actions:
+            receipt = action.get("effect_receipt")
+            call_id = str(action.get("tool_call_id") or "")
+            if (
+                action.get("tool_name") in _FILE_WRITE_TOOLS
+                and action.get("status") == "success"
+                and isinstance(receipt, Mapping)
+                and receipt.get("kind") == "write"
+                and receipt.get("readback") is True
+                and call_id not in seen_writes
+            ):
+                seen_writes.add(call_id)
+                known_effects.append({
+                    "kind": "tool_change",
+                    "tool_name": action["tool_name"],
+                    "tool_call_id": call_id,
+                    "target": action["target"],
+                })
+        for job in jobs:
+            if job["state"] == "succeeded":
+                known_effects.append({
+                    "kind": "background_job_completed",
+                    "job_id": job["job_id"],
+                    "state": job["state"],
+                    "returncode": job["returncode"],
+                })
+        if summary["confirmed_write_count"] > len(seen_writes):
+            known_effects.append({
+                "kind": "terminal_confirmed_write",
+                "count": summary["confirmed_write_count"] - len(seen_writes),
+            })
+        completed_jobs = sum(job["state"] == "succeeded" for job in jobs)
+        if summary["completed_background_job_count"] > completed_jobs:
+            known_effects.append({
+                "kind": "terminal_completed_background_job",
+                "count": summary["completed_background_job_count"] - completed_jobs,
+            })
+        unknown_reasons = []
+        if summary["evidence_limited"]:
+            unknown_reasons.append("tool_evidence_incomplete")
+        if summary["unverified_action_count"] or summary["pending_action_count"]:
+            unknown_reasons.append("tool_effect_unverified")
+        if any(job["state"] != "succeeded" for job in jobs):
+            unknown_reasons.append("background_job_effect_unverified")
+        completed = terminal_map.get("completed")
+        completion = "completed" if completed is True else (
+            "not_completed" if completed is False else "unknown"
+        )
+        if completion == "unknown":
+            unknown_reasons.append("terminal_projection_missing")
+        effect_status = (
+            "observed" if known_effects else
+            "unknown" if unknown_reasons else
+            "none_observed"
+        )
+        report["reconciliation"] = {
+            **summary,
+            "request_completion": completion,
+            "effect_status": effect_status,
+            "known_effects": known_effects,
+            "unknown_effect_reasons": unknown_reasons,
+        }
+        # A later receipt can invalidate a previously saved retry indication.
+        # Never upgrade an existing conservative retry result at query time.
+        if completed is not True and known_effects:
+            report["safe_retry_evidence"] = {
+                "status": "absent", "reasons": ["completed_effects_observed"]
+            }
+        elif unknown_reasons and report["safe_retry_evidence"].get("status") == "present":
+            report["safe_retry_evidence"] = {
+                "status": "unknown", "reasons": ["effect_audit_incomplete"]
+            }
+    return report
 
 
 def build_user_effect_reconciliation(
@@ -248,6 +353,7 @@ def build_user_effect_reconciliation(
     side_effects_possible: bool,
     additional_workspaces: Iterable[Path] = (),
     background_jobs: Iterable[Any] = (),
+    _prefetched_reports: Mapping[Path, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Summarize observed effects without inferring success from a tool exit.
 
@@ -262,11 +368,14 @@ def build_user_effect_reconciliation(
     evidence_limited = False
     jobs_by_id: dict[str, dict[str, Any]] = {}
     for location in locations:
-        report = build_request_diagnostics(
-            workspace_dir=location,
-            request_id=request_id,
-            background_jobs=background_jobs,
-        )
+        report = (_prefetched_reports or {}).get(location)
+        if report is None:
+            report = build_request_diagnostics(
+                workspace_dir=location,
+                request_id=request_id,
+                background_jobs=background_jobs,
+                _include_reconciliation=False,
+            )
         evidence = report["evidence"]
         evidence_limited = evidence_limited or bool(
             evidence["tool_log_suffix_truncated"]

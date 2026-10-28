@@ -12137,9 +12137,14 @@ class SessionStore:
             connection.execute("BEGIN IMMEDIATE")
             event = connection.execute(
                 """
-                SELECT e.event_id
+                SELECT e.event_id, e.detail_json,
+                       fme.message_id AS presentation_message_id, r.final_message_id
                 FROM run_events AS e
                 JOIN sessions AS s ON s.session_id = e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id = e.event_id AND fme.session_id = e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id = e.run_id AND r.session_id = e.session_id
                 WHERE e.event_id = ? AND e.session_id = ?
                   AND s.owner_id = ? AND s.instance_id = ?
                 """,
@@ -12147,6 +12152,35 @@ class SessionStore:
             ).fetchone()
             if event is None:
                 raise SessionNotFound("frontend event not found")
+            proof = normalized.get("proof") or {}
+            attachment_receipts = proof.get("attachment_receipts") or ()
+            if attachment_receipts:
+                detail = _json_object(event["detail_json"] or "{}")
+                message_id = str(
+                    event["presentation_message_id"] or event["final_message_id"]
+                    or detail.get("message_id") or ""
+                ).strip()
+                message = connection.execute(
+                    "SELECT role, visibility, content_json FROM messages "
+                    "WHERE session_id = ? AND message_id = ?",
+                    (resolved_session_id, message_id),
+                ).fetchone()
+                if (
+                    message is None or message["role"] != "assistant"
+                    or message["visibility"] != "visible"
+                ):
+                    raise SessionConflict("attachment receipt has no visible assistant message")
+                try:
+                    content = json.loads(str(message["content_json"] or "[]"))
+                except (TypeError, ValueError):
+                    content = []
+                valid_ids = {
+                    str(part.get("attachment_id") or part.get("asset_id") or "")
+                    for part in content if isinstance(part, Mapping)
+                    and part.get("type") in {"attachment", "media", "audio"}
+                } if isinstance(content, list) else set()
+                if any(item["attachment_id"] not in valid_ids for item in attachment_receipts):
+                    raise SessionConflict("attachment receipt does not belong to this message")
             existing = connection.execute(
                 """
                 SELECT * FROM connector_delivery_receipts

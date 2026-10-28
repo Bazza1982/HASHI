@@ -21,23 +21,50 @@ _WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _WSL_UNC_RE = re.compile(r"^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+\\(.*)$", re.IGNORECASE)
 
 
+def workzone_path_kind(raw_path: str) -> str:
+    raw = str(raw_path or "").strip()
+    if _WINDOWS_DRIVE_RE.match(raw):
+        return "windows_drive"
+    unc = raw.replace("/", "\\").casefold()
+    if unc.startswith(("\\\\wsl$\\", "\\\\wsl.localhost\\")):
+        return "wsl_unc"
+    if raw.startswith(("\\\\", "//")):
+        return "windows_unc"
+    if raw.startswith("/"):
+        return "posix"
+    return "relative"
+
+
+def workzone_execution_platform() -> str:
+    return "windows" if os.name == "nt" else ("wsl" if is_wsl() else "linux")
+
+
 def state_path(workspace_dir: Path) -> Path:
     return workspace_dir / STATE_FILENAME
 
 
-def load_workzone(workspace_dir: Path) -> Path | None:
+def load_workzone_path_text(workspace_dir: Path) -> str | None:
+    """Read a legacy single Workzone without interpreting its path."""
     path = state_path(workspace_dir)
     if not path.exists():
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        value = str(raw.get("path") or "").strip()
-        if not value:
-            return None
+        return str(raw.get("path") or "").strip() or None
+    except Exception as exc:
+        logger.warning("Failed to load workzone state from %s: %s", path, exc)
+        return None
+
+
+def load_workzone(workspace_dir: Path) -> Path | None:
+    value = load_workzone_path_text(workspace_dir)
+    if not value or (os.name == "nt" and workzone_path_kind(value) == "posix"):
+        return None
+    try:
         zone = Path(value).expanduser().resolve()
         return zone if zone.is_dir() else None
     except Exception as exc:
-        logger.warning("Failed to load workzone state from %s: %s", path, exc)
+        logger.warning("Failed to resolve workzone state from %s: %s", state_path(workspace_dir), exc)
         return None
 
 
@@ -63,6 +90,11 @@ def resolve_workzone_input(raw_path: str, project_root: Path, workspace_dir: Pat
     raw = (raw_path or "").strip()
     if not raw:
         raise ValueError("missing path")
+    if os.name == "nt" and workzone_path_kind(raw) == "posix":
+        raise ValueError(
+            "POSIX absolute path is not valid on native Windows; use a Windows "
+            "path or a WSL UNC path"
+        )
     candidate = _normalize_workzone_input(raw)
     was_relative = not candidate.is_absolute()
     if was_relative:
@@ -117,18 +149,28 @@ def normalize_workzone_state(value: Mapping[str, Any] | None) -> dict[str, Any]:
         path_text = str(item.get("path") or "").strip()
         if not path_text:
             continue
-        path = Path(path_text).expanduser()
-        try:
-            path = path.resolve()
-        except (OSError, RuntimeError):
-            pass
+        kind = workzone_path_kind(path_text)
+        host_compatible = not (os.name == "nt" and kind == "posix")
+        if host_compatible:
+            path = Path(path_text).expanduser()
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError):
+                pass
+            normalized_path = str(path)
+            available = path.is_dir()
+        else:
+            normalized_path, available = path_text, False
         seen.add(slot_id)
         slots.append(
             {
                 "slot_id": slot_id,
-                "path": str(path),
+                "path": normalized_path,
                 "enabled": bool(item.get("enabled")),
-                "available": path.is_dir(),
+                "available": available,
+                "path_kind": kind,
+                "execution_platform": workzone_execution_platform(),
+                "host_compatible": host_compatible,
                 "label": str(item.get("label") or "").strip(),
                 "created_at": item.get("created_at"),
                 "updated_at": item.get("updated_at"),

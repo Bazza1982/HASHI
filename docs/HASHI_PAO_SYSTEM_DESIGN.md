@@ -126,6 +126,14 @@ PAO owns the following product domains.
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
 
+Native Windows rejects POSIX absolute Workzone input. Previously saved POSIX
+paths keep their original spelling, are marked incompatible and unavailable,
+and never become Tool roots. The read-only Agent overview derives path kind,
+execution platform and compatibility from this PAO-owned Workzone state; Windows
+and WSL UNC paths retain their existing handling. The 2026-10-29 legacy PR
+audit authorized this Function-layer repair on HASHI3; native Windows offline
+tests passed. Live Worker adoption and user acceptance remain unverified.
+
 Reboot admission and outcome belong to PAO Functions. Persisted operation
 progress, exact target scope, qualified source, Worker readiness and transaction
 recovery remain authoritative. Chat delivery and browser-render acknowledgements
@@ -857,8 +865,12 @@ strict-debug Skill behavior.
 request's fail-open terminal projection with the existing Tool audit/Smart Tool
 ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
-evidence is present, absent, or unknown. It never retries work, changes HERV3
-control flow, or makes diagnostic persistence a completion condition.
+evidence is present, absent, or unknown. At query time it reconciles the latest
+Tool and BackgroundJob evidence with the terminal summary, preserving already
+confirmed effects from other workspaces. Missing or partial evidence remains
+unknown; a later effect cannot upgrade safe-retry evidence. It never retries
+work, changes HERV3 control flow, or makes diagnostic persistence a completion
+condition.
 
 `/stop` persists an Agent-wide stop epoch through the existing
 `agent_stop_fence` owner. It cancels foreground and detached work admitted

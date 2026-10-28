@@ -358,17 +358,20 @@ def _record_standard_telegram_receipt(
     endpoint_id: str,
     status: str,
     message_ids: list[str],
+    attachment_receipts: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Persist one combined receipt for all text/media effects of an Event."""
+    """Persist a combined endpoint outcome and known per-attachment evidence."""
 
     proof = None
-    if status == "delivered":
+    if status == "delivered" or attachment_receipts:
         material = "\n".join(message_ids)
         proof = {
             "type": "telegram-api-accepted",
             "value": "tgmsg_"
             + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32],
         }
+        if attachment_receipts:
+            proof["attachment_receipts"] = list(attachment_receipts)
     return store.record_frontend_delivery_receipt(
         session_id=str(session_id),
         owner_id=str(owner_id),
@@ -509,6 +512,12 @@ async def _send_standard_event_media_to_telegram(
             all_ids = list(outbox_outcome.get("accepted_message_ids") or ())
             if transport_message_id is not None:
                 all_ids.append(str(transport_message_id))
+                receipts = list(outbox_outcome.get("attachment_receipts") or ())
+                receipts.append({
+                    "attachment_id": attachment_id,
+                    "transport_message_id": str(transport_message_id),
+                })
+                outbox_outcome["attachment_receipts"] = receipts
             outbox_outcome["accepted_message_ids"] = all_ids
             outbox_outcome["accepted_effect_count"] = int(
                 outbox_outcome.get("accepted_effect_count") or 0
@@ -1375,6 +1384,7 @@ async def dispatch_claimed_telegram_event(
                 endpoint_id=str(claim["endpoint_id"]),
                 status=status,
                 message_ids=message_ids,
+                attachment_receipts=list(outcome.get("attachment_receipts") or ()),
             )
             store.complete_delivery_outbox(
                 outbox_id=str(claim["outbox_id"]),
@@ -1401,6 +1411,7 @@ async def dispatch_claimed_telegram_event(
             endpoint_id=str(claim["endpoint_id"]),
             status=receipt_status,
             message_ids=message_ids,
+            attachment_receipts=list(outcome.get("attachment_receipts") or ()),
         )
         store.complete_delivery_outbox(
             outbox_id=str(claim["outbox_id"]),
@@ -1421,6 +1432,7 @@ async def dispatch_claimed_telegram_event(
                         endpoint_id=str(claim["endpoint_id"]),
                         status="unknown",
                         message_ids=list(outcome.get("accepted_message_ids") or ()),
+                        attachment_receipts=list(outcome.get("attachment_receipts") or ()),
                     )
                 except Exception as receipt_error:
                     runtime.logger.warning(

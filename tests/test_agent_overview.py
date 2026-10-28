@@ -64,12 +64,19 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
 
     canonical = get_summary(workspace_dir, session_id="session-current")
     assert overview["agent"]["status"] == "online"
+    from orchestrator.workzone import workzone_execution_platform, workzone_path_kind
+
+    expected_kind = workzone_path_kind(str(workzone))
+    expected_platform = workzone_execution_platform()
     assert overview["workzone"] == {
         "active": True,
         "revision": 0,
         "active_revision": 0,
         "pending_activation": False,
         "path": str(workzone),
+        "path_kind": expected_kind,
+        "execution_platform": expected_platform,
+        "host_compatible": True,
         "active_count": 1,
         "configured_count": 1,
         "slots": [
@@ -80,6 +87,9 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
                 "label": workzone.name,
                 "enabled": True,
                 "available": True,
+                "path_kind": expected_kind,
+                "execution_platform": expected_platform,
+                "host_compatible": True,
             }
         ],
     }
