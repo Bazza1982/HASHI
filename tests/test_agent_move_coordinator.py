@@ -994,6 +994,36 @@ def test_rejected_clone_snapshot_is_rebuilt_after_source_configuration_fix(tmp_p
     assert prepared["status"] == "staged_remote"
 
 
+def test_slow_remote_name_resolution_does_not_hold_instance_clone_lock(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    root = _source(tmp_path)
+    receiver = _Receiver()
+    resolve = receiver.resolve_target_id
+    entered, release = Event(), Event()
+
+    def slow_resolve(*args, **kwargs):
+        entered.set()
+        assert release.wait(15)
+        return resolve(*args, **kwargs)
+
+    receiver.resolve_target_id = slow_resolve
+    _install_receiver(monkeypatch, receiver)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        remote = pool.submit(
+            coordinator.prepare_outbound_clone, root, {"hashi2": {}}, "zelda", "HASHI2",
+            source_instance="HASHI1", target_agent_id="sheik",
+        )
+        try:
+            assert entered.wait(5)
+            local = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+            assert local["status"] == "staged_remote"
+        finally:
+            release.set()
+        assert remote.result(timeout=15)["status"] == "staged_remote"
+
+
 def test_successful_move_cleans_source_only_after_target_verification(
     tmp_path,
     monkeypatch,

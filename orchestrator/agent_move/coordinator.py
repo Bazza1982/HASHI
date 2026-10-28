@@ -408,6 +408,24 @@ def _prepare_outbound_transfer_owned(
         operation=operation,
         passphrase=token,
     )
+    # An optimistic read avoids resolving an ID already owned by this intent.
+    # RPC must stay outside the instance coordination lock. The locked read
+    # below remains authoritative, and receiver staging owns final allocation.
+    prior = (
+        _matching_pending_clone(
+            root, name, source_instance=client.source_instance,
+            target_instance=client.target_instance,
+            requested_agent_id=requested_agent_id,
+            transfer_mode=transfer_mode, history_mode=history_mode,
+        ) if operation == "clone" else None
+    )
+    resolved = (
+        {"target_agent_id": requested_agent_id or name, "renamed": False}
+        if operation == "legacy_move" or prior is not None
+        else _resolve_client_target(
+            client, name, operation=operation, requested_agent_id=requested_agent_id,
+        )
+    )
     resumed = False
     with _outbound_lock(root):
         _assert_no_active_outbound(root, name, operation=operation)
@@ -431,14 +449,6 @@ def _prepare_outbound_transfer_owned(
             package_id = str(state["package_id"])
             state["status"] = "uploading" if state.get("sha256") else "packaging"
         else:
-            resolved = (
-                {"target_agent_id": name, "renamed": False}
-                if operation == "legacy_move"
-                else _resolve_client_target(
-                    client, name, operation=operation,
-                    requested_agent_id=requested_agent_id,
-                )
-            )
             package_id = str(uuid4())
             directory = _outbound_dir(root, package_id)
             directory.mkdir(parents=True, exist_ok=False)
