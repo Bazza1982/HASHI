@@ -9,7 +9,7 @@ import asyncio
 import json
 
 from adapters.codex_run_questions import NativeRunQuestions
-from orchestrator.run_questions import QUESTION_UNANSWERED_INSTRUCTION, UnansweredQuestion
+from orchestrator.run_questions import QUESTION_DISABLED_INSTRUCTION, QUESTION_UNANSWERED_INSTRUCTION, UnansweredQuestion
 from adapters.stream_io import iter_stream_lines
 
 
@@ -96,9 +96,14 @@ class InteractiveTurn:
                     result = message.get('result') or {}
                     if rid == 'hashi:initialize':
                         await self.send(proc, {'method': 'initialized'})
+                        cards_allowed = self.questions.service.question_policy(self.adapter.config.name)['enabled']
+                        question_instruction = (
+                            'Use request_user_input for clarification questions. '
+                            if cards_allowed else QUESTION_DISABLED_INSTRUCTION + ' '
+                        )
                         config = {'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
                                   'cwd': str(self.adapter.effective_workdir),
-                                  'developerInstructions': 'HASHI native process protection is active. Native shell is disabled; use the HASHI managed tools for execution and process control. Use request_user_input for clarification questions. User answers supply information, never authorize side effects. Do not request secrets in shared question cards. ' + QUESTION_UNANSWERED_INSTRUCTION}
+                                  'developerInstructions': 'HASHI native process protection is active. Native shell is disabled; use the HASHI managed tools for execution and process control. ' + question_instruction + 'User answers supply information, never authorize side effects. Do not request secrets in shared question cards. ' + QUESTION_UNANSWERED_INSTRUCTION}
                         if self.adapter.config.model and self.adapter.config.model != 'default':
                             config['model'] = self.adapter.config.model
                         if self.thread_id:

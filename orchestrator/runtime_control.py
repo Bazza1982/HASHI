@@ -743,10 +743,24 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         f"(queue_size={runtime.queue.qsize()}, backend={active})"
     )
     session_id = _command_session_id(runtime, update)
+    question_id = getattr(context, "_hashi_question_stop_id", None)
     async with stop_fence_lock_for(runtime):
         active_metas = _active_request_metas(runtime)
         active_meta = active_metas[0] if active_metas else None
         active_executions = _active_executions(runtime)
+        if question_id:
+            from orchestrator.run_questions import QuestionError, RunQuestions
+            try:
+                claim = await asyncio.to_thread(
+                    RunQuestions(runtime_session.ensure_store(runtime)).stop_claim,
+                    question_id=str(question_id), agent_id=runtime.name,
+                )
+            except (QuestionError, LookupError, OSError):
+                return {"ok": False, "error_code": "question_stop_not_active"}
+            active_ids = {str(meta.get("request_id") or "") for meta in active_metas}
+            active_ids.update(str(getattr(item, "active_request", "") or "") for item in active_executions)
+            if claim["request_id"] not in active_ids:
+                return {"ok": False, "error_code": "question_stop_not_active"}
         execution_by_request = {
             str(getattr(execution, "active_request", "") or ""): execution
             for execution in active_executions
@@ -846,7 +860,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             update,
             ui_language.tr("control.stop.unconfirmed", count=len(unconfirmed)),
         )
-        return
+        return {"ok": False, "error_code": "question_stop_unconfirmed"} if question_id else None
 
     continuation_note = (
         ui_language.tr("control.stop.continuation_saved")
@@ -874,6 +888,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         )
         + continuation_note,
     )
+    return {"ok": True} if question_id else None
 
 
 def _user_is_authorized(runtime: Any, update: Any) -> bool:

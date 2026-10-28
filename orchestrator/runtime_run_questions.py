@@ -7,7 +7,7 @@ from orchestrator.frontend_run_questions import question_text
 from orchestrator.run_questions import QuestionError, RunQuestions
 from orchestrator.session_store import SessionConflict, SessionNotFound
 
-CALLBACK_PATTERN = r'^rq:(que_[a-f0-9]{32}):(text|[0-7])$'
+CALLBACK_PATTERN = r'^rq:(que_[a-f0-9]{32}):(text|[0-9])$'
 
 
 def _service(runtime):
@@ -36,8 +36,16 @@ async def handle_callback(runtime, update, context):
     try:
         q = _question(runtime, update, qid)
         if q['state'] != 'pending':
-            await query.answer(ui['saved'] if q['state'] in ('answered', 'consumed') else ui['closed'], show_alert=True)
-            return
+            stop_unconfirmed = (q['state'] == 'answered' and
+                                (q.get('answer') or {}).get('system_action') == 'stop')
+            retry_stop = (stop_unconfirmed and choice != 'text' and
+                          int(choice) < len(q['options']) and
+                          q['options'][int(choice)].get('system_action') == 'stop')
+            if not retry_stop:
+                label = (ui['failed'] if stop_unconfirmed else
+                         ui['saved'] if q['state'] in ('answered', 'consumed') else ui['closed'])
+                await query.answer(label, show_alert=True)
+                return
         if choice == 'text':
             if not q['allow_free_text']:
                 raise QuestionError('question_answer_invalid')
@@ -46,9 +54,27 @@ async def handle_callback(runtime, update, context):
         index = int(choice)
         if index >= len(q['options']):
             raise QuestionError('question_answer_invalid')
-        _service(runtime).answer(session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
+        saved = _service(runtime).answer(session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
             question_id=qid, payload={'option_id': q['options'][index]['id'],
                                      'idempotency_key': f'telegram:callback:{query.id}'})
+        if (saved.get('answer') or {}).get('system_action') == 'stop':
+            from types import SimpleNamespace
+            from orchestrator import runtime_control
+            message = getattr(update, 'effective_message', None) or getattr(query, 'message', None)
+            if message is None:
+                await query.answer(ui['failed'], show_alert=True)
+                return
+            stop_update = SimpleNamespace(
+                effective_user=update.effective_user, effective_chat=update.effective_chat,
+                message=message, effective_message=message,
+                update_id=getattr(update, 'update_id', None),
+            )
+            result = await runtime_control.cmd_stop(
+                runtime, stop_update, SimpleNamespace(_hashi_question_stop_id=qid),
+            )
+            if not result or not result.get('ok'):
+                await query.answer(ui['failed'], show_alert=True)
+                return
     except (QuestionError, SessionConflict, SessionNotFound):
         await query.answer(ui['closed'], show_alert=True)
         return

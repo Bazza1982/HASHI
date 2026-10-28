@@ -13,6 +13,38 @@ from contextlib import contextmanager
 from orchestrator.session_store import SessionNotFound
 
 QUESTION_TTL_SECONDS = 300
+QUESTION_CONTINUE_ID = '__hashi_continue__'
+QUESTION_STOP_ID = '__hashi_stop__'
+QUESTION_SYSTEM_OPTIONS = (
+    {'id': QUESTION_CONTINUE_ID, 'label': 'Continue original task', 'description': '', 'system_action': 'continue'},
+    {'id': QUESTION_STOP_ID, 'label': '🛑 Stop immediately', 'description': '', 'system_action': 'stop'},
+)
+
+
+def system_question_options(existing):
+    """Give legacy model option ids precedence and reserve distinct system ids."""
+    occupied = {str(item.get('id') or '') for item in existing if isinstance(item, dict)}
+    result = []
+    for template in QUESTION_SYSTEM_OPTIONS:
+        base = template['id']
+        candidate = base
+        serial = 0
+        while candidate in occupied:
+            serial += 1
+            candidate = f'{base}:{serial}'
+        occupied.add(candidate)
+        result.append({**template, 'id': candidate})
+    return result
+QUESTION_CONTINUE_INSTRUCTION = (
+    'The user says this question is irrelevant. Continue the original task within '
+    'the scope already given; do not add or pivot to another scope. This does '
+    'not authorize additional actions.'
+)
+QUESTION_DISABLED_INSTRUCTION = (
+    'Question cards are disabled. Stop this turn and ask the user the necessary '
+    'question directly in your final plain text; do not create another card. '
+    'Do not treat the absence of an answer as authorization.'
+)
 QUESTION_UNANSWERED_INSTRUCTION = (
     "If a question expires or delivery fails without an answer, reassess "
     "the original goal now. "
@@ -32,17 +64,22 @@ class QuestionError(ValueError):
 
 class UnansweredQuestion(QuestionError):
     def __init__(self, questions, reason="expired", *, partial_answers=None):
-        super().__init__("question_" + reason)
+        super().__init__(reason if reason.startswith("question_") else "question_" + reason)
+        instruction = (
+            QUESTION_DISABLED_INSTRUCTION if reason == 'question_cards_disabled'
+            else QUESTION_CONTINUE_INSTRUCTION if reason == 'user_continue'
+            else QUESTION_UNANSWERED_INSTRUCTION
+        )
         self.resolution = {
             "type": "hashi.run_question.unanswered",
             "reason": reason,
             "questions": questions,
             "partial_answers": dict(partial_answers or {}),
-            "instruction": QUESTION_UNANSWERED_INSTRUCTION,
+            "instruction": instruction,
         }
 
     def __str__(self):
-        return self.code + ": " + QUESTION_UNANSWERED_INSTRUCTION
+        return self.code + ": " + self.resolution['instruction']
 
 
 def _deadline(row):
@@ -95,6 +132,55 @@ class RunQuestions:
                 created_at TEXT NOT NULL, expires_epoch REAL NOT NULL, updated_at TEXT NOT NULL,
                 UNIQUE(run_id,create_key), FOREIGN KEY(run_id) REFERENCES runs(run_id))''')
             c.execute('CREATE INDEX IF NOT EXISTS run_questions_session ON run_questions(session_id,context_generation,created_at)')
+            c.execute('''CREATE TABLE IF NOT EXISTS run_question_preferences (
+                instance_id TEXT NOT NULL, scope_key TEXT NOT NULL, enabled INTEGER NOT NULL,
+                PRIMARY KEY(instance_id,scope_key), CHECK(enabled IN (0,1)))''')
+
+    def _policy(self, c, agent_id):
+        agent = str(agent_id or '').strip().lower()
+        if not agent:
+            raise QuestionError('question_agent_invalid', 400)
+        rows = c.execute(
+            'SELECT scope_key,enabled FROM run_question_preferences WHERE instance_id=? '
+            'AND scope_key IN (?,?)',
+            (self.store.instance_id, 'instance', 'agent:' + agent),
+        ).fetchall()
+        values = {row['scope_key']: bool(row['enabled']) for row in rows}
+        instance_enabled = values.get('instance', True)
+        agent_enabled = values.get('agent:' + agent, True)
+        return {'instance_enabled': instance_enabled, 'agent_enabled': agent_enabled,
+                'enabled': instance_enabled and agent_enabled}
+
+    def question_policy(self, agent_id):
+        with self._transaction() as c:
+            return self._policy(c, agent_id)
+
+    def set_question_policy(self, *, scope, agent_id, enabled):
+        agent = str(agent_id or '').strip().lower()
+        if scope not in {'instance', 'agent'} or not agent or type(enabled) is not bool:
+            raise QuestionError('question_policy_invalid', 400)
+        key = 'instance' if scope == 'instance' else 'agent:' + agent
+        with self._transaction() as c:
+            c.execute(
+                'INSERT INTO run_question_preferences(instance_id,scope_key,enabled) VALUES(?,?,?) '
+                'ON CONFLICT(instance_id,scope_key) DO UPDATE SET enabled=excluded.enabled',
+                (self.store.instance_id, key, int(enabled)),
+            )
+            if not enabled:
+                sql = "SELECT * FROM run_questions WHERE instance_id=? AND state='pending'"
+                params = [self.store.instance_id]
+                if scope == 'agent':
+                    sql += ' AND agent_id=?'
+                    params.append(agent)
+                for row in c.execute(sql, params).fetchall():
+                    data = json.loads(row['question_json'])
+                    data['resolution_reason'] = 'question_cards_disabled'
+                    c.execute('UPDATE run_questions SET state=?,updated_at=?,question_json=? WHERE question_id=?',
+                              ('cancelled', _stamp(self.clock()), _json(data), row['question_id']))
+                    updated = c.execute('SELECT * FROM run_questions WHERE question_id=?',
+                                        (row['question_id'],)).fetchone()
+                    self._event(c, updated, 'cancelled')
+            return self._policy(c, agent)
 
     @contextmanager
     def _transaction(self):
@@ -137,6 +223,8 @@ class RunQuestions:
 
     def _public(self, row):
         q = json.loads(row['question_json'])
+        options = list(q.get('options') or [])
+        q['options'] = options + system_question_options(options)
         return {**q, **{k:row[k] for k in ('question_id','instance_id','agent_id','session_id',
                 'run_id','request_id','context_generation','state','created_at','updated_at')},
                 'expires_at':_stamp(_deadline(row)),
@@ -260,7 +348,7 @@ class RunQuestions:
             if not isinstance(option,dict) or set(option)-{'id','label','description'}:
                 raise QuestionError('question_options_invalid',400)
             oid = self._text(option.get('id'),80,'question_option_invalid')
-            if not re.fullmatch(r'[A-Za-z0-9_.:-]+',oid) or oid in seen:
+            if not re.fullmatch(r'[A-Za-z0-9_.:-]+',oid) or oid in seen or oid in {QUESTION_CONTINUE_ID, QUESTION_STOP_ID}:
                 raise QuestionError('question_option_invalid',400)
             seen.add(oid)
             label=self._text(option.get('label'),160,'question_option_invalid')
@@ -280,6 +368,8 @@ class RunQuestions:
         with self._transaction() as c:
             run=self._run(c,request_id,agent_id)
             session=self._session(c,run['session_id'])
+            if not self._policy(c, agent_id)['enabled']:
+                raise QuestionError('question_cards_disabled')
             prior=c.execute('SELECT * FROM run_questions WHERE run_id=? AND create_key=?',
                             (run['run_id'],key)).fetchone()
             if prior:
@@ -327,16 +417,27 @@ class RunQuestions:
             row=self._scoped(c,question_id,session_id=session_id,owner_id=owner_id)
             spec=json.loads(row['question_json'])
             option=payload.get('option_id'); text=payload.get('text','')
-            if option is not None and (not isinstance(option,str) or option not in {o['id'] for o in spec['options']}):
+            system_actions = {item['id']: item['system_action'] for item in system_question_options(spec['options'])}
+            if option is not None and (not isinstance(option,str) or option not in {o['id'] for o in spec['options']} | set(system_actions)):
                 raise QuestionError('question_answer_invalid',400)
+            system_action = system_actions.get(option)
             if not isinstance(text,str) or len(text)>4000 or (text and not spec['allow_free_text']):
                 raise QuestionError('question_answer_invalid',400)
             text=text.strip()
+            if system_action and text:
+                raise QuestionError('question_answer_invalid', 400)
             if option is None and not text:
                 raise QuestionError('question_answer_required',400)
             answer={'option_id':option,'text':text,'author': 'authenticated_user','grants_permissions':False}
+            if system_action == 'continue':
+                answer['text'] = QUESTION_CONTINUE_INSTRUCTION
+                answer['system_action'] = 'continue'
+            elif system_action == 'stop':
+                answer['system_action'] = 'stop'
             if row['state'] in ('answered','consumed'):
-                if row['answer_key']==key and json.loads(row['answer_json'])==answer:
+                prior = json.loads(row['answer_json'])
+                if prior == answer and (row['answer_key'] == key or
+                                        (row['state'] == 'answered' and system_action == 'stop')):
                     return self._public(row)
                 raise QuestionError('question_already_answered')
             if row['state']!='pending':
@@ -345,6 +446,33 @@ class RunQuestions:
                       (_json(answer),key,_stamp(self.clock()),question_id))
             row=c.execute('SELECT * FROM run_questions WHERE question_id=?',(question_id,)).fetchone()
             self._event(c,row,'answered')
+            if system_action == 'continue':
+                others = c.execute(
+                    "SELECT * FROM run_questions WHERE run_id=? AND question_id!=? AND state='pending'",
+                    (row['run_id'], question_id),
+                ).fetchall()
+                for other in others:
+                    data = json.loads(other['question_json'])
+                    data['resolution_reason'] = 'user_continue'
+                    c.execute('UPDATE run_questions SET state=?,updated_at=?,question_json=? WHERE question_id=?',
+                              ('cancelled', _stamp(self.clock()), _json(data), other['question_id']))
+                    updated = c.execute('SELECT * FROM run_questions WHERE question_id=?',
+                                        (other['question_id'],)).fetchone()
+                    self._event(c, updated, 'cancelled')
+            return self._public(row)
+
+    def stop_claim(self, *, question_id, agent_id):
+        with self._transaction() as c:
+            row = c.execute(
+                'SELECT * FROM run_questions WHERE question_id=? AND instance_id=? AND agent_id=?',
+                (question_id, self.store.instance_id, str(agent_id).strip().lower()),
+            ).fetchone()
+            if row is None:
+                raise QuestionError('question_not_found', 404)
+            row = self._scoped(c, question_id, session_id=row['session_id'], owner_id=row['owner_id'])
+            answer = json.loads(row['answer_json']) if row['answer_json'] else {}
+            if row['state'] != 'answered' or answer.get('system_action') != 'stop':
+                raise QuestionError('question_stop_not_active')
             return self._public(row)
 
     def get_answer(self,*,request_id,agent_id,question_id):
@@ -357,6 +485,9 @@ class RunQuestions:
             if run['state']!='running' or session['status']!='active' or run['context_generation']!=session['context_generation']:
                 raise QuestionError('question_run_not_active')
             if row['state']=='answered':
+                answer = json.loads(row['answer_json']) if row['answer_json'] else {}
+                if answer.get('system_action') == 'stop':
+                    return {**self._public(row), 'state': 'stopping', 'answer': None}
                 c.execute("UPDATE run_questions SET state='consumed',updated_at=? WHERE question_id=?",(_stamp(self.clock()),question_id))
                 row=c.execute('SELECT * FROM run_questions WHERE question_id=?',(question_id,)).fetchone()
                 self._event(c,row,'consumed')

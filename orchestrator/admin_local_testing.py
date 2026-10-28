@@ -578,6 +578,7 @@ async def execute_local_command(
             source_channel=source_channel,
             frontend_operation=frontend_boundary["operation"],
             frontend_connector_id=frontend_boundary["connector_id"],
+            _hashi_question_stop_id=local_session_metadata.get("_hashi_question_stop_id"),
         )
 
         lock = getattr(runtime, "_local_admin_lock", None)

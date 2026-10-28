@@ -68,19 +68,29 @@ recovery while that logical call remains active. Once it is terminal, PCM first
 projects the complete call as ordinary history and then sends the action tombstone.
 
 Typed fixed PCM also performs a one-time representation migration. It reads
-the exact current sections and validates each deprecated
-`phone_external_context:*` identity, scope and fragment against durable
-SessionStore or the immutable current action snapshot before issuing a
-tombstone. Both the original `fragments` payload and the grouped durable
-`fragment_groups` encoding are expanded through the same decoder before those
-checks. Existing semantic Phone sections must likewise match a chronological
-durable source snapshot by stable event-identity digest and rendered text.
-Provider arrival sequence is used only to reconstruct the snapshot's first
-arrival through a candidate high-water mark; it is never compared with chat
-ordinals or used as transcript chronology. This deterministic reconstruction
-spans multiple calls and remains unambiguous when fragments repeat identical
-text. Missing, malformed or incomplete source fails closed and preserves the old
-section. Verified source is rebuilt as ordinary semantic
+the current sections and validates each deprecated `phone_external_context:*`
+scope and event identities against durable SessionStore or the immutable current
+action snapshot before issuing a tombstone. The legacy decoder needs only event
+identity fields, even when old display fields, timing fields or column order
+have changed. Full action snapshots still require their complete transcript and
+authorization fields. Semantic Phone sections are matched to scoped durable events
+by stable event-identity digest; the stored display text and its old content
+hash are not authorities over that source. Differences in punctuation,
+whitespace, rendering, timestamps or a stale display hash therefore do not
+block a request when the source identities are complete and can be verified.
+New semantic sections retain the first and last arrival sequence in their PCM
+metadata. Verification uses those exact bounds and the event-identity digest;
+arrival sequence never determines transcript chronology or a typed Message ordinal.
+For older sections without the last bound, direct identity and whole-snapshot
+checks run first. The high-water interval fallback shares a 100,000-candidate
+budget per turn. A completed search
+that cannot verify its source still reports incomplete source and preserves the
+old section. Budget exhaustion is an unresolved lookup, not proof of missing
+source: preserve that section without a tombstone and continue the turn with the
+scoped durable history. The audit lists these `retained_section_keys`. Successful
+Provider completion checkpoints the delivered durable events; later turns use
+that consumption ledger instead of repeating the legacy search. Frozen action
+scope and authorization checks remain strict. Verified source is rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing
@@ -274,3 +284,13 @@ Offline checks use durable test stores, a simulated Provider replacement, real
 fixed-HER materialization, and native Windows regression suites. GitHub CI,
 independent review, Worker adoption, and live Provider verification remain
 separate facts; no live adoption is claimed here.
+
+## Phone migration projection correction, 2026-10-28
+
+PAO SessionStore owns the durable Phone events; a fixed PCM section is a
+rebuildable projection. Migration no longer requires a second exact comparison
+of its display text, timestamps or stored text hash when the scoped source event
+identities match. Genuine missing identities and scope mismatches still preserve
+the original section instead of discarding history. Offline regressions exercise
+the materialized HERV3 prompt and the read-only incident state; a committed
+source change and actual Worker adoption remain separate facts.

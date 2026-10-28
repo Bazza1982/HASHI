@@ -11494,7 +11494,7 @@ class FlexibleAgentRuntime:
         await runtime_workspace.cmd_clear(self, update, context)
 
     async def cmd_stop(self, update: Update, context: Any):
-        await runtime_control.cmd_stop(self, update, context)
+        return await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_steer(self, update: Update, context: Any):
         return await runtime_control.cmd_steer(self, update, context)
