@@ -696,7 +696,9 @@ def create_agent_move_package(
             workspace_metadata.update(
                 inventory=sorted(inventory, key=lambda item: item["path"]),
                 inventory_scope="portable_clone_payload", total_workspace_bytes=total_workspace_bytes,
-                discarded=[],
+                # Disclose exclusions without recursively stat'ing software or
+                # files outside the selected scope. Unknown size is explicit.
+                discarded=[{"path": item["path"], "size": 0, "size_known": False, "reason": item["reason"]} for item in exclusions],
             )
         if transfer_mode == "workspace" and (
             total_workspace_bytes + (snapshot_growth if transfer_operation == "move" else 0)
