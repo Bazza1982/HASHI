@@ -362,6 +362,42 @@ async def test_sys_g_alias_manages_global_slots_without_touching_local_slots(
 
 
 @pytest.mark.asyncio
+async def test_sys_save_preserves_multiline_spacing_and_quotes_from_raw_command(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    update = _update()
+    prompt = 'line one  with spaces\nline two with "quotes"\tand a tab'
+    update.message.text = f"/sys 3 save {prompt}"
+    update.effective_message = update.message
+
+    result = await runtime_sys_prompts.cmd_sys(
+        runtime, update, _context("3", "save", "incorrectly", "split")
+    )
+
+    assert result is None
+    assert runtime.sys_prompt_manager.get_slot("3")["text"] == prompt
+
+
+@pytest.mark.asyncio
+async def test_sys_save_to_occupied_local_slot_returns_actionable_typed_failure(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.sys_prompt_manager.save("1", "existing")
+    update = _update()
+
+    result = await runtime_sys_prompts.cmd_sys(
+        runtime, update, _context("1", "save", "replacement")
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "sys_slot_occupied"
+    assert "/sys 1 replace" in result["error_message"]
+    assert runtime.sys_prompt_manager.get_slot("1")["text"] == "existing"
+
+
+@pytest.mark.asyncio
 async def test_global_activation_and_active_replace_require_explicit_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -395,6 +431,30 @@ async def test_global_activation_and_active_replace_require_explicit_confirmatio
     )
     assert runtime.global_sys_prompt_manager.get_slot("1") == {
         "text": "Confirmed change.",
+        "active": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_active_global_replace_preserves_text_after_one_confirm_separator(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.global_sys_prompt_manager.save("1", "Original global rule.")
+    runtime.global_sys_prompt_manager.activate("1")
+    update = _update()
+    prompt = '  indented first line\n\n"quoted" C:\\Prompt\\rule\t  '
+    update.message.text = f"/sys global 1 replace CONFIRM {prompt}"
+    update.effective_message = update.message
+
+    await runtime_sys_prompts.cmd_sys(
+        runtime,
+        update,
+        _context("global", "1", "replace", "incorrectly", "split"),
+    )
+
+    assert runtime.global_sys_prompt_manager.get_slot("1") == {
+        "text": prompt,
         "active": True,
     }
 

@@ -1115,7 +1115,119 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
 
 
 @pytest.mark.asyncio
-async def test_signed_tui_command_relay_retains_tui_connector_identity(
+async def test_session_api_sys_accepts_shared_limit_and_preserves_exact_prompt(
+    tmp_path, monkeypatch
+):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+    from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
+
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    monkeypatch.setattr(
+        slash_command_audit,
+        "is_supported_slash_command",
+        lambda _runtime, command: command == "sys",
+    )
+    seen = {}
+
+    async def dispatch(_runtime, payload, metadata):
+        seen["payload"] = payload
+        seen["metadata"] = metadata
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", dispatch
+    )
+    prefix = '  indented first line\n\n"quoted" C:\\Prompt\\rule\n'
+    suffix = "  "
+    prompt = (
+        prefix
+        + "🙂" * (MAX_SYS_PROMPT_CHARS - len(prefix) - len(suffix))
+        + suffix
+    )
+    arguments = ["3", "save", prompt]
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "sys",
+                "arguments": arguments,
+                "client_id": "session-api-client-7",
+                "request_id": "sys-command-request-123456",
+                "ui_locale": "zh-CN",
+                "context_generation": session["context_generation"],
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    result = json.loads(response.text)
+    assert response.status == 200, response.text
+    assert len(prompt) == MAX_SYS_PROMPT_CHARS
+    assert seen["payload"]["command"] == f"/sys 3 save {prompt}"
+    assert seen["metadata"]["frontend_operation"]["arguments"] == arguments
+    assert result["command_invocation"]["arguments"] == ["[redacted]"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["x"] * 65, id="argument-count"),
+        pytest.param(["x" * 4097], id="single-argument-length"),
+    ],
+)
+async def test_session_api_non_sys_commands_keep_existing_argument_limits(
+    tmp_path, arguments
+):
+    server, _runtime = _server(tmp_path)
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "model",
+                "arguments": arguments,
+                "client_id": "session-api-client-7",
+                "request_id": "model-command-request-123456",
+                "ui_locale": "en",
+                "context_generation": 1,
+            },
+            match_info={"session_id": "not-reached"},
+        )
+    )
+
+    result = json.loads(response.text)
+    assert response.status == 400
+    assert result["error"] == "command arguments are invalid"
+
+
+@pytest.mark.asyncio
+async def test_session_api_sys_oversize_uses_shared_typed_error(tmp_path):
+    from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
+
+    server, _runtime = _server(tmp_path)
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "sys",
+                "arguments": ["3", "save", "🙂" * (MAX_SYS_PROMPT_CHARS + 1)],
+                "client_id": "session-api-client-7",
+                "request_id": "sys-command-request-oversize",
+                "ui_locale": "en",
+                "context_generation": 1,
+            },
+            match_info={"session_id": "not-reached"},
+        )
+    )
+
+    result = json.loads(response.text)
+    assert response.status == 413
+    assert result["code"] == "sys_prompt_too_large"
+    assert str(MAX_SYS_PROMPT_CHARS) in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_signed_tui_sys_command_relay_preserves_text_and_connector_identity(
     tmp_path, monkeypatch
 ):
     from orchestrator import command_interaction_bridge, slash_command_audit
@@ -1132,7 +1244,7 @@ async def test_signed_tui_command_relay_retains_tui_connector_identity(
     monkeypatch.setattr(
         slash_command_audit,
         "is_supported_slash_command",
-        lambda _runtime, command: command == "model",
+        lambda _runtime, command: command == "sys",
     )
     seen = {}
 
@@ -1144,9 +1256,10 @@ async def test_signed_tui_command_relay_retains_tui_connector_identity(
     monkeypatch.setattr(
         command_interaction_bridge, "dispatch_command_interaction", dispatch
     )
-    arguments = ["balanced"]
+    prompt = '  first line\n\n"quoted" C:\\Prompt\\rule\t  '
+    arguments = ["4", "save", prompt]
     prompt_binding = json.dumps(
-        {"command": "model", "arguments": arguments},
+        {"command": "sys", "arguments": arguments},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1166,7 +1279,7 @@ async def test_signed_tui_command_relay_retains_tui_connector_identity(
     response = await server.handle_v1_session_command_invocation(
         _Request(
             {
-                "command": "model",
+                "command": "sys",
                 "arguments": arguments,
                 "client_id": "tui-window-client-7",
                 "request_id": "tui-command-request-123456",
@@ -1186,7 +1299,9 @@ async def test_signed_tui_command_relay_retains_tui_connector_identity(
     assert seen["metadata"]["source_channel"] == "tui_session_command"
     assert seen["metadata"]["fc_compatibility_adapter_id"] == "tui.command"
     assert seen["metadata"]["origin_instance"] == "HASHI2"
+    assert seen["payload"]["command"] == f"/sys 4 save {prompt}"
     assert result["command_invocation"]["connector_id"] == "tui"
+    assert result["command_invocation"]["arguments"] == ["[redacted]"]
 
 
 @pytest.mark.asyncio

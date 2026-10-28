@@ -41,6 +41,11 @@ from orchestrator.admin_local_testing import (
     supported_commands,
     try_execute_slash_command_text,
 )
+from orchestrator.sys_command_contract import (
+    SysCommandContractError,
+    is_sys_command_line,
+    normalize_sys_arguments,
+)
 from orchestrator.agent_creation import (
     AgentCreationError,
 )
@@ -6655,6 +6660,10 @@ class WorkbenchApiServer:
                 ),
             ):
                 resolved_status = 409
+            elif isinstance(error, SysCommandContractError):
+                resolved_status = (
+                    413 if error.error_code == "sys_prompt_too_large" else 400
+                )
             elif isinstance(error, (ValueError, TypeError)):
                 resolved_status = 400
             else:
@@ -6663,7 +6672,13 @@ class WorkbenchApiServer:
             {
                 "ok": False,
                 "error": str(error),
-                "code": str(getattr(error, "code", "invalid_request")),
+                "code": str(
+                    getattr(
+                        error,
+                        "error_code",
+                        getattr(error, "code", "invalid_request"),
+                    )
+                ),
             },
             status=resolved_status,
         )
@@ -8843,13 +8858,15 @@ class WorkbenchApiServer:
                 for character in command
             ):
                 raise ValueError("command name is invalid")
-            if (
-                not isinstance(arguments, list)
-                or len(arguments) > 64
-                or any(
-                    not isinstance(argument, str) or len(argument) > 4096
-                    for argument in arguments
-                )
+            if not isinstance(arguments, list) or any(
+                not isinstance(argument, str) for argument in arguments
+            ):
+                raise ValueError("command arguments are invalid")
+            evidence_arguments = list(arguments)
+            if command == "sys":
+                arguments = normalize_sys_arguments(arguments)
+            elif len(arguments) > 64 or any(
+                len(argument) > 4096 for argument in arguments
             ):
                 raise ValueError("command arguments are invalid")
             if not ID_PATTERN.fullmatch(client_id) or not ID_PATTERN.fullmatch(
@@ -8889,7 +8906,7 @@ class WorkbenchApiServer:
                     from orchestrator.message_context import verify_connector_evidence
 
                     prompt_binding = json.dumps(
-                        {"command": command, "arguments": arguments},
+                        {"command": command, "arguments": evidence_arguments},
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -13085,7 +13102,11 @@ class WorkbenchApiServer:
             )
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
-        command = (payload.get("command") or "").strip()
+        command = payload.get("command") or ""
+        if not isinstance(command, str):
+            command = ""
+        elif not is_sys_command_line(command):
+            command = command.strip()
         chat_id = payload.get("chat_id")
 
         runtime = self._runtime_map().get(agent_name)
@@ -13093,7 +13114,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
-        if not command:
+        if not command.strip():
             return web.json_response(
                 {"ok": False, "error": "command is required"}, status=400
             )
@@ -13116,7 +13137,11 @@ class WorkbenchApiServer:
         """Handle /api/agents/{name}/command - simpler endpoint for frontend."""
         agent_name = request.match_info.get("name")
         payload = await request.json()
-        command = (payload.get("command") or "").strip()
+        command = payload.get("command") or ""
+        if not isinstance(command, str):
+            command = ""
+        elif not is_sys_command_line(command):
+            command = command.strip()
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
             return web.json_response(
@@ -13128,7 +13153,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
-        if not command:
+        if not command.strip():
             return web.json_response(
                 {"ok": False, "error": "command is required"}, status=400
             )

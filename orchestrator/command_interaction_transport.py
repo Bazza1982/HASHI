@@ -15,12 +15,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from orchestrator.command_interactions import InteractionError, validate_operation
+from orchestrator.sys_command_contract import MAX_SYS_COMMAND_CHARS
 from orchestrator import command_interaction_bridge, runtime_session
 
 logger = logging.getLogger("HASHI.CommandInteractions")
 
 TRANSPORT_PREFIX = "__hashi_command_ui_v1__:"
-MAX_TRANSPORT_LENGTH = 32 * 1024
+# URL-safe base64 expands UTF-8 JSON. Four bytes per prompt character covers
+# the worst-case Unicode body before the 4/3 encoding expansion.
+MAX_TRANSPORT_LENGTH = (MAX_SYS_COMMAND_CHARS * 6) + 4096
 _FIELDS = frozenset(
     {
         "version",
