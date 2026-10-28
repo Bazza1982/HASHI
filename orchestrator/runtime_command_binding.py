@@ -12,7 +12,7 @@ from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.her_v2.v3_callback_contract import HER_V3_MODEL_CALLBACK_PATTERN
 from orchestrator.private_wol import private_wol_available
 from orchestrator.runtime_run_questions import CALLBACK_PATTERN as QUESTION_CALLBACK_PATTERN
-from orchestrator.slash_command_audit import split_slash_command_words
+from orchestrator.slash_command_audit import parse_slash_command_text
 from orchestrator import ui_language
 
 logger = logging.getLogger("BridgeU.RuntimeCommandBinding")
@@ -113,14 +113,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
 
 
 def _split_runtime_command_text(text: str) -> tuple[str, list[str]]:
-    raw = (text or "").strip()
-    if not raw.startswith("/"):
-        return "", []
-    parts = split_slash_command_words(raw[1:])
-    if not parts:
-        return "", []
-    command = parts[0].split("@", 1)[0].lower()
-    return command, parts[1:]
+    return parse_slash_command_text(text)
 
 
 async def _dispatch_dynamic_runtime_command(runtime, update, context) -> bool:

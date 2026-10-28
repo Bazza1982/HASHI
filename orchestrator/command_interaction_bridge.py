@@ -12,6 +12,7 @@ from orchestrator.command_interactions import (
     Binding, Capture, CapturedQuery, InteractionError, MenuStore, VERSION,
     perform_action, replay_without_actions, validate_operation,
 )
+from orchestrator.slash_command_audit import redact_args
 
 logger = logging.getLogger("HASHI.CommandInteractions")
 
@@ -72,7 +73,7 @@ def build_frontend_command_invocation(
             "command": command_name,
             "issued_action_id": issued_action_id,
             "revision": revision,
-            "arguments": arguments,
+            "arguments": redact_args(command_name, arguments),
             "actor_digest": f"sha256:{actor_digest}",
             "idempotency_digest": f"sha256:{idempotency_digest}",
             "authorization": {"decision": decision, "scope": "owner"},
@@ -157,7 +158,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
     from orchestrator import ui_language
     from orchestrator.admin_local_testing import (
         _FakeUpdate, _capture_local_output, execute_local_command,
-        _format_slash_command_line, _runtime_audit_path, _runtime_agent_name,
+        _runtime_audit_path, _runtime_agent_name,
     )
     from orchestrator.slash_command_audit import SlashCommandAuditSession, bind_slash_command_audit_session
     try:
@@ -212,18 +213,27 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
         typed_invocations: list[dict] = []
         command_line = payload.get("command", "")
         if op == "open":
-            if not isinstance(command_line, str) or len(command_line) > 16384:
+            from orchestrator.sys_command_contract import (
+                SysCommandContractError,
+                validate_command_line_length,
+            )
+
+            if not isinstance(command_line, str):
                 raise InteractionError("command_menu_command_invalid", 400)
+            try:
+                validate_command_line_length(command_line)
+            except SysCommandContractError as exc:
+                raise InteractionError(
+                    exc.error_code, 413, exc.error_message
+                ) from None
+            except ValueError:
+                raise InteractionError("command_menu_command_invalid", 400) from None
             from orchestrator.admin_local_testing import _split_command
             command, command_args = _split_command(command_line)
             if not command_line.lstrip().startswith("/") or not _allowed(runtime, command):
                 raise InteractionError("command_menu_forbidden", 403)
             typed_invocations.append(
                 command_invocation(command, command_args, decision="allowed")
-            )
-            command_line = _format_slash_command_line(
-                typed_invocations[0]["command"],
-                typed_invocations[0]["arguments"],
             )
         def persist_menu(menu):
             """Refresh the canonical presentation row; command execution never depends on it."""
@@ -283,10 +293,27 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                             menu.actions.clear()
                             capture._record(menu)
                         code = result.get("error_code") or "command_menu_command_failed"
-                        return {**capture.result(), "ok": False,
-                                "error_code": code, "error": code,
-                                "request_outcome": result.get("request_outcome", "unknown"),
-                                "http_status": 400}
+                        error_message = str(
+                            result.get("error_message")
+                            or (result.get("result") or {}).get(
+                                "error_message", ""
+                            )
+                        ).strip()
+                        return {
+                            **capture.result(),
+                            "ok": False,
+                            "error_code": code,
+                            "error": code,
+                            **(
+                                {"error_message": error_message}
+                                if error_message
+                                else {}
+                            ),
+                            "request_outcome": result.get(
+                                "request_outcome", "unknown"
+                            ),
+                            "http_status": 400,
+                        }
                     extra = {}
                     if "result" in result:
                         extra["result"] = result["result"]

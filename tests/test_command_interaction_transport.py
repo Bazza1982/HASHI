@@ -104,6 +104,28 @@ async def test_existing_runtime_slash_entry_dispatches_menu_inside_worker(monkey
 
 
 @pytest.mark.asyncio
+async def test_long_sys_command_crosses_workbench_transport_losslessly(monkeypatch):
+    observed = []
+    prompt = "word  " * 6000 + "\nfinal line"
+    command = f"/sys 5 save {prompt}"
+
+    async def dispatch(runtime, payload, metadata):
+        observed.append(payload["command"])
+        return {"ok": True, "command_ui_version": 2, "messages": []}
+
+    monkeypatch.setattr(
+        "orchestrator.command_interaction_bridge.dispatch_command_interaction",
+        dispatch,
+    )
+    result = await try_execute_slash_command_text(
+        _runtime(), _wire("open", command=command), source_channel="workbench_api"
+    )
+
+    assert result["ok"] is True
+    assert observed == [command]
+
+
+@pytest.mark.asyncio
 async def test_unchanged_shared_command_path_routes_to_rebooted_worker(monkeypatch):
     worker = _runtime()
 

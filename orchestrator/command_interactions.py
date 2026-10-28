@@ -18,21 +18,41 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import urlsplit
 
+from orchestrator.sys_command_contract import (
+    MAX_SYS_COMMAND_CHARS,
+    SysCommandContractError,
+    validate_command_line_length,
+)
+
 VERSION = 1
 MAX_TEXT = 65536
+MAX_REQUEST_TEXT = MAX_SYS_COMMAND_CHARS + 4096
 MAX_BUTTONS = 100
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 _UNSET = object()
 
 
 class InteractionError(Exception):
-    def __init__(self, code: str, status: int = 409):
+    def __init__(
+        self, code: str, status: int = 409, error_message: str | None = None
+    ):
         super().__init__(code)
         self.code, self.status = code, status
+        self.error_message = str(error_message or "").strip()
 
     def result(self):
-        return {"ok": False, "command_ui_version": VERSION, "error_code": self.code,
-                "error": self.code, "http_status": self.status}
+        return {
+            "ok": False,
+            "command_ui_version": VERSION,
+            "error_code": self.code,
+            "error": self.code,
+            "http_status": self.status,
+            **(
+                {"error_message": self.error_message}
+                if self.error_message
+                else {}
+            ),
+        }
 
 
 def validate_operation(payload: Any) -> None:
@@ -57,9 +77,18 @@ def validate_operation(payload: Any) -> None:
             raise InteractionError("command_menu_request_invalid", 400)
     if op == "act" and (not isinstance(payload.get("button_id"), str) or not ID_PATTERN.fullmatch(payload["button_id"])):
         raise InteractionError("command_menu_request_invalid", 400)
-    if op == "open" and (not isinstance(payload.get("command"), str)
-                         or len(payload["command"]) > 16384 or not payload["command"].lstrip().startswith("/")):
-        raise InteractionError("command_menu_command_invalid", 400)
+    if op == "open":
+        command = payload.get("command")
+        if not isinstance(command, str) or not command.lstrip().startswith("/"):
+            raise InteractionError("command_menu_command_invalid", 400)
+        try:
+            validate_command_line_length(command)
+        except SysCommandContractError as exc:
+            raise InteractionError(
+                exc.error_code, 413, exc.error_message
+            ) from None
+        except ValueError:
+            raise InteractionError("command_menu_command_invalid", 400) from None
 
 
 def replay_without_actions(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -223,7 +252,7 @@ class MenuStore:
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise InteractionError("command_menu_request_invalid", 400) from exc
-        if len(encoded) > MAX_TEXT:
+        if len(encoded) > MAX_REQUEST_TEXT:
             raise InteractionError("command_menu_request_too_large", 413)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         key = (binding, request_id)

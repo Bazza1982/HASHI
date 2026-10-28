@@ -3,17 +3,28 @@ from __future__ import annotations
 import hashlib
 import html
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import runtime_menu_views, ui_language
-from orchestrator.bridge_memory import SysPromptManager, global_sys_prompt_state_path
+from orchestrator.bridge_memory import (
+    SysPromptManager,
+    SysPromptSemanticConflict,
+    global_sys_prompt_state_path,
+)
 from orchestrator.command_ui import confirm_card, selected_label
+from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 from orchestrator.slash_command_audit import (
     append_audit_record,
     build_audit_record,
+    parse_slash_command_text,
+)
+from orchestrator.sys_command_contract import (
+    SysCommandContractError,
+    normalize_sys_arguments,
 )
 
 GLOBAL_SCOPE_ALIASES = frozenset({"global", "g"})
@@ -356,15 +367,86 @@ def _usage() -> str:
     return ui_language.tr("sys.usage.full")
 
 
-async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
+async def _reject(
+    runtime: Any,
+    update: Any,
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    await _reply(runtime, update, message)
+    return {
+        "ok": False,
+        "error_code": code,
+        "error_message": message,
+        "request_outcome": "rejected",
+    }
+
+
+async def _mutate_or_reject(
+    runtime: Any,
+    update: Any,
+    manager: SysPromptManager,
+    *,
+    scope: str,
+    slot: str,
+    action: str,
+    actor_id: int | None,
+    text: str | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    try:
+        return (
+            _mutate_slot(
+                runtime,
+                manager,
+                scope=scope,
+                slot=slot,
+                action=action,
+                actor_id=actor_id,
+                source_channel="slash_command",
+                text=text,
+            ),
+            None,
+        )
+    except SysPromptSemanticConflict as exc:
+        if "occupied" in str(exc).casefold():
+            message = ui_language.tr(
+                "sys.error.global_already_configured"
+                if scope == "global"
+                else "sys.error.local_already_configured",
+                slot=slot,
+            )
+            code = "sys_slot_occupied"
+        else:
+            message = ui_language.tr("sys.error.changed", slot=slot)
+            code = "sys_slot_changed"
+        return None, await _reject(runtime, update, code, message)
+    except (ConfigConflictError, ConfigDurabilityError, OSError, TimeoutError):
+        message = ui_language.tr("sys.error.persistence", slot=slot)
+        return None, await _reject(
+            runtime, update, "sys_persistence_failed", message
+        )
+
+
+async def cmd_sys(runtime: Any, update: Any, context: Any) -> dict[str, Any] | None:
     user_id = getattr(getattr(update, "effective_user", None), "id", None)
     if not _is_authorized(runtime, user_id):
         return
-    raw_args = [
-        str(arg).strip()
-        for arg in (getattr(context, "args", None) or [])
-        if str(arg).strip()
-    ]
+    message = getattr(update, "effective_message", None) or getattr(
+        update, "message", None
+    )
+    command, parsed_args = parse_slash_command_text(
+        str(getattr(message, "text", "") or "")
+    )
+    try:
+        raw_args = normalize_sys_arguments(
+            parsed_args
+            if command == "sys"
+            else (getattr(context, "args", None) or [])
+        )
+    except SysCommandContractError as exc:
+        return await _reject(
+            runtime, update, exc.error_code, exc.error_message
+        )
     scope, args = _resolve_scope(raw_args)
     manager = _manager_for_scope(runtime, scope)
 
@@ -375,15 +457,15 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
     if args[0].lower() == "output":
         slot = args[1] if len(args) > 1 else ""
         if slot not in manager.SLOTS:
-            await _reply(
+            return await _reject(
                 runtime,
                 update,
+                "sys_slot_invalid",
                 ui_language.tr(
                     "sys.usage.output",
                     prefix="/sys global" if scope == "global" else "/sys",
                 ),
             )
-            return
         text = str(manager.get_slot(slot).get("text") or "")
         await _reply(
             runtime,
@@ -395,12 +477,12 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
 
     slot = args[0]
     if slot not in manager.SLOTS:
-        await _reply(
+        return await _reject(
             runtime,
             update,
+            "sys_slot_invalid",
             ui_language.tr("sys.error.invalid_slot", slot=slot),
         )
-        return
 
     if len(args) == 1:
         await _reply_slot(runtime, update, scope, slot)
@@ -411,37 +493,41 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
 
     if action == "on":
         if not manager.get_slot(slot).get("text"):
-            await _reply(
+            return await _reject(
                 runtime,
                 update,
+                "sys_slot_empty",
                 ui_language.tr("sys.error.empty_slot", slot=slot),
             )
-            return
         if scope == "global" and not confirmed:
             await _reply_confirmation(runtime, update, scope, slot, "on")
             return
-        notice = _mutate_slot(
+        notice, failure = await _mutate_or_reject(
             runtime,
+            update,
             manager,
             scope=scope,
             slot=slot,
             action="on",
             actor_id=user_id,
-            source_channel="slash_command",
         )
+        if failure:
+            return failure
         await _reply_slot(runtime, update, scope, slot, notice=notice)
         return
 
     if action == "off":
-        notice = _mutate_slot(
+        notice, failure = await _mutate_or_reject(
             runtime,
+            update,
             manager,
             scope=scope,
             slot=slot,
             action="off",
             actor_id=user_id,
-            source_channel="slash_command",
         )
+        if failure:
+            return failure
         await _reply_slot(runtime, update, scope, slot, notice=notice)
         return
 
@@ -449,85 +535,101 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
         if scope == "global" and manager.get_slot(slot).get("text") and not confirmed:
             await _reply_confirmation(runtime, update, scope, slot, "delete")
             return
-        notice = _mutate_slot(
+        notice, failure = await _mutate_or_reject(
             runtime,
+            update,
             manager,
             scope=scope,
             slot=slot,
             action="delete",
             actor_id=user_id,
-            source_channel="slash_command",
         )
+        if failure:
+            return failure
         await _reply_slot(runtime, update, scope, slot, notice=notice)
         return
 
     if action == "save":
-        if scope == "global" and manager.get_slot(slot).get("text"):
-            await _reply(
+        if manager.get_slot(slot).get("text"):
+            return await _reject(
                 runtime,
                 update,
-                ui_language.tr("sys.error.global_already_configured", slot=slot),
+                "sys_slot_occupied",
+                ui_language.tr(
+                    "sys.error.global_already_configured"
+                    if scope == "global"
+                    else "sys.error.local_already_configured",
+                    slot=slot,
+                ),
             )
-            return
-        text = " ".join(args[2:]).strip()
-        if not text:
+        text = args[2] if len(args) > 2 else ""
+        if not text.strip():
             prefix = "/sys global" if scope == "global" else "/sys"
-            await _reply(
+            return await _reject(
                 runtime,
                 update,
+                "sys_prompt_required",
                 ui_language.tr("sys.usage.save", prefix=prefix),
             )
-            return
-        notice = _mutate_slot(
+        notice, failure = await _mutate_or_reject(
             runtime,
+            update,
             manager,
             scope=scope,
             slot=slot,
             action="save",
             actor_id=user_id,
-            source_channel="slash_command",
             text=text,
         )
+        if failure:
+            return failure
         await _reply_slot(runtime, update, scope, slot, notice=notice)
         return
 
     if action == "replace":
-        text_args = args[2:]
+        text = args[2] if len(args) > 2 else ""
         is_active_global = scope == "global" and bool(
             manager.get_slot(slot).get("active")
         )
-        if is_active_global and not confirmed:
-            await _reply(
+        confirmed_match = re.match(r"^CONFIRM(?:[ \t\r\n]+)([\s\S]*)$", text)
+        if is_active_global and confirmed_match is None:
+            return await _reject(
                 runtime,
                 update,
+                "sys_confirmation_required",
                 ui_language.tr("sys.error.active_global_replace", slot=slot),
             )
-            return
-        if is_active_global and confirmed:
-            text_args = text_args[1:]
-        text = " ".join(text_args).strip()
-        if not text:
+        if is_active_global and confirmed_match is not None:
+            text = confirmed_match.group(1)
+        if not text.strip():
             prefix = "/sys global" if scope == "global" else "/sys"
-            await _reply(
+            return await _reject(
                 runtime,
                 update,
+                "sys_prompt_required",
                 ui_language.tr("sys.usage.replace", prefix=prefix),
             )
-            return
-        notice = _mutate_slot(
+        notice, failure = await _mutate_or_reject(
             runtime,
+            update,
             manager,
             scope=scope,
             slot=slot,
             action="replace",
             actor_id=user_id,
-            source_channel="slash_command",
             text=text,
         )
+        if failure:
+            return failure
         await _reply_slot(runtime, update, scope, slot, notice=notice)
         return
 
-    await _reply(runtime, update, _usage())
+    return await _reject(
+        runtime,
+        update,
+        "sys_action_invalid",
+        ui_language.tr("sys.error.invalid_action"),
+    )
 
 
 async def _edit_slots(runtime: Any, query: Any, scope: str) -> None:

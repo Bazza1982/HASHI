@@ -95,6 +95,7 @@ from orchestrator.slash_command_audit import (
     bind_slash_command_audit_session,
     default_audit_path,
     parse_inline_callback_command,
+    parse_slash_command_text,
     resolve_handler_kind,
 )
 from orchestrator.enterprise.audit_schema import AuditEventWriter
@@ -805,7 +806,18 @@ class FlexibleAgentRuntime:
 
     def _wrap_cmd(self, cmd: str, handler):
         async def _wrapped(update: Update, context: Any):
-            args = list(getattr(context, "args", None) or [])
+            message = getattr(update, "effective_message", None) or getattr(
+                update, "message", None
+            )
+            parsed_command, parsed_args = parse_slash_command_text(
+                str(getattr(message, "text", "") or "")
+            )
+            args = (
+                parsed_args
+                if parsed_command == str(cmd).casefold()
+                else list(getattr(context, "args", None) or [])
+            )
+            setattr(context, "args", args)
             actor_id = getattr(getattr(update, "effective_user", None), "id", None)
             chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
             session = SlashCommandAuditSession(
@@ -841,9 +853,6 @@ class FlexibleAgentRuntime:
                         session.block("stale_confirmation_required")
                         return
                     self._record_active_chat(update)
-                    message = getattr(update, "effective_message", None) or getattr(
-                        update, "message", None
-                    )
                     runtime_session.record_frontend_message_for_update(
                         self,
                         update,
@@ -966,6 +975,14 @@ class FlexibleAgentRuntime:
                                 )
                         else:
                             session.fail(error_code)
+                            error_message = str(
+                                outcome.get("error_message")
+                                or (outcome.get("result") or {}).get(
+                                    "error_message", ""
+                                )
+                            ).strip()
+                            if error_message:
+                                await self._reply_text(update, error_message)
                         return outcome
 
                     return outcome
