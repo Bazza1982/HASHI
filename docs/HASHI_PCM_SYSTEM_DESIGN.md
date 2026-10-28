@@ -80,7 +80,10 @@ Confirmed frontend deletion of an Agent-local /sys slot carries an opaque
 revision bound to the Agent, slot, complete text and active state. PCM compares
 the confirmed snapshot and uses its existing revision-aware writer to reject a
 concurrent slot change. Instance-global and permanent prompts are outside this
-operation. Older backends lack conditional deletion and must fail closed.
+operation. The Backend API requires authenticated owner credentials and, in
+Governed mode, Agent visibility and management authority; an explicit
+confirmation field is not authentication. Older backends lack conditional
+deletion and must fail closed.
 The user authorized the supporting small Function change on 2026-10-28.
 HASHI3 source and offline checks are separate from pending runtime adoption and
 external-frontend verification.

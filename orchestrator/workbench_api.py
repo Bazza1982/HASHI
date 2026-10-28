@@ -1118,7 +1118,7 @@ class WorkbenchApiServer:
     def _strict_authenticated_owner(self, request):
         if self._is_governed_profile():
             return self._v1_owner_id(request)
-        if not self.admin_token or not self._check_admin_auth(request):
+        if not getattr(self, "admin_token", "") or not self._check_admin_auth(request):
             return None
         return self._v1_owner_id(request)
 
@@ -5619,16 +5619,36 @@ class WorkbenchApiServer:
             status=int(outcome.get("status", 200)),
         )
 
-    def _guard_agent_management_access(self, request, agent_name: str):
-        """Apply the same governed Agent visibility as the overview."""
+    def _can_view_deletion_revision(self, request, agent_name: str) -> bool:
+        """Only an authenticated owner with Agent visibility receives a revision."""
+        if self._strict_authenticated_owner(request) is None:
+            return False
         if not self._is_governed_profile():
-            return None
+            return True
         user = self._enterprise_user_from_request(request)
-        if user is None:
-            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
         rows = self._filter_enterprise_agent_rows_for_user(user, self._load_agent_rows())
-        if not any(str(row.get("name") or "") == agent_name for row in rows):
+        return any(str(row.get("name") or "") == agent_name for row in rows)
+
+    def _guard_agent_management_access(self, request, agent_name: str):
+        """Require real credentials, Agent visibility, and governed management rights."""
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        if not self._can_view_deletion_revision(request, agent_name):
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            memberships = self.identity_service.list_project_memberships(user_id=user.id)
+            rows = self._load_agent_rows()
+            target = next((row for row in rows if str(row.get("name") or "") == agent_name), None)
+            projects = agent_project_ids(target)
+            can_manage = any(
+                row.get("role") == EnterpriseRole.ORG_ADMIN.value
+                or (row.get("role") == EnterpriseRole.TEAM_ADMIN.value
+                    and str(row.get("project_id") or "") in projects)
+                for row in memberships
+            )
+            if not can_manage:
+                return web.json_response({"ok": False, "error": "management access required"}, status=403)
         return None
 
     async def handle_agent_sys_prompt_conditional_delete(self, request):
@@ -5717,6 +5737,9 @@ class WorkbenchApiServer:
             runtime=runtime,
             desired_workzone_state=desired_workzone_state,
         )
+        if not self._can_view_deletion_revision(request, name):
+            for slot in overview.get("system_prompts", {}).get("slots", []):
+                slot.pop("deletion_revision", None)
         response = web.json_response({"ok": True, "overview": overview})
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -13154,7 +13177,7 @@ class WorkbenchApiServer:
             return value.strip()
         return None
 
-    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict) -> dict:
+    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict, request=None) -> dict:
         from orchestrator.her_v2.request_policy import job_effort_policy
         from orchestrator.skill_manager import scheduler_job_deletion_revision
 
@@ -13212,7 +13235,9 @@ class WorkbenchApiServer:
             "job_id": task_id,
             "enabled": bool(job.get("enabled", False)),
             "job": dict(job),
-            "deletion_revision": scheduler_job_deletion_revision(job),
+            **({"deletion_revision": scheduler_job_deletion_revision(job)}
+               if request is not None and self._can_view_deletion_revision(request, agent_name)
+               else {}),
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
@@ -13257,6 +13282,7 @@ class WorkbenchApiServer:
                         agent_name=agent_name,
                         kind=job_kind,
                         job=job,
+                        request=request,
                     )
                 )
         return web.json_response(
@@ -13453,7 +13479,7 @@ class WorkbenchApiServer:
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
             },
             status=201,
         )
@@ -13507,7 +13533,7 @@ class WorkbenchApiServer:
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
             }
         )
 
@@ -13555,38 +13581,8 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, "agent": agent_name, "kind": kind, "job_id": job_id})
 
     async def handle_agent_scheduler_delete(self, request):
-        """Delete one owned scheduler task after exact user authorization."""
-
-        agent_name = request.match_info.get("name")
-        job_id = str(request.match_info.get("job_id") or "").strip()
-        runtime = self._runtime_map().get(agent_name)
-        if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if payload.get("authorization") != "explicit_user_authorization":
-            return web.json_response({"ok": False, "error": "explicit task deletion authorization is required"}, status=403)
-        if any(field in payload for field in ("expected_enabled", "expected_revision", "only_disabled")):
-            return web.json_response({"ok": False, "error": "use conditional deletion for a guarded task"}, status=400)
-        kind = str(payload.get("kind") or "").strip().lower()
-        if kind not in {"cron", "heartbeat", "nudge"}:
-            return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)
-        skill_manager = getattr(runtime, "skill_manager", None)
-        if skill_manager is None:
-            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
-        try:
-            ok, message = skill_manager.delete_owned_job(kind, job_id, agent_name=agent_name)
-        except (ConfigConflictError, ConfigDurabilityError) as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=409)
-        if not ok:
-            return web.json_response({"ok": False, "error": message}, status=404)
-        return web.json_response(
-            {"ok": True, "authority": "HASHI Scheduler", "agent": agent_name, "kind": kind, "job_id": job_id}
-        )
+        """The legacy route has the same authentication and revision guarantees."""
+        return await self.handle_agent_scheduler_conditional_delete(request)
 
     async def handle_agent_scheduler_status(self, request):
         """Return one authoritative job definition and persisted scheduler state."""
@@ -13626,6 +13622,7 @@ class WorkbenchApiServer:
                     agent_name=agent_name,
                     kind=kind,
                     job=job,
+                    request=request,
                 ),
             }
         )

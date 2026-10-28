@@ -539,6 +539,11 @@ publishes the deletion using the revision of the same persisted document.
 Changed or ambiguous tasks are not deleted. A stale document is a conflict;
 a committed durability error is outcome-unknown and must not be blindly
 retried. Older backends lack this operation and must not be treated as guarded.
+The Backend API requires authenticated owner credentials, Agent visibility,
+and, in Governed mode, management authority. Its legacy DELETE route uses the
+same confirmation and revision checks. Read projections omit deletion revisions
+without an authenticated, visible owner. The current Agent Scheduler tool does
+not yet supply those credentials, so its deletion request is rejected.
 The user authorized a small HASHI Function change for Workbench on 2026-10-28.
 Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
 running adoption and external-frontend verification remain separate and pending.

@@ -395,7 +395,7 @@ async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_scheduler_agent_can_create_update_and_delete_owned_tasks(tmp_path):
+async def test_scheduler_agent_can_create_update_but_unauthenticated_delete_is_rejected(tmp_path):
     server, _runtime = _server(tmp_path)
 
     created = await server.handle_agent_scheduler_create(
@@ -451,8 +451,8 @@ async def test_scheduler_agent_can_create_update_and_delete_owned_tasks(tmp_path
             },
         )()
     )
-    assert deleted.status == 200
-    assert json.loads(deleted.text)["job_id"] == "momo-loop-1"
+    assert deleted.status == 401
+    assert _runtime.skill_manager.get_job("heartbeat", "momo-loop-1") is not None
 
 
 @pytest.mark.asyncio
@@ -472,7 +472,7 @@ async def test_scheduler_mutation_rejects_other_agent_job(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_nudge_create_update_delete_uses_typed_owner_path(tmp_path):
+async def test_scheduler_nudge_create_update_and_unauthenticated_delete(tmp_path):
     server, _runtime = _server(tmp_path)
 
     created = await server.handle_agent_scheduler_create(
@@ -530,7 +530,8 @@ async def test_scheduler_nudge_create_update_delete_uses_typed_owner_path(tmp_pa
             },
         )()
     )
-    assert deleted.status == 200
+    assert deleted.status == 401
+    assert _runtime.skill_manager.get_job("nudge", "momo-nudge-1") is not None
 
 
 @pytest.mark.asyncio

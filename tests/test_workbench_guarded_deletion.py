@@ -16,7 +16,7 @@ class Request:
     def __init__(self, *, name="momo", job_id="", slot="", query=None, payload=None):
         self.match_info = {"name": name, "job_id": job_id, "slot": slot}
         self.query = query or {}
-        self.headers = {}
+        self.headers = {"X-Workbench-Token": "test-owner-token"}
         self.payload = payload or {}
 
     async def json(self):
@@ -41,6 +41,7 @@ def environment(tmp_path):
                               sys_prompt_manager=prompts, global_sys_prompt_manager=global_prompts)
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server.global_config = SimpleNamespace(deployment_profile="personal", authorized_id=1)
+    server.admin_token = "test-owner-token"
     server.orchestrator = SimpleNamespace(scheduler=SimpleNamespace(state={}))
     server._runtime_map = lambda: {"momo": runtime}
     return server, manager, prompts, global_prompts

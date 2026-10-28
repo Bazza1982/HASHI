@@ -2,8 +2,8 @@
 
 Current decisions, with full rationale in the linked owners:
 
-- Confirmed task/local /sys deletion rechecks the snapshot; changed or reenabled
-  items survive. Global/permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md)
+- Task/local /sys deletion requires authenticated management and a current
+  snapshot. Global/permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md)
   and [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
