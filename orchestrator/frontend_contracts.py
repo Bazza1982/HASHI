@@ -502,6 +502,28 @@ def normalize_delivery_receipt(value: Any) -> dict[str, Any]:
             "type": _token(proof_obj.get("type"), "proof type", maximum=64),
             "value": _token(proof_obj.get("value"), "proof value"),
         }
+        media_receipts = proof_obj.get("attachment_receipts")
+        if media_receipts is not None:
+            if proof["type"] != "telegram-api-accepted":
+                raise ValueError("attachment receipts require Telegram transport proof")
+            if not isinstance(media_receipts, (list, tuple)) or not 1 <= len(media_receipts) <= 16:
+                raise ValueError("attachment receipts must contain at most 16 entries")
+            attachments = []
+            seen_attachments: set[str] = set()
+            seen_messages: set[str] = set()
+            for entry in media_receipts:
+                item = _object(entry, "attachment receipt")
+                attachment_id = _token(item.get("attachment_id"), "attachment_id")
+                message_id = _token(item.get("transport_message_id"), "transport_message_id")
+                if attachment_id in seen_attachments or message_id in seen_messages:
+                    raise ValueError("attachment receipt identities must be unique")
+                seen_attachments.add(attachment_id)
+                seen_messages.add(message_id)
+                attachments.append({
+                    "attachment_id": attachment_id,
+                    "transport_message_id": message_id,
+                })
+            proof["attachment_receipts"] = attachments
     if status == "delivered" and proof is None:
         raise ValueError("delivered receipt requires proof")
     return {

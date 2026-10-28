@@ -16,14 +16,14 @@
 - HERV3 has no artificial whole-run size/time/call ceiling. Preserve state and
   evidence; cancellation, safety, transport, Provider and single-Tool limits
   remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-- Agent Move qualifies mutable state at staging, becomes forward-only after
-  confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
-- Image fallback: selected model, same-Provider visual model, then LAN Compute;
+- Agent Move checks mutable state at staging; after confirmation it is
+  forward-only and never rolls the target back. [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Image fallback: selected model, same-Provider visual model, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
   fallback. [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
 - Call frames are input-only/cleared camera-off; LAN targets are literal private
-  IPv4 without redirects. Preview is not Agent vision. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+  IPv4 without redirects. Preview is not Agent vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
 - Tool screenshots use provider-native image input, never Base64 text. Ollama
   behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
@@ -47,7 +47,7 @@ before and after fencing. [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md
 
 ## Configuration, identity, and persistence
 
-Isolated speech locks, runtimes and releases need separate proof. See
+Isolated speech locks/runtimes/releases need separate proof:
 [dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
 Config owns identity, ports, Workzones, endpoints/models; exclude secrets and
@@ -56,32 +56,33 @@ uses the qualified registry. Unknown capability/price is neither unsupported nor
 zero; explicit choices persist. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md)
 without Engine grants.
 
-Agent name/Emoji use revisioned config; post-save refresh cannot reverse durable success.
+Agent name/Emoji use revisioned config; refresh cannot undo durable success.
 
-Verified model capabilities survive lookup failure until identity/source changes;
-pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
+Verified capabilities survive lookup failure until identity/source changes;
+pricing freshness is separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
-Portable carries no credentials; PAO starts Workers. Wildcards grant permission,
-not capability; path names grant nothing. Workzones stay Agent-scoped across
-backends; busy Runs freeze their active revision while saved state remains visible.
+Portable has no credentials; PAO starts Workers. Wildcards grant permission, not
+capability; paths grant nothing. Workzones are Agent-scoped; busy Runs freeze
+active revisions while saved state stays visible. Windows rejects POSIX Workzones.
 A Browser Bridge disconnect never stops the shared Windows named-pipe listener.
 Keep experiments, secrets, media bytes and remote paths out of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
-JSON writers validate private candidates under lock/revision and atomically replace.
-Display fallback is read-only; conflicts require fresh state/action, never blind
-retry or stale restore. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+JSON writes validate private candidates under lock/revision, then atomically replace.
+Display fallback is read-only; conflicts need fresh state/action, never blind
+retry or stale restore. [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
-Endpoint publication may retry only bounded Windows rename blocking of the same
-fsynced candidate; permanent failure keeps prior state and never replays actions.
+Endpoint publication retries only bounded Windows rename blocking on the same
+fsynced candidate; permanent failure preserves state and never replays actions.
 
 ## Sessions, trust, and delivery
 
-PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider and
-frontend history are rebuildable. Preserve order; stage attachments atomically
-per Message/Run and never leak failed/cancelled assets.
+PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider/frontend
+history is rebuildable. Preserve order; stage attachments atomically per Message/Run;
+never leak failed/cancelled assets. Telegram item proofs keep partial uncertainty.
+Diagnostics join Tool/job evidence.
 
 Accepted non-voice attachments commit atomically to the target Agent's ignored
 `.attachments/{session}/{message}/`; only its home scope may read them and

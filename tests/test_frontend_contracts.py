@@ -674,3 +674,22 @@ async def test_t01_t12_dynamic_third_connector_registration_and_reference_adapte
         unregister_connector(custom_id)
         with pytest.raises(ValueError, match="unregistered frontend connector"):
             canonical_connector_id(custom_id)
+
+
+def test_attachment_transport_receipt_rejects_duplicate_or_wrong_proof_type():
+    base = {
+        "type": "hashi.delivery-receipt", "version": 1,
+        "event_id": "event-1", "endpoint_id": "ep-1", "status": "unknown",
+        "proof": {
+            "type": "telegram-api-accepted", "value": "proof-1",
+            "attachment_receipts": [
+                {"attachment_id": "att-1", "transport_message_id": "101"},
+                {"attachment_id": "att-1", "transport_message_id": "102"},
+            ],
+        },
+    }
+    with pytest.raises(ValueError, match="unique"):
+        normalize_delivery_receipt(base)
+    wrong = {**base, "proof": {**base["proof"], "type": "other-connector"}}
+    with pytest.raises(ValueError, match="Telegram"):
+        normalize_delivery_receipt(wrong)

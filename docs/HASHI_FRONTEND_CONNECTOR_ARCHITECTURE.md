@@ -601,8 +601,15 @@ reloads do not leave visible publications queued.
 The tool reports persistence separately from each endpoint's queued,
 accepted, delivered, failed or unknown state. An accepted receipt is not
 proof that the user saw the file; delivered requires the connector's transport
-proof. Unknown outcomes use the existing evidence-based recovery path and are
-not blindly resent. The terminal Message includes only attachments still
+proof. Telegram's endpoint receipt can also retain each accepted attachment ID
+and its transport message ID. If only part of a group was accepted, the
+endpoint remains unknown and the recorded item evidence does not claim the
+other items were delivered. A Worker crash before the receipt is committed can
+leave item evidence unknown. Unknown outcomes use the existing evidence-based
+recovery path and are not blindly resent. The 2026-10-29 legacy PR audit
+authorized this Function-layer repair on HASHI3; native Windows offline tests
+passed. Live Worker adoption and user acceptance remain unverified. The terminal
+Message includes only attachments still
 bound for final delivery. If prior deliverables are the only visible output,
 the Run may complete successfully without a duplicate final Message. A later
 failure or cancellation does not remove earlier committed deliverables.

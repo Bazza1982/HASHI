@@ -140,12 +140,16 @@ def _workzone_overview(
     revision = int(state.get("revision") or 0)
     active = workzone_module.active_workzone_slots(state)
     primary = workzone_module.primary_workzone_path(state)
+    primary_item = next((item for item in state["slots"] if item["slot_id"] == "main"), None)
     return {
         "active": bool(active),
         "revision": revision,
         "active_revision": active_revision,
         "pending_activation": revision > active_revision,
         "path": str(primary) if primary is not None else None,
+        "path_kind": primary_item.get("path_kind") if primary_item else None,
+        "execution_platform": primary_item.get("execution_platform") if primary_item else None,
+        "host_compatible": primary_item.get("host_compatible") if primary_item else None,
         "active_count": len(active),
         "configured_count": len(state["slots"]),
         "slots": [
@@ -156,6 +160,9 @@ def _workzone_overview(
                 "label": item.get("label") or Path(item["path"]).name,
                 "enabled": bool(item["enabled"]),
                 "available": bool(item["available"]),
+                "path_kind": item["path_kind"],
+                "execution_platform": item["execution_platform"],
+                "host_compatible": item["host_compatible"],
             }
             for item in state["slots"]
         ],
