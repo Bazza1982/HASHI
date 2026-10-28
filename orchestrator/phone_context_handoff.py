@@ -443,25 +443,56 @@ def _identity_interval_matches(
     first_arrival: int | None = None,
     last_arrival: int | None = None,
 ) -> bool:
-    for lower in range(len(units)):
-        digest = hashlib.sha256(b"[")
-        has_fragment = False
-        has_first = first_arrival is None
-        has_last = last_arrival is None
-        for unit in units[lower:]:
-            for row in unit:
-                if has_fragment:
-                    digest.update(b",")
-                digest.update(encoded_identities[id(row)])
-                has_fragment = True
-                sequence = int(row["sequence"])
-                has_first = has_first or sequence == first_arrival
-                has_last = has_last or sequence == last_arrival
-            if has_fragment and has_first and has_last:
-                candidate = digest.copy()
-                candidate.update(b"]")
-                if candidate.hexdigest()[:24] == target_digest:
-                    return True
+    # A candidate snapshot must include both of its arrival extrema.  Locate
+    # their units first instead of hashing every interval that cannot contain
+    # them.  Repeated sequence values are handled as separate possible anchors.
+    from bisect import bisect_left
+
+    target_bytes = bytes.fromhex(target_digest)
+    unit_bytes: list[bytes] = []
+    first_units: list[int] = []
+    last_units: list[int] = []
+    for index, unit in enumerate(units):
+        unit_bytes.append(b",".join(encoded_identities[id(row)] for row in unit))
+        sequences = {int(row["sequence"]) for row in unit}
+        if first_arrival is not None and first_arrival in sequences:
+            first_units.append(index)
+        if last_arrival is not None and last_arrival in sequences:
+            last_units.append(index)
+
+    if first_arrival is not None and not first_units:
+        return False
+    if last_arrival is not None and not last_units:
+        return False
+
+    last_lower = len(units) - 1
+    if first_arrival is not None:
+        last_lower = min(last_lower, first_units[-1])
+    if last_arrival is not None:
+        last_lower = min(last_lower, last_units[-1])
+
+    for lower in range(last_lower + 1):
+        first_index = bisect_left(first_units, lower)
+        last_index = bisect_left(last_units, lower)
+        if first_arrival is not None and first_index == len(first_units):
+            continue
+        if last_arrival is not None and last_index == len(last_units):
+            continue
+        earliest_end = lower
+        if first_arrival is not None:
+            earliest_end = max(earliest_end, first_units[first_index])
+        if last_arrival is not None:
+            earliest_end = max(earliest_end, last_units[last_index])
+
+        digest = hashlib.sha256(b"[" + b",".join(unit_bytes[lower:earliest_end + 1]))
+        for upper in range(earliest_end, len(units)):
+            if upper != earliest_end:
+                digest.update(b",")
+                digest.update(unit_bytes[upper])
+            candidate = digest.copy()
+            candidate.update(b"]")
+            if candidate.digest()[:12] == target_bytes:
+                return True
     return False
 
 

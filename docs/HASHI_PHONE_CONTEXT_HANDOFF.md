@@ -82,7 +82,11 @@ projection sequence is only a lost search hint when an identity interval can
 otherwise be found. Provider arrival sequence is used only to reconstruct a
 candidate snapshot, never as transcript chronology or a typed Message ordinal.
 Missing, malformed or incomplete source identity fails closed and preserves the
-old section. Verified source is rebuilt as ordinary semantic
+old section. Snapshot search locates the arrival extrema before checking aligned
+intervals, avoiding impossible intervals. Highly interleaved arrival sequences
+can still have many valid candidate intervals and remain a performance risk;
+the legacy digest does not record the source identity list. Verified source is
+rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing
