@@ -1,11 +1,8 @@
 # HASHI Agent FYI
 
-Current decisions, with full rationale in the linked owners:
-
-- Telegram credential saves request exact-Agent activation; shared receivers
-  adopt fresh credentials after cutover. Saved/verified/mirrored is not two-way
-  connected, and pending activation retains the token without a save replay.
-  See [Connector activation](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
+- Telegram saves request exact-Agent activation; receivers adopt credentials
+  after cutover. Saved/verified/mirrored is not two-way ready; pending keeps
+  the token without resaving. See [activation](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
 
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
@@ -13,11 +10,11 @@ Current decisions, with full rationale in the linked owners:
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md) and [HERV3](HERV3_UPGRADE.md#completed-tool-checkpoint-provider-call-continuation).
 - PAO strips internal control envelopes before judging deliverability. A result
   containing only Memory+ state fails terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
-  state and evidence; only explicit cancellation, safety, transport, Provider and
-  single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- HERV3 has no artificial whole-run size/time/call ceiling. Keep full state and
+  evidence; explicit cancellation, safety, transport, Provider and single-Tool
+  limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Move qualifies at staging; confirmation is forward-only, never rolls back.
-  Clone uses stable PAO owner snapshots, not Telegram IDs or Move drain gates.
+  Clone: stable PAO owner snapshots, not Telegram IDs/drain gates.
   See [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback is selected model, same-Provider visual model, then LAN Compute;
   it is visible/request-only and shares these [admission facts](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
@@ -38,10 +35,10 @@ bump, label and independent review; flags grant nothing.
 
 Source, Worker adoption and delivery need separate proof. Tools cannot edit/kill
 Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
-Worker; `max` replaces shared Functions/Workers, never Core/Remote. Function code
-adopts only by reboot; docs do not. Workbench config preserves `AGENT_BUSY`;
-retry only before a durable receipt; durable `target_busy` stays pending. `max`
-rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
+Worker; `max` replaces shared Functions/Workers, not Core/Remote. Code adopts by
+reboot, docs do not. Workbench preserves `AGENT_BUSY`; retry only before a durable
+receipt; `target_busy` stays pending. `max` rejects shared API/background work
+before and after fencing. See [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
@@ -51,10 +48,10 @@ and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-202
 Isolated speech locks, runtimes and releases need separate proof. See
 [dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
-Configuration owns identity, ports, Workzones, endpoints and models; exclude
-secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
-shared compatibility uses the qualified registry. Unknown capability/price is
-neither unsupported nor zero; explicit choices persist.
+Config owns identity, ports, Workzones, endpoints/models; exclude secrets/machine
+paths. Opt-ins use `allowed_backends`/runtime effort; shared compatibility uses
+the qualified registry. Unknown capability/price is not unsupported or zero;
+explicit choices persist.
 HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md) without Engine grants.
 
 Agent name/Emoji come from revisioned config; failed post-save refresh cannot reverse durable success.
@@ -73,7 +70,7 @@ Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
 JSON writers validate private candidates under lock/revision and atomically replace.
 Display fallback is read-only; conflicts require fresh state/action, never blind
-retry or stale restore. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+retry or stale restore. See [config](HASHI_CONFIGURATION_PERSISTENCE.md).
 
 Endpoint publication may retry only bounded Windows rename blocking of the same
 fsynced candidate; permanent failure keeps prior state and never replays actions.
@@ -148,7 +145,7 @@ epoch-scoped. At hang-up, replace them with full ordinary history. Legacy cleanu
 validates exact source and fails closed. HERV3 orders Phone and typed Turns by
 conversation time; fixed incremental turns skip unused recent history.
 Failures preserve cause; resumes stop after five. See
-[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
@@ -189,8 +186,8 @@ unless `video_tts_supported: false`; without AP it uses audio. Groups have
 bounded admission and ordered playback. Audio failure keeps video waiting;
 fallback is group-local; stale tails cancel; late jobs only signal recovery.
 Audio stays serial.
-See [language voices](HASHIKO_LANGUAGE_VOICES.md),
-[Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
+See [voices](HASHIKO_LANGUAGE_VOICES.md),
+[Call/Phone](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
@@ -201,13 +198,13 @@ triggers owner-route feedback; AP-local input never echoes. `/phone` sends scope
 leave/return; AP owns presentation, HASHI owns services/voices. Ingress fails
 closed; surfaces stay independent. See
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
-[input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
+[feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-[Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
+[Records](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
