@@ -1089,7 +1089,12 @@ async def test_phone_action_includes_unconsumed_ended_call_without_migration(pho
 
 
 @pytest.mark.asyncio
-async def test_grouped_legacy_phone_section_migrates_after_exact_source_validation(phone):
+@pytest.mark.parametrize(
+    "projection_change",
+    ["unchanged", "punctuation", "reworded", "timing", "stale_hash",
+     "missing_display", "missing_timing", "reordered_columns"],
+)
+async def test_grouped_legacy_phone_section_migrates_after_exact_source_validation(phone, projection_change):
     from orchestrator.phone_context_handoff import _fragments,prepare_turn
 
     await phone.manager.append_fragment_once(
@@ -1108,10 +1113,36 @@ async def test_grouped_legacy_phone_section_migrates_after_exact_source_validati
             call_id=phone.call_id,call_epoch=1,ended_only=True,
         )
     legacy_key,legacy_section=packed_legacy_phone_section(phone,fragments)
+    prefix, encoded = legacy_section[1].split("\n", 1)
+    legacy_payload = json.loads(encoded)
+    legacy_fragment = legacy_payload["fragment_groups"][0]["fragments"][0]
+    if projection_change == "punctuation":
+        legacy_fragment["text"] += ".."
+    elif projection_change == "reworded":
+        legacy_fragment["text"] = "An older rendering of the same event."
+    elif projection_change == "timing":
+        legacy_fragment["event"][2] += 1
+    elif projection_change == "missing_display":
+        del legacy_fragment["role"]
+        del legacy_fragment["text"]
+        del legacy_payload["fragment_groups"][0]["source"]
+    elif projection_change == "missing_timing":
+        legacy_fragment["event"] = legacy_fragment["event"][:1]
+    elif projection_change == "reordered_columns":
+        columns = legacy_payload["event_columns"]
+        legacy_payload["event_columns"] = list(reversed(columns))
+        legacy_fragment["event"] = list(reversed(legacy_fragment["event"]))
+    legacy_text = prefix + "\n" + json.dumps(
+        legacy_payload, ensure_ascii=False, separators=(",", ":")
+    )
+    legacy_hash = (
+        "0" * 64 if projection_change == "stale_hash"
+        else hashlib.sha256(legacy_text.encode()).hexdigest()
+    )
     stored_section={
-        "key":legacy_key,"title":legacy_section[0],"text":legacy_section[1],
+        "key":legacy_key,"title":legacy_section[0],"text":legacy_text,
         "authority":"history","protected":True,
-        "content_sha256":legacy_section[2]["content_sha256"],
+        "content_sha256":legacy_hash,
     }
     runtime=turn_runtime(phone)
     runtime.backend_manager.current_backend.current_pcm_section_keys=lambda: (legacy_key,)
@@ -1129,7 +1160,7 @@ async def test_grouped_legacy_phone_section_migrates_after_exact_source_validati
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption",["hash","scope","event"])
+@pytest.mark.parametrize("corruption",["scope","event","missing_id","duplicate_id"])
 async def test_invalid_grouped_legacy_phone_section_is_preserved(phone,corruption):
     from orchestrator.phone_context_handoff import PhoneContextError,_fragments,prepare_turn
 
@@ -1155,14 +1186,18 @@ async def test_invalid_grouped_legacy_phone_section_is_preserved(phone,corruptio
         corrupt["scope"]["session_id"]="other-session"
     elif corruption=="event":
         corrupt["fragment_groups"][0]["fragments"][0]["event"][0]="missing-source"
+    elif corruption=="missing_id":
+        corrupt["event_columns"][0] = "unknown_event"
+    elif corruption=="duplicate_id":
+        corrupt["event_columns"].append("provider_event_id")
+        corrupt["fragment_groups"][0]["fragments"][0]["event"].append("other")
     corrupt_body=prefix+"\n"+json.dumps(
         corrupt,ensure_ascii=False,separators=(",", ":")
     )
     stored={legacy_key:{
         "key":legacy_key,"title":legacy_section[0],"text":corrupt_body,
         "authority":"history","protected":True,
-        "content_sha256":(("0"*64) if corruption=="hash" else
-            hashlib.sha256(corrupt_body.encode()).hexdigest()),
+        "content_sha256":hashlib.sha256(corrupt_body.encode()).hexdigest(),
     }}
     runtime=turn_runtime(phone)
     runtime.backend_manager.current_backend.current_pcm_section_keys=lambda: tuple(stored)
@@ -1176,6 +1211,21 @@ async def test_invalid_grouped_legacy_phone_section_is_preserved(phone,corruptio
     assert raised.value.code=="phone_context_legacy_source_incomplete"
     assert tuple(stored)==(legacy_key,)
     assert not hasattr(item,"_phone_context_handoff")
+
+
+def test_live_action_snapshot_still_requires_full_fragment_content():
+    from orchestrator.phone_context_handoff import (
+        PhoneContextError, _expanded_payload, _packed_payload,
+    )
+
+    payload = _packed_payload({"fragments": [{
+        "call_id": "call", "call_epoch": 1, "provider_event_id": "event",
+        "sequence": 1, "role": "user", "text": "Allowed action",
+        "start_ms": 0, "end_ms": 10, "source": "durable_phone_transcript",
+    }]})
+    del payload["fragment_groups"][0]["fragments"][0]["text"]
+    with pytest.raises(PhoneContextError):
+        _expanded_payload(payload, source="action")
 
 
 @pytest.mark.asyncio
@@ -1204,7 +1254,10 @@ async def test_legacy_phone_section_without_exact_source_fails_safe(phone):
 
 
 @pytest.mark.asyncio
-async def test_semantic_phone_section_without_complete_source_fails_safe(phone):
+@pytest.mark.parametrize("legacy_budget", [0, 100_000])
+@pytest.mark.parametrize("new_format", [False, True])
+async def test_semantic_phone_section_without_complete_source_fails_safe(phone, monkeypatch, legacy_budget, new_format):
+    monkeypatch.setattr("orchestrator.phone_context_handoff.LEGACY_SNAPSHOT_CANDIDATE_LIMIT", legacy_budget)
     from orchestrator.phone_context_handoff import (
         PhoneContextError,_fragment_digest,_fragments,_semantic_transcript,prepare_turn,
     )
@@ -1232,6 +1285,8 @@ async def test_semantic_phone_section_without_complete_source_fails_safe(phone):
         "text":_semantic_transcript(expected),"authority":"history","protected":False,
         "metadata":{"sequence":available[0]["sequence"]},
     }
+    if new_format:
+        semantic_section["metadata"]["phone_source_last_sequence"] = missing["sequence"]
     runtime=turn_runtime(phone)
     runtime.backend_manager.current_backend.current_pcm_section_keys=lambda: (semantic_key,)
     runtime.backend_manager.current_backend.current_pcm_sections=lambda _keys: {
@@ -1245,7 +1300,8 @@ async def test_semantic_phone_section_without_complete_source_fails_safe(phone):
 
 
 @pytest.mark.asyncio
-async def test_verified_semantic_phone_section_migrates_to_dialogue_units(phone):
+@pytest.mark.parametrize("display_change", ["unchanged", "spaces", "punctuation", "reworded"])
+async def test_verified_semantic_phone_section_migrates_to_dialogue_units(phone, display_change):
     from orchestrator.phone_context_handoff import (
         _fragments,_ordinary_history_section,prepare_turn,
     )
@@ -1254,7 +1310,7 @@ async def test_verified_semantic_phone_section_migrates_to_dialogue_units(phone)
         Fragment("old-u1","user","Only use test.",0,20),
         Fragment("old-a1","assistant","Understood.",30,50),
         Fragment("old-u2","user","Inspect status.",60,80),
-        Fragment("old-a2","assistant","Status inspected.",90,110),
+        Fragment("old-a2","assistant","Status inspected.  ",90,110),
     ):
         await phone.manager.append_fragment_once(phone.binding,fragment)
     with phone.store._lock,phone.store._connection() as connection:
@@ -1267,11 +1323,17 @@ async def test_verified_semantic_phone_section_migrates_to_dialogue_units(phone)
             call_id=phone.call_id,call_epoch=1,ended_only=True)
     title,text_value,metadata=_ordinary_history_section(fragments)
     semantic_key=metadata["key"]
+    old_display = {
+        "unchanged": text_value,
+        "spaces": text_value.rstrip(),
+        "punctuation": text_value.rstrip() + "!!",
+        "reworded": "A previous rendering of the same phone events.",
+    }[display_change]
     runtime=turn_runtime(phone)
     runtime.backend_manager.current_backend.current_pcm_section_keys=lambda: (semantic_key,)
     runtime.backend_manager.current_backend.current_pcm_sections=lambda _keys: {
         semantic_key:{
-            "key":semantic_key,"title":title,"text":text_value,
+            "key":semantic_key,"title":title,"text":old_display,
             "authority":"history","protected":False,
             "metadata":{"sequence":metadata["sequence"]},
         }
@@ -1284,6 +1346,80 @@ async def test_verified_semantic_phone_section_migrates_to_dialogue_units(phone)
     assert semantic_key in audit["removed_section_keys"]
     assert "Only use test." in sections[0][1]
     assert "Inspect status." in sections[1][1]
+
+
+@pytest.mark.asyncio
+async def test_changed_phone_projection_migrates_into_real_her_prompt_once(phone, tmp_path):
+    from adapters.her_v2 import HERv2Adapter
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from orchestrator.phone_context_handoff import (
+        _fragments, _ordinary_history_section, commit_success, prepare_turn,
+    )
+
+    for fragment in (
+        Fragment("old-user-1", "user", "Use only the test environment.", 0, 20),
+        Fragment("old-answer-1", "assistant", "Understood.", 30, 50),
+        Fragment("old-user-2", "user", "Check the status.", 60, 80),
+        Fragment("old-answer-2", "assistant", "Status checked.  ", 90, 110),
+    ):
+        await phone.manager.append_fragment_once(phone.binding, fragment)
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute(
+            "UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",
+            (phone.call_id,),
+        )
+        fragments = _fragments(
+            connection, owner_id=phone.owner_id, agent_id=phone.agent_id,
+            session_id=phone.session_id, context_generation=1, ended_only=True,
+        )
+
+    title, body, metadata = _ordinary_history_section(fragments)
+    assert metadata["phone_source_last_sequence"] == max(row["sequence"] for row in fragments)
+    old_key = metadata["key"]
+    coordinator = HerBackendSessionCoordinator(tmp_path / "her-state")
+    (tmp_path / "pcm").mkdir()
+    assembler = BridgeContextAssembler(BridgeMemoryStore(tmp_path / "pcm"), None)
+
+    def transport(item, sections, removed=()):
+        payload = assembler.build_prompt_payload(
+            "Current question", "her-v2", extra_sections=sections, incremental=True,
+        )
+        encoded, _ = coordinator.prepare_transport(
+            session_id="her-phone", sections=payload["transport_snapshot"]["sections"],
+            resources=[], user_message="Current question", request_id=item.request_id,
+            message_id=item.request_id, instance_id="HASHI", agent_id=phone.agent_id,
+            owner_id=phone.owner_id, hashi_conversation_id=phone.session_id,
+            context_generation=1, workzone_identity="test", removed_section_keys=removed,
+        )
+        return coordinator.accept(encoded)
+
+    seed = transport(turn_item(phone, "projection-seed"), [(title, body.rstrip() + "!!", metadata)])
+    coordinator.complete(seed, assistant_text="Seeded.")
+    adapter = HERv2Adapter.__new__(HERv2Adapter)
+    adapter._session_coordinator = coordinator
+    adapter._session_id = "her-phone"
+    persisted = adapter.current_pcm_sections((old_key,))[old_key]
+    assert persisted["metadata"]["phone_source_last_sequence"] == metadata["phone_source_last_sequence"]
+    runtime = turn_runtime(phone)
+    runtime.config.active_backend = "her-v2"
+    backend = runtime.backend_manager.current_backend
+    backend._session_id = "her-phone"
+    backend.current_pcm_section_keys = adapter.current_pcm_section_keys
+    backend.current_pcm_sections = adapter.current_pcm_sections
+
+    item = turn_item(phone, "projection-migration")
+    sections, audit = prepare_turn(runtime, item, incremental=True)
+    accepted = transport(item, sections, audit["removed_section_keys"])
+    assert old_key in audit["removed_section_keys"]
+    assert accepted.materialized_prompt.count("Use only the test environment.") == 1
+    assert accepted.materialized_prompt.count("Check the status.") == 1
+    assert "Status checked.!!" not in accepted.materialized_prompt
+    assert "Current question" in accepted.materialized_prompt
+    coordinator.complete(accepted, assistant_text="Done.")
+    commit_success(item, SimpleNamespace(is_success=True))
+    later_sections, _ = prepare_turn(runtime, turn_item(phone, "projection-later"), incremental=True)
+    assert later_sections == []
 
 
 @pytest.mark.asyncio
@@ -1473,6 +1609,26 @@ def test_semantic_v2_spans_units_outside_arrival_extrema():
     }
 
     assert _semantic_source_matches(key, section, source)
+
+
+@pytest.mark.parametrize("metadata", [{}, {"sequence": 999}])
+def test_semantic_source_identity_does_not_depend_on_projection_sequence(metadata):
+    from orchestrator.phone_context_handoff import (
+        _fragment_digest, _semantic_source_matches,
+    )
+
+    fragments = [{
+        "call_id": "metadata-call", "call_epoch": 1,
+        "provider_event_id": f"event-{index}", "sequence": index + 1,
+        "role": "user" if index % 2 == 0 else "assistant",
+        "text": f"event {index}", "start_ms": index * 10, "end_ms": index * 10 + 5,
+        "source": "durable_phone_transcript",
+    } for index in range(8)]
+    source = fragments[2:6]
+    key = f"recent_exchange:phone:{_fragment_digest(source)}"
+    section = {"text": "An older rendering.", "metadata": metadata}
+
+    assert _semantic_source_matches(key, section, fragments)
 
 
 

@@ -1884,6 +1884,7 @@ class _CognitiveControlToolRegistry:
         if not question_id or state not in {
             "pending",
             "answered",
+            "stopping",
             "consumed",
             "expired",
             "cancelled",
@@ -1897,6 +1898,13 @@ class _CognitiveControlToolRegistry:
         }
         if question.get("resolution_reason"):
             result["resolution_reason"] = question["resolution_reason"]
+            if question["resolution_reason"] == "question_cards_disabled":
+                from orchestrator.run_questions import QUESTION_DISABLED_INSTRUCTION
+                result["instruction"] = QUESTION_DISABLED_INSTRUCTION
+                result["question"] = str(question.get("question") or "")
+            elif question["resolution_reason"] == "user_continue":
+                from orchestrator.run_questions import QUESTION_CONTINUE_INSTRUCTION
+                result["instruction"] = QUESTION_CONTINUE_INSTRUCTION
         return result
 
     def _observe_run_question_result(self, name: str, result: Any) -> dict[str, Any] | None:
@@ -1908,7 +1916,7 @@ class _CognitiveControlToolRegistry:
         if question is None:
             return None
         question_id = question["question_id"]
-        if question["state"] in {"pending", "answered"}:
+        if question["state"] in {"pending", "answered", "stopping"}:
             self._pending_run_questions[question_id] = question
         else:
             self._pending_run_questions.pop(question_id, None)
@@ -1983,6 +1991,7 @@ class _CognitiveControlToolRegistry:
             if question is not None and question["state"] not in {
                 "pending",
                 "answered",
+                "stopping",
             }:
                 resolved.append(question)
 
@@ -2001,6 +2010,7 @@ class _CognitiveControlToolRegistry:
             if question is not None and question["state"] not in {
                 "pending",
                 "answered",
+                "stopping",
             }:
                 resolved.append(question)
 

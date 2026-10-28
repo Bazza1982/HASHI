@@ -4,6 +4,20 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "askme.title": "Ask me",
+    "askme.instance": "HASHI: {state}",
+    "askme.agent": "This agent: {state}",
+    "askme.effective": "Question cards: {state}",
+    "askme.scope": "Changes are immediate and saved. When off, ask in ordinary text.",
+    "askme.agent_on": "Enable this agent",
+    "askme.agent_off": "Disable this agent",
+    "askme.instance_on": "Enable HASHI",
+    "askme.instance_off": "Disable HASHI",
+    "askme.usage": "Use /askme [on|off|global on|global off].",
+    "askme.error": "Question settings are unavailable.",
+    "askme.continue": "Continue original task",
+    "askme.stop": "🛑 Stop immediately",
+    "askme.stop_unconfirmed": "Stop is not confirmed. Submit Stop again or use /stop.",
     "call.title": "Call settings",
     "call.companion_modes": "With AgentPresence: /call uses VideoTTS video; /phone uses audio and the companion steps away.",
     "call.video_unavailable": "Video call unavailable. Use /phone for an audio call.",
@@ -2818,6 +2832,7 @@
     "ingress_confirmation.identity_mismatch": "This confirmation does not belong to this chat or message."
   },
   "commands": {
+    "askme": "Control question cards",
     "help": "Show help menu",
     "start": "Start another stopped agent",
     "status": "View agent status",

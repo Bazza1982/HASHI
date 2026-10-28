@@ -937,6 +937,10 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/system-prompts/{slot}/delete-if-unchanged",
+            self.handle_agent_sys_prompt_conditional_delete,
+        )
         self.app.router.add_patch(
             "/api/agents/{name}/metadata", self.handle_agent_metadata
         )
@@ -1027,6 +1031,10 @@ class WorkbenchApiServer:
             "/api/agents/{name}/scheduler/jobs/{job_id}",
             self.handle_agent_scheduler_delete,
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/scheduler/jobs/{job_id}/delete-if-unchanged",
+            self.handle_agent_scheduler_conditional_delete,
+        )
         self.app.router.add_get(
             "/api/agents/{name}/scheduler/status",
             self.handle_agent_scheduler_status,
@@ -1115,7 +1123,7 @@ class WorkbenchApiServer:
     def _strict_authenticated_owner(self, request):
         if self._is_governed_profile():
             return self._v1_owner_id(request)
-        if not self.admin_token or not self._check_admin_auth(request):
+        if not getattr(self, "admin_token", "") or not self._check_admin_auth(request):
             return None
         return self._v1_owner_id(request)
 
@@ -1176,12 +1184,33 @@ class WorkbenchApiServer:
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
         except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
 
+    def _question_for_display(self, question, owner, *, stop_complete=False):
+        from orchestrator import ui_language
+        runtime = self._runtime_map().get(str(question.get('agent_id') or '').casefold())
+        if runtime is not None and getattr(runtime, 'global_config', None) is not None:
+            locale = ui_language.preferred_locale(runtime, actor_id=owner)
+        else:
+            locale = ui_language.normalize_locale(getattr(self.global_config, 'ui_language', None))
+        keys = {'continue': 'askme.continue', 'stop': 'askme.stop'}
+        options = [
+            {**option, 'label': ui_language.tr(keys[option['system_action']], locale=locale)}
+            if option.get('system_action') in keys else option
+            for option in question.get('options', [])
+        ]
+        if (not stop_complete and question.get('state') == 'answered'
+                and (question.get('answer') or {}).get('system_action') == 'stop'):
+            return {**question, 'state': 'pending', 'answer': None, 'allow_free_text': False,
+                    'question': ui_language.tr('askme.stop_unconfirmed', locale=locale),
+                    'options': [option for option in options if option.get('system_action') == 'stop']}
+        return {**question, 'options': options}
+
     async def handle_session_questions(self, request):
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
         if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
         try:
             result=self._questions().list(session_id=str(request.match_info['session_id']),owner_id=owner)
+            result=[self._question_for_display(question, owner) for question in result]
             return web.json_response({'ok':True,'questions':result},headers={'Cache-Control':'no-store'})
         except QuestionError as exc:return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
@@ -1195,6 +1224,20 @@ class WorkbenchApiServer:
             if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
             question=self._questions().answer(session_id=str(request.match_info['session_id']),owner_id=owner,
                 question_id=str(request.match_info['question_id']),payload=body)
+            if (question.get('answer') or {}).get('system_action') == 'stop':
+                runtime = self._runtime_map().get(str(question['agent_id']).casefold())
+                if runtime is None:
+                    return web.json_response({'ok': False, 'error_code': 'question_stop_unavailable'}, status=503)
+                result = await execute_local_command(
+                    runtime, '/stop', source_channel='workbench_api',
+                    session_metadata={'_hashi_owner_id': owner, 'session_id': question['session_id'],
+                                      '_hashi_question_stop_id': question['question_id'],
+                                      'connector_id': 'backend_api',
+                                      'fc_compatibility_adapter_id': 'backend_api.agent_command'},
+                )
+                if not result.get('ok') or not (result.get('result') or {}).get('ok'):
+                    return web.json_response({'ok': False, 'error_code': 'question_stop_unconfirmed'}, status=503)
+            question = self._question_for_display(question, owner, stop_complete=True)
             return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
         except QuestionError as exc:return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
@@ -5640,6 +5683,90 @@ class WorkbenchApiServer:
             status=int(outcome.get("status", 200)),
         )
 
+    def _can_view_deletion_revision(self, request, agent_name: str) -> bool:
+        """Only an authenticated owner with Agent visibility receives a revision."""
+        if self._strict_authenticated_owner(request) is None:
+            return False
+        if not self._is_governed_profile():
+            return True
+        user = self._enterprise_user_from_request(request)
+        rows = self._filter_enterprise_agent_rows_for_user(user, self._load_agent_rows())
+        return any(str(row.get("name") or "") == agent_name for row in rows)
+
+    def _guard_agent_management_access(self, request, agent_name: str):
+        """Require real credentials, Agent visibility, and governed management rights."""
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        if not self._can_view_deletion_revision(request, agent_name):
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            memberships = self.identity_service.list_project_memberships(user_id=user.id)
+            rows = self._load_agent_rows()
+            target = next((row for row in rows if str(row.get("name") or "") == agent_name), None)
+            projects = agent_project_ids(target)
+            can_manage = any(
+                row.get("role") == EnterpriseRole.ORG_ADMIN.value
+                or (row.get("role") == EnterpriseRole.TEAM_ADMIN.value
+                    and str(row.get("project_id") or "") in projects)
+                for row in memberships
+            )
+            if not can_manage:
+                return web.json_response({"ok": False, "error": "management access required"}, status=403)
+        return None
+
+    async def handle_agent_sys_prompt_conditional_delete(self, request):
+        """Clear a local PCM slot only if it still matches the confirmed view."""
+        from orchestrator.bridge_memory import (
+            SysPromptManager, SysPromptSemanticConflict, sys_prompt_deletion_revision,
+        )
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        revision = payload.get("expected_revision")
+        if slot not in {str(index) for index in range(1, 11)} or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+            return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
+        manager = getattr(runtime, "sys_prompt_manager", None)
+        if manager is None:
+            # Shared Function workers use a runtime facade; resolve the same
+            # workspace used by the overview and the canonical PCM store.
+            row = next((item for item in self._load_agent_rows()
+                        if item.get("name") == agent_name), None)
+            if row is None:
+                return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            metadata = self._metadata_for_agent(row, runtime)
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error": "local system prompts unavailable"}, status=503)
+            manager = SysPromptManager(Path(workspace))
+        if getattr(manager, "scope", None) != "local" or getattr(manager, "shared", False):
+            return web.json_response({"ok": False, "error": "local system prompts unavailable"}, status=503)
+        try:
+            before = manager.get_slot(slot)
+            canonical_agent = str(getattr(runtime, "name", agent_name))
+            if not before.get("text") or sys_prompt_deletion_revision(
+                slot, before, agent_name=canonical_agent,
+            ) != revision:
+                return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+            manager.delete(slot, expected_slot=before)
+        except (SysPromptSemanticConflict, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        return web.json_response({"ok": True, "agent": canonical_agent, "slot": slot})
+
     async def handle_agent_overview(self, request):
         name = str(request.match_info.get("name") or "").strip()
         runtime_map = self._runtime_map()
@@ -5674,6 +5801,9 @@ class WorkbenchApiServer:
             runtime=runtime,
             desired_workzone_state=desired_workzone_state,
         )
+        if not self._can_view_deletion_revision(request, name):
+            for slot in overview.get("system_prompts", {}).get("slots", []):
+                slot.pop("deletion_revision", None)
         response = web.json_response({"ok": True, "overview": overview})
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -13131,8 +13261,9 @@ class WorkbenchApiServer:
             return value.strip()
         return None
 
-    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict) -> dict:
+    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict, request=None) -> dict:
         from orchestrator.her_v2.request_policy import job_effort_policy
+        from orchestrator.skill_manager import scheduler_job_deletion_revision
 
         task_id = str(job.get("id") or "")
         scheduler = self._task_scheduler()
@@ -13188,6 +13319,9 @@ class WorkbenchApiServer:
             "job_id": task_id,
             "enabled": bool(job.get("enabled", False)),
             "job": dict(job),
+            **({"deletion_revision": scheduler_job_deletion_revision(job)}
+               if request is not None and self._can_view_deletion_revision(request, agent_name)
+               else {}),
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
@@ -13232,6 +13366,7 @@ class WorkbenchApiServer:
                         agent_name=agent_name,
                         kind=job_kind,
                         job=job,
+                        request=request,
                     )
                 )
         return web.json_response(
@@ -13428,7 +13563,7 @@ class WorkbenchApiServer:
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
             },
             status=201,
         )
@@ -13482,41 +13617,56 @@ class WorkbenchApiServer:
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
             }
         )
 
-    async def handle_agent_scheduler_delete(self, request):
-        """Delete one owned scheduler task after exact user authorization."""
+    async def handle_agent_scheduler_conditional_delete(self, request):
+        """Delete exactly one confirmed Scheduler definition, without stale writes."""
+        from orchestrator.skill_manager import SchedulerJobChanged
 
-        agent_name = request.match_info.get("name")
-        job_id = str(request.match_info.get("job_id") or "").strip()
-        runtime = self._runtime_map().get(agent_name)
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
         if runtime is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         try:
             payload = await request.json()
         except Exception:
             payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if payload.get("authorization") != "explicit_user_authorization":
-            return web.json_response({"ok": False, "error": "explicit task deletion authorization is required"}, status=403)
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
         kind = str(payload.get("kind") or "").strip().lower()
-        if kind not in {"cron", "heartbeat", "nudge"}:
-            return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)
-        skill_manager = getattr(runtime, "skill_manager", None)
-        if skill_manager is None:
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        revision = payload.get("expected_revision")
+        only_disabled = payload.get("only_disabled", False)
+        if (kind not in {"cron", "heartbeat", "nudge"} or not self._scheduler_task_id_valid(job_id)
+                or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)
+                or type(only_disabled) is not bool):
+            return web.json_response({"ok": False, "error": "invalid task confirmation"}, status=400)
+        manager = getattr(runtime, "skill_manager", None)
+        if manager is None:
             return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
         try:
-            ok, message = skill_manager.delete_owned_job(kind, job_id, agent_name=agent_name)
-        except (ConfigConflictError, ConfigDurabilityError) as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+            ok, message = manager.delete_owned_job_if_unchanged(
+                kind, job_id, agent_name=str(getattr(runtime, "name", agent_name)),
+                expected_revision=revision, only_disabled=only_disabled,
+            )
+        except (SchedulerJobChanged, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
         if not ok:
             return web.json_response({"ok": False, "error": message}, status=404)
-        return web.json_response(
-            {"ok": True, "authority": "HASHI Scheduler", "agent": agent_name, "kind": kind, "job_id": job_id}
-        )
+        return web.json_response({"ok": True, "agent": agent_name, "kind": kind, "job_id": job_id})
+
+    async def handle_agent_scheduler_delete(self, request):
+        """The legacy route has the same authentication and revision guarantees."""
+        return await self.handle_agent_scheduler_conditional_delete(request)
 
     async def handle_agent_scheduler_status(self, request):
         """Return one authoritative job definition and persisted scheduler state."""
@@ -13556,6 +13706,7 @@ class WorkbenchApiServer:
                     agent_name=agent_name,
                     kind=kind,
                     job=job,
+                    request=request,
                 ),
             }
         )

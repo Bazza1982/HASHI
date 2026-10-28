@@ -5,13 +5,18 @@ from __future__ import annotations
 def question_blocks(question):
     qid = question['question_id']
     blocks = [{'type': 'text', 'format': 'plain', 'text': question['question']}]
-    for index, choice in enumerate(question.get('options', [])):
+    choices = list(question.get('options', []))
+    if not any(choice.get('system_action') for choice in choices):
+        from orchestrator.run_questions import system_question_options
+        choices.extend(system_question_options(choices))
+    for index, choice in enumerate(choices):
         if choice.get('description'):
             blocks.append({'type': 'text', 'format': 'plain',
                            'text': f"{choice['label']}: {choice['description']}"})
         blocks.append({'type': 'action', 'action_id': f'{qid}:{index}', 'label': choice['label'],
                        'style': 'secondary', 'payload': {'kind': 'run_question_answer',
-                       'question_id': qid, 'option_id': choice['id'], 'index': index}})
+                       'question_id': qid, 'option_id': choice['id'], 'index': index,
+                       'system_action': choice.get('system_action')}})
     if question.get('allow_free_text'):
         blocks.append({'type': 'action', 'action_id': f'{qid}:text', 'label': 'Write an answer',
                        'style': 'secondary', 'payload': {'kind': 'run_question_text', 'question_id': qid}})
@@ -45,8 +50,12 @@ def telegram_button(block, locale):
     payload = block.get('payload') or {}
     qid = payload['question_id']
     free = payload['kind'] == 'run_question_text'
-    return InlineKeyboardButton(question_text(locale)['write'] if free else block['label'],
-                                callback_data=f"rq:{qid}:{'text' if free else payload['index']}")
+    from orchestrator import ui_language
+    system_keys = {'continue': 'askme.continue', 'stop': 'askme.stop'}
+    label = (question_text(locale)['write'] if free else
+             ui_language.tr(system_keys[payload['system_action']], locale=locale)
+             if payload.get('system_action') in system_keys else block['label'])
+    return InlineKeyboardButton(label, callback_data=f"rq:{qid}:{'text' if free else payload['index']}")
 
 
 class QuestionRenditions:
@@ -77,7 +86,7 @@ class QuestionRenditions:
             connection.execute(
                 "INSERT INTO frontend_question_renditions VALUES(?,?,?,?,?) "
                 "ON CONFLICT(question_id,endpoint_id,transport_message_id) DO NOTHING",
-                (question_id, endpoint_id, str(chat_id), str(transport_message_id), "pending"))
+                (question_id, endpoint_id, str(chat_id), str(transport_message_id), "pending_v2"))
 
     def resolve(self, *, agent_id, chat_id, transport_message_id):
         with self.store._lock, self.store._connection() as connection:
@@ -98,8 +107,9 @@ class QuestionRenditions:
                 "SELECT q.*,f.endpoint_id,f.chat_id,f.transport_message_id "
                 "FROM frontend_question_renditions f "
                 "JOIN run_questions q ON q.question_id=f.question_id "
-                "WHERE q.instance_id=? AND q.agent_id=? AND q.state!='pending' "
-                "AND f.presentation_state!=q.state AND f.presentation_state!='unavailable' "
+                "WHERE q.instance_id=? AND q.agent_id=? AND f.presentation_state!='unavailable' "
+                "AND ((q.state='pending' AND f.presentation_state='pending') OR "
+                "(q.state!='pending' AND f.presentation_state!=q.state)) "
                 "ORDER BY q.created_at LIMIT ?",
                 (self.store.instance_id, str(agent_id).lower(), limit)).fetchall()
             return [{**service._public(row), **{key: row[key] for key in
@@ -110,7 +120,8 @@ class QuestionRenditions:
             connection.execute(
                 "UPDATE frontend_question_renditions SET presentation_state=? "
                 "WHERE question_id=? AND endpoint_id=? AND transport_message_id=?",
-                ("unavailable" if unavailable else question["state"],
+                ("unavailable" if unavailable else
+                 "pending_v2" if question["state"] == "pending" else question["state"],
                  question["question_id"], question["endpoint_id"],
                  question["transport_message_id"]))
 
@@ -133,13 +144,28 @@ async def refresh_telegram_question_renditions(runtime, store):
     from telegram.error import BadRequest, Forbidden
 
     renditions = QuestionRenditions(store)
-    ui = question_text(ui_language.preferred_locale(runtime))
+    locale = ui_language.preferred_locale(runtime)
+    ui = question_text(locale)
     for question in renditions.pending_updates(agent_id=runtime.name):
         state = question["state"]
-        label = ui["saved"] if state in {"answered", "consumed"} else ui.get(state, ui["closed"])
-        text = html.escape(label) + "\n\n" + html.escape(question["question"])
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-            label, callback_data=f"rq:{question['question_id']}:text")]])
+        stop_unconfirmed = (state == "answered" and
+                            (question.get("answer") or {}).get("system_action") == "stop")
+        if state == "pending":
+            blocks = question_blocks(question)
+            text = "\n".join(html.escape(block["text"]) for block in blocks if block["type"] == "text")
+            markup = InlineKeyboardMarkup([[telegram_button(block, locale)]
+                                           for block in blocks if block["type"] == "action"])
+        elif stop_unconfirmed:
+            blocks = question_blocks(question)
+            stop = next(block for block in blocks if block.get("type") == "action"
+                        and (block.get("payload") or {}).get("system_action") == "stop")
+            text = html.escape(ui_language.tr("askme.stop_unconfirmed", locale=locale))
+            markup = InlineKeyboardMarkup([[telegram_button(stop, locale)]])
+        else:
+            label = ui["saved"] if state in {"answered", "consumed"} else ui.get(state, ui["closed"])
+            text = html.escape(label) + "\n\n" + html.escape(question["question"])
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                label, callback_data=f"rq:{question['question_id']}:text")]])
         try:
             await runtime.app.bot.edit_message_text(
                 chat_id=int(question["chat_id"]), message_id=int(question["transport_message_id"]),
