@@ -445,7 +445,7 @@ def _identity_interval_matches(
     first_arrival: int | None = None,
     last_arrival: int | None = None,
     candidate_budget: list[int] | None = None,
-) -> bool:
+) -> bool | None:
     # A candidate snapshot must include both of its arrival extrema.  Locate
     # their units first instead of hashing every interval that cannot contain
     # them.  Repeated sequence values are handled as separate possible anchors.
@@ -491,7 +491,7 @@ def _identity_interval_matches(
         for upper in range(earliest_end, len(units)):
             if candidate_budget is not None:
                 if candidate_budget[0] <= 0:
-                    return False
+                    return None
                 candidate_budget[0] -= 1
             if upper != earliest_end:
                 digest.update(b",")
@@ -507,7 +507,9 @@ def _semantic_source_matches(
     section_key: str,
     section: Mapping[str, Any],
     replacement_fragments: list[dict[str, Any]],
-) -> bool:
+    *,
+    candidate_budget: list[int] | None = None,
+) -> bool | None:
     target_digest = section_key.removeprefix(SEMANTIC_SECTION_PREFIX)
     if len(target_digest) != 24 or any(
         character not in "0123456789abcdef" for character in target_digest
@@ -591,7 +593,8 @@ def _semantic_source_matches(
     # active at that high-water may now appear between completed history units.
     # Rebuild aligned dialogue-unit intervals using only event identities.
     # Text is a derived projection and can differ after formatting or correction.
-    candidate_budget = [LEGACY_SNAPSHOT_CANDIDATE_LIMIT]
+    if candidate_budget is None:
+        candidate_budget = [LEGACY_SNAPSHOT_CANDIDATE_LIMIT]
     for last_arrival in arrivals:
         eligible = [
             row
@@ -599,15 +602,17 @@ def _semantic_source_matches(
             if first_arrival <= int(row["sequence"]) <= last_arrival
         ]
         units = _history_units(eligible)
-        if _identity_interval_matches(
+        if len(units) <= 1:
+            # This entire snapshot was already checked above.
+            continue
+        matched = _identity_interval_matches(
             units, target_digest, encoded_identities,
             first_arrival=first_arrival, last_arrival=last_arrival,
             candidate_budget=candidate_budget,
-        ):
-            return True
-        if candidate_budget[0] <= 0:
-            # No match was verified: keep the old section rather than delete it.
-            return False
+        )
+        if matched is not False:
+            # None means the search stopped, not that its source is missing.
+            return matched
     return False
 
 
@@ -615,15 +620,27 @@ def _validate_semantic_sources(
     sections: Mapping[str, Mapping[str, Any]],
     semantic_section_keys: list[str],
     replacement_fragments: list[dict[str, Any]],
-) -> None:
+) -> list[str]:
+    retained: list[str] = []
+    candidate_budget = [LEGACY_SNAPSHOT_CANDIDATE_LIMIT]
     for section_key in semantic_section_keys:
         section = sections.get(section_key)
-        if section is None or not _semantic_source_matches(
-            section_key, section, replacement_fragments
-        ):
+        matched = (
+            _semantic_source_matches(
+                section_key, section, replacement_fragments,
+                candidate_budget=candidate_budget,
+            )
+            if section is not None else False
+        )
+        if matched is None:
+            # Keep the existing PCM section; incomplete search is not a
+            # verified reason to delete history or reject an ordinary turn.
+            retained.append(section_key)
+        elif not matched:
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
+    return retained
 
 
 def _semantic_transcript(fragments: list[dict[str, Any]]) -> str:
@@ -1014,12 +1031,14 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
         agent_id=runtime.name,
         context_generation=generation,
     )
-    _validate_semantic_sources(
+    retained_semantic_keys = _validate_semantic_sources(
         migration_sections, semantic_migration_keys, replacement_fragments
     )
 
     migration_removals = (
-        [*legacy_section_keys,*semantic_section_keys] if migrate_history else []
+        [*legacy_section_keys, *(key for key in semantic_section_keys
+                                if key not in retained_semantic_keys)]
+        if migrate_history else []
     )
     audit={
         "schema":"hashi.phone-context-handoff.v1",
@@ -1042,6 +1061,7 @@ def prepare_turn(runtime, item, *, incremental: bool) -> tuple[list[tuple],dict[
             [row["provider_event_id"] for row in history_fragments]
             if live and migrate_history else []
         ),
+        "retained_section_keys":retained_semantic_keys,
         "removed_section_keys":(
             migration_removals
             if live else [

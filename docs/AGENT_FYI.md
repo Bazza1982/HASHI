@@ -162,8 +162,8 @@ raw metadata and bounded PCM/Conversation/job evidence, not scheduled prompts;
 lookups create no Run. Action snapshots/constraints survive reconnection with
 epoch-scoped authority; after checks, handoff freezes ID and ordered snapshot
 without authority. Hang-up restores history. Bounded cleanup verifies event IDs,
-not display text; unverified sources stay intact. PCM stores arrival bounds.
-HERV3 orders Phone/typed Turns by time, skips unused fixed history. Functions
+not display text; exhausted search keeps prior context and allows the turn.
+PCM stores arrival bounds; HERV3 orders Turns by time, skips unused history. Functions
 own settings; open when ready.
 Failed PCM refresh allows only stop/inspect; Session fence/hang-up win. Preserve
 failure cause; resume at most five times, never retry uncertain writes. Verify

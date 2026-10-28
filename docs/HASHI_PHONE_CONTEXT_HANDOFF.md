@@ -81,13 +81,16 @@ block a request when the source identities are complete and can be verified.
 New semantic sections retain the first and last arrival sequence in their PCM
 metadata. Verification uses those exact bounds and the event-identity digest;
 arrival sequence never determines transcript chronology or a typed Message ordinal.
-For older sections without the last bound, the search checks complete snapshots
-and intervals, then stops after 100,000 candidate digests. If verification fails
-or this bound is exhausted, the section is retained and the request reports
-incomplete source; it is never silently removed. The user has stated that earlier
-Phone data was test data and legacy migration is not required. A very unusual
-complete legacy section can therefore need a fresh context rather than automatic
-migration. Verified source is rebuilt as ordinary semantic
+For older sections without the last bound, direct identity and whole-snapshot
+checks run first. The high-water interval fallback shares a 100,000-candidate
+budget per turn. A completed search
+that cannot verify its source still reports incomplete source and preserves the
+old section. Budget exhaustion is an unresolved lookup, not proof of missing
+source: preserve that section without a tombstone and continue the turn with the
+scoped durable history. The audit lists these `retained_section_keys`. Successful
+Provider completion checkpoints the delivered durable events; later turns use
+that consumption ledger instead of repeating the legacy search. Frozen action
+scope and authorization checks remain strict. Verified source is rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing
