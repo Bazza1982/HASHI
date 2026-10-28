@@ -60,6 +60,13 @@ def _channel(value: Any, *, fallback: str = "default") -> str:
     return normalized
 
 
+def _telegram_channel(value: Any) -> str | None:
+    """Return a usable Telegram channel, keeping an unresolved zero fail-closed."""
+
+    normalized = _channel(value, fallback="")
+    return normalized if normalized and normalized != "0" else None
+
+
 def _destination(surface: Any, channel_key: Any) -> dict[str, str]:
     return {
         "surface": _surface(surface),
@@ -143,20 +150,27 @@ def freeze_run_delivery_route(
     resolved_surface = _surface(session_surface)
     resolved_channel = _channel(session_channel_key)
     primary_channel = _channel(primary_channel_key, fallback=resolved_channel)
-    telegram_channel = _channel(chat_id)
+    telegram_channel = _telegram_channel(chat_id)
 
     if source_id == "telegram":
-        primary = _destination("telegram", telegram_channel)
+        primary = (
+            _destination("telegram", telegram_channel)
+            if telegram_channel is not None
+            else None
+        )
     elif source_id == "tui":
         primary = _destination("tui", primary_channel)
     elif source_id == "whatsapp":
         primary = _destination("whatsapp", primary_channel)
     elif source_id == "hchat" and terminal_exchange:
-        primary = (
-            _destination("telegram", telegram_channel)
-            if telegram_requested
-            else _destination(resolved_surface, resolved_channel)
-        )
+        if telegram_requested:
+            primary = (
+                _destination("telegram", telegram_channel)
+                if telegram_channel is not None
+                else None
+            )
+        else:
+            primary = _destination(resolved_surface, resolved_channel)
     elif source_id == "hchat":
         # HChat is the message semantic.  The authenticated transport remains
         # its own Connector so Remote and Exchange can use separate adapters,
@@ -170,7 +184,7 @@ def freeze_run_delivery_route(
     elif source_id == "hashi.internal":
         primary = (
             _destination("telegram", telegram_channel)
-            if telegram_requested
+            if telegram_requested and telegram_channel is not None
             else None
         )
     else:
@@ -189,6 +203,7 @@ def freeze_run_delivery_route(
     primary_surface = primary["surface"] if primary is not None else ""
     if (
         telegram_requested
+        and telegram_channel is not None
         and primary_surface != "telegram"
         and not terminal_exchange
     ):

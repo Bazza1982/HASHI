@@ -2,10 +2,9 @@
 
 Current decisions, with full rationale in the linked owners:
 
-- Confirmed task and local /sys deletion rechecks the exact snapshot at the
-  canonical writer; changed content and newly enabled tasks survive. Global and
-  permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md#confirmed-scheduler-deletion-2026-10-28)
-  and [PCM](HASHI_PCM_SYSTEM_DESIGN.md#dynamic-system-prompts).
+- Confirmed task/local /sys deletion rechecks the snapshot; changed or reenabled
+  items survive. Global/permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md)
+  and [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
@@ -13,9 +12,9 @@ Current decisions, with full rationale in the linked owners:
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md) and [HERV3](HERV3_UPGRADE.md#completed-tool-checkpoint-provider-call-continuation).
 - PAO strips internal control envelopes before judging deliverability. A result
   containing only Memory+ state fails terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
-  state and evidence; only explicit cancellation, safety, transport, Provider and
-  single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- HERV3 has no artificial whole-run size/time/call ceiling. Keep full state and
+  evidence; explicit cancellation, safety, transport, Provider and single-Tool
+  limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Agent Move qualifies mutable state at staging, becomes forward-only after
   confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
 - Image fallback is selected model, same-Provider visual model, then LAN Compute;
@@ -37,10 +36,10 @@ bump, label and independent review; flags grant nothing.
 
 Source, Worker adoption and delivery need separate proof. Tools cannot edit/kill
 Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
-Worker; `max` replaces shared Functions/Workers, never Core/Remote. Function code
-adopts only by reboot; docs do not. Workbench config preserves `AGENT_BUSY`;
-retry only before a durable receipt; durable `target_busy` stays pending. `max`
-rejects shared API/background work before and after fencing. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
+Worker; `max` replaces shared Functions/Workers, not Core/Remote. Code adopts by
+reboot, docs do not. Workbench preserves `AGENT_BUSY`; retry only before a durable
+receipt; `target_busy` stays pending. `max` rejects shared API/background work
+before and after fencing. See [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md)
 and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
@@ -50,11 +49,11 @@ and [fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-202
 Isolated speech locks, runtimes and releases need separate proof. See
 [dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
-Configuration owns identity, ports, Workzones, endpoints and models; exclude
-secrets/machine paths. Model opt-ins use `allowed_backends`/runtime effort;
-shared compatibility uses the qualified registry. Unknown capability/price is
-neither unsupported nor zero; explicit choices persist.
-HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md) without Engine grants.
+Config owns identity, ports, Workzones, endpoints/models; exclude secrets and
+machine paths. Opt-ins use `allowed_backends`/runtime effort; shared compatibility
+uses the qualified registry. Unknown capability/price is neither unsupported nor
+zero; explicit choices persist. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md)
+without Engine grants.
 
 Agent name/Emoji come from revisioned config; failed post-save refresh cannot reverse durable success.
 
@@ -87,10 +86,12 @@ Accepted non-voice attachments commit atomically to the target Agent's ignored
 `.attachments/{session}/{message}/`; only its home scope may read them and
 Session retention removes them. Safe Voice has its own lifecycle.
 
-Telegram proactive routes are owner-only and revalidate actor/egress after restart.
-`/askme` controls instance and Agent question cards; off asks in plain text.
-Cards offer original-task continuation and Agent stop. Unknown delivery never
-retries; Codex expiry preserves partial answers. See [questions](HASHI_RUN_QUESTIONS.md).
+Telegram proactive routes are owner-only; actor/egress revalidate after restart.
+Only the owner's same-ID private chat may bind. `/askme` controls instance and
+Agent cards; off asks in plain text. Cards offer original-task continuation and
+Agent stop. Question `unknown` neither cancels nor retries; Codex expiry preserves
+authenticated partial answers. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
+and [questions](HASHI_RUN_QUESTIONS.md).
 
 CURRENT MESSAGE CONTEXT separates source, assurance, authority and destination;
 only current successful private_authorization grants scope. HChat separates
@@ -141,15 +142,6 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Phone history uses dialogue-round HCC without raw metadata. Action snapshots
-survive call reconnection and preserve earlier constraints; authorization remains
-epoch-scoped. At hang-up, replace them with full ordinary history. Legacy cleanup
-validates exact source and fails closed. HERV3 orders Phone and typed Turns by
-conversation time; fixed incremental turns skip unused recent history.
-Failures preserve cause; resumes stop after five. See
-[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
-[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
-
 Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
 neither translates replies/IDs. TUI switches freeze runtime identity/state.
 Remote authenticates. Mirror opt-outs preserve origin replies; `/think` and
@@ -165,14 +157,18 @@ Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
 audio durable while hiding its duplicate generic player/bubble; ordinary audio
 stays visible. Telegram uses its renderer.
 
-Phone binds to owner's foreground Conversation. Actions get bounded PCM/Conversation/job
-evidence, no scheduled prompts; lookups create no Run. Handoff freezes ID after
-checks, keeps ordered snapshot and grants no authority. Functions own settings
-and recovery; open after readiness. Failed PCM refresh allows stop/inspect only;
-Session fence and hang-up win. Do not retry uncertain writes. Verify
-acceptance/execution/playback/listening and source/adoption/device separately. See
-[PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md), and
-[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
+Phone binds the owner's foreground Conversation. Use dialogue-round HCC without
+raw metadata and bounded PCM/Conversation/job evidence, not scheduled prompts;
+lookups create no Run. Action snapshots/constraints survive reconnection with
+epoch-scoped authority; after checks, handoff freezes ID and ordered snapshot
+without authority. Hang-up restores full history. Legacy cleanup validates source
+and fails closed; HERV3 orders Phone/typed Turns by time and skips unused history
+in fixed incremental turns. Functions own settings/recovery; open after readiness.
+Failed PCM refresh allows only stop/inspect; Session fence/hang-up win. Preserve
+failure cause; resume at most five times, never retry uncertain writes. Verify
+acceptance/execution/playback/listening and source/adoption/device separately.
+See [PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
+[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
 and remain owner-admitted during active Runs. `/new` preserves history; PAO owns
@@ -182,24 +178,21 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share routing; actual video/audio routes are
-privacy-checked before publish or cached delivery. AP prefers VideoTTS
-unless `video_tts_supported: false`; without AP it uses audio. Groups have
-bounded admission and ordered playback. Audio failure keeps video waiting;
-fallback is group-local; stale tails cancel; late jobs only signal recovery.
-Audio stays serial.
-See [language voices](HASHIKO_LANGUAGE_VOICES.md),
+`/voice` and `/call` share privacy-checked routing before publish/cached
+delivery. AP prefers VideoTTS unless `video_tts_supported: false`; without AP
+it uses audio. Groups have bounded admission and ordered playback. Audio failure
+holds video; fallback is group-local, stale tails cancel, late jobs only signal
+recovery. Audio stays serial. See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-AgentPresence is owner-scoped and default-off. HASHI authenticates binding and
-freezes the resolved Agent/Conversation. Only PAO-admitted human/client input
-triggers owner-route feedback; AP-local input never echoes. `/phone` sends scoped
-leave/return; AP owns presentation, HASHI owns services/voices. Ingress fails
-closed; surfaces stay independent. See
-[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
+AgentPresence is owner-scoped/default-off; HASHI authenticates and freezes the
+Agent/Conversation. Only PAO-admitted human/client input triggers owner-route
+feedback; AP-local input never echoes. `/phone` sends scoped leave/return; AP
+owns presentation, HASHI services/voices. Ingress fails closed; surfaces stay
+independent. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
 [input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps

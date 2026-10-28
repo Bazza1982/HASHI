@@ -331,6 +331,24 @@ def test_pao_freezes_one_cross_connector_run_route(
         assert route["primary"]["channel_key"] == "peer@HASHI2"
 
 
+def test_unresolved_telegram_chat_is_not_frozen_as_zero_destination():
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        chat_id=0,
+        telegram_requested=True,
+    )
+
+    assert project_run_delivery_route(route) == {
+        "surface": "workbench",
+        "mirrors": [],
+        "automatic": True,
+        "telegram_mirror": False,
+    }
+    assert route_destination(route, "telegram") is None
+
+
 def test_terminal_hchat_reply_routes_to_user_without_acknowledgement_loop():
     route = freeze_run_delivery_route(
         message_source_id="hchat",

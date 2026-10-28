@@ -280,10 +280,25 @@ secondary user's activity never selects or replaces the owner's proactive
 route. On every lookup, including after Worker restart, PAO revalidates the
 persisted owner actor against the current Telegram allowlist and the current
 channel-egress policy. Revocation therefore disables the old route without
-deleting audit evidence. A legacy Session with no actor-bound route may recover
-one only by matching the canonical ingress envelope's opaque `endpoint_id`
-against the currently authorized configured owner. An authorization-list
-position never selects a destination, and an unresolved route sends nothing.
+deleting audit evidence. A legacy Session with no actor-bound route first tries
+to recover one by matching the canonical ingress envelope's opaque
+`endpoint_id` against the currently authorized configured owner. If no endpoint
+can be recovered, PAO may bootstrap only that configured owner's direct private
+chat because Telegram defines its chat ID as the same numeric user ID. The same
+authorization and channel-egress checks run before PAO persists the owner
+binding. This fallback never guesses a group chat, chooses an authorization-list
+position, or selects a secondary actor. An unresolved or zero route is omitted
+from the frozen Run destinations and sends nothing.
+
+The PAO owner scope is also distinct from the replaceable Telegram actor. A
+runtime-proven direct Telegram account replacement retains the same explicit
+`owner_scope_id`, changes the canonical Telegram owner, and reduces every Agent
+allowlist to that one actor. If the new actor previously had a direct binding as
+`secondary`, PAO may promote only the binding whose actor ID and private chat ID
+both equal the newly configured owner. It never promotes a group or an
+actor-less legacy endpoint. Old actor bindings remain audit evidence but fail
+authorization and cannot be selected for a future Workbench or other Connector
+mirror.
 
 AgentPresence is an optional local desktop-companion egress Connector. Its
 owner-scoped `/agentpresence on|off` preference defaults off and is shared by

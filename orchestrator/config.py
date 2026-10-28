@@ -35,6 +35,10 @@ from orchestrator.runtime_defaults import (
     DEFAULT_WORKBENCH_PORT,
 )
 from orchestrator.timezone_policy import canonical_timezone_name
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
+)
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -176,6 +180,9 @@ class GlobalConfig:
     desktop_enabled: bool = False
     live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
+    # Stable PAO owner scope.  Telegram account replacement must not fork the
+    # same person's Sessions, Workzones, or owner-scoped preferences.
+    owner_scope_id: str | None = None
 
 @dataclass
 class AgentConfig:
@@ -547,10 +554,13 @@ class ConfigManager:
         code_root = self.code_root
         bridge_home = self.bridge_home
 
-        # authorized_id: secrets.json takes priority (written by Hashiko during
-        # AI-driven onboarding); falls back to agents.json for manual setups.
-        # Value of 0 means Telegram not yet configured (local/API-only mode).
-        _auth_id = int(secrets.get("authorized_telegram_id", 0)) or int(g_raw.get("authorized_id", 0))
+        # ``telegram_owner_id`` is the canonical Telegram actor when present.
+        # Older installs fall back to the private onboarding value and then the
+        # legacy global field.  ``owner_scope_id`` deliberately remains stable
+        # when the Telegram account changes so the same human keeps one PAO
+        # Session/Workzone/preference scope.
+        _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
+        _owner_scope_id = resolve_owner_scope_id(g_raw, _auth_id)
 
         workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
@@ -660,6 +670,7 @@ class ConfigManager:
 
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
+            owner_scope_id=_owner_scope_id,
             deployment_profile=profile_ctx.profile.value,
             organization_id=profile_ctx.organization_id,
             base_logs_dir=resolve_path_value(

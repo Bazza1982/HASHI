@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -32,6 +33,10 @@ from orchestrator.config_json import (
     new_config_json,
     read_config_json,
     write_config_json,
+)
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
 )
 
 
@@ -62,6 +67,7 @@ class TelegramCredentialContext:
     configured: bool
     authorized_user_configured: bool
     authorized_owner_id: int | None
+    owner_scope_id: str
     shared_reference: bool
     credential_revision: str
     mirror_policy: str
@@ -120,13 +126,6 @@ async def verify_telegram_bot_token(token: str) -> dict:
     return public_bot
 
 
-def _positive_integer(value) -> bool:
-    try:
-        return int(value) > 0
-    except (TypeError, ValueError):
-        return False
-
-
 def _opaque_revision(document: ConfigDocument, key: bytes, domain: str) -> str:
     source_revision = document.revision or "absent"
     return hmac.new(
@@ -161,11 +160,17 @@ class TelegramCredentialService:
         secrets_path: str | Path,
         state_root: str | Path | None = None,
         verify_bot: Callable[[str], Awaitable[dict]] = verify_telegram_bot_token,
+        private_full_control_sids: Iterable[str] = (),
     ):
+        if isinstance(private_full_control_sids, (str, bytes)):
+            raise TypeError(
+                "private_full_control_sids must be an iterable of SIDs"
+            )
         self.config_path = Path(config_path).expanduser().resolve()
         self.secrets_path = Path(secrets_path).expanduser().resolve()
         self.state_root = Path(state_root or self.config_path.parent).expanduser().resolve()
         self.verify_bot = verify_bot
+        self.private_full_control_sids = tuple(private_full_control_sids)
         self._revision_key = secrets.token_bytes(32)
 
     def _read_secrets(self) -> ConfigDocument:
@@ -238,23 +243,31 @@ class TelegramCredentialService:
             str(secrets.get(token_key)).strip()
         )
         global_config = config.get("global")
-        config_owner = (
-            global_config.get("authorized_id")
-            if isinstance(global_config, dict)
-            else None
-        )
-        owner_value = (
-            secrets.get("authorized_telegram_id")
-            if _positive_integer(secrets.get("authorized_telegram_id"))
-            else config_owner
-        )
-        authorized_owner_id = int(owner_value) if _positive_integer(owner_value) else None
+        if not isinstance(global_config, dict):
+            raise TelegramCredentialError(
+                "Agent configuration is invalid.",
+                error_code="telegram_credential_config_invalid",
+                status_code=409,
+            )
+        try:
+            authorized_owner_id = resolve_telegram_owner_id(global_config, secrets)
+            owner_scope_id = resolve_owner_scope_id(
+                global_config,
+                authorized_owner_id,
+            )
+        except ValueError:
+            raise TelegramCredentialError(
+                "Telegram owner configuration is invalid.",
+                error_code="telegram_credential_config_invalid",
+                status_code=409,
+            ) from None
         return TelegramCredentialContext(
             agent_id=canonical_id,
             token_key=token_key,
             configured=configured,
             authorized_user_configured=authorized_owner_id is not None,
             authorized_owner_id=authorized_owner_id,
+            owner_scope_id=owner_scope_id,
             shared_reference=len(references) > 1,
             credential_revision=_credential_revision(secrets, self._revision_key),
             mirror_policy=telegram_mirror_policy_from_document(config, canonical_id),
@@ -280,10 +293,9 @@ class TelegramCredentialService:
         *,
         runtime_active: bool,
     ) -> dict:
-        owner_id = f"user:{context.authorized_owner_id or 0}"
         instance_mirror_enabled = get_connector_preference(
             self.state_root,
-            owner_id,
+            context.owner_scope_id,
             "telegram",
             "mirror",
             default=True,
@@ -486,7 +498,11 @@ class TelegramCredentialService:
                     )
                 latest_secrets[context.token_key] = token
                 try:
-                    write_config_json(self.secrets_path, latest_secrets)
+                    write_config_json(
+                        self.secrets_path,
+                        latest_secrets,
+                        private_full_control_sids=self.private_full_control_sids,
+                    )
                 except ConfigDurabilityError:
                     durability_warning = "credential_saved_durability_unconfirmed"
         except TelegramCredentialError:
