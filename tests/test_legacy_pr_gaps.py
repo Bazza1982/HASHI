@@ -37,6 +37,11 @@ def test_foreign_posix_workzone_is_neither_remapped_nor_a_tool_root(tmp_path):
 
     (workspace / "workzone.json").write_text(json.dumps({"path": foreign}), encoding="utf-8")
     assert workzone.load_workzone(workspace) is None
+    legacy_overview = _workzone_overview(None, workspace)
+    assert legacy_overview["path"] is None
+    assert legacy_overview["slots"][0]["path"] == foreign
+    assert legacy_overview["slots"][0]["host_compatible"] is False
+    assert legacy_overview["slots"][0]["available"] is False
 
 
 def _persist_terminal(tmp_path, request_id, **kwargs):

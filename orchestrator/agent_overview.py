@@ -116,11 +116,16 @@ def _workzone_overview(
         active_state = workzone_module.normalize_workzone_state(raw_active_state)
     else:
         legacy = load_workzone(workspace_dir)
+        legacy_path = str(legacy) if legacy is not None else None
+        if legacy_path is None and workzone_module.workzone_execution_platform() == "windows":
+            raw_legacy = workzone_module.load_workzone_path_text(workspace_dir)
+            if raw_legacy and workzone_module.workzone_path_kind(raw_legacy) == "posix":
+                legacy_path = raw_legacy
         active_state = workzone_module.normalize_workzone_state(
             {
                 "slots": (
-                    [{"slot_id": "main", "path": str(legacy), "enabled": True}]
-                    if legacy is not None
+                    [{"slot_id": "main", "path": legacy_path, "enabled": True}]
+                    if legacy_path is not None
                     else []
                 )
             }

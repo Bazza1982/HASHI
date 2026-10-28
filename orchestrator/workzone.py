@@ -43,21 +43,28 @@ def state_path(workspace_dir: Path) -> Path:
     return workspace_dir / STATE_FILENAME
 
 
-def load_workzone(workspace_dir: Path) -> Path | None:
+def load_workzone_path_text(workspace_dir: Path) -> str | None:
+    """Read a legacy single Workzone without interpreting its path."""
     path = state_path(workspace_dir)
     if not path.exists():
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        value = str(raw.get("path") or "").strip()
-        if not value:
-            return None
-        if os.name == "nt" and workzone_path_kind(value) == "posix":
-            return None
+        return str(raw.get("path") or "").strip() or None
+    except Exception as exc:
+        logger.warning("Failed to load workzone state from %s: %s", path, exc)
+        return None
+
+
+def load_workzone(workspace_dir: Path) -> Path | None:
+    value = load_workzone_path_text(workspace_dir)
+    if not value or (os.name == "nt" and workzone_path_kind(value) == "posix"):
+        return None
+    try:
         zone = Path(value).expanduser().resolve()
         return zone if zone.is_dir() else None
     except Exception as exc:
-        logger.warning("Failed to load workzone state from %s: %s", path, exc)
+        logger.warning("Failed to resolve workzone state from %s: %s", state_path(workspace_dir), exc)
         return None
 
 
