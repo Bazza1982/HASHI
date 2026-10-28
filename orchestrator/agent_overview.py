@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator.bridge_memory import SysPromptManager
+from orchestrator.bridge_memory import SysPromptManager, sys_prompt_deletion_revision
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.workzone import load_workzone
 from tools.token_tracker import get_summary
@@ -49,7 +49,7 @@ def _usage_overview(workspace_dir: Path, session_id: str | None) -> dict[str, An
     }
 
 
-def _system_prompt_overview(manager: Any) -> dict[str, Any]:
+def _system_prompt_overview(manager: Any, *, agent_name: str = '') -> dict[str, Any]:
     slots = []
     for item in manager.list_slots():
         text = str(item.get("text") or "")
@@ -65,6 +65,9 @@ def _system_prompt_overview(manager: Any) -> dict[str, Any]:
                 "state": "on" if active else ("off" if text else "empty"),
                 "preview": preview,
                 "characters": len(text),
+                "deletion_revision": sys_prompt_deletion_revision(
+                    str(item.get("slot") or ""), item, agent_name=agent_name,
+                ) if text else None,
             }
         )
     return {
@@ -186,7 +189,9 @@ def build_agent_overview(
             desired_workzone_state=desired_workzone_state,
         ),
         "usage": _usage_overview(workspace_dir, session_id),
-        "system_prompts": _system_prompt_overview(prompt_manager),
+        "system_prompts": _system_prompt_overview(
+            prompt_manager, agent_name=str(metadata.get("id") or metadata.get("name") or ""),
+        ),
         "parked_topics": _parked_topics_overview(parked_store),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
     }

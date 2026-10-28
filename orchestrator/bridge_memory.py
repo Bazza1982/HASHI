@@ -1205,6 +1205,18 @@ class BridgeMemoryStore:
         return status
 
 
+def sys_prompt_deletion_revision(
+    slot: str, state: dict[str, object], *, agent_name: str = "",
+) -> str:
+    """Bind confirmation to one Agent, slot, full text and active state."""
+    payload = json.dumps(
+        {"agent": agent_name, "slot": str(slot),
+         "text": str(state.get("text") or ""), "active": bool(state.get("active"))},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
 class SysPromptSemanticConflict(RuntimeError):
     """The target slot changed after the caller observed or confirmed it."""
 
