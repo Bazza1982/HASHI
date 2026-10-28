@@ -1,17 +1,8 @@
 # HASHI Agent FYI
 
-Current decisions, with full rationale in the linked owners:
-
-- Task/local /sys deletion requires authenticated management and a current
-  snapshot. Global/permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md)
-  and [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
-
-- Telegram credential saves request exact-Agent activation; shared receivers
-  adopt fresh credentials after cutover. Saved/verified/mirrored is not two-way
-  connected, and pending activation retains the token without a save replay.
-  Receiver status cannot overwrite application-owned outbound readiness;
-  legacy ambiguous Worker metadata is not proof of a ready sender.
-  See [Connector activation](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
+- Task/local /sys deletion: authenticated management + current snapshot;
+  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
+  [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
@@ -117,7 +108,8 @@ Scheduler/recovery and `/bg` use an Agent-owned hidden Session; separate
 execution/delivery/receipts and show each final once. `/bg` freezes admission;
 schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
 
-HASHI3 Telegram health needs a bounded poll; startup preserves pending updates.
+Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
+Bounded polls preserve pending updates. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery
 
