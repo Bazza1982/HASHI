@@ -35,10 +35,16 @@ operation remains incomplete; `/forget resume` resumes that owner's operation.
   admit files verifiably unchanged before the interval. Remote export admits
   intact older transcript rounds and new records appended after a verified
   completion checkpoint; forgotten audit rounds remain excluded.
-- Remaining limitation: a summary or Wiki page updated during/after the
+- Validated older Memory+ archives are made available to the fresh Session.
+  Copies carry a digest and conservative time bound: a changed copy or one
+  covered by a later, wider forget must not be restored. Distinct Session
+  archives remain scoped to this Agent.
+- Remaining limitations: a summary or Wiki page updated during/after the
   interval without complete lineage cannot be safely separated or automatically
-  restored. This can also exclude legitimate newer information. Source-level
-  provenance and a safe recovery path are still required before full acceptance.
+  restored. An exchange or Phone call spanning the boundary is currently
+  removed as a whole. These can exclude legitimate outside-window information.
+  Source-level provenance and an exact boundary policy are required before
+  full acceptance.
 - This scope does not erase provider-held copies, external backups, arbitrary
   user project files, independent services, or another Agent's data. Audit
   retention is not a promise of irreversible deletion. If a person explicitly
@@ -83,6 +89,18 @@ unverifiable isolation is a release blocker, never a successful forget.
   Agent with a synthetic historical owner completed confirmation and removed
   both test messages. Both temporary Agents were removed after testing.
 - The following user-facing warning clarifies that quarantined memory and HCC
-  may include older information. Adoption of that wording requires its own
-  Worker verification. User acceptance and the provenance limitation remain
-  open; the user's real Agent memory was not modified during these tests.
+  may include older information. User acceptance and the provenance limitation
+  remain open; the user's real Agent memory was not modified during these tests.
+
+## HASHI3 development record — 2026-10-29
+
+- Approval: the user reiterated that only the specified interval is to be
+  forgotten; prior approval covers implementation and HASHI3 reboot/testing.
+- Implementation: independently verified older Memory+ archives are available
+  in the fresh Session. Their content digest and conservative time bound follow
+  copies through repeated operations, including retries and wider intervals.
+- Offline validation: 210 relevant tests passed; a further focused case passed
+  after adding interruption, repeated-forget and modified-copy checks. Worker
+  adoption and user acceptance require separate evidence.
+- Mixed untimestamped content and complete cross-boundary runs/Phone calls
+  remain open; do not describe this as exact time-bounded forgetting.

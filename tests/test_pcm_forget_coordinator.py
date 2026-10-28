@@ -100,3 +100,93 @@ async def test_completion_retry_reestablishes_backend_session(tmp_path, monkeypa
     assert completed["new_session_id"] == new_id
     assert reset.await_count == 2
     assert bind.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forgotten_session_carries_verified_old_archives_to_new_session(tmp_path, monkeypatch):
+    import time
+    from orchestrator.memory_plus_mode import (
+        MemoryPlusConfig, _append_history_index, _rollover_memory_plus_state,
+        append_memory_plus_manual_note, load_memory_plus_state, search_memory_plus_history,
+    )
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI3")
+    old = store.create_session(owner_id="user:7", agent_id="lily")
+    workspace = store.session_workspace(old["session_id"], 1)
+    append_memory_plus_manual_note(workspace, "older safe memory about orchids")
+    old_state = load_memory_plus_state(workspace)
+    old_state["date"] = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+    _rollover_memory_plus_state(workspace, old_state, today="2099-01-01", cfg=MemoryPlusConfig())
+    old_archive = workspace / "memory" / "memory_plus_wiki" / f"{old_state['date']}_memory_plus_state.json"
+    other = store.create_session(owner_id="user:7", agent_id="other")
+    other_workspace = store.session_workspace(other["session_id"], 1)
+    append_memory_plus_manual_note(other_workspace, "other agent private memory about lilies")
+    other_state = load_memory_plus_state(other_workspace)
+    other_state["date"] = old_state["date"]
+    _rollover_memory_plus_state(other_workspace, other_state, today="2099-01-01", cfg=MemoryPlusConfig())
+    cutoff = datetime.now(timezone.utc) + timedelta(milliseconds=100)
+    time.sleep(0.2)
+    append_memory_plus_manual_note(workspace, "recent wrong memory about violets")
+    _append_history_index(workspace, load_memory_plus_state(workspace), old_archive)
+    now = datetime.now(timezone.utc)
+    preview = store.preview_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=old["session_id"], duration=now - cutoff, now=now)
+    store.confirm_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=old["session_id"], token=preview["token"], now=now)
+    runtime = SimpleNamespace(name="lily", workspace_dir=home, session_store=store)
+    monkeypatch.setattr(runtime_session, "_reset_cli_backend", AsyncMock(return_value="session"))
+    monkeypatch.setattr(runtime_session, "_bind_session", AsyncMock())
+    monkeypatch.setattr(runtime_session, "_discard_session_transients", lambda runtime: None)
+    monkeypatch.setattr(runtime_session, "_prepare_clean_context", lambda *a, **k: None)
+
+    complete = store.complete_pcm_forget
+    monkeypatch.setattr(store, "complete_pcm_forget",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("simulated crash before completion")))
+    with pytest.raises(OSError):
+        await pcm_forget_coordinator.finish_pending(runtime, object(), owner_id="user:7")
+    pending = store.pending_pcm_forget(owner_id="user:7", agent_id="lily")
+    pending_id = pending["result"]["new_session_id"]
+    monkeypatch.setattr(store, "complete_pcm_forget", complete)
+    result = await pcm_forget_coordinator.finish_pending(runtime, object(), owner_id="user:7")
+    assert result["new_session_id"] == pending_id
+    fresh = store.session_workspace(result["new_session_id"], 1)
+    assert any("older safe memory about orchids" in row["excerpt"]
+               for row in search_memory_plus_history(fresh, "orchids"))
+    assert not search_memory_plus_history(fresh, "violets")
+    assert not search_memory_plus_history(fresh, "lilies")
+
+    # Modifying a verified copy cannot introduce a forgotten item.
+    import json
+    import os
+    copied = next((fresh / "memory" / "memory_plus_wiki").rglob("*_memory_plus_state.json"))
+    original = copied.read_bytes()
+    modified = json.loads(original)
+    modified["today"]["facts"] = ["violets returned through a changed archive"]
+    copied.write_text(json.dumps(modified), encoding="utf-8")
+    os.utime(copied, (cutoff.timestamp() - 100, cutoff.timestamp() - 100))
+    assert not search_memory_plus_history(fresh, "violets")
+    copied.write_bytes(original)
+
+    # A later, narrower forget must not lose or misdate the copied old archive.
+    second = store.preview_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=result["new_session_id"], duration=timedelta(milliseconds=20))
+    store.confirm_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=result["new_session_id"], token=second["token"])
+    result2 = await pcm_forget_coordinator.finish_pending(runtime, object(), owner_id="user:7")
+    fresh2 = store.session_workspace(result2["new_session_id"], 1)
+    assert any("older safe memory about orchids" in row["excerpt"]
+               for row in search_memory_plus_history(fresh2, "orchids"))
+    assert not search_memory_plus_history(fresh2, "violets")
+
+    # An archive copied earlier must not survive a later wider forget that
+    # includes the archive's original, now-unverifiable creation time.
+    third = store.preview_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=result2["new_session_id"], duration=timedelta(hours=1))
+    store.confirm_pcm_forget(owner_id="user:7", agent_id="lily",
+        session_id=result2["new_session_id"], token=third["token"])
+    result3 = await pcm_forget_coordinator.finish_pending(runtime, object(), owner_id="user:7")
+    fresh3 = store.session_workspace(result3["new_session_id"], 1)
+    assert not search_memory_plus_history(fresh3, "orchids")
+    assert not search_memory_plus_history(fresh3, "violets")

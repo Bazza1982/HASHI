@@ -493,11 +493,27 @@ def get_memory_plus_status(workspace_dir: Path) -> dict[str, Any]:
 
 
 def list_memory_plus_history(workspace_dir: Path, *, limit: int = 12) -> list[dict[str, Any]]:
-    _, _, index_path, _ = _memory_paths(workspace_dir)
+    _, _, index_path, archive_dir = _memory_paths(workspace_dir)
     days = _read_json_object(index_path).get("days")
-    if not isinstance(days, list):
-        return []
-    rows = [dict(item) for item in days if isinstance(item, Mapping)]
+    rows = [dict(item) for item in days if isinstance(item, Mapping)] if isinstance(days, list) else []
+
+    # An index can mix forgotten and older entries and therefore be removed.
+    # Derive missing entries only from archives proven unchanged before every
+    # forget boundary; the archive itself remains the authoritative source.
+    from orchestrator.pcm_forget_memory import oldest_forget_start
+
+    cutoff = oldest_forget_start(workspace_dir)
+    if cutoff is not None and archive_dir.is_dir():
+        from orchestrator.pcm_forget_archives import verified_memory_plus_archives
+
+        existing = {(str(item.get("date") or ""), str(item.get("archive") or "")) for item in rows}
+        for archive, state, _raw, _verified_before in verified_memory_plus_archives(workspace_dir, cutoff):
+            entry = _memory_plus_history_entry(state, archive)
+            key = (entry["date"], entry["archive"])
+            if key not in existing:
+                rows.append(entry)
+                existing.add(key)
+        rows.sort(key=lambda item: str(item.get("date") or ""))
     return rows[-max(1, limit) :][::-1]
 
 
@@ -712,14 +728,10 @@ def _rollover_memory_plus_state(
     return new_state
 
 
-def _append_history_index(workspace_dir: Path, state: Mapping[str, Any], archive_path: Path) -> None:
-    _, _, index_path, _ = _memory_paths(workspace_dir)
-    index = _read_json_object(index_path)
-    raw_days = index.get("days")
-    days = [dict(item) for item in raw_days if isinstance(item, Mapping)] if isinstance(raw_days, list) else []
+def _memory_plus_history_entry(state: Mapping[str, Any], archive_path: Path) -> dict[str, Any]:
     date = str(state.get("date") or "unknown")
     today = state.get("today") if isinstance(state.get("today"), Mapping) else {}
-    entry = {
+    return {
         "date": date,
         "summary": (
             _list_text(today.get("completed"))[-2:]
@@ -736,6 +748,15 @@ def _append_history_index(workspace_dir: Path, state: Mapping[str, Any], archive
         + _list_text(today.get("facts"))[-3:],
         "archive": str(archive_path),
     }
+
+
+def _append_history_index(workspace_dir: Path, state: Mapping[str, Any], archive_path: Path) -> None:
+    _, _, index_path, _ = _memory_paths(workspace_dir)
+    index = _read_json_object(index_path)
+    raw_days = index.get("days")
+    days = [dict(item) for item in raw_days if isinstance(item, Mapping)] if isinstance(raw_days, list) else []
+    entry = _memory_plus_history_entry(state, archive_path)
+    date = entry["date"]
     days = [item for item in days if str(item.get("date") or "") != date]
     days.append(entry)
     days.sort(key=lambda item: str(item.get("date") or ""))

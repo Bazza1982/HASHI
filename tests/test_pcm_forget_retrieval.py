@@ -152,6 +152,104 @@ def test_backdated_modified_file_is_not_mistaken_for_old(tmp_path):
     os.utime(path, (cutoff - 1000, cutoff - 1000))
     assert not _unchanged_before(path, cutoff)
 
+def test_forget_keeps_searchable_older_memory_plus_archives(tmp_path):
+    import time
+    from orchestrator.memory_plus_mode import (
+        MemoryPlusConfig, _append_history_index, _rollover_memory_plus_state,
+        append_memory_plus_manual_note, load_memory_plus_state, search_memory_plus_history,
+    )
+    from orchestrator.pcm_forget_artifacts import forget_local_memories, quarantine_unproven_continuity
+    from orchestrator.session_store import SessionStore
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    append_memory_plus_manual_note(home, "older safe memory about orchids")
+    old_state = load_memory_plus_state(home)
+    old_state["date"] = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+    _rollover_memory_plus_state(home, old_state, today="2099-01-01", cfg=MemoryPlusConfig())
+    old_archive = home / "memory" / "memory_plus_wiki" / f"{old_state['date']}_memory_plus_state.json"
+    assert old_archive.exists()
+    cutoff = datetime.now(timezone.utc) + timedelta(milliseconds=80)
+    time.sleep(0.16)
+    append_memory_plus_manual_note(home, "recent wrong memory about violets")
+    # A newer mixed index is unsafe even though the underlying old archive is safe.
+    _append_history_index(home, load_memory_plus_state(home), old_archive)
+    store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI3")
+    session = store.create_session(owner_id="user:7", agent_id="lily")
+    result = store.forget_pcm_window(owner_id="user:7", agent_id="lily",
+        start=cutoff, end=datetime.now(timezone.utc) + timedelta(seconds=1))
+    forget_local_memories(store, operation_id=result["operation_id"], owner_id="user:7",
+                          agent_id="lily", agent_home=home)
+    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+        agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
+
+    assert old_archive.exists()
+    found = search_memory_plus_history(home, "orchids")
+    assert any("older safe memory about orchids" in row["excerpt"] for row in found)
+    assert not search_memory_plus_history(home, "violets")
+    # Re-running an interrupted cleanup must not restore a forgotten item.
+    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+        agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
+    assert search_memory_plus_history(home, "orchids") == found
+    assert not search_memory_plus_history(home, "violets")
+
+    # A backdated archive created after the forget is not a trusted old copy.
+    import json
+    import os
+    late = dict(old_state)
+    late["date"] = "2000-01-01"
+    late["today"] = dict(old_state["today"], facts=["violets returned from an untrusted file"])
+    forged_archive = old_archive.with_name("2000-01-01_memory_plus_state.json")
+    forged_archive.write_text(json.dumps(late), encoding="utf-8")
+    os.utime(forged_archive, (cutoff.timestamp() - 100, cutoff.timestamp() - 100))
+    assert not search_memory_plus_history(home, "violets")
+
+    # Fresh history remains available alongside recovered history.
+    append_memory_plus_manual_note(home, "fresh memory about roses")
+    _rollover_memory_plus_state(
+        home, load_memory_plus_state(home), today="2099-01-01", cfg=MemoryPlusConfig(),
+    )
+    assert any("older safe memory about orchids" in row["excerpt"]
+               for row in search_memory_plus_history(home, "orchids"))
+    assert any("fresh memory about roses" in row["excerpt"]
+               for row in search_memory_plus_history(home, "roses"))
+    assert not search_memory_plus_history(home, "violets")
+
+
+def test_forget_recovers_archives_in_a_session_memory_plus_workspace(tmp_path):
+    import time
+    from orchestrator.memory_plus_mode import (
+        MemoryPlusConfig, _append_history_index, _rollover_memory_plus_state,
+        append_memory_plus_manual_note, load_memory_plus_state, search_memory_plus_history,
+    )
+    from orchestrator.pcm_forget_artifacts import forget_local_memories, quarantine_unproven_continuity
+    from orchestrator.session_store import SessionStore
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI3")
+    session = store.create_session(owner_id="user:7", agent_id="lily")
+    workspace = store.session_workspace(session["session_id"], 1)
+    append_memory_plus_manual_note(workspace, "older safe memory about orchids")
+    state = load_memory_plus_state(workspace)
+    state["date"] = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+    _rollover_memory_plus_state(workspace, state, today="2099-01-01", cfg=MemoryPlusConfig())
+    old_archive = workspace / "memory" / "memory_plus_wiki" / f"{state['date']}_memory_plus_state.json"
+    cutoff = datetime.now(timezone.utc) + timedelta(milliseconds=80)
+    time.sleep(0.16)
+    append_memory_plus_manual_note(workspace, "recent wrong memory about violets")
+    _append_history_index(workspace, load_memory_plus_state(workspace), old_archive)
+    assert not (workspace / "bridge_memory.sqlite").exists()
+    result = store.forget_pcm_window(owner_id="user:7", agent_id="lily",
+        start=cutoff, end=datetime.now(timezone.utc) + timedelta(seconds=1))
+    forget_local_memories(store, operation_id=result["operation_id"], owner_id="user:7",
+                          agent_id="lily", agent_home=home)
+    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+        agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
+    assert any("older safe memory about orchids" in row["excerpt"]
+               for row in search_memory_plus_history(workspace, "orchids"))
+    assert not search_memory_plus_history(workspace, "violets")
+
 
 @pytest.mark.asyncio
 async def test_wiki_command_is_available_through_filtered_capability(tmp_path, monkeypatch):

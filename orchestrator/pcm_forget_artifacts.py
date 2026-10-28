@@ -109,6 +109,11 @@ def _remove_file(store: SessionStore, path: Path, *, base: Path, label: str,
         raise SessionConflict("continuity artifact escaped its workspace")
     if _unchanged_before(path, cutoff):
         return 0
+    if path.name.endswith("_memory_plus_state.json"):
+        from orchestrator.pcm_forget_archives import is_verified_archive_copy
+
+        if is_verified_archive_copy(base, path, cutoff):
+            return 0
     original = path.read_bytes()
     content = original.decode("utf-8")
     _audit(store, owner=owner, agent=agent, operation=operation,
@@ -265,7 +270,11 @@ def forget_local_memories(
                 raise SessionConflict("session generation is a link")
             if workspace.is_dir() and any(
                 (workspace / name).exists()
-                for name in ("bridge_memory.sqlite", "transcript.jsonl", "recent_context.jsonl")
+                for name in (
+                    "bridge_memory.sqlite", "transcript.jsonl", "recent_context.jsonl",
+                    "memory/memory_plus_state.json", "memory/memory_plus_index.json",
+                    "memory/memory_plus_wiki",
+                )
             ):
                 workspaces.append(workspace)
     totals = {"stores": 0, "exchanges": 0, "turns": 0, "memories": 0, "quarantined": 0}

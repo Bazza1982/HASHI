@@ -3,8 +3,10 @@
 Current decisions (details linked):
 
 - `/forget` (in development) covers all Sessions of the selected Agent, preserves
-  provably older memory and audit copies, and starts a clean Session. Unproven
-  summaries/Wiki sources remain excluded pending provenance. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
+  verified older Memory+ archives across a clean Session, and retains audit
+  copies outside Context. Unproven summaries/Wiki and cross-boundary exchanges
+  can still lose outside-window content; exact retention remains unqualified.
+  [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
 - Task/local /sys deletion requires authenticated management and a current snapshot.
   Global/permanent prompts are excluded. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),

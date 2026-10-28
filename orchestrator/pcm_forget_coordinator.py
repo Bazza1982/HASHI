@@ -55,6 +55,13 @@ async def finish_pending(runtime: Any, update: Any, *, owner_id: str) -> dict[st
     if not new_session_id:
         raise SessionConflict("forget new session unavailable")
     try:
+        from orchestrator.pcm_forget_archives import carry_safe_memory_plus_archives
+
+        report["preserved_memory_plus_archives"] = await asyncio.to_thread(
+            carry_safe_memory_plus_archives, store, operation_id=operation,
+            owner_id=owner, agent_id=agent, agent_home=runtime.workspace_dir,
+            new_session_id=new_session_id,
+        )
         # A pending operation may outlive the Worker that created its Session.
         # Re-establish the backend every time before allowing new Agent work.
         reset = await runtime_session._reset_cli_backend(runtime, reason="pcm_forget")
