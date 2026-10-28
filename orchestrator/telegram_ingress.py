@@ -10,6 +10,7 @@ from typing import Any
 from pathlib import Path
 
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 from telegram import Bot, Update
 
@@ -76,6 +77,16 @@ class CoreTelegramIngress:
     def is_running(self) -> bool:
         return bool(self.task is not None and not self.task.done())
 
+    def _check_bot_identity(self, handle: Any) -> None:
+        metadata = getattr(handle, "metadata", {})
+        if "telegram_bot_fingerprint" in metadata and (
+            metadata["telegram_bot_fingerprint"] != telegram_bot_fingerprint(self.token)
+        ):
+            # A poll may outlive a Worker pointer swap. Leave its updates
+            # unacknowledged instead of delivering the previous Bot's inbox to
+            # a Worker configured for another Bot.
+            raise RuntimeError("Telegram Bot identity changed at the Agent route")
+
     async def start(self, *, drop_pending_updates: bool) -> None:
         if self.is_running:
             return
@@ -123,6 +134,7 @@ class CoreTelegramIngress:
                     await asyncio.sleep(0.05)
                     continue
                 stage = "get_updates"
+                self._check_bot_identity(handle)
                 self.diagnostics.begin(stage, deadline=TELEGRAM_POLL_WATCHDOG_SECONDS)
                 poll = asyncio.create_task(
                     self.bot.get_updates(
@@ -150,6 +162,7 @@ class CoreTelegramIngress:
                 finally:
                     self._poll_task = None
                 self.diagnostics.poll_succeeded()
+                self._check_bot_identity(self.handle_lookup(self.agent_name))
                 status_ok = await self._set_connected(True)
                 for update in updates:
                     if self._stopping:
@@ -162,6 +175,7 @@ class CoreTelegramIngress:
                     if getattr(handle, "route_is_gated", False):
                         break
                     stage = "worker_delivery"
+                    self._check_bot_identity(handle)
                     self.diagnostics.stage(stage)
                     await handle.deliver_telegram_update(update.to_dict())
                     self.offset = int(update.update_id) + 1

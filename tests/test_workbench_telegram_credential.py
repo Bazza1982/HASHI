@@ -140,7 +140,8 @@ async def test_status_and_replace_never_return_existing_or_new_token(tmp_path):
     status = json.loads(status_response.text)
     assert status["configured"] is True
     assert status["runtime_active"] is True
-    assert status["activation_required"] is None
+    assert status["activation_required"] == "agent_restart"
+    assert status["bidirectional_ready"] is False
     assert OLD_TOKEN not in status_response.text
     assert "token_key" not in status_response.text
     assert status["credential_revision"] != read_config_json(
@@ -177,6 +178,113 @@ async def test_status_and_replace_never_return_existing_or_new_token(tmp_path):
     assert stored["provider_api_key"] == "preserve-me"
     assert stored["workbench_admin_token"] == ADMIN_TOKEN
     assert result["credential_revision"] != stored.revision
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
+async def test_save_automatically_requests_only_target_agent_activation(
+    tmp_path, monkeypatch, configured
+):
+    async def verify(token):
+        return {"id": 123, "username": "safe_bot", "first_name": "Safe"}
+
+    server = _server(
+        tmp_path, verifier=verify, runtime_active=True, configured=configured
+    )
+    runtime = server.orchestrator.runtimes[0]
+    runtime.is_function_worker_proxy = True
+    calls = []
+
+    async def execute(target, command, **kwargs):
+        assert read_config_json(tmp_path / "secrets.json")["lily.telegram"] == NEW_TOKEN
+        calls.append((target, command, kwargs))
+        return {"ok": True, "result": {"accepted": True, "record": {
+            "id": "reboot-lily", "status": "accepted", "targets": ["lily"],
+        }}}
+
+    monkeypatch.setattr(workbench_api_module, "try_execute_slash_command_text", execute)
+    result = await server.handle_admin_agent_telegram_credential_replace(_Request(
+        headers={"X-Workbench-Token": ADMIN_TOKEN},
+        payload={"token": NEW_TOKEN, "replace_existing": configured,
+                 "expected_revision": server.telegram_credential_service.status("lily")["credential_revision"]},
+    ))
+    payload = json.loads(result.text)
+    assert result.status == 200
+    assert payload["activation_status"] == "activating"
+    assert payload["activation_operation_id"] == "reboot-lily"
+    assert payload["activation_required"] is None
+    assert payload["bidirectional_ready"] is False
+    assert len(calls) == 1 and calls[0][0] is runtime
+    assert calls[0][1] == "/reboot min"
+    assert NEW_TOKEN not in repr(calls)
+    assert NEW_TOKEN not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["busy", "exception", "ack_unknown"])
+async def test_saved_credential_is_not_reported_connected_when_activation_fails(
+    tmp_path, monkeypatch, caplog, failure
+):
+    async def verify(token):
+        return {"id": 123, "username": "safe_bot", "first_name": "Safe"}
+
+    server = _server(tmp_path, verifier=verify, runtime_active=True)
+    server.orchestrator.runtimes[0].is_function_worker_proxy = True
+
+    async def busy(*args, **kwargs):
+        if failure == "exception":
+            raise RuntimeError(NEW_TOKEN)  # Transport exceptions must never echo credentials.
+        return {"ok": True, "result": {"accepted": False, "reason": failure}}
+
+    monkeypatch.setattr(workbench_api_module, "try_execute_slash_command_text", busy)
+    response = await server.handle_admin_agent_telegram_credential_replace(_Request(
+        headers={"X-Workbench-Token": ADMIN_TOKEN},
+        payload={"token": NEW_TOKEN, "replace_existing": True,
+                 "expected_revision": server.telegram_credential_service.status("lily")["credential_revision"]},
+    ))
+    payload = json.loads(response.text)
+    assert response.status == 200  # Saving committed; do not prompt a credential replay.
+    assert read_config_json(tmp_path / "secrets.json")["lily.telegram"] == NEW_TOKEN
+    assert payload["activation_status"] == "pending"
+    assert payload["activation_error_code"] == (
+        "AGENT_BUSY" if failure == "busy" else "telegram_activation_unavailable"
+    )
+    assert payload["bidirectional_ready"] is False
+    assert NEW_TOKEN not in response.text
+    assert NEW_TOKEN not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outbound,running,inbound,current_bot,current_receiver,ready", [
+    (True, False, False, True, True, False),
+    (True, True, False, True, True, False),
+    (False, True, True, True, True, False),
+    (True, True, True, False, True, False),
+    (True, True, True, True, False, False),
+    (True, True, True, True, True, True),
+])
+async def test_status_requires_current_bot_and_both_live_directions(
+    tmp_path, outbound, running, inbound, current_bot, current_receiver, ready
+):
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+    server.orchestrator.runtimes[0].get_runtime_metadata = lambda: {
+        "online": True,
+        "telegram_bot_fingerprint": telegram_bot_fingerprint(OLD_TOKEN if current_bot else NEW_TOKEN),
+        "telegram_outbound_connected": outbound,
+        "telegram_ingress": {"running": running, "connected": inbound,
+            "bot_fingerprint": telegram_bot_fingerprint(OLD_TOKEN if current_receiver else NEW_TOKEN)},
+    }
+    response = await server.handle_admin_agent_telegram_credential(
+        _Request(headers={"X-Workbench-Token": ADMIN_TOKEN})
+    )
+    payload = json.loads(response.text)
+    assert payload["bidirectional_ready"] is ready
+    assert (payload["activation_status"] == "connected") is ready
+    assert payload["inbound_connected"] is bool(current_bot and current_receiver and running and inbound)
+    assert payload["outbound_connected"] is bool(current_bot and outbound)
+    assert OLD_TOKEN not in response.text
 
 
 @pytest.mark.asyncio

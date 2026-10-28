@@ -2,6 +2,11 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Telegram credential saves request exact-Agent activation; shared receivers
+  adopt fresh credentials after cutover. Saved/verified/mirrored is not two-way
+  connected, and pending activation retains the token without a save replay.
+  See [Connector activation](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
+
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
   See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),

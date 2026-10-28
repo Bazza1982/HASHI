@@ -63,6 +63,40 @@ startup preserves Telegram's pending updates; the accepted-update offset
 advances only after the Worker accepts each update. Source changes on HASHI3
 are not evidence that an already running shared Function has adopted them.
 
+### Telegram credential activation (2026-10-28)
+
+The Frontend Connector owns Bot credential verification and connection facts;
+PAO owns the exact-Agent activation transaction. Saving a verified credential
+for a running Agent requests the existing targeted Worker switch automatically.
+A stopped Agent stays stopped. The save and activation outcomes are separate:
+busy, unavailable or unknown activation retains the committed credential,
+reports `activation_status=pending` with a safe error code, and never replays
+the credential write or widens the request into a shared/all-Agent reboot.
+
+After Worker cutover, shared Functions refresh the configuration through its
+existing owner before reconciling Telegram receivers. A new Bot is not polled
+for a Worker still carrying the previous Bot fingerprint. An in-flight poll
+also rechecks that identity before delivery, leaving mismatched updates
+unacknowledged. Receiver replacement is serialized per Agent; the same Bot
+keeps its accepted-update offset, while a different Bot never inherits that
+receiver's cursor. Normal activation never drops pending updates.
+
+Recovery checkpoints store the Bot fingerprint together with its offset, even
+before the replacement receives its first update. The existing numeric offset
+file remains a rollback-compatible projection; identity-aware generations use
+the paired record and reject a different Bot's cursor. Legacy checkpoints
+without identity retain their existing compatibility behavior until rebound
+by the receiving owner.
+
+Credential status projects `inbound_connected`, `outbound_connected` and
+`bidirectional_ready` from the live Worker and actual receiver, bound to the
+currently saved Bot fingerprint. Token verification, Worker presence, a saved
+mirror policy, or successful outbound delivery alone cannot assert a two-way
+connection. These transport facts are still distinct from a real user round
+trip. Clients must preserve that distinction, including on older backends
+that do not publish connection facts. Mirror-policy changes remain immediate
+and do not themselves request a Worker switch.
+
 ## 3. External-client boundary
 
 Any compatible desktop, web, mobile, IDE, or operations client may use HASHI

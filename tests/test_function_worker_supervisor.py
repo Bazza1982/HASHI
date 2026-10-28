@@ -248,6 +248,116 @@ def test_topology_publishes_live_source_adoption_commit():
     assert topology["function_workers"][0]["source_commit"] == target
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_token", [None, "old-bot-token"])
+async def test_topology_adopts_saved_telegram_credentials_after_worker_cutover(
+    tmp_path, monkeypatch, previous_token
+):
+    from orchestrator.config_json import read_config_json, write_config_json
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    kernel.secrets = {"alpha.telegram": previous_token}
+    token = "new-bot-token"
+    credentials = tmp_path / "credentials.json"
+    write_config_json(credentials, {"alpha.telegram": token})
+
+    def reload_configuration():
+        kernel.secrets = read_config_json(credentials)
+        return kernel.global_cfg, [], kernel.secrets
+
+    kernel._load_config_bundle = reload_configuration
+    handle = _handle(kernel, _Client("alpha", 101))
+    handle.metadata.update(
+        telegram_token_key="alpha.telegram",
+        telegram_bot_fingerprint=telegram_bot_fingerprint(token),
+        telegram_connected=True,
+    )
+    kernel.runtimes = [handle]
+    supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+    created = []
+
+    class Ingress:
+        def __init__(self, **kwargs):
+            self.token = kwargs["token"]
+            self.is_running = False
+            self.connected = False
+            self.offset = None
+            created.append(self)
+
+        async def start(self, *, drop_pending_updates):
+            assert drop_pending_updates is False
+            self.is_running = True
+
+        async def stop(self, **kwargs):
+            await asyncio.sleep(0)  # Exercise concurrent replacement across an await.
+            self.is_running = False
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.CoreTelegramIngress", Ingress
+    )
+    await supervisor.broadcast_topology()
+    await supervisor.broadcast_topology()
+
+    assert len(created) == 1
+    assert created[0].token == token
+    assert supervisor.telegram_ingress_running("alpha")
+    assert not handle.get_runtime_metadata()["telegram_connected"]
+    created[0].connected = True
+    assert handle.get_runtime_metadata()["telegram_connected"]
+    assert handle.client.calls == ["worker.topology", "worker.topology"]
+
+    created[0].offset = 77
+    created[0].is_running = False
+    await asyncio.gather(supervisor.broadcast_topology(), supervisor.broadcast_topology())
+    assert len(created) == 2
+    assert created[-1].offset == 77  # Same Bot resumes without discarding pending updates.
+
+    replacement = "replacement-bot-token"
+    write_config_json(credentials, {"alpha.telegram": replacement})
+    handle.metadata["telegram_bot_fingerprint"] = telegram_bot_fingerprint(replacement)
+    kernel._handoff_offsets = {"alpha": 999}
+    await asyncio.gather(supervisor.broadcast_topology(), supervisor.broadcast_topology())
+    assert len(created) == 3
+    assert created[-1].token == replacement
+    assert created[-1].offset is None  # Another Bot must not inherit the previous Bot's cursor.
+
+    kernel._handoff_bot_offsets = {"alpha": {
+        "bot_fingerprint": telegram_bot_fingerprint("previous-bot-token"), "offset": 999,
+    }}
+    recovered = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+    await recovered.broadcast_topology()
+    assert created[-1].token == replacement
+    assert created[-1].offset is None  # Crash recovery also rejects another Bot's cursor.
+
+
+@pytest.mark.asyncio
+async def test_saved_token_is_not_polled_by_worker_with_previous_bot_identity(
+    tmp_path, monkeypatch
+):
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    kernel.secrets = {"alpha": "new-bot-token"}
+    handle = _handle(kernel, _Client("alpha", 101))
+    handle.metadata["telegram_bot_fingerprint"] = telegram_bot_fingerprint(
+        "old-bot-token"
+    )
+    kernel.runtimes = [handle]
+    supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+
+    async def unexpected_start(*args, **kwargs):
+        pytest.fail("A new Bot must not feed updates to the previous Bot's Worker")
+
+    monkeypatch.setattr(supervisor, "start_telegram_ingress", unexpected_start)
+    await supervisor.broadcast_topology()
+    assert not supervisor.telegram_ingress_running("alpha")
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"
