@@ -44,6 +44,9 @@ async def test_forget_requires_verified_api_identity_and_confirm_then_opens_new_
     session = store.create_session(owner_id="user:7", agent_id="lily")
     _complete(store, session_id=session["session_id"], owner_id="user:7", agent_id="lily",
               request_id="old", key="old", text="wrong idea", answer="wrong answer")
+    legacy = store.create_session(owner_id="exchange:legacy", agent_id="lily")
+    _complete(store, session_id=legacy["session_id"], owner_id="exchange:legacy", agent_id="lily",
+              request_id="legacy", key="legacy", text="wrong legacy idea", answer="wrong legacy answer")
     memory = BridgeMemoryStore(home)
     memory.record_memory("episodic", "test", "wrong idea")
     runtime = Runtime(home, store)
@@ -74,6 +77,7 @@ async def test_forget_requires_verified_api_identity_and_confirm_then_opens_new_
     assert completed["result"]["new_session_id"] != session["session_id"]
     assert store.pending_pcm_forget(owner_id="user:7", agent_id="lily") is None
     assert "wrong idea" not in str(store.agent_history_page(owner_id="user:7", agent_id="lily"))
+    assert "wrong legacy idea" not in str(store.messages(legacy["session_id"], owner_id="exchange:legacy"))
     assert memory.retrieve_memories("wrong idea", limit=3) == []
     assert "wrong idea" not in (home / "agent.md").read_text(encoding="utf-8")
     with store._connection() as connection:

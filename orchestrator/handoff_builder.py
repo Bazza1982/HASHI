@@ -131,6 +131,14 @@ class HandoffBuilder:
             logger.error(f"Failed to read handoff context from {path}: {e}")
             return ""
 
+    def _read_pre_forget_text(self, path: Path, cutoff: float) -> str:
+        from orchestrator.pcm_forget_artifacts import _unchanged_before
+
+        if not path.is_file() or not _unchanged_before(path, cutoff):
+            return ""
+        text = self._read_optional_text(path)
+        return text if _unchanged_before(path, cutoff) else ""
+
     def _bounded_recent_rounds(
         self,
         *,
@@ -325,13 +333,17 @@ class HandoffBuilder:
             if rendered_entries:
                 rendered_rounds.append({"index": round_index, "entries": rendered_entries})
 
-        from orchestrator.pcm_forget_memory import has_forget_boundary
+        from orchestrator.pcm_forget_memory import oldest_forget_start
 
         memory_files = {}
-        if has_forget_boundary(self.workspace_dir):
-            # Untimestamped handoffs and notes have no reliable provenance.
-            # Use only filtered transcript rounds until those files are reviewed.
-            handoff_summary = context_block
+        cutoff = oldest_forget_start(self.workspace_dir)
+        if cutoff is not None:
+            old_handoff = self._read_pre_forget_text(self.handoff_path, cutoff)
+            handoff_summary = "\n\n".join(item for item in (old_handoff, context_block) if item)
+            for name in ("project.md", "decisions.md", "tasks.md"):
+                text = self._read_pre_forget_text(self.memory_dir / name, cutoff)
+                if text:
+                    memory_files[name] = text
         else:
             handoff_summary = self._read_optional_text(self.handoff_path)
             if not handoff_summary:
@@ -445,12 +457,18 @@ class HandoffBuilder:
 
     def build_handoff(self):
         """Synthesizes handoff.md from memory files and recent context."""
-        from orchestrator.pcm_forget_memory import has_forget_boundary
+        from orchestrator.pcm_forget_memory import oldest_forget_start
 
-        if has_forget_boundary(self.workspace_dir):
-            # Do not rebuild from untimestamped memory or an unfiltered cache.
+        cutoff = oldest_forget_start(self.workspace_dir)
+        if cutoff is not None:
             safe_context, _, _ = self.build_recent_context_block()
-            self.handoff_path.write_text("# Handoff Summary\n\n" + safe_context, encoding="utf-8")
+            parts = ["# Handoff Summary\n\n"]
+            for name in ("project.md", "decisions.md", "tasks.md"):
+                text = self._read_pre_forget_text(self.memory_dir / name, cutoff)
+                if text:
+                    parts.append(f"## {name.removesuffix('.md').capitalize()}\n{text}\n\n")
+            parts.append(safe_context)
+            self.handoff_path.write_text("".join(parts), encoding="utf-8")
             return
 
         handoff_content = ["# Handoff Summary\n\n"]

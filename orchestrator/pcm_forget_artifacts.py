@@ -6,6 +6,7 @@ active PCM.  Interrupted work can be retried without replacing a newer edit.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from orchestrator.memory_plus_mode import _memory_paths, _memory_plus_store_lock, load_memory_plus_state
@@ -21,8 +22,43 @@ def _audit(store: SessionStore, *, owner: str, agent: str, operation: str,
     )
 
 
+def _unchanged_before(path: Path, cutoff: float) -> bool:
+    """Prove an artifact was neither written nor metadata-changed in the interval."""
+    if path.is_symlink():
+        return False
+    try:
+        if os.name != "nt":
+            stat = path.stat()
+            return stat.st_mtime < cutoff and stat.st_ctime < cutoff
+        # Windows st_ctime is creation time. Query NTFS ChangeTime as well,
+        # which also changes when an old mtime is restored after a rewrite.
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class FileBasicInfo(ctypes.Structure):
+            _fields_ = [("creation", ctypes.c_longlong), ("access", ctypes.c_longlong),
+                        ("write", ctypes.c_longlong), ("change", ctypes.c_longlong),
+                        ("attributes", wintypes.DWORD)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_info = kernel32.GetFileInformationByHandleEx
+        get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        get_info.restype = wintypes.BOOL
+        info = FileBasicInfo()
+        with path.open("rb") as handle:
+            if not get_info(msvcrt.get_osfhandle(handle.fileno()), 0,
+                            ctypes.byref(info), ctypes.sizeof(info)):
+                return False
+        epochs = [value / 10_000_000 - 11_644_473_600
+                  for value in (info.creation, info.write, info.change)]
+        return all(value > 0 and value < cutoff for value in epochs)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _clear_pcm_blocks(store: SessionStore, home: Path, *, owner: str, agent: str,
-                      operation: str) -> int:
+                      operation: str, cutoff: float) -> int:
     target = home / "agent.md"
     if not target.exists():
         return 0
@@ -32,6 +68,8 @@ def _clear_pcm_blocks(store: SessionStore, home: Path, *, owner: str, agent: str
 
     def mutate(text: str) -> str:
         nonlocal count
+        if _unchanged_before(target, cutoff):
+            return text
         replacements = []
         for name in ("memory", "hcc"):
             span = pcm_block_body_span(text, name)
@@ -62,13 +100,15 @@ def _clear_pcm_blocks(store: SessionStore, home: Path, *, owner: str, agent: str
 
 
 def _remove_file(store: SessionStore, path: Path, *, base: Path, label: str,
-                 owner: str, agent: str, operation: str) -> int:
+                 owner: str, agent: str, operation: str, cutoff: float) -> int:
     if path.is_symlink():
         raise SessionConflict("continuity artifact is a link")
     if not path.is_file():
         return 0
     if not path.resolve().is_relative_to(base.resolve()):
         raise SessionConflict("continuity artifact escaped its workspace")
+    if _unchanged_before(path, cutoff):
+        return 0
     original = path.read_bytes()
     content = original.decode("utf-8")
     _audit(store, owner=owner, agent=agent, operation=operation,
@@ -80,7 +120,7 @@ def _remove_file(store: SessionStore, path: Path, *, base: Path, label: str,
 
 
 def _clear_workspace(store: SessionStore, workspace: Path, *, label: str,
-                     owner: str, agent: str, operation: str) -> int:
+                     owner: str, agent: str, operation: str, cutoff: float) -> int:
     if workspace.is_symlink():
         raise SessionConflict("session workspace is a link")
     if not workspace.exists():
@@ -96,7 +136,17 @@ def _clear_workspace(store: SessionStore, workspace: Path, *, label: str,
     if compaction.state_path.exists():
         with compaction._lock:
             state_before = compaction.read_state()
-            if state_before.get("active_capsule") is not None:
+            active = state_before.get("active_capsule")
+            proven_old = False
+            if active is not None and _unchanged_before(compaction.state_path, cutoff):
+                try:
+                    # The old pointer authenticates immutable capsule and archive
+                    # bytes, so later replacement cannot change its contents.
+                    compaction.load_active(state_before)
+                    proven_old = _unchanged_before(compaction.state_path, cutoff)
+                except Exception:
+                    proven_old = False
+            if active is not None and not proven_old:
                 raw = compaction.state_path.read_bytes()
                 _audit(store, owner=owner, agent=agent, operation=operation,
                        identity=f"{label}:context_compaction_pointer", content=raw.decode("utf-8"))
@@ -127,7 +177,7 @@ def _clear_workspace(store: SessionStore, workspace: Path, *, label: str,
             count += _remove_file(
                 store, path, base=workspace,
                 label=f"{label}:{path.relative_to(workspace).as_posix()}",
-                owner=owner, agent=agent, operation=operation,
+                owner=owner, agent=agent, operation=operation, cutoff=cutoff,
             )
     return count
 
@@ -146,9 +196,11 @@ def quarantine_unproven_continuity(
     home = Path(agent_home)
     if home.is_symlink():
         raise SessionConflict("Agent workspace is a link")
-    count = _clear_pcm_blocks(store, home, owner=owner_id, agent=agent_id, operation=operation_id)
+    cutoff = float(pending["start_epoch"])
+    count = _clear_pcm_blocks(store, home, owner=owner_id, agent=agent_id,
+                              operation=operation_id, cutoff=cutoff)
     count += _clear_workspace(store, home, label="agent", owner=owner_id,
-                              agent=agent_id, operation=operation_id)
+                              agent=agent_id, operation=operation_id, cutoff=cutoff)
     for session_id in sorted(allowed):
         if not session_id or any(not (char.isalnum() or char in "_-") for char in session_id):
             raise SessionConflict("invalid forget session id")
@@ -163,7 +215,7 @@ def quarantine_unproven_continuity(
             if workspace.is_dir():
                 count += _clear_workspace(
                     store, workspace, label=f"session:{session_id}:{workspace.name}",
-                    owner=owner_id, agent=agent_id, operation=operation_id,
+                    owner=owner_id, agent=agent_id, operation=operation_id, cutoff=cutoff,
                 )
     return count
 
@@ -189,8 +241,8 @@ def forget_local_memories(
         for run_id in result["run_ids"]:
             row = connection.execute(
                 """SELECT r.session_id FROM runs r JOIN sessions s ON s.session_id=r.session_id
-                   WHERE r.run_id=? AND s.instance_id=? AND s.owner_id=? AND s.agent_id=?""",
-                (run_id, store.instance_id, owner, agent),
+                   WHERE r.run_id=? AND s.instance_id=? AND s.agent_id=?""",
+                (run_id, store.instance_id, agent),
             ).fetchone()
             if row is None:
                 raise SessionConflict("forget run scope changed")

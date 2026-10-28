@@ -79,7 +79,11 @@ async def finish_pending(runtime: Any, update: Any, *, owner_id: str) -> dict[st
             except Exception:
                 pass
         raise
+    from orchestrator.pcm_forget_memory import checkpoint_forget_exports
+
+    # Snapshot retained audit-file prefixes while the Agent is still fenced.
+    await asyncio.to_thread(checkpoint_forget_exports, runtime.workspace_dir)
     store.complete_pcm_forget(owner_id=owner, agent_id=agent, operation_id=operation)
     report["new_session_id"] = new_session_id
-    report["central_memory_quarantined"] = True
+    report["central_memory_filtered"] = True
     return report

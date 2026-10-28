@@ -4123,9 +4123,9 @@ class SessionStore:
             if session is None:
                 raise SessionNotFound(session_id)
             if connection.execute(
-                """SELECT 1 FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
+                """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
                    AND agent_id=? AND state='pending'""",
-                (self.instance_id, str(owner_id), str(agent_id).lower()),
+                (self.instance_id, str(agent_id).lower()),
             ).fetchone():
                 raise SessionConflict("pcm_forget_in_progress")
             if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):

@@ -97,6 +97,8 @@ class CentralMemorySearch:
         *,
         scope: MemorySearchScope,
         limit: int,
+        safe_before: float | None = None,
+        safe_sources: set[tuple[float, str]] | None = None,
     ) -> list[dict[str, Any]]:
         if not self.configured:
             return []
@@ -125,6 +127,7 @@ class CentralMemorySearch:
                     "agent_id",
                     "content",
                     "source_ts",
+                    "consolidated_at",
                     "source",
                     "memory_type",
                     "importance",
@@ -132,16 +135,55 @@ class CentralMemorySearch:
                 )
                 if name in columns
             ]
-            rows = connection.execute(
-                f"SELECT {', '.join(selected)} FROM consolidated "
-                "WHERE instance = ? AND agent_id = ? ORDER BY id DESC LIMIT 500",
-                (scope.instance_id, scope.agent_id),
-            ).fetchall()
+            if safe_before is not None:
+                if "source_ts" not in columns:
+                    return []
+                cutoff = datetime.fromtimestamp(safe_before, timezone.utc).isoformat()
+                rows = []
+                if "consolidated_at" in columns:
+                    rows = connection.execute(
+                        f"SELECT {', '.join(selected)} FROM consolidated "
+                        "WHERE instance = ? AND agent_id = ? "
+                        "AND julianday(source_ts) < julianday(?) "
+                        "AND julianday(consolidated_at) < julianday(?) "
+                        "ORDER BY id DESC LIMIT 500",
+                        (scope.instance_id, scope.agent_id, cutoff, cutoff),
+                    ).fetchall()
+                if safe_sources:
+                    recent = connection.execute(
+                        f"SELECT {', '.join(selected)} FROM consolidated "
+                        "WHERE instance = ? AND agent_id = ? ORDER BY id DESC LIMIT 500",
+                        (scope.instance_id, scope.agent_id),
+                    ).fetchall()
+                    seen = {row["id"] for row in rows}
+                    rows.extend(row for row in recent if row["id"] not in seen)
+            else:
+                rows = connection.execute(
+                    f"SELECT {', '.join(selected)} FROM consolidated "
+                    "WHERE instance = ? AND agent_id = ? ORDER BY id DESC LIMIT 500",
+                    (scope.instance_id, scope.agent_id),
+                ).fetchall()
 
         query_folded = query.casefold().strip()
         scored: list[tuple[float, dict[str, Any]]] = []
         for raw in rows:
             row = dict(raw)
+            if safe_before is not None:
+                from orchestrator.timezone_policy import parse_absolute_timestamp
+
+                source_time = parse_absolute_timestamp(row.get("source_ts"))
+                created = parse_absolute_timestamp(row.get("consolidated_at"))
+                # Older snapshots are safe only if both dates precede the
+                # interval. New records must exactly match a retained local
+                # exchange that has passed the forget fences.
+                old = (source_time is not None and created is not None
+                       and source_time.timestamp() < safe_before
+                       and created.timestamp() < safe_before)
+                local = (source_time is not None and
+                         (source_time.timestamp(), str(row.get("content") or ""))
+                         in (safe_sources or set()))
+                if not old and not local:
+                    continue
             content = str(row.get("content") or "")
             embedding = self._decode_embedding(row.get("embedding"))
             vector_score = (
@@ -250,15 +292,26 @@ class MemorySearchService:
             )
         central_status = "not_requested"
         if source in {"central", "all"}:
-            from orchestrator.pcm_forget_memory import has_forget_boundary
+            from orchestrator.pcm_forget_memory import oldest_forget_start
 
-            if has_forget_boundary(self.workspace_dir):
-                # Consolidated records do not currently prove their complete
-                # source lineage. Do not reintroduce an unverifiable summary.
-                central_status = "quarantined_after_forget"
+            safe_before = oldest_forget_start(self.workspace_dir)
+            safe_sources: set[tuple[float, str]] = set()
+            if safe_before is not None and not scope.cross_agent:
+                from orchestrator.timezone_policy import parse_absolute_timestamp
+
+                for exchange in BridgeMemoryStore(self.workspace_dir).get_completed_exchanges(limit=500):
+                    for role in ("user", "assistant"):
+                        instant = parse_absolute_timestamp(exchange.get(role + "_ts"))
+                        content = str(exchange.get(role + "_text") or "")
+                        if instant is not None and content:
+                            safe_sources.add((instant.timestamp(), content))
+            if safe_before is not None and self.central.configured:
+                central_status = "filtered_after_forget"
             else:
                 central_status = "configured" if self.central.configured else "unconfigured"
-                results.extend(self.central.search(query, scope=scope, limit=limit))
+            results.extend(self.central.search(
+                query, scope=scope, limit=limit, safe_before=safe_before, safe_sources=safe_sources,
+            ))
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return {
             "query": query,

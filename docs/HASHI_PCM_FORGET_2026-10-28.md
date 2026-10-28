@@ -12,27 +12,33 @@ owner-scoped Sessions, execution fence, and fresh Engine/Conversation Session.
 Frontend Connectors authenticate the requesting user and display the preview
 and result. Core is unchanged.
 
-A preview fixes the time interval and the Agent/owner/Session scope. Confirmation
-is a separate, one-time, expiring command. Changed history, an expired preview,
-another owner sharing unscoped Agent memory, active work, or an unresolved Phone
-attempt makes the operation fail closed. New Agent work is blocked durably while
-an accepted operation remains incomplete; `/forget resume` resumes that operation.
+A preview fixes the time interval and the current Agent's complete Session scope,
+including historical owner identities. The authenticated initiating owner and
+Session still bind the one-time, expiring confirmation. Changed history, an
+expired preview, active work, or an unresolved Phone attempt makes the operation
+fail closed. New work for the entire Agent is blocked durably while an accepted
+operation remains incomplete; `/forget resume` resumes that owner's operation.
 
 ## Retention and isolation
 
-- Persona and system instructions remain. Source-unverifiable Agent memory, HCC,
-  Memory+, dual-brain continuity, and context-compaction pointers are taken out
-  of active Context. Original artifacts are retained through the canonical audit
-  owner, using its configured access and encryption policy.
+- Persona and system instructions remain. Memory, HCC, Memory+, continuity,
+  and compaction artifacts verifiably unchanged before the interval are retained.
+  Unverifiable or mixed artifacts are taken out of active Context and preserved
+  through the canonical audit owner with its configured access and encryption.
 - Selected Session messages, Phone material, local memory rows and relevant
   search indexes are removed from normal projections. Original conversation
   logs and isolated audit copies remain available for human investigation.
 - Session generations and Engine state are renewed; forgotten source identities
   and intervals fence later transcript or transfer re-imports.
-- Memory and relationship material without reliable lineage is quarantined.
-  Current central memory, Wiki search, and remote memory export remain
-  quarantined for this Agent because they do not establish complete provenance.
-  There is no automatic release path in this development version.
+- Central search admits verifiably older records and exact matches to retained
+  local exchanges; uncertain records remain excluded. Wiki and handoff recall
+  admit files verifiably unchanged before the interval. Remote export admits
+  intact older transcript rounds and new records appended after a verified
+  completion checkpoint; forgotten audit rounds remain excluded.
+- Remaining limitation: a summary or Wiki page updated during/after the
+  interval without complete lineage cannot be safely separated or automatically
+  restored. This can also exclude legitimate newer information. Source-level
+  provenance and a safe recovery path are still required before full acceptance.
 - This scope does not erase provider-held copies, external backups, arbitrary
   user project files, independent services, or another Agent's data. Audit
   retention is not a promise of irreversible deletion. If a person explicitly
@@ -62,6 +68,13 @@ unverifiable isolation is a release blocker, never a successful forget.
   `49ae6555` was adopted through `/reboot max`, with 13 Agents online.
   The authenticated command usage and non-destructive preview worked in
   Workbench; the preview formatting defect was then corrected in source.
-- A real-Agent destructive confirmation has not been exercised. No production
-  deployment or user acceptance is implied; the limitations above remain open
-  release concerns.
+- User correction on 2026-10-28: the scope is the Agent, not a single historical
+  owner; preserving other Agents and verifiably older information is required.
+  The earlier owner-based rejection and permanent blanket search/export
+  quarantine did not meet that intent.
+- Corrected implementation: the Agent-wide confirmation, retention rules, and
+  filtered memory/export paths are implemented on the same branch.
+- Offline validation: 378 related tests passed, followed by 49 focused tests
+  after the repeated-forget export correction.
+- Worker adoption, a complete live confirmation on disposable data, and user
+  acceptance remain separate evidence; the provenance limitation above is open.

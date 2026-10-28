@@ -84,6 +84,17 @@ def install_schema(connection: sqlite3.Connection) -> None:
            ON pcm_forget_operations(instance_id, owner_id, agent_id)
            WHERE state='pending'"""
     )
+    # A forget applies to the Agent, across historical owner identities.
+    connection.execute(
+        """CREATE TRIGGER IF NOT EXISTS pcm_forget_agent_phone_guard
+           BEFORE INSERT ON live_call_attempts
+           WHEN EXISTS (
+               SELECT 1 FROM pcm_forget_operations f
+               WHERE f.instance_id=NEW.instance_id
+                 AND f.agent_id=NEW.agent_id AND f.state='pending'
+           )
+           BEGIN SELECT RAISE(ABORT, 'pcm_forget_in_progress'); END"""
+    )
     # Phone admission and forget admission are serialized by SQLite, including
     # separate workers which do not share the SessionStore thread lock.
     connection.execute(
@@ -156,41 +167,34 @@ def forget_window(
             raise ValueError("forget operation id was reused for another scope")
         return json.loads(str(existing["result_json"]))
     if connection.execute(
-        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
-           AND agent_id=? AND state='pending'""", (instance_id, owner, agent),
+        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
+           AND agent_id=? AND state='pending'""", (instance_id, agent),
     ).fetchone():
         raise ForgetBusy("a forget operation is already incomplete")
     if naive_timezone:
         from orchestrator.timezone_policy import canonical_timezone_name
         naive_timezone = canonical_timezone_name(naive_timezone)
 
-    # Legacy Agent-home memory lacks owner attribution.  Refuse instead of
-    # clearing a different owner's shared memory accidentally.
-    if connection.execute(
-        """SELECT 1 FROM sessions WHERE instance_id=? AND agent_id=?
-           AND owner_id!=? LIMIT 1""", (instance_id, agent, owner),
-    ).fetchone():
-        raise ForgetUnsupported("Agent memory is shared by another owner")
     if connection.execute(
         """SELECT 1 FROM live_call_attempts
-           WHERE instance_id=? AND owner_id=? AND agent_id=?
+           WHERE instance_id=? AND agent_id=?
              AND state IN ('reserved','provider_created','unknown') LIMIT 1""",
-        (instance_id, owner, agent),
+        (instance_id, agent),
     ).fetchone():
         raise ForgetBusy("Agent has an active or uncertain Phone reservation")
 
     active = connection.execute(
         """SELECT 1 FROM runs r JOIN sessions s ON s.session_id=r.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=?
+           WHERE s.instance_id=? AND s.agent_id=?
              AND r.state NOT IN ('completed','failed','stopped','superseded','interrupted')
-           LIMIT 1""", (instance_id, owner, agent),
+           LIMIT 1""", (instance_id, agent),
     ).fetchone()
     if active:
         raise ForgetBusy("Agent has active or queued work")
     live = connection.execute(
         """SELECT * FROM live_calls
-           WHERE instance_id=? AND owner_id=? AND agent_id=?""",
-        (instance_id, owner, agent),
+           WHERE instance_id=? AND agent_id=?""",
+        (instance_id, agent),
     ).fetchall()
     selected_calls: list[sqlite3.Row] = []
     phone_run_ids: set[str] = set()
@@ -216,9 +220,9 @@ def forget_window(
     rows = connection.execute(
         """SELECT m.* FROM messages m
            JOIN sessions s ON s.session_id=m.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=?
+           WHERE s.instance_id=? AND s.agent_id=?
              AND m.visibility='visible'""",
-        (instance_id, owner, agent),
+        (instance_id, agent),
     ).fetchall()
     by_run: dict[str, list[sqlite3.Row]] = defaultdict(list)
     single: list[sqlite3.Row] = []
@@ -283,8 +287,8 @@ def forget_window(
     command_rows = connection.execute(
         """SELECT c.* FROM frontend_command_invocations c
            JOIN sessions s ON s.session_id=c.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=?""",
-        (instance_id, owner, agent),
+           WHERE s.instance_id=? AND s.agent_id=?""",
+        (instance_id, agent),
     ).fetchall()
     for row in command_rows:
         instant = _epoch(row["created_at"], naive_timezone)
@@ -303,9 +307,9 @@ def forget_window(
         )
     event_rows = connection.execute(
         """SELECT e.* FROM run_events e JOIN sessions s ON s.session_id=e.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=? AND e.run_id IS NULL
+           WHERE s.instance_id=? AND s.agent_id=? AND e.run_id IS NULL
              AND NOT EXISTS (SELECT 1 FROM live_fragments f WHERE f.event_id=e.event_id)""",
-        (instance_id, owner, agent),
+        (instance_id, agent),
     ).fetchall()
     for event in event_rows:
         instant = _epoch(event["created_at"], naive_timezone)
@@ -323,7 +327,7 @@ def forget_window(
         connection.execute(
             """INSERT OR IGNORE INTO pcm_forget_live_calls
                (call_id, owner_id, agent_id, session_id) VALUES (?, ?, ?, ?)""",
-            (call_id, owner, agent, str(call["session_id"])),
+            (call_id, str(call["owner_id"]), agent, str(call["session_id"])),
         )
         event_rows = connection.execute(
             """SELECT e.* FROM run_events e JOIN live_fragments f ON f.event_id=e.event_id
@@ -393,17 +397,18 @@ def forget_window(
                    kind="voice", identity=str(voice["transcript_id"]), row=dict(voice))
         connection.execute("UPDATE voice_transcripts SET text='' WHERE run_id=?", (run_id,))
 
-    connection.execute(
+    all_sessions = connection.execute(
+        """SELECT session_id, owner_id, context_generation, status FROM sessions
+           WHERE instance_id=? AND agent_id=?""",
+        (instance_id, agent),
+    ).fetchall()
+    owners = {str(session["owner_id"]) for session in all_sessions} | {owner}
+    connection.executemany(
         """INSERT OR IGNORE INTO pcm_forget_windows
            (instance_id, owner_id, agent_id, start_epoch, end_epoch, naive_timezone)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (instance_id, owner, agent, lower, upper, naive_timezone),
+        ((instance_id, item, agent, lower, upper, naive_timezone) for item in owners),
     )
-    all_sessions = connection.execute(
-        """SELECT session_id, context_generation, status FROM sessions
-           WHERE instance_id=? AND owner_id=? AND agent_id=?""",
-        (instance_id, owner, agent),
-    ).fetchall()
     scoped_sessions = [session for session in all_sessions if session["status"] != "deleted"]
     previous_generations = []
     for session in scoped_sessions:
@@ -448,13 +453,13 @@ def assert_continuity_safe(
     """Prevent an old transfer from recreating an erased PCM interval."""
     scope = (instance_id, str(owner_id), str(agent_id).lower())
     if connection.execute(
-        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
-           AND agent_id=? AND state='pending'""", scope,
+        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
+           AND agent_id=? AND state='pending'""", (scope[0], scope[2]),
     ).fetchone():
         raise ForgetBusy("forget operation is incomplete")
     windows = connection.execute(
-        """SELECT start_epoch, end_epoch, naive_timezone FROM pcm_forget_windows
-           WHERE instance_id=? AND owner_id=? AND agent_id=?""", scope,
+        """SELECT DISTINCT start_epoch, end_epoch, naive_timezone FROM pcm_forget_windows
+           WHERE instance_id=? AND agent_id=?""", (scope[0], scope[2]),
     ).fetchall()
     if not windows:
         return
@@ -462,7 +467,7 @@ def assert_continuity_safe(
         str(row[0]) for row in connection.execute(
             """SELECT f.text_digest FROM pcm_forget_messages f
                JOIN sessions s ON s.session_id=f.session_id
-               WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=?""", scope,
+               WHERE s.instance_id=? AND s.agent_id=?""", (scope[0], scope[2]),
         )
     }
     for session in sessions:
@@ -485,9 +490,9 @@ def projection_policy(
     owner_id: str, agent_id: str, session_id: str,
 ) -> dict[str, Any]:
     windows = connection.execute(
-        """SELECT start_epoch, end_epoch, naive_timezone FROM pcm_forget_windows
-           WHERE instance_id=? AND owner_id=? AND agent_id=?""",
-        (instance_id, str(owner_id), str(agent_id).lower()),
+        """SELECT DISTINCT start_epoch, end_epoch, naive_timezone FROM pcm_forget_windows
+           WHERE instance_id=? AND agent_id=?""",
+        (instance_id, str(agent_id).lower()),
     ).fetchall()
     messages = connection.execute(
         "SELECT message_id, text_digest FROM pcm_forget_messages WHERE session_id=?",

@@ -30,6 +30,21 @@ def install_schema(connection: sqlite3.Connection) -> None:
         )"""
     )
     connection.execute(
+        """CREATE TABLE IF NOT EXISTS pcm_forget_export_checkpoints (
+            source_path TEXT PRIMARY KEY,
+            prefix_size INTEGER NOT NULL,
+            prefix_sha256 TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS pcm_forget_export_checkpoint_history (
+            source_path TEXT NOT NULL, prefix_size INTEGER NOT NULL,
+            prefix_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL,
+            PRIMARY KEY(source_path, prefix_size, prefix_sha256, recorded_at)
+        )"""
+    )
+    connection.execute(
         """CREATE TABLE IF NOT EXISTS pcm_forget_quarantine (
             item_type TEXT NOT NULL,
             item_id TEXT NOT NULL,
@@ -113,6 +128,83 @@ def has_forget_boundary(workspace: Path) -> bool:
             return connection.execute("SELECT 1 FROM pcm_forgotten_ranges LIMIT 1").fetchone() is not None
     except sqlite3.Error as exc:
         raise RuntimeError("cannot verify the forget boundary") from exc
+
+
+def oldest_forget_start(workspace: Path) -> float | None:
+    """Find the earliest erased interval; fail closed for damaged boundaries."""
+    database = Path(workspace) / "bridge_memory.sqlite"
+    if not database.exists():
+        return None
+    if database.is_symlink():
+        raise RuntimeError("memory boundary is a link")
+    try:
+        with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+            tables = {str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pcm_forgotten_%'"
+            )}
+            if not tables:
+                return None
+            if not {"pcm_forgotten_ranges", "pcm_forgotten_origins"}.issubset(tables):
+                raise RuntimeError("incomplete forget boundary")
+            value = connection.execute("SELECT MIN(start_epoch) FROM pcm_forgotten_ranges").fetchone()[0]
+            return float(value) if value is not None else None
+    except sqlite3.Error as exc:
+        raise RuntimeError("cannot verify the forget boundary") from exc
+
+
+def checkpoint_forget_exports(workspace: Path) -> None:
+    """Mark retained log prefixes after cleanup, before Agent work resumes."""
+    workspace = Path(workspace)
+    database = workspace / "bridge_memory.sqlite"
+    if oldest_forget_start(workspace) is None or database.is_symlink():
+        raise RuntimeError("forget boundary unavailable for export checkpoint")
+    checkpoints = []
+    for relative in ("transcript.jsonl", "memory/left_brain_continuity.jsonl"):
+        path = workspace / relative
+        if path.is_symlink() or path.parent.is_symlink():
+            raise RuntimeError("forget export source is a link")
+        digest = hashlib.sha256()
+        size = 0
+        if path.exists():
+            before = path.stat()
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            after = path.stat()
+            if (before.st_size != size or after.st_size != size
+                    or before.st_mtime_ns != after.st_mtime_ns):
+                raise RuntimeError("forget export source changed during checkpoint")
+        checkpoints.append((relative, size, digest.hexdigest(),
+                            datetime.now(timezone.utc).isoformat()))
+    with sqlite3.connect(database.resolve().as_uri() + "?mode=rw", uri=True) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS pcm_forget_export_checkpoints (
+                source_path TEXT PRIMARY KEY, prefix_size INTEGER NOT NULL,
+                prefix_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL)"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS pcm_forget_export_checkpoint_history (
+                source_path TEXT NOT NULL, prefix_size INTEGER NOT NULL,
+                prefix_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL,
+                PRIMARY KEY(source_path, prefix_size, prefix_sha256, recorded_at))"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO pcm_forget_export_checkpoint_history
+               SELECT source_path, prefix_size, prefix_sha256, recorded_at
+               FROM pcm_forget_export_checkpoints"""
+        )
+        connection.executemany(
+            """INSERT OR IGNORE INTO pcm_forget_export_checkpoint_history
+               (source_path, prefix_size, prefix_sha256, recorded_at) VALUES (?, ?, ?, ?)""",
+            checkpoints,
+        )
+        connection.executemany(
+            """INSERT OR REPLACE INTO pcm_forget_export_checkpoints
+               (source_path, prefix_size, prefix_sha256, recorded_at) VALUES (?, ?, ?, ?)""",
+            checkpoints,
+        )
 
 
 def inherit_forget_fences(agent_workspace: Path, memory_store: Any) -> None:

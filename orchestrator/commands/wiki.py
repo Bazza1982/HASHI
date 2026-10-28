@@ -47,12 +47,6 @@ def build_wiki_prompt(*, query: str, provider_id: str, capability: str) -> str:
 async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
     if not _is_authorized(runtime, update):
         return
-    from orchestrator.pcm_forget_memory import has_forget_boundary
-
-    workspace = getattr(runtime, "workspace_dir", None)
-    if workspace is not None and has_forget_boundary(workspace):
-        await _reply(runtime, update, ui_language.tr("forget.wiki_blocked"))
-        return
     query = " ".join(
         str(value).strip()
         for value in (getattr(context, "args", None) or [])
@@ -65,6 +59,13 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
     provider = dict(getattr(runtime.global_config, "wiki_provider", None) or {})
     provider_id = str(provider.get("id") or "").strip()
     capability = str(provider.get("capability") or "").strip()
+    from orchestrator.pcm_forget_memory import has_forget_boundary
+
+    workspace = getattr(runtime, "workspace_dir", None)
+    if (workspace is not None and has_forget_boundary(workspace)
+            and capability != "wiki_search"):
+        await _reply(runtime, update, ui_language.tr("forget.wiki_blocked"))
+        return
     if not provider_id or not capability:
         await _reply(
             runtime,

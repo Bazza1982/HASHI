@@ -201,7 +201,7 @@ async def test_unverifiable_wiki_is_quarantined_for_the_forgotten_agent(tmp_path
     )
     after = await registry.execute("wiki_search", {"operation": "search", "query": "wrong idea"})
     assert "old wrong idea" not in after.output
-    assert "quarantined" in after.output
+    assert json.loads(after.output)["results"] == []
 
 
 @pytest.mark.asyncio
@@ -291,7 +291,7 @@ def test_central_memory_without_source_lineage_is_quarantined_after_forget(tmp_p
 
     result = service.search({"query": "decision", "source": "central"})
     assert result["results"] == []
-    assert result["central_status"] == "quarantined_after_forget"
+    assert result["central_status"] == "filtered_after_forget"
 
 
 def test_emotional_memory_and_relationship_cache_are_not_left_in_pcm(tmp_path):

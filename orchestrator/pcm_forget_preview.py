@@ -27,22 +27,22 @@ def install_schema(connection: sqlite3.Connection) -> None:
 def _fingerprint(connection: sqlite3.Connection, *, instance: str, owner: str, agent: str) -> str:
     digest = hashlib.sha256()
     queries = (
-        """SELECT s.session_id, s.status, s.context_generation FROM sessions s
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=? ORDER BY s.session_id""",
+        """SELECT s.session_id, s.owner_id, s.status, s.context_generation FROM sessions s
+           WHERE s.instance_id=? AND s.agent_id=? ORDER BY s.session_id""",
         """SELECT m.message_id, m.session_id, m.run_id, m.role, m.visibility,
                   m.history_eligible, m.created_at, m.text, m.display_text
            FROM messages m JOIN sessions s ON s.session_id=m.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=?
+           WHERE s.instance_id=? AND s.agent_id=?
              AND m.history_eligible=1 ORDER BY m.message_id""",
         """SELECT r.run_id, r.state FROM runs r JOIN sessions s ON s.session_id=r.session_id
-           WHERE s.instance_id=? AND s.owner_id=? AND s.agent_id=? ORDER BY r.run_id""",
+           WHERE s.instance_id=? AND s.agent_id=? ORDER BY r.run_id""",
         """SELECT attempt_id, state FROM live_call_attempts
-           WHERE instance_id=? AND owner_id=? AND agent_id=? ORDER BY attempt_id""",
+           WHERE instance_id=? AND agent_id=? ORDER BY attempt_id""",
         """SELECT call_id, phase FROM live_calls
-           WHERE instance_id=? AND owner_id=? AND agent_id=? ORDER BY call_id""",
+           WHERE instance_id=? AND agent_id=? ORDER BY call_id""",
     )
     for query in queries:
-        for row in connection.execute(query, (instance, owner, agent)):
+        for row in connection.execute(query, (instance, agent)):
             digest.update(json.dumps(tuple(row), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
             digest.update(b"\n")
         digest.update(b"\0")
@@ -67,8 +67,8 @@ def create(
     if row is None:
         raise ForgetUnsupported("forget session is unavailable")
     if connection.execute(
-        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
-           AND agent_id=? AND state='pending'""", (instance_id, owner, agent),
+        """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
+           AND agent_id=? AND state='pending'""", (instance_id, agent),
     ).fetchone():
         raise ForgetBusy("an earlier forget operation is incomplete")
     token = secrets.token_urlsafe(18)

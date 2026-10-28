@@ -85,9 +85,7 @@ async def forget_command(runtime: Any, update: Any, context: Any) -> dict[str, A
                 )
         except (SessionConflict, ValueError) as exc:
             detail = str(exc).casefold()
-            if "another owner" in detail:
-                key = "forget.shared_owner"
-            elif any(word in detail for word in ("active", "queued", "phone", "unfinished command")):
+            if any(word in detail for word in ("active", "queued", "phone", "unfinished command")):
                 key = "forget.busy"
             else:
                 key = "forget.changed"

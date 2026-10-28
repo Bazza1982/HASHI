@@ -355,12 +355,12 @@ def test_stale_transfer_cannot_reimport_forgotten_history(tmp_path, monkeypatch)
     assert "bad idea" not in json.dumps(target.agent_history_page(owner_id=owner, agent_id=agent))
 
 
-def test_forget_fails_closed_when_agent_has_another_owner(tmp_path):
+def test_forget_accepts_historical_owner_sessions(tmp_path):
     store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI3")
     store.create_session(owner_id="user:7", agent_id="lily")
     store.create_session(owner_id="user:8", agent_id="lily")
-    with pytest.raises(SessionConflict, match="owner"):
-        store.forget_pcm_window(
-            owner_id="user:7", agent_id="lily",
-            start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
-        )
+    result = store.forget_pcm_window(
+        owner_id="user:7", agent_id="lily",
+        start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
+    )
+    assert result["sessions"] == 2
