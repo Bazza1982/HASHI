@@ -164,15 +164,31 @@ def _packed_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "fragment_groups": groups}
 
 
-def _expanded_payload(payload: dict[str, Any], *, source: str) -> dict[str, Any]:
+def _expanded_payload(
+    payload: dict[str, Any], *, source: str, identities_only: bool = False,
+) -> dict[str, Any]:
     if "fragment_encoding" not in payload:
         return payload  # Existing durable snapshots keep their original shape.
-    if (payload.get("fragment_encoding") != FRAGMENT_ENCODING
-            or payload.get("event_columns") != list(EVENT_COLUMNS)):
+    columns = payload.get("event_columns")
+    if payload.get("fragment_encoding") != FRAGMENT_ENCODING:
+        raise PhoneContextError("phone_context_invalid_fragment", source=source)
+    if identities_only:
+        if not isinstance(columns, list) or columns.count("provider_event_id") != 1:
+            raise PhoneContextError("phone_context_invalid_fragment", source=source)
+        identity_index = columns.index("provider_event_id")
+    elif columns != list(EVENT_COLUMNS):
         raise PhoneContextError("phone_context_invalid_fragment", source=source)
     try:
         fragments = []
         for group in payload["fragment_groups"]:
+            if identities_only:
+                scope = {key: group[key] for key in ("call_id", "call_epoch")}
+                for fragment in group["fragments"]:
+                    event = fragment["event"]
+                    if not isinstance(event, list) or len(event) <= identity_index:
+                        raise ValueError("missing event identity")
+                    fragments.append({**scope, "provider_event_id": event[identity_index]})
+                continue
             scope = {key: group[key] for key in ("call_id", "call_epoch", "source")}
             for fragment in group["fragments"]:
                 event = fragment["event"]
@@ -315,34 +331,6 @@ def _fragment_identity(row: Mapping[str, Any]) -> tuple[str, int, str]:
     )
 
 
-def _canonical_fragment(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
-    try:
-        fragment = {
-            "call_id": str(row["call_id"]),
-            "call_epoch": int(row["call_epoch"]),
-            "provider_event_id": str(row["provider_event_id"]),
-            "sequence": int(row["sequence"]),
-            "role": str(row["role"]),
-            "text": row["text"],
-            "start_ms": int(row["start_ms"]),
-            "end_ms": int(row["end_ms"]),
-            "source": str(row["source"]),
-        }
-    except (KeyError, TypeError, ValueError):
-        raise PhoneContextError(
-            "phone_context_legacy_source_incomplete", source=source
-        ) from None
-    if (
-        fragment["role"] not in {"user", "assistant"}
-        or not isinstance(fragment["text"], str)
-        or not fragment["provider_event_id"]
-    ):
-        raise PhoneContextError(
-            "phone_context_legacy_source_incomplete", source=source
-        )
-    return fragment
-
-
 def _fragment_digest(fragments: list[Mapping[str, Any]]) -> str:
     identity = [_fragment_identity(row) for row in fragments]
     return hashlib.sha256(
@@ -353,11 +341,6 @@ def _fragment_digest(fragments: list[Mapping[str, Any]]) -> str:
 def _legacy_payload(section: Mapping[str, Any], *, section_key: str) -> dict[str, Any]:
     text = section.get("text")
     if not isinstance(text, str):
-        raise PhoneContextError(
-            "phone_context_legacy_source_incomplete", source=section_key
-        )
-    declared_hash = section.get("content_sha256")
-    if declared_hash and str(declared_hash) != hashlib.sha256(text.encode()).hexdigest():
         raise PhoneContextError(
             "phone_context_legacy_source_incomplete", source=section_key
         )
@@ -374,7 +357,9 @@ def _legacy_payload(section: Mapping[str, Any], *, section_key: str) -> dict[str
             "phone_context_legacy_source_incomplete", source=section_key
         )
     try:
-        payload = _expanded_payload(dict(payload), source=section_key)
+        payload = _expanded_payload(
+            dict(payload), source=section_key, identities_only=True,
+        )
     except PhoneContextError:
         raise PhoneContextError(
             "phone_context_legacy_source_incomplete", source=section_key
@@ -397,10 +382,7 @@ def _validate_legacy_sources(
 ) -> None:
     if not legacy_section_keys:
         return
-    available = {
-        _fragment_identity(row): _canonical_fragment(row, source=session_id)
-        for row in replacement_fragments
-    }
+    available = {_fragment_identity(row) for row in replacement_fragments}
     for section_key in legacy_section_keys:
         section = sections.get(section_key)
         if section is None:
@@ -425,30 +407,62 @@ def _validate_legacy_sources(
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
-        fragments = [
-            _canonical_fragment(row, source=section_key)
-            for row in payload["fragments"]
-            if isinstance(row, Mapping)
-        ]
+        fragments = [row for row in payload["fragments"] if isinstance(row, Mapping)]
         if len(fragments) != len(payload["fragments"]) or not fragments:
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
-        expected_key = LEGACY_SECTION_PREFIX + _fragment_digest(fragments)
+        try:
+            identities = [_fragment_identity(row) for row in fragments]
+            expected_key = LEGACY_SECTION_PREFIX + _fragment_digest(fragments)
+        except (KeyError, TypeError, ValueError):
+            raise PhoneContextError(
+                "phone_context_legacy_source_incomplete", source=section_key
+            ) from None
         if expected_key != section_key:
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
-        identities = [_fragment_identity(row) for row in fragments]
         if len(identities) != len(set(identities)):
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
-        if any(available.get(identity) != fragment
-               for identity, fragment in zip(identities, fragments)):
+        # The scoped durable events own the transcript. The legacy PCM section
+        # is only a projection and its text, timestamps or hash can differ.
+        if any(identity not in available for identity in identities):
             raise PhoneContextError(
                 "phone_context_legacy_source_incomplete", source=section_key
             )
+
+
+def _identity_interval_matches(
+    units: list[list[dict[str, Any]]],
+    target_digest: str,
+    encoded_identities: dict[int, bytes],
+    *,
+    first_arrival: int | None = None,
+    last_arrival: int | None = None,
+) -> bool:
+    for lower in range(len(units)):
+        digest = hashlib.sha256(b"[")
+        has_fragment = False
+        has_first = first_arrival is None
+        has_last = last_arrival is None
+        for unit in units[lower:]:
+            for row in unit:
+                if has_fragment:
+                    digest.update(b",")
+                digest.update(encoded_identities[id(row)])
+                has_fragment = True
+                sequence = int(row["sequence"])
+                has_first = has_first or sequence == first_arrival
+                has_last = has_last or sequence == last_arrival
+            if has_fragment and has_first and has_last:
+                candidate = digest.copy()
+                candidate.update(b"]")
+                if candidate.hexdigest()[:24] == target_digest:
+                    return True
+    return False
 
 
 def _semantic_source_matches(
@@ -456,14 +470,37 @@ def _semantic_source_matches(
     section: Mapping[str, Any],
     replacement_fragments: list[dict[str, Any]],
 ) -> bool:
-    text = section.get("text")
-    metadata = section.get("metadata")
-    if not isinstance(text, str) or not isinstance(metadata, Mapping):
-        return False
     target_digest = section_key.removeprefix(SEMANTIC_SECTION_PREFIX)
     if len(target_digest) != 24 or any(
         character not in "0123456789abcdef" for character in target_digest
     ):
+        return False
+    if not replacement_fragments:
+        return False
+
+    # Most sections already correspond to one dialogue unit (or to the entire
+    # source). Their identity is enough; the stored display text is not an
+    # authority over the durable Phone events.
+    if _fragment_digest(replacement_fragments) == target_digest:
+        return True
+    units = _history_units(replacement_fragments)
+    if any(
+        _fragment_digest(unit) == target_digest
+        for unit in units
+    ):
+        return True
+
+    encoded_identities = {
+        id(row): json.dumps(_fragment_identity(row), separators=(",", ":")).encode()
+        for row in replacement_fragments
+    }
+    # A stale or missing projection sequence is just a lost search hint; a
+    # matching interval of scoped event identities is still authoritative.
+    if _identity_interval_matches(units, target_digest, encoded_identities):
+        return True
+
+    metadata = section.get("metadata")
+    if not isinstance(metadata, Mapping):
         return False
     try:
         first_arrival = int(metadata["sequence"])
@@ -481,9 +518,8 @@ def _semantic_source_matches(
     # first arrival through one durable high-water mark.  Arrival sequence only
     # bounds membership; it is not transcript order, and calls that were still
     # active at that high-water may now appear between completed history units.
-    # Rebuild every aligned dialogue-unit interval deterministically.  Exact
-    # rendered text locates viable intervals before the stable identity digest
-    # is checked, avoiding the old bounded exponential subsequence search.
+    # Rebuild aligned dialogue-unit intervals using only event identities.
+    # Text is a derived projection and can differ after formatting or correction.
     for last_arrival in arrivals:
         eligible = [
             row
@@ -491,45 +527,11 @@ def _semantic_source_matches(
             if first_arrival <= int(row["sequence"]) <= last_arrival
         ]
         units = _history_units(eligible)
-        unit_texts = [_semantic_transcript(unit) for unit in units]
-        joined_text = "\n".join(unit_texts)
-        unit_starts: list[int] = []
-        unit_end_to_index: dict[int, int] = {}
-        cursor = 0
-        for index, unit_text in enumerate(unit_texts):
-            unit_starts.append(cursor)
-            cursor += len(unit_text)
-            unit_end_to_index[cursor] = index
-            cursor += 1
-        first_units = [
-            index
-            for index, unit in enumerate(units)
-            if any(int(row["sequence"]) == first_arrival for row in unit)
-        ]
-        last_units = [
-            index
-            for index, unit in enumerate(units)
-            if any(int(row["sequence"]) == last_arrival for row in unit)
-        ]
-        for lower, start in enumerate(unit_starts):
-            if not joined_text.startswith(text, start):
-                continue
-            upper = unit_end_to_index.get(start + len(text))
-            if upper is None or upper < lower:
-                continue
-            if not any(lower <= index <= upper for index in first_units):
-                continue
-            if not any(lower <= index <= upper for index in last_units):
-                continue
-            selected = [
-                row for unit in units[lower : upper + 1] for row in unit
-            ]
-            if (
-                selected
-                and _fragment_digest(selected) == target_digest
-                and _semantic_transcript(selected) == text
-            ):
-                return True
+        if _identity_interval_matches(
+            units, target_digest, encoded_identities,
+            first_arrival=first_arrival, last_arrival=last_arrival,
+        ):
+            return True
     return False
 
 
