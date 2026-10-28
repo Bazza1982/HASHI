@@ -917,6 +917,10 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/system-prompts/{slot}/delete-if-unchanged",
+            self.handle_agent_sys_prompt_conditional_delete,
+        )
         self.app.router.add_patch(
             "/api/agents/{name}/metadata", self.handle_agent_metadata
         )
@@ -1006,6 +1010,10 @@ class WorkbenchApiServer:
         self.app.router.add_delete(
             "/api/agents/{name}/scheduler/jobs/{job_id}",
             self.handle_agent_scheduler_delete,
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/scheduler/jobs/{job_id}/delete-if-unchanged",
+            self.handle_agent_scheduler_conditional_delete,
         )
         self.app.router.add_get(
             "/api/agents/{name}/scheduler/status",
@@ -5595,6 +5603,70 @@ class WorkbenchApiServer:
             },
             status=int(outcome.get("status", 200)),
         )
+
+    def _guard_agent_management_access(self, request, agent_name: str):
+        """Apply the same governed Agent visibility as the overview."""
+        if not self._is_governed_profile():
+            return None
+        user = self._enterprise_user_from_request(request)
+        if user is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        rows = self._filter_enterprise_agent_rows_for_user(user, self._load_agent_rows())
+        if not any(str(row.get("name") or "") == agent_name for row in rows):
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        return None
+
+    async def handle_agent_sys_prompt_conditional_delete(self, request):
+        """Clear a local PCM slot only if it still matches the confirmed view."""
+        from orchestrator.bridge_memory import (
+            SysPromptManager, SysPromptSemanticConflict, sys_prompt_deletion_revision,
+        )
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        revision = payload.get("expected_revision")
+        if slot not in {str(index) for index in range(1, 11)} or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+            return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
+        manager = getattr(runtime, "sys_prompt_manager", None)
+        if manager is None:
+            # Shared Function workers use a runtime facade; resolve the same
+            # workspace used by the overview and the canonical PCM store.
+            row = next((item for item in self._load_agent_rows()
+                        if item.get("name") == agent_name), None)
+            if row is None:
+                return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            metadata = self._metadata_for_agent(row, runtime)
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error": "local system prompts unavailable"}, status=503)
+            manager = SysPromptManager(Path(workspace))
+        if getattr(manager, "scope", None) != "local" or getattr(manager, "shared", False):
+            return web.json_response({"ok": False, "error": "local system prompts unavailable"}, status=503)
+        try:
+            before = manager.get_slot(slot)
+            canonical_agent = str(getattr(runtime, "name", agent_name))
+            if not before.get("text") or sys_prompt_deletion_revision(
+                slot, before, agent_name=canonical_agent,
+            ) != revision:
+                return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+            manager.delete(slot, expected_slot=before)
+        except (SysPromptSemanticConflict, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        return web.json_response({"ok": True, "agent": canonical_agent, "slot": slot})
 
     async def handle_agent_overview(self, request):
         name = str(request.match_info.get("name") or "").strip()
@@ -13069,6 +13141,7 @@ class WorkbenchApiServer:
 
     def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict) -> dict:
         from orchestrator.her_v2.request_policy import job_effort_policy
+        from orchestrator.skill_manager import scheduler_job_deletion_revision
 
         task_id = str(job.get("id") or "")
         scheduler = self._task_scheduler()
@@ -13124,6 +13197,7 @@ class WorkbenchApiServer:
             "job_id": task_id,
             "enabled": bool(job.get("enabled", False)),
             "job": dict(job),
+            "deletion_revision": scheduler_job_deletion_revision(job),
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
@@ -13422,6 +13496,49 @@ class WorkbenchApiServer:
             }
         )
 
+    async def handle_agent_scheduler_conditional_delete(self, request):
+        """Delete exactly one confirmed Scheduler definition, without stale writes."""
+        from orchestrator.skill_manager import SchedulerJobChanged
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        kind = str(payload.get("kind") or "").strip().lower()
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        revision = payload.get("expected_revision")
+        only_disabled = payload.get("only_disabled", False)
+        if (kind not in {"cron", "heartbeat", "nudge"} or not self._scheduler_task_id_valid(job_id)
+                or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)
+                or type(only_disabled) is not bool):
+            return web.json_response({"ok": False, "error": "invalid task confirmation"}, status=400)
+        manager = getattr(runtime, "skill_manager", None)
+        if manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        try:
+            ok, message = manager.delete_owned_job_if_unchanged(
+                kind, job_id, agent_name=str(getattr(runtime, "name", agent_name)),
+                expected_revision=revision, only_disabled=only_disabled,
+            )
+        except (SchedulerJobChanged, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        if not ok:
+            return web.json_response({"ok": False, "error": message}, status=404)
+        return web.json_response({"ok": True, "agent": agent_name, "kind": kind, "job_id": job_id})
+
     async def handle_agent_scheduler_delete(self, request):
         """Delete one owned scheduler task after exact user authorization."""
 
@@ -13438,6 +13555,8 @@ class WorkbenchApiServer:
             payload = {}
         if payload.get("authorization") != "explicit_user_authorization":
             return web.json_response({"ok": False, "error": "explicit task deletion authorization is required"}, status=403)
+        if any(field in payload for field in ("expected_enabled", "expected_revision", "only_disabled")):
+            return web.json_response({"ok": False, "error": "use conditional deletion for a guarded task"}, status=400)
         kind = str(payload.get("kind") or "").strip().lower()
         if kind not in {"cron", "heartbeat", "nudge"}:
             return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)

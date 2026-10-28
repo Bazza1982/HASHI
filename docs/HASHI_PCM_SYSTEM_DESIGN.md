@@ -76,6 +76,15 @@ Dynamic system prompts are temporary or quickly configurable instructions manage
 | Agent-local /sys     | Each agent has ten local slots. They are stored in sys\_prompts.json in that agent’s workspace and affect only that agent. Saving a prompt does not enable it; the user must turn it on. Off disables the prompt without deleting it. Delete removes its content.                                                                                                                   |
 | Instance-global /sys | Each HASHI instance has ten global slots, accessed through /sys global or /sys g. All configured Bridge Agents in the instance read active global prompts on their next request. Global prompts are not copied into agent workspaces. Global prompts precede and override conflicting local /sys prompts, but cannot override higher-level system permissions or safety boundaries. |
 
+Confirmed frontend deletion of an Agent-local /sys slot carries an opaque
+revision bound to the Agent, slot, complete text and active state. PCM compares
+the confirmed snapshot and uses its existing revision-aware writer to reject a
+concurrent slot change. Instance-global and permanent prompts are outside this
+operation. Older backends lack conditional deletion and must fail closed.
+The user authorized the supporting small Function change on 2026-10-28.
+HASHI3 source and offline checks are separate from pending runtime adoption and
+external-frontend verification.
+
 ### 4.2 Working environment
 
 #### Workspace

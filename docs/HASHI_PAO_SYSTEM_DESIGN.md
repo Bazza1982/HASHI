@@ -530,6 +530,19 @@ New and edited declarations use the revision-aware Scheduler writer and retain
 unrelated fields. Merely reading a legacy declaration does not publish a
 migration.
 
+#### Confirmed Scheduler deletion (2026-10-28)
+
+A frontend confirms an exact Agent-owned task definition and passes its opaque
+deletion revision to the distinct conditional-delete operation. PAO compares
+the full current definition, owner and (when requested) disabled state, then
+publishes the deletion using the revision of the same persisted document.
+Changed or ambiguous tasks are not deleted. A stale document is a conflict;
+a committed durability error is outcome-unknown and must not be blindly
+retried. Older backends lack this operation and must not be treated as guarded.
+The user authorized a small HASHI Function change for Workbench on 2026-10-28.
+Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
+running adoption and external-frontend verification remain separate and pending.
+
 #### Scheduler recovery conversation contract (2026-09-30)
 
 When persisted missed triggers require a decision, HASHI Scheduler creates one

@@ -2,6 +2,11 @@
 
 Current decisions, with full rationale in the linked owners:
 
+- Confirmed task and local /sys deletion rechecks the exact snapshot at the
+  canonical writer; changed content and newly enabled tasks survive. Global and
+  permanent prompts are excluded. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md#confirmed-scheduler-deletion-2026-10-28)
+  and [PCM](HASHI_PCM_SYSTEM_DESIGN.md#dynamic-system-prompts).
+
 - Legacy audio migration is fail-closed on verified ownership and safe paths;
   PAO settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
   See [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
