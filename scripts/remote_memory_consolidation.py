@@ -314,37 +314,16 @@ def _safe_forget_lines(workspace: Path, source_path: Path, source_kind: str):
     except (OSError, ValueError, UnicodeError):
         return []
 
-    def safe(group):
-        if not group or any(row[7] is None for row in group):
-            return False
-        epochs = [row[7].timestamp() for row in group]
-        if any(lower <= value <= upper for value in epochs for lower, upper in windows):
-            return False
-        old = (source_kind == "transcript" and all(row[1] <= offset for row in group)
-               and all(value < first_start for value in epochs))
-        trusted = valid_checkpoints if source_kind == "transcript" else [
-            (int(offset), str(expected_hash), str(recorded_at), checkpoint_epoch)
-        ]
-        new = any(all(row[0] >= point[0] for row in group)
-                  and all(value >= point[3] for value in epochs) for point in trusted)
-        return old or new
-
     if source_kind != "transcript":
-        return [row[2:7] for row in parsed if safe([row])]
-    groups = []
-    current = []
-    for row in parsed:
-        if row[4] == "user":
-            if current:
-                groups.append(current)
-            current = [row]
-        elif current:
-            current.append(row)
-    if current:
-        groups.append(current)
-    return [row[2:7] for group in groups
-            if any(row[4] == "assistant" for row in group) and safe(group)
-            for row in group]
+        # Summary content is not attributable to a precise time.
+        return [row[2:7] for row in parsed]
+    return [
+        row[2:7] for row in parsed
+        if row[7] is None or not any(
+            float(lower) <= row[7].timestamp() <= float(upper)
+            for lower, upper in windows
+        )
+    ]
 
 
 def iter_source_records(root: Path, instance_id: str, agent_ids: Iterable[str]) -> Iterable[dict[str, Any]]:

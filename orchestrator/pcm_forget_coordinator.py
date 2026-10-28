@@ -5,7 +5,7 @@ import asyncio
 from typing import Any
 
 from orchestrator import runtime_session
-from orchestrator.pcm_forget_artifacts import forget_local_memories, quarantine_unproven_continuity
+from orchestrator.pcm_forget_artifacts import forget_local_memories, validate_untracked_continuity_scope
 from orchestrator.session_store import SessionConflict
 
 
@@ -36,11 +36,12 @@ async def finish_pending(runtime: Any, update: Any, *, owner_id: str) -> dict[st
         )
     if "continuity" not in steps:
         session_ids = pending["result"].get("all_session_ids", pending["result"]["session_ids"])
-        report["quarantined_artifacts"] = await asyncio.to_thread(
-            quarantine_unproven_continuity, store, operation_id=operation,
+        await asyncio.to_thread(
+            validate_untracked_continuity_scope, store, operation_id=operation,
             owner_id=owner, agent_id=agent, agent_home=runtime.workspace_dir,
             session_ids=session_ids,
         )
+        report["untracked_continuity_preserved"] = True
         store.record_pcm_forget_step(
             owner_id=owner, agent_id=agent, operation_id=operation, step="continuity",
         )

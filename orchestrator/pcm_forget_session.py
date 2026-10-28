@@ -203,7 +203,9 @@ def forget_window(
             raise ForgetBusy("Agent has an active Phone call")
         started = _epoch(call["started_at"], naive_timezone)
         ended = _epoch(call["ended_at"], naive_timezone) if call["ended_at"] else None
-        if started is None or ended is None or (started <= upper and ended >= lower):
+        # A Phone call is indivisible here. Preserve crossing or undated calls
+        # rather than removing content whose time cannot be established.
+        if started is not None and ended is not None and lower <= started <= ended <= upper:
             selected_calls.append(call)
             for row in connection.execute(
                 "SELECT run_id FROM live_actions WHERE call_id=? AND run_id IS NOT NULL",
@@ -235,17 +237,20 @@ def forget_window(
     unverified = 0
     for run_id, members in by_run.items():
         times = [_epoch(row["created_at"], naive_timezone) for row in members]
-        uncertain = any(value is None for value in times)
-        valid = [float(value) for value in times if value is not None]
-        if run_id in phone_run_ids or uncertain or (valid and min(valid) <= upper and max(valid) >= lower):
-            selected.extend(members)
+        unverified += sum(value is None for value in times)
+        selected.extend(row for row, instant in zip(members, times)
+                        if instant is not None and lower <= instant <= upper)
+        # A run-level projection can contain both sides of a boundary.
+        # Redact it only when its entire visible message set is in the window.
+        if run_id in phone_run_ids or (times and all(
+            value is not None and lower <= value <= upper for value in times
+        )):
             selected_runs.add(run_id)
-            unverified += sum(value is None for value in times)
     for row in single:
         instant = _epoch(row["created_at"], naive_timezone)
-        if instant is None or lower <= instant <= upper:
+        unverified += int(instant is None)
+        if instant is not None and lower <= instant <= upper:
             selected.append(row)
-            unverified += int(instant is None)
 
     from orchestrator.session_titles import automatic_session_title
 
@@ -292,7 +297,7 @@ def forget_window(
     ).fetchall()
     for row in command_rows:
         instant = _epoch(row["created_at"], naive_timezone)
-        if instant is not None and not lower <= instant <= upper:
+        if instant is None or not lower <= instant <= upper:
             continue
         if str(row["state"]) != "completed":
             raise ForgetBusy("Agent has an unfinished command")
@@ -313,7 +318,7 @@ def forget_window(
     ).fetchall()
     for event in event_rows:
         instant = _epoch(event["created_at"], naive_timezone)
-        if instant is None or lower <= instant <= upper:
+        if instant is not None and lower <= instant <= upper:
             _audit(connection, instance_id=instance_id, owner_id=owner, agent_id=agent,
                    kind="event", identity=str(event["event_id"]), row=dict(event))
             connection.execute(
@@ -463,26 +468,12 @@ def assert_continuity_safe(
     ).fetchall()
     if not windows:
         return
-    digests = {
-        str(row[0]) for row in connection.execute(
-            """SELECT f.text_digest FROM pcm_forget_messages f
-               JOIN sessions s ON s.session_id=f.session_id
-               WHERE s.instance_id=? AND s.agent_id=?""", (scope[0], scope[2]),
-        )
-    }
     for session in sessions:
         for message in session.get("messages", []):
             for lower, upper, naive_timezone in windows:
                 instant = _epoch(message.get("source_created_at"), naive_timezone)
-                if instant is None or float(lower) <= instant <= float(upper):
-                    raise ForgetUnsupported("continuity contains a forgotten or unverified interval")
-                if instant <= float(upper):
-                    texts = (message.get("text"), message.get("display_text"))
-                    if any(
-                        value and hashlib.sha256(str(value).encode("utf-8")).hexdigest() in digests
-                        for value in texts
-                    ):
-                        raise ForgetUnsupported("continuity contains a forgotten exchange")
+                if instant is not None and float(lower) <= instant <= float(upper):
+                    raise ForgetUnsupported("continuity contains a forgotten interval")
 
 
 def projection_policy(
@@ -511,11 +502,8 @@ def transcript_blocked(item: Mapping[str, Any], policy: Mapping[str, Any]) -> bo
         return False
     if str(item.get("message_ref") or item.get("message_id") or "") in policy["message_ids"]:
         return True
-    text_digest = hashlib.sha256(str(item.get("text") or "").encode("utf-8")).hexdigest()
     for lower, upper, naive_timezone in windows:
         instant = _epoch(item.get("ts"), naive_timezone)
-        if instant is None or lower <= instant <= upper:
-            return True
-        if instant <= upper and text_digest in policy["digests"]:
+        if instant is not None and lower <= instant <= upper:
             return True
     return False

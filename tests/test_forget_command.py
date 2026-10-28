@@ -78,8 +78,8 @@ async def test_forget_requires_verified_api_identity_and_confirm_then_opens_new_
     assert store.pending_pcm_forget(owner_id="user:7", agent_id="lily") is None
     assert "wrong idea" not in str(store.agent_history_page(owner_id="user:7", agent_id="lily"))
     assert "wrong legacy idea" not in str(store.messages(legacy["session_id"], owner_id="exchange:legacy"))
-    assert memory.retrieve_memories("wrong idea", limit=3) == []
-    assert "wrong idea" not in (home / "agent.md").read_text(encoding="utf-8")
+    assert [row["content"] for row in memory.retrieve_memories("wrong idea", limit=3)] == ["wrong idea"]
+    assert "wrong idea" in (home / "agent.md").read_text(encoding="utf-8")
     with store._connection() as connection:
         copies = [row[0] for row in connection.execute("SELECT payload_json FROM pcm_forget_audit")]
     with memory._connect() as connection:
@@ -151,8 +151,8 @@ def test_forget_preview_has_readable_line_breaks(locale):
     assert "\n" in text
     assert "\\n" not in text
     assert "HCC" in text
-    assert ("更早内容" if locale == "zh-CN" else "older information") in text
-    assert ("不能自动恢复" if locale == "zh-CN" else "cannot yet be restored automatically") in text
+    assert ("可能仍" if locale == "zh-CN" else "may still") in text
+    assert ("跨界通话" if locale == "zh-CN" else "Calls crossing the boundary") in text
 
 
 @pytest.mark.parametrize("duration", ["0h", "1w", "-1h", "9999d", "3", "1.5d"])

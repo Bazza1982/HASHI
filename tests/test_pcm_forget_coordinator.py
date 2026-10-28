@@ -44,12 +44,12 @@ async def test_confirmed_operation_resumes_after_interruption_and_creates_new_se
     monkeypatch.setattr(runtime_session, "_bind_session", bind)
     monkeypatch.setattr(runtime_session, "_discard_session_transients", lambda runtime: None)
     monkeypatch.setattr(runtime_session, "_prepare_clean_context", lambda *a, **k: None)
-    original = pcm_forget_coordinator.quarantine_unproven_continuity
+    original = pcm_forget_coordinator.validate_untracked_continuity_scope
 
     def interrupted(*args, **kwargs):
         raise OSError("simulated interruption")
 
-    monkeypatch.setattr(pcm_forget_coordinator, "quarantine_unproven_continuity", interrupted)
+    monkeypatch.setattr(pcm_forget_coordinator, "validate_untracked_continuity_scope", interrupted)
     with pytest.raises(OSError):
         await pcm_forget_coordinator.finish_pending(runtime, update, owner_id="user:7")
     pending = store.pending_pcm_forget(owner_id="user:7", agent_id="lily")
@@ -59,12 +59,13 @@ async def test_confirmed_operation_resumes_after_interruption_and_creates_new_se
         store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="lily",
                          request_id="blocked", text="new", source="test", idempotency_key="blocked")
 
-    monkeypatch.setattr(pcm_forget_coordinator, "quarantine_unproven_continuity", original)
+    monkeypatch.setattr(pcm_forget_coordinator, "validate_untracked_continuity_scope", original)
     result = await pcm_forget_coordinator.finish_pending(runtime, update, owner_id="user:7")
     assert result["new_session_id"] != session["session_id"]
     assert store.pending_pcm_forget(owner_id="user:7", agent_id="lily") is None
-    assert memory.retrieve_memories("wrong", limit=3) == []
-    assert "wrong memory" not in (home / "agent.md").read_text(encoding="utf-8")
+    assert [row["content"] for row in memory.retrieve_memories("wrong", limit=3)] == ["wrong memory"]
+    assert "wrong memory" in (home / "agent.md").read_text(encoding="utf-8")
+    assert "wrong idea" not in str(store.messages(session["session_id"], owner_id="user:7"))
     reset.assert_awaited_once()
     bind.assert_awaited_once_with(runtime, update, result["new_session_id"])
 

@@ -35,8 +35,8 @@ def test_forget_removes_selected_memory_but_keeps_audit_and_survives_reconciliat
             transcript_entries.append({"role": role, "source": "test", "ts": ts, "text": text})
 
     add_exchange("old", stamp(8), stamp(8, 10), origin_ref="old-run")
-    # A pair that straddles the beginning must be removed as a complete exchange.
-    add_exchange("forgotten", stamp(8, 55), stamp(9, 5), origin_ref="forgotten-run")
+    # Both messages of this fully tracked exchange fall in the selected interval.
+    add_exchange("forgotten", stamp(9, 1), stamp(9, 5), origin_ref="forgotten-run")
     add_exchange("after", stamp(11, 5), stamp(11, 10), origin_ref="after-run")
     transcript.write_text(
         "".join(json.dumps(entry) + "\n" for entry in transcript_entries),
@@ -154,9 +154,11 @@ def test_handoff_never_reloads_forgotten_audit_transcript(tmp_path):
         transfer_id="t", source_agent="a", source_instance="i",
         target_agent="a", target_instance="j", created_at=stamp(12),
     )
-    assert "forgotten" not in json.dumps(package)
+    assert "forgotten" not in package["recent_context_block"]
+    assert package["handoff_summary"] == "forgotten summary"
+    assert package["memory_files"]["tasks.md"] == "forgotten task"
     builder.build_handoff()
-    assert "forgotten" not in (tmp_path / "handoff.md").read_text(encoding="utf-8")
+    assert "forgotten task" in (tmp_path / "handoff.md").read_text(encoding="utf-8")
 
 
 def test_memory_export_does_not_republish_retained_audit_log(tmp_path):
@@ -178,7 +180,7 @@ def test_memory_export_does_not_republish_retained_audit_log(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unverifiable_wiki_is_quarantined_for_the_forgotten_agent(tmp_path):
+async def test_unverifiable_wiki_remains_available_after_forget(tmp_path):
     from types import SimpleNamespace
     from tools.registry import ToolRegistry
 
@@ -200,12 +202,12 @@ async def test_unverifiable_wiki_is_quarantined_for_the_forgotten_agent(tmp_path
         start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
     )
     after = await registry.execute("wiki_search", {"operation": "search", "query": "wrong idea"})
-    assert "old wrong idea" not in after.output
-    assert json.loads(after.output)["results"] == []
+    assert "old wrong idea" in after.output
+    assert json.loads(after.output)["results"]
 
 
 @pytest.mark.asyncio
-async def test_wiki_command_does_not_bypass_quarantine_with_other_capability(tmp_path):
+async def test_wiki_command_keeps_other_capability_after_forget(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from orchestrator.commands.wiki import wiki_command
@@ -220,16 +222,20 @@ async def test_wiki_command_does_not_bypass_quarantine_with_other_capability(tmp
     runtime = SimpleNamespace(
         workspace_dir=home, _is_authorized_user=lambda actor: actor == 7,
         _reply_text=reply, enqueue_request=enqueue,
+        _is_hashi_tool_connected=lambda capability: True,
         global_config=SimpleNamespace(wiki_provider={"id": "test", "capability": "web_search"}),
     )
+    route = SimpleNamespace(chat_id=1, metadata={}, idempotency_key="wiki-key")
+    monkeypatch.setattr("orchestrator.command_request_context.command_request_context",
+                        lambda *args, **kwargs: route)
+    enqueue.return_value = "request"
     update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
     await wiki_command(runtime, update, SimpleNamespace(args=["old", "idea"]))
-    assert "quarantined" in reply.await_args.args[1]
-    enqueue.assert_not_awaited()
+    enqueue.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_dual_brain_preflight_cannot_fetch_unverified_wiki_after_forget(tmp_path):
+async def test_dual_brain_preflight_can_fetch_unverified_wiki_after_forget(tmp_path):
     from types import SimpleNamespace
     from orchestrator.dual_brain_mode import DualBrainObserver
     from orchestrator.post_turn_observer import TurnContextRequest
@@ -267,11 +273,12 @@ async def test_dual_brain_preflight_cannot_fetch_unverified_wiki_after_forget(tm
     await observer.build_context_sections(TurnContextRequest(
         request_id="new", source="telegram", user_text="hello", model_name="test",
     ))
-    assert len(prompts) == 1
+    assert len(prompts) == 2
     assert "old wrong idea" not in prompts[0]
+    assert "old wrong idea" in prompts[1]
 
 
-def test_central_memory_without_source_lineage_is_quarantined_after_forget(tmp_path):
+def test_central_memory_without_source_lineage_remains_available_after_forget(tmp_path):
     from types import SimpleNamespace
     from orchestrator.central_memory import MemorySearchService
     from tests.test_pcm_audit_memory_wiki import _central_db
@@ -290,11 +297,11 @@ def test_central_memory_without_source_lineage_is_quarantined_after_forget(tmp_p
     store.forget_window(start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)))
 
     result = service.search({"query": "decision", "source": "central"})
-    assert result["results"] == []
+    assert result["results"]
     assert result["central_status"] == "filtered_after_forget"
 
 
-def test_emotional_memory_and_relationship_cache_are_not_left_in_pcm(tmp_path):
+def test_tracked_emotional_events_are_removed_and_unattributed_cache_is_preserved(tmp_path):
     from orchestrator.anatta.bridge_adapter import BridgeMemoryAdapter
     from orchestrator.anatta.config import AnattaConfig
     from orchestrator.anatta.memory import AnattaMemoryStore
@@ -332,15 +339,17 @@ def test_emotional_memory_and_relationship_cache_are_not_left_in_pcm(tmp_path):
         )]
     assert emotions == ["old emotional summary"]
     assert relationships == ["old relationship idea"]
-    assert cache == []
+    assert len(cache) == 1
     assert any("forgotten emotional summary" in row for row in audit)
 
 
 def test_selected_derived_memory_is_retained_only_in_private_audit(tmp_path, monkeypatch):
     store = BridgeMemoryStore(tmp_path)
     monkeypatch.setattr(store, "_now", lambda: stamp(10))
-    store.record_memory("episodic", "test", "targeted memory")
-    store.forget_window(start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)))
+    reference = "session:one:run:targeted"
+    store.record_memory("episodic", "test", "targeted memory", origin_ref=reference)
+    store.forget_window(start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
+                        origin_refs=(reference,))
     assert store.retrieve_memories("targeted memory", limit=3) == []
     with store._connect() as connection:
         audit = connection.execute(
@@ -349,20 +358,17 @@ def test_selected_derived_memory_is_retained_only_in_private_audit(tmp_path, mon
     assert any("targeted memory" in row[0] for row in audit)
 
 
-def test_unattributed_late_memory_is_quarantined_not_silently_reused(tmp_path, monkeypatch):
+def test_unattributed_late_memory_is_preserved(tmp_path, monkeypatch):
     store = BridgeMemoryStore(tmp_path)
     monkeypatch.setattr(store, "_now", lambda: stamp(12))
     store.record_memory("episodic", "test", "unproven late summary")
     report = store.forget_window(
         start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
     )
-    assert report["quarantined"] == 1
-    assert store.retrieve_memories("unproven late summary", limit=3) == []
-    with store._connect() as connection:
-        audit = connection.execute(
-            "SELECT payload_json FROM pcm_forget_quarantine WHERE item_type='memory'"
-        ).fetchall()
-    assert any("unproven late summary" in row[0] for row in audit)
+    assert report["quarantined"] == 0
+    assert [row["content"] for row in store.retrieve_memories("unproven late summary", limit=3)] == [
+        "unproven late summary"
+    ]
 
 
 def test_new_session_inherits_the_agent_forget_boundary(tmp_path, monkeypatch):
@@ -426,7 +432,7 @@ def test_runtime_session_memory_inherits_agent_forget_fences(tmp_path):
     ) is None
 
 
-def test_recovery_capsule_cannot_be_replayed_after_its_interval_was_forgotten(tmp_path, monkeypatch):
+def test_unattributed_recovery_capsule_is_preserved(tmp_path, monkeypatch):
     store = BridgeMemoryStore(tmp_path)
     monkeypatch.setattr(store, "_now", lambda: stamp(9, 30))
     assert store.record_recovery_capsule("bad idea in old unfinished work", origin_ref="old-run") is not None
@@ -434,8 +440,8 @@ def test_recovery_capsule_cannot_be_replayed_after_its_interval_was_forgotten(tm
     store.forget_window(start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)))
 
     monkeypatch.setattr(store, "_now", lambda: stamp(12))
-    assert store.record_recovery_capsule("bad idea in old unfinished work", origin_ref="old-run") is None
+    assert store.record_recovery_capsule("bad idea in old unfinished work", origin_ref="old-run") is not None
     with store._connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM turns WHERE text LIKE '%bad idea%'"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1

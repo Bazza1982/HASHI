@@ -30,6 +30,13 @@ def install_schema(connection: sqlite3.Connection) -> None:
         )"""
     )
     connection.execute(
+        """CREATE TABLE IF NOT EXISTS pcm_forgotten_fingerprints (
+            source_epoch REAL NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            PRIMARY KEY(source_epoch, content_sha256)
+        )"""
+    )
+    connection.execute(
         """CREATE TABLE IF NOT EXISTS pcm_forget_export_checkpoints (
             source_path TEXT PRIMARY KEY,
             prefix_size INTEGER NOT NULL,
@@ -79,11 +86,10 @@ def _overlaps(
     naive_timezone: str | None,
 ) -> tuple[bool, bool]:
     points = [_epoch(value, naive_timezone) for value in timestamps]
-    if not points or any(point is None for point in points):
-        # An unverifiable source is quarantined rather than silently reused.
-        return True, True
     values = [float(point) for point in points if point is not None]
-    return min(values) <= upper and max(values) >= lower, False
+    uncertain = not points or any(point is None for point in points)
+    # Only a known source time inside the window establishes a match.
+    return any(lower <= point <= upper for point in values), uncertain
 
 
 def blocked(
@@ -150,6 +156,27 @@ def oldest_forget_start(workspace: Path) -> float | None:
             return float(value) if value is not None else None
     except sqlite3.Error as exc:
         raise RuntimeError("cannot verify the forget boundary") from exc
+
+
+def forgotten_raw_fingerprints(workspace: Path) -> set[tuple[float, str]]:
+    """Return exact time-and-content fingerprints of forgotten raw records."""
+    database = Path(workspace) / "bridge_memory.sqlite"
+    if not database.exists():
+        return set()
+    if database.is_symlink():
+        raise RuntimeError("memory boundary is a link")
+    try:
+        with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pcm_forgotten_fingerprints'"
+            ).fetchone()
+            if not exists:
+                return set()  # A pre-feature store has no provable raw fingerprints.
+            return {(float(row[0]), str(row[1])) for row in connection.execute(
+                "SELECT source_epoch, content_sha256 FROM pcm_forgotten_fingerprints"
+            )}
+    except sqlite3.Error as exc:
+        raise RuntimeError("cannot verify forgotten raw record fingerprints") from exc
 
 
 def checkpoint_forget_exports(workspace: Path) -> None:
@@ -272,10 +299,12 @@ def filter_transcript_rounds(
                 return rounds  # Legacy store which has never had a forget operation.
             if not {"pcm_forgotten_ranges", "pcm_forgotten_origins"}.issubset(tables):
                 raise RuntimeError("incomplete forget boundary")
-            return [
-                entries for entries in rounds
-                if not blocked(connection, timestamps=(entry.get("ts") for entry in entries))
+            filtered = [
+                [entry for entry in entries
+                 if not blocked(connection, timestamps=(entry.get("ts"),))]
+                for entries in rounds
             ]
+            return [entries for entries in filtered if entries]
     except sqlite3.Error as exc:
         raise RuntimeError("cannot verify the forget boundary for handoff") from exc
 
@@ -325,9 +354,9 @@ def forget_window(
 ) -> dict[str, int]:
     """Fence and remove one interval in the caller's SQLite transaction.
 
-    All selected exchanges are removed whole.  Untimestamped material is moved
-    to a non-retrievable quarantine and reported; the audit transcript remains
-    intact.  Source identities prevent a later promotion from recreating rows.
+    Known-timestamped turns and directly attributed memories are removed.
+    Unknown or mixed summary content is retained and may still contain
+    information from the window. Audit transcripts remain intact.
     """
     lower, upper = validate_window(start, end)
     if naive_timezone:
@@ -343,33 +372,56 @@ def forget_window(
     )
     refs = {str(ref).strip() for ref in origin_refs if str(ref).strip()}
     exchange_ids: set[int] = set()
-    safe_refs: set[str] = set()
     turn_ids: set[int] = set()
     memory_ids: set[int] = set()
     quarantined = 0
 
-    for row in connection.execute("SELECT * FROM conversation_exchanges"):
-        selected, uncertain = _overlaps(
-            (row["user_ts"], row["assistant_ts"]), lower, upper, naive_timezone
+    def remember_raw_fingerprint(instant: float | None, text: object) -> None:
+        content = str(text or "").strip()
+        if instant is None or not content:
+            return
+        connection.execute(
+            "INSERT OR IGNORE INTO pcm_forgotten_fingerprints(source_epoch, content_sha256) VALUES (?, ?)",
+            (instant, hashlib.sha256(content.encode("utf-8")).hexdigest()),
         )
-        if not selected:
-            if row["origin_ref"]:
-                safe_refs.add(str(row["origin_ref"]))
+
+    for row in connection.execute("SELECT * FROM conversation_exchanges"):
+        user_time = _epoch(row["user_ts"], naive_timezone)
+        assistant_time = _epoch(row["assistant_ts"], naive_timezone)
+        selected_user = user_time is not None and lower <= user_time <= upper
+        selected_assistant = assistant_time is not None and lower <= assistant_time <= upper
+        if not (selected_user or selected_assistant):
             continue
-        exchange_ids.add(int(row["id"]))
-        if row["origin_ref"]:
-            refs.add(str(row["origin_ref"]))
-        for field in ("user_turn_id", "assistant_turn_id"):
-            if row[field]:
-                turn_ids.add(int(row[field]))
         _quarantine(connection, "exchange", row)
-        if uncertain:
-            quarantined += 1
+        if selected_user:
+            remember_raw_fingerprint(user_time, row["user_text"])
+        if selected_assistant:
+            remember_raw_fingerprint(assistant_time, row["assistant_text"])
+        if selected_user and row["user_turn_id"]:
+            turn_ids.add(int(row["user_turn_id"]))
+        if selected_assistant and row["assistant_turn_id"]:
+            turn_ids.add(int(row["assistant_turn_id"]))
+        if selected_user and selected_assistant:
+            exchange_ids.add(int(row["id"]))
+            if row["origin_ref"]:
+                refs.add(str(row["origin_ref"]))
+        else:
+            # Preserve the other message instead of removing a boundary-crossing pair.
+            for side, selected in (("user", selected_user), ("assistant", selected_assistant)):
+                if selected:
+                    connection.execute(
+                        f"UPDATE conversation_exchanges SET {side}_text='', {side}_turn_id=NULL WHERE id=?",
+                        (int(row["id"]),),
+                    )
 
     for row in connection.execute("SELECT * FROM turns"):
         selected, uncertain = _overlaps((row["ts"],), lower, upper, naive_timezone)
+        if str(row["role"]) == "recovery" and int(row["id"]) not in turn_ids:
+            # A recovery capsule is a summary, not an event with known source time.
+            continue
         if selected or int(row["id"]) in turn_ids:
             turn_ids.add(int(row["id"]))
+            remember_raw_fingerprint(_epoch(row["ts"], naive_timezone), row["text"])
             # Recovery capsules use a stable source identity across replay.
             # Remember it before removing the row, even if the replay occurs
             # long after the original forgotten interval.
@@ -381,20 +433,14 @@ def forget_window(
                 quarantined += 1
 
     for row in connection.execute("SELECT * FROM memories"):
-        selected, uncertain = _overlaps((row["ts"],), lower, upper, naive_timezone)
         reference = str(row["origin_ref"] or "").strip()
-        instant = _epoch(row["ts"], naive_timezone)
-        # A later untethered summary may have been generated from a forgotten
-        # exchange. Keep its audit copy but do not return it as Agent memory.
-        if quarantine_late and instant is not None and instant > upper and reference not in safe_refs:
-            selected, uncertain = True, True
-        if selected or (reference and reference in refs):
+        # A generated memory's creation time does not identify the time of its
+        # source facts. Only a known source reference permits targeted removal.
+        if reference and reference in refs:
             memory_ids.add(int(row["id"]))
             if row["origin_ref"]:
                 refs.add(str(row["origin_ref"]))
             _quarantine(connection, "memory", row)
-            if uncertain:
-                quarantined += 1
 
     tables = {str(row[0]) for row in connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -422,11 +468,8 @@ def forget_window(
                 _quarantine(connection, "anatta_relationship", row)
                 connection.execute("DELETE FROM relationship_events WHERE id=?", (row["id"],))
                 quarantined += int(uncertain)
-    if "derived_relationship_cache" in tables:
-        for row in connection.execute("SELECT * FROM derived_relationship_cache").fetchall():
-            _quarantine(connection, "anatta_relationship_cache", row, identity=row["relationship_key"])
-            quarantined += 1
-        connection.execute("DELETE FROM derived_relationship_cache")
+    # A derived relationship cache can mix facts from multiple periods and
+    # has no per-item source provenance. Leave it unchanged.
 
     connection.executemany(
         "INSERT OR IGNORE INTO pcm_forgotten_origins(origin_ref) VALUES (?)",

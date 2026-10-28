@@ -1988,14 +1988,11 @@ class ToolRegistry:
                 return f"Error: {exc}"
 
         if tool_name == "wiki_search":
-            from orchestrator.pcm_forget_memory import oldest_forget_start
             from tools.wiki_search import execute_wiki_search
 
-            agent_home = Path(self._read_scope()[1].get("agent_home") or self.workspace_dir)
             return await execute_wiki_search(
                 arguments,
                 global_config=self._effective_audit_context().get("global_config"),
-                safe_before=oldest_forget_start(agent_home),
             )
 
         if tool_name.startswith("hashi_scheduler_"):

@@ -540,10 +540,14 @@ def search_memory_plus_history(
     results: list[dict[str, str]] = []
     used = 0
     for _, row in scored:
+        hints = _list_text(row.get("search_hints"))
+        matching_hints = [
+            hint for hint in hints if any(term in hint.lower() for term in terms)
+        ]
         excerpt_parts = (
             _list_text(row.get("summary"))
             + _list_text(row.get("open_items"))
-            + _list_text(row.get("search_hints"))[:1]
+            + (matching_hints[:1] or hints[:1])
         )
         excerpt = " · ".join(excerpt_parts) or "Archived continuity checkpoint"
         remaining = max_chars - used

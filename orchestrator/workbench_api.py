@@ -9099,7 +9099,7 @@ class WorkbenchApiServer:
                 "source_channel": source_channel,
                 "frontend_operation": frontend_command["operation"],
                 "fc_compatibility_adapter_id": compatibility_adapter_id,
-                "_hashi_forget_authenticated": command == "forget",
+                **({"_hashi_forget_authenticated": True} if command == "forget" else {}),
             }
             if connector_claims is not None:
                 metadata["origin_instance"] = str(
@@ -13207,7 +13207,7 @@ class WorkbenchApiServer:
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.admin_command",
                 "_hashi_owner_id": owner_id,
-                "_hashi_forget_authenticated": forget_command,
+                **({"_hashi_forget_authenticated": True} if forget_command else {}),
             },
         )
         status = 200 if result.get("ok") else 400
@@ -13252,7 +13252,7 @@ class WorkbenchApiServer:
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.agent_command",
                 "_hashi_owner_id": owner_id,
-                "_hashi_forget_authenticated": forget_command,
+                **({"_hashi_forget_authenticated": True} if forget_command else {}),
             },
         )
         status_code = 200 if result.get("ok") else 400

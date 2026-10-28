@@ -35,7 +35,9 @@ def test_central_search_keeps_provably_older_records_after_forget(tmp_path):
         global_config=SimpleNamespace(instance_id="HASHI3",
             central_memory={"database_path": str(database), "model_dir": str(tmp_path / "missing")}))
     result = service.search({"query": "safe", "source": "central", "limit": 20})
-    assert [row["content"] for row in result["results"]] == ["old safe"]
+    assert {row["content"] for row in result["results"]} == {
+        "old safe", "forgotten unsafe", "old timestamp but later summary", "unknown provenance"
+    }
     assert result["central_status"] == "filtered_after_forget"
 
 
@@ -64,11 +66,13 @@ def test_central_search_allows_new_records_with_proven_local_source(tmp_path):
         global_config=SimpleNamespace(instance_id="HASHI3",
             central_memory={"database_path": str(database), "model_dir": str(tmp_path / "missing")}))
     result = service.search({"query": "fresh", "source": "central", "limit": 20})
-    assert [row["content"] for row in result["results"]] == ["fresh request"]
+    assert {row["content"] for row in result["results"]} == {
+        "fresh request", "unverified wrong summary"
+    }
 
 
 def test_unchanged_older_agent_memory_is_preserved(tmp_path):
-    from orchestrator.pcm_forget_artifacts import quarantine_unproven_continuity
+    from orchestrator.pcm_forget_artifacts import validate_untracked_continuity_scope
     from orchestrator.session_store import SessionStore
 
     home = tmp_path / "agent"
@@ -82,7 +86,7 @@ def test_unchanged_older_agent_memory_is_preserved(tmp_path):
     lower = datetime.now(timezone.utc) + timedelta(seconds=5)
     result = store.forget_pcm_window(owner_id="user:7", agent_id="lily",
                                      start=lower, end=lower + timedelta(hours=1))
-    quarantine_unproven_continuity(store, operation_id=result["operation_id"],
+    validate_untracked_continuity_scope(store, operation_id=result["operation_id"],
         owner_id="user:7", agent_id="lily", agent_home=home,
         session_ids=result["all_session_ids"])
     assert "old useful memory" in agent_file.read_text(encoding="utf-8")
@@ -92,7 +96,7 @@ def test_older_verified_compaction_is_preserved(tmp_path):
     from orchestrator.context_compaction import (
         ARCHIVE_FORMAT, CAPSULE_FORMAT, CAPSULE_RECORD_FORMAT, CompactionStore,
     )
-    from orchestrator.pcm_forget_artifacts import quarantine_unproven_continuity
+    from orchestrator.pcm_forget_artifacts import validate_untracked_continuity_scope
     from orchestrator.session_store import SessionStore
 
     home = tmp_path / "agent"
@@ -111,14 +115,14 @@ def test_older_verified_compaction_is_preserved(tmp_path):
     lower = datetime.now(timezone.utc) + timedelta(seconds=5)
     result = store.forget_pcm_window(owner_id="user:7", agent_id="lily",
                                      start=lower, end=lower + timedelta(hours=1))
-    quarantine_unproven_continuity(store, operation_id=result["operation_id"],
+    validate_untracked_continuity_scope(store, operation_id=result["operation_id"],
         owner_id="user:7", agent_id="lily", agent_home=home,
         session_ids=[session["session_id"]])
     assert compaction.read_state()["active_capsule"] is not None
     assert compaction.load_active()[0]["capsule"]["format"] == CAPSULE_FORMAT
 
 
-def test_handoff_preserves_provably_old_notes_without_recent_notes(tmp_path):
+def test_handoff_preserves_old_and_untraceable_recent_notes(tmp_path):
     import time
     from orchestrator.handoff_builder import HandoffBuilder
 
@@ -132,11 +136,10 @@ def test_handoff_preserves_provably_old_notes_without_recent_notes(tmp_path):
     builder = HandoffBuilder(tmp_path)
     package = builder.build_transfer_package(transfer_id="transfer", source_agent="a",
         source_instance="i", target_agent="a", target_instance="j", created_at=cutoff.isoformat())
-    assert package["memory_files"] == {"project.md": "old project"}
-    assert "recent wrong task" not in str(package)
+    assert package["memory_files"] == {"project.md": "old project", "tasks.md": "recent wrong task"}
     builder.build_handoff()
     assert "old project" in (tmp_path / "handoff.md").read_text(encoding="utf-8")
-    assert "recent wrong task" not in (tmp_path / "handoff.md").read_text(encoding="utf-8")
+    assert "recent wrong task" in (tmp_path / "handoff.md").read_text(encoding="utf-8")
 
 
 def test_backdated_modified_file_is_not_mistaken_for_old(tmp_path):
@@ -158,7 +161,7 @@ def test_forget_keeps_searchable_older_memory_plus_archives(tmp_path):
         MemoryPlusConfig, _append_history_index, _rollover_memory_plus_state,
         append_memory_plus_manual_note, load_memory_plus_state, search_memory_plus_history,
     )
-    from orchestrator.pcm_forget_artifacts import forget_local_memories, quarantine_unproven_continuity
+    from orchestrator.pcm_forget_artifacts import forget_local_memories, validate_untracked_continuity_scope
     from orchestrator.session_store import SessionStore
 
     home = tmp_path / "agent"
@@ -180,18 +183,18 @@ def test_forget_keeps_searchable_older_memory_plus_archives(tmp_path):
         start=cutoff, end=datetime.now(timezone.utc) + timedelta(seconds=1))
     forget_local_memories(store, operation_id=result["operation_id"], owner_id="user:7",
                           agent_id="lily", agent_home=home)
-    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+    validate_untracked_continuity_scope(store, operation_id=result["operation_id"], owner_id="user:7",
         agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
 
     assert old_archive.exists()
     found = search_memory_plus_history(home, "orchids")
     assert any("older safe memory about orchids" in row["excerpt"] for row in found)
-    assert not search_memory_plus_history(home, "violets")
-    # Re-running an interrupted cleanup must not restore a forgotten item.
-    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+    assert (home / "memory" / "memory_plus_index.json").exists()
+    # Re-running an interrupted operation must not rewrite mixed summaries.
+    validate_untracked_continuity_scope(store, operation_id=result["operation_id"], owner_id="user:7",
         agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
     assert search_memory_plus_history(home, "orchids") == found
-    assert not search_memory_plus_history(home, "violets")
+    assert (home / "memory" / "memory_plus_index.json").exists()
 
     # A backdated archive created after the forget is not a trusted old copy.
     import json
@@ -202,7 +205,8 @@ def test_forget_keeps_searchable_older_memory_plus_archives(tmp_path):
     forged_archive = old_archive.with_name("2000-01-01_memory_plus_state.json")
     forged_archive.write_text(json.dumps(late), encoding="utf-8")
     os.utime(forged_archive, (cutoff.timestamp() - 100, cutoff.timestamp() - 100))
-    assert not search_memory_plus_history(home, "violets")
+    assert not any("violets returned from an untrusted file" in row["excerpt"]
+                   for row in search_memory_plus_history(home, "violets"))
 
     # Fresh history remains available alongside recovered history.
     append_memory_plus_manual_note(home, "fresh memory about roses")
@@ -213,7 +217,8 @@ def test_forget_keeps_searchable_older_memory_plus_archives(tmp_path):
                for row in search_memory_plus_history(home, "orchids"))
     assert any("fresh memory about roses" in row["excerpt"]
                for row in search_memory_plus_history(home, "roses"))
-    assert not search_memory_plus_history(home, "violets")
+    assert not any("violets returned from an untrusted file" in row["excerpt"]
+                   for row in search_memory_plus_history(home, "violets"))
 
 
 def test_forget_recovers_archives_in_a_session_memory_plus_workspace(tmp_path):
@@ -222,7 +227,7 @@ def test_forget_recovers_archives_in_a_session_memory_plus_workspace(tmp_path):
         MemoryPlusConfig, _append_history_index, _rollover_memory_plus_state,
         append_memory_plus_manual_note, load_memory_plus_state, search_memory_plus_history,
     )
-    from orchestrator.pcm_forget_artifacts import forget_local_memories, quarantine_unproven_continuity
+    from orchestrator.pcm_forget_artifacts import forget_local_memories, validate_untracked_continuity_scope
     from orchestrator.session_store import SessionStore
 
     home = tmp_path / "agent"
@@ -244,11 +249,11 @@ def test_forget_recovers_archives_in_a_session_memory_plus_workspace(tmp_path):
         start=cutoff, end=datetime.now(timezone.utc) + timedelta(seconds=1))
     forget_local_memories(store, operation_id=result["operation_id"], owner_id="user:7",
                           agent_id="lily", agent_home=home)
-    quarantine_unproven_continuity(store, operation_id=result["operation_id"], owner_id="user:7",
+    validate_untracked_continuity_scope(store, operation_id=result["operation_id"], owner_id="user:7",
         agent_id="lily", agent_home=home, session_ids=[session["session_id"]])
     assert any("older safe memory about orchids" in row["excerpt"]
                for row in search_memory_plus_history(workspace, "orchids"))
-    assert not search_memory_plus_history(workspace, "violets")
+    assert (workspace / "memory" / "memory_plus_index.json").exists()
 
 
 @pytest.mark.asyncio
@@ -275,7 +280,7 @@ async def test_wiki_command_is_available_through_filtered_capability(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_wiki_search_keeps_unchanged_older_pages_and_blocks_recent_pages(tmp_path):
+async def test_wiki_search_keeps_old_and_untraceable_recent_pages(tmp_path):
     import json
     import time
     from tools.registry import ToolRegistry
@@ -297,11 +302,11 @@ async def test_wiki_search_keeps_unchanged_older_pages_and_blocks_recent_pages(t
     )
     search = await registry.execute("wiki_search", {"operation": "search", "query": "topic"})
     assert "old safe reference" in search.output
-    assert "recent wrong idea" not in search.output
+    assert "recent wrong idea" in search.output
     old = await registry.execute("wiki_search", {"operation": "read", "path": "topics/old.md"})
     recent = await registry.execute("wiki_search", {"operation": "read", "path": "topics/recent.md"})
     assert "old safe reference" in old.output
-    assert "recent wrong idea" not in recent.output
+    assert "recent wrong idea" in recent.output
 
 
 def test_export_retains_old_and_new_rounds_without_republishing_forgotten_log(tmp_path):
@@ -333,7 +338,7 @@ def test_export_retains_old_and_new_rounds_without_republishing_forgotten_log(tm
         stream.write(pair("new", new, new))
     records = list(iter_source_records(tmp_path, "HASHI3", ["lily"]))
     assert {row["text"] for row in records} == {
-        "old user", "old assistant", "new user", "new assistant"}
+        "old user", "old assistant", "cross user", "new user", "new assistant"}
     assert "bad user" in path.read_text(encoding="utf-8")
 
     first_new = datetime.fromisoformat(new)
@@ -348,7 +353,7 @@ def test_export_retains_old_and_new_rounds_without_republishing_forgotten_log(tm
         stream.write(pair("newest", latest.isoformat(), latest.isoformat()))
     again = list(iter_source_records(tmp_path, "HASHI3", ["lily"]))
     assert {row["text"] for row in again} == {
-        "old user", "old assistant", "new user", "new assistant",
+        "old user", "old assistant", "cross user", "new user", "new assistant",
         "newest user", "newest assistant"}
 
     # Replacing the retained prefix invalidates the checkpoint.

@@ -19,46 +19,51 @@ expired preview, active work, or an unresolved Phone attempt makes the operation
 fail closed. New work for the entire Agent is blocked durably while an accepted
 operation remains incomplete; `/forget resume` resumes that owner's operation.
 
-## Retention and isolation
+## Approved scope and limitations — 2026-10-29
 
-- Persona and system instructions remain. Memory, HCC, Memory+, continuity,
-  and compaction artifacts verifiably unchanged before the interval are retained.
-  Unverifiable or mixed artifacts are taken out of active Context and preserved
-  through the canonical audit owner with its configured access and encryption.
-- Selected Session messages, Phone material, local memory rows and relevant
-  search indexes are removed from normal projections. Original conversation
-  logs and isolated audit copies remain available for human investigation.
-- Session generations and Engine state are renewed; forgotten source identities
-  and intervals fence later transcript or transfer re-imports.
-- Central search admits verifiably older records and exact matches to retained
-  local exchanges; uncertain records remain excluded. Wiki and handoff recall
-  admit files verifiably unchanged before the interval. Remote export admits
-  intact older transcript rounds and new records appended after a verified
-  completion checkpoint; forgotten audit rounds remain excluded.
-- Validated older Memory+ archives are made available to the fresh Session.
-  Copies carry a digest and conservative time bound: a changed copy or one
-  covered by a later, wider forget must not be restored. Distinct Session
-  archives remain scoped to this Agent.
-- Remaining limitations: a summary or Wiki page updated during/after the
-  interval without complete lineage cannot be safely separated or automatically
-  restored. An exchange or Phone call spanning the boundary is currently
-  removed as a whole. These can exclude legitimate outside-window information.
-  Source-level provenance and an exact boundary policy are required before
-  full acceptance.
+The user approved limiting this feature to information whose time or source can
+be tracked accurately, and leaving untraceable summaries alone. The preview and
+completion notice must state that this can leave information from the requested
+period accessible to the Agent. This is a technical limitation, not a guarantee
+that the Agent has forgotten everything from that period.
+
+- Persona and system instructions remain. Memory+, HCC, unstructured PCM,
+  compaction, Wiki pages, relationship caches and other summaries are not
+  cleared merely because their creation or modification time overlaps the
+  interval. A summary can mix older and newer facts; it can still contain facts
+  from the selected interval. No new per-item timestamp scheme is implied.
+- Individually timestamped Session messages and raw turns in the interval are
+  redacted; messages with no reliable timestamp and messages outside the
+  interval are retained. A boundary-crossing pair retains its outside message.
+  An attributed memory is removed only when its source can be matched to a
+  selected whole exchange or run.
+- Phone calls entirely within the interval can be removed as a unit. A call
+  crossing a boundary, or lacking reliable bounds, is left intact; it can still
+  expose interval content. Other indivisible run projections may also remain
+  when a run crosses the boundary. These are additional implementation limits
+  and must be made visible rather than described as exact full forgetting.
+- Raw transcript and central-memory replay can exclude records matching
+  known times and source fingerprints. Missing or unverifiable timestamps and
+  summaries remain available. Historical central records without such a
+  fingerprint cannot be guaranteed removed.
+- The command opens a fresh Session and retains original conversation logs and
+  protected audit copies for investigation. Those audit copies are not part
+  of automatic context, but untracked summaries can still carry similar facts.
+  A fresh Session does not imply all old Session-specific summaries are copied.
+- Verified older Memory+ archives can be carried to the fresh Session. This is
+  separate from a guarantee about the origin of each fact in a summary.
 - This scope does not erase provider-held copies, external backups, arbitrary
-  user project files, independent services, or another Agent's data. Audit
-  retention is not a promise of irreversible deletion. If a person explicitly
-  reads or copies retained material back into a new request, it can influence
-  that request.
+  user files, independent services, or another Agent's data. Audit retention is
+  not irreversible deletion. Content explicitly copied into a new request can
+  influence that request.
 
 ## Qualification and rollout
 
-Unit and API integration tests use isolated disposable data, including failed
-and resumed operations. Before enabling the command for real use, verify all
-active import/export and continuity paths, Worker adoption and the actual
-Frontend experience on a non-production test Agent. Report source, tests,
-running Worker, production, and user acceptance separately. Incomplete or
-unverifiable isolation is a release blocker, never a successful forget.
+Use isolated disposable data for repeatable tests, including failure and resume,
+old and new messages, unknown-time summaries, and boundary-crossing material.
+Report source, tests, running Worker, production, and user acceptance separately.
+The user's accepted limitation must be present in the interface and PR review;
+passing tests never proves complete erasure of untraceable information.
 
 ## HASHI3 development record — 2026-10-28
 
@@ -104,3 +109,13 @@ unverifiable isolation is a release blocker, never a successful forget.
   adoption and user acceptance require separate evidence.
 - Mixed untimestamped content and complete cross-boundary runs/Phone calls
   remain open; do not describe this as exact time-bounded forgetting.
+
+## Scope decision — 2026-10-29
+
+The user explicitly chose to leave summaries without precise source lineage
+unprocessed and accepted that as a technical limitation, rather than adding
+timestamps throughout the rest of the system. This decision supersedes the
+earlier summary quarantine policy. The command warning and review must say
+that forgotten-period information can remain in untraceable material.
+Implementation, offline checks, HASHI3 Worker adoption and live acceptance
+must each be recorded against their exact source version.

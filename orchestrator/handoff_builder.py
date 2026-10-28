@@ -333,27 +333,16 @@ class HandoffBuilder:
             if rendered_entries:
                 rendered_rounds.append({"index": round_index, "entries": rendered_entries})
 
-        from orchestrator.pcm_forget_memory import oldest_forget_start
-
         memory_files = {}
-        cutoff = oldest_forget_start(self.workspace_dir)
-        if cutoff is not None:
-            old_handoff = self._read_pre_forget_text(self.handoff_path, cutoff)
-            handoff_summary = "\n\n".join(item for item in (old_handoff, context_block) if item)
-            for name in ("project.md", "decisions.md", "tasks.md"):
-                text = self._read_pre_forget_text(self.memory_dir / name, cutoff)
-                if text:
-                    memory_files[name] = text
-        else:
+        handoff_summary = self._read_optional_text(self.handoff_path)
+        if not handoff_summary:
+            self.build_handoff()
             handoff_summary = self._read_optional_text(self.handoff_path)
-            if not handoff_summary:
-                self.build_handoff()
-                handoff_summary = self._read_optional_text(self.handoff_path)
 
-            for name in ("project.md", "decisions.md", "tasks.md"):
-                text = self._read_optional_text(self.memory_dir / name)
-                if text:
-                    memory_files[name] = text
+        for name in ("project.md", "decisions.md", "tasks.md"):
+            text = self._read_optional_text(self.memory_dir / name)
+            if text:
+                memory_files[name] = text
 
         task_state = {
             "latest_user_request": last_user_text,
@@ -464,7 +453,7 @@ class HandoffBuilder:
             safe_context, _, _ = self.build_recent_context_block()
             parts = ["# Handoff Summary\n\n"]
             for name in ("project.md", "decisions.md", "tasks.md"):
-                text = self._read_pre_forget_text(self.memory_dir / name, cutoff)
+                text = self._read_optional_text(self.memory_dir / name)
                 if text:
                     parts.append(f"## {name.removesuffix('.md').capitalize()}\n{text}\n\n")
             parts.append(safe_context)

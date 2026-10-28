@@ -1,14 +1,10 @@
 # HASHI Agent FYI
 
-Current decisions (details linked):
+- `/forget` removes traceable period data; untraceable summaries may remain.
+  Audit copies stay outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- `/forget` covers all Sessions of the selected Agent. Only traceable information
-  can be removed accurately; untraceable summaries may retain forgotten content.
-  Retained audit copies remain outside automatic Context.
-  [PCM](HASHI_PCM_FORGET_2026-10-28.md).
-
-- Task/local /sys deletion requires authenticated management and a current snapshot.
-  Global/permanent prompts are excluded. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
+- Task/local /sys deletion: authenticated management + current snapshot;
+  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
   [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration requires verified ownership and safe paths; PAO
