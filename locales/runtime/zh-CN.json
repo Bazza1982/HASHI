@@ -4,6 +4,20 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "askme.title": "提问卡片",
+    "askme.instance": "HASHI 总开关：{state}",
+    "askme.agent": "当前代理：{state}",
+    "askme.effective": "提问卡片：{state}",
+    "askme.scope": "设置立即生效并保存；关闭后通过普通文字提问。",
+    "askme.agent_on": "开启当前代理",
+    "askme.agent_off": "关闭当前代理",
+    "askme.instance_on": "开启 HASHI 总开关",
+    "askme.instance_off": "关闭 HASHI 总开关",
+    "askme.usage": "用法：/askme [on|off|global on|global off]",
+    "askme.error": "无法读取或保存提问设置。",
+    "askme.continue": "按原任务继续",
+    "askme.stop": "🛑 立即停止",
+    "askme.stop_unconfirmed": "停止尚未确认，请再次提交停止或使用 /stop。",
     "call.title": "通话设置",
     "call.companion_modes": "连接智能体在场（AP）时：/call 使用 VideoTTS 视频通话；/phone 使用语音电话，角色离场接听。",
     "call.video_unavailable": "视频通话暂不可用，请使用 /phone 进行语音电话。",
@@ -2815,6 +2829,7 @@
     "ingress_confirmation.identity_mismatch": "这条确认不属于当前聊天或原消息。"
   },
   "commands": {
+    "askme": "控制提问卡片",
     "help": "显示帮助菜单",
     "start": "启动其他已停止的代理",
     "status": "查看代理状态",

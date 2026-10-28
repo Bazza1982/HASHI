@@ -1156,12 +1156,33 @@ class WorkbenchApiServer:
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
         except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
 
+    def _question_for_display(self, question, owner, *, stop_complete=False):
+        from orchestrator import ui_language
+        runtime = self._runtime_map().get(str(question.get('agent_id') or '').casefold())
+        if runtime is not None and getattr(runtime, 'global_config', None) is not None:
+            locale = ui_language.preferred_locale(runtime, actor_id=owner)
+        else:
+            locale = ui_language.normalize_locale(getattr(self.global_config, 'ui_language', None))
+        keys = {'continue': 'askme.continue', 'stop': 'askme.stop'}
+        options = [
+            {**option, 'label': ui_language.tr(keys[option['system_action']], locale=locale)}
+            if option.get('system_action') in keys else option
+            for option in question.get('options', [])
+        ]
+        if (not stop_complete and question.get('state') == 'answered'
+                and (question.get('answer') or {}).get('system_action') == 'stop'):
+            return {**question, 'state': 'pending', 'answer': None, 'allow_free_text': False,
+                    'question': ui_language.tr('askme.stop_unconfirmed', locale=locale),
+                    'options': [option for option in options if option.get('system_action') == 'stop']}
+        return {**question, 'options': options}
+
     async def handle_session_questions(self, request):
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
         if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
         try:
             result=self._questions().list(session_id=str(request.match_info['session_id']),owner_id=owner)
+            result=[self._question_for_display(question, owner) for question in result]
             return web.json_response({'ok':True,'questions':result},headers={'Cache-Control':'no-store'})
         except QuestionError as exc:return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
@@ -1175,6 +1196,20 @@ class WorkbenchApiServer:
             if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
             question=self._questions().answer(session_id=str(request.match_info['session_id']),owner_id=owner,
                 question_id=str(request.match_info['question_id']),payload=body)
+            if (question.get('answer') or {}).get('system_action') == 'stop':
+                runtime = self._runtime_map().get(str(question['agent_id']).casefold())
+                if runtime is None:
+                    return web.json_response({'ok': False, 'error_code': 'question_stop_unavailable'}, status=503)
+                result = await execute_local_command(
+                    runtime, '/stop', source_channel='workbench_api',
+                    session_metadata={'_hashi_owner_id': owner, 'session_id': question['session_id'],
+                                      '_hashi_question_stop_id': question['question_id'],
+                                      'connector_id': 'backend_api',
+                                      'fc_compatibility_adapter_id': 'backend_api.agent_command'},
+                )
+                if not result.get('ok') or not (result.get('result') or {}).get('ok'):
+                    return web.json_response({'ok': False, 'error_code': 'question_stop_unconfirmed'}, status=503)
+            question = self._question_for_display(question, owner, stop_complete=True)
             return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
         except QuestionError as exc:return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)

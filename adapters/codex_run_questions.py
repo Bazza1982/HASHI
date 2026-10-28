@@ -29,11 +29,20 @@ class NativeRunQuestions:
             for index, raw in enumerate(questions):
                 options = [{'id': f'option_{i}', 'label': o['label'], 'description': o.get('description', '')}
                            for i, o in enumerate(raw.get('options') or [])]
-                q = self.service.create(request_id=self.request_id, agent_id=self.agent_id, payload={
-                    'idempotency_key': f'codex-native:{params["itemId"]}:{key}:{index}',
-                    'question': raw['question'], 'options': options,
-                    'allow_free_text': True,
-                })
+                try:
+                    q = self.service.create(request_id=self.request_id, agent_id=self.agent_id, payload={
+                        'idempotency_key': f'codex-native:{params["itemId"]}:{key}:{index}',
+                        'question': raw['question'], 'options': options,
+                        'allow_free_text': True,
+                    })
+                except QuestionError as exc:
+                    if exc.code == 'question_cards_disabled':
+                        raise UnansweredQuestion(
+                            [{'native_question_id': item['id'], 'question': item['question']}
+                             for item in questions],
+                            'question_cards_disabled', partial_answers=answers,
+                        ) from exc
+                    raise
                 batch.append((raw['id'], q))
             while len(answers) < len(batch):
                 self.activity()
@@ -64,6 +73,11 @@ class NativeRunQuestions:
                         continue
                     if current['state'] == 'consumed':
                         answer = current['answer']
+                        if answer.get('system_action') == 'continue':
+                            raise UnansweredQuestion(
+                                [{**current, 'native_question_id': original_id}],
+                                'user_continue', partial_answers=answers,
+                            )
                         values = [o['label'] for o in q['options'] if o['id'] == answer['option_id']]
                         if answer['text']:
                             values.append(answer['text'])

@@ -2135,7 +2135,23 @@ class OpenRouterAdapter(BaseBackend):
     def _run_question_resolution_messages(
         resolution: Mapping[str, Any],
     ) -> list[dict[str, str]]:
-        from orchestrator.run_questions import QUESTION_UNANSWERED_INSTRUCTION
+        from orchestrator.run_questions import (
+            QUESTION_CONTINUE_INSTRUCTION,
+            QUESTION_DISABLED_INSTRUCTION,
+            QUESTION_UNANSWERED_INSTRUCTION,
+        )
+        questions = [q for q in (resolution.get("questions") or []) if isinstance(q, Mapping)]
+        instruction = QUESTION_UNANSWERED_INSTRUCTION
+        if any(q.get("resolution_reason") == "question_cards_disabled" for q in questions):
+            instruction = QUESTION_DISABLED_INSTRUCTION
+        elif any(
+            q.get("resolution_reason") == "user_continue"
+            or (q.get("state") == "consumed" and isinstance(q.get("answer"), Mapping)
+                and q["answer"].get("author") == "authenticated_user"
+                and q["answer"].get("system_action") == "continue")
+            for q in questions
+        ):
+            instruction = QUESTION_CONTINUE_INSTRUCTION
         return [
             {
                 "role": "system",
@@ -2148,7 +2164,7 @@ class OpenRouterAdapter(BaseBackend):
                     "Only a consumed question with an authenticated_user answer is "
                     "an answer. Pending, expired, cancelled, missing, or default "
                     "values never grant permission or approval. "
-                    + QUESTION_UNANSWERED_INSTRUCTION
+                    + instruction
                 ),
             },
             {

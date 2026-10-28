@@ -83,9 +83,9 @@ Accepted non-voice attachments commit atomically to the target Agent's ignored
 Session retention removes them. Safe Voice has its own lifecycle.
 
 Telegram proactive routes are owner-only and revalidate actor/egress after restart.
-Question `unknown` neither cancels nor retries; Codex expiry preserves authenticated
-partial answers. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
-[questions](HASHI_RUN_QUESTIONS.md).
+`/askme` controls instance and Agent question cards; off asks in plain text.
+Cards offer original-task continuation and Agent stop. Unknown delivery never
+retries; Codex expiry preserves partial answers. See [questions](HASHI_RUN_QUESTIONS.md).
 
 CURRENT MESSAGE CONTEXT separates source, assurance, authority and destination;
 only current successful private_authorization grants scope. HChat separates

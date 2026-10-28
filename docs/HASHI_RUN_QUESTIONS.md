@@ -1,5 +1,34 @@
 # Asynchronous questions within a Run
 
+## October 28: question-card controls
+
+Approved scope: implement on the current HASHI3 branch. PAO persists one
+instance-wide switch and one switch per Agent, both defaulting to enabled.
+The effective policy is their conjunction. `/askme` shows and changes both;
+`/askme on|off` changes the current Agent and `/askme global on|off`
+changes this instance. Re-enabling the instance preserves Agent preferences.
+Changes are immediate and independent of presentation clients.
+
+PAO rejects a new card when either switch is off and cancels existing pending
+cards with an explicit non-answer. Both HERV3 and native Codex receive guidance
+to finish the current turn by asking the necessary question in ordinary final
+text; ordinary chat remains available. Silence and rejection grant no authority.
+
+Every card projects two reserved system choices in addition to the model's
+options. Continue conveys the authenticated user's instruction to stay within
+the original task and closes other pending questions in the same Run. Stop
+fences the original question's active Run and invokes the Agent's existing
+`/stop` path; it is never returned to a model as an answer. Late cards cannot
+stop a later Run. A previously delivered pending Telegram card is refreshed
+with both choices. If Stop cannot be confirmed, the card offers only a Stop
+retry and the original Run claim is revalidated. This explicit retry is the
+only case where the same saved answer may use a new idempotency key; it never
+turns Stop into a model answer. Frontends must report an unconfirmed stop honestly.
+
+Source and offline validation are distinct from Function adoption, real
+Provider behavior and external frontend acceptance. No production deployment
+or Protected Core modification is part of this approval.
+
 ## October 26: five-minute resolution and usable connector delivery
 
 PAO caps every question at 300 seconds from creation, including persisted
