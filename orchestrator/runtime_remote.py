@@ -14,6 +14,7 @@ import aiohttp
 from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from orchestrator.agent_move.manager import record_agent_move_admin_outcome
 from orchestrator.agent_move.coordinator import (
+    ClonePreparationError,
     cancel_outbound_move,
     continue_outbound_move,
     get_outbound_move,
@@ -622,7 +623,7 @@ async def clone_show_agent_picker(runtime: Any, update: Any) -> None:
             str(row.get("name") or row.get("id") or "")
             for row in rows
             if isinstance(row, dict)
-            and row.get("is_active", True) is not False
+            and row.get("transfer_state") != "moved_out_pending_reboot"
             and str(row.get("name") or row.get("id") or "")
         ]
     except Exception:
@@ -780,6 +781,7 @@ async def do_clone(
     target_agent_id: str | None = None,
     dry_run: bool = False,
     history_mode: str = "none",
+    transfer_mode: str | None = "workspace",
 ) -> None:
     chat_id = update.effective_chat.id
     # Clone snapshots durable state and leaves source execution/queues alone.
@@ -818,6 +820,7 @@ async def do_clone(
                 source_instance=source_instance,
                 target_agent_id=target_agent_id,
                 history_mode=history_mode,
+                transfer_mode=transfer_mode,
             )
             await runtime._send_text(
                 chat_id,
@@ -834,36 +837,64 @@ async def do_clone(
             source_instance=source_instance,
             target_agent_id=target_agent_id,
             history_mode=history_mode,
+            transfer_mode=transfer_mode,
         )
-        package_id = str(result["package_id"])
-        markup = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr("remote.clone.confirm"),
-                        callback_data=f"clone:commit:{package_id}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr("remote.move.cancel_prepared"),
-                        callback_data=f"clone:abort:{package_id}",
-                    )
-                ],
-            ]
-        )
+        text, markup = _clone_transaction_card(result)
         await runtime._send_text(
             chat_id,
-            _render_clone_prepared(result),
+            text,
             parse_mode="HTML",
             reply_markup=markup,
         )
     except (AgentMoveError, OSError) as exc:
+        if isinstance(exc, ClonePreparationError):
+            try:
+                result = await asyncio.to_thread(get_outbound_move, instance_root(runtime), exc.package_id)
+                text, markup = _clone_transaction_card(result)
+                await runtime._send_text(chat_id, ui_language.tr("remote.clone.failed", error=html.escape(str(exc))) + "\n\n" + text,
+                                         parse_mode="HTML", reply_markup=markup)
+                return
+            except (AgentMoveError, OSError):
+                pass
         await runtime._send_text(
             chat_id,
             ui_language.tr("remote.clone.failed", error=html.escape(str(exc))),
             parse_mode="HTML",
         )
+
+
+def _clone_transaction_card(result: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Reopen the same transaction instead of treating repetition as failure."""
+    package_id = str(result["package_id"])
+    status = result.get("status") or "staged_remote"
+    if status == "completed":
+        return _render_clone_complete(result), None
+    if status == "cancelled":
+        return ui_language.tr("remote.clone.prepared_cancelled"), None
+    if status == "prepare_failed" or result.get("rollback_completed"):
+        return (
+            ui_language.tr("remote.clone.retry_preparation_saved"),
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                ui_language.tr("remote.clone.retry_preparation"), callback_data=f"clone:prepare:{package_id}",
+            )]]),
+        )
+    if status in {"packaging", "uploading"}:
+        return (
+            ui_language.tr("remote.clone.preparing_existing"),
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                ui_language.tr("common.refresh"), callback_data=f"clone:refresh:{package_id}",
+            )]]),
+        )
+    label = "remote.clone.confirm" if status == "staged_remote" else "remote.clone.resume"
+    rows = [[InlineKeyboardButton(ui_language.tr(label), callback_data=f"clone:commit:{package_id}")]]
+    if status != "clone_completed_cleanup_pending":
+        rows.append([InlineKeyboardButton(
+            ui_language.tr("remote.move.cancel_prepared"), callback_data=f"clone:abort:{package_id}",
+        )])
+    text = _render_clone_prepared(result) if status == "staged_remote" else ui_language.tr("remote.clone.resume_saved")
+    if result.get("reused") and status == "staged_remote":
+        text = ui_language.tr("remote.clone.reopened") + "\n\n" + text
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _render_clone_preview(result: dict[str, Any]) -> str:
@@ -1585,6 +1616,29 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
             dry_run=dry_run,
             history_mode=history_mode,
         )
+        return
+    if action == "prepare" and len(parts) >= 3:
+        try:
+            state = await asyncio.to_thread(get_outbound_move, instance_root(runtime), parts[2])
+            if state.get("operation") != "clone":
+                raise AgentMoveError("this preparation is not an Agent clone")
+            instances = await load_clone_instances(runtime)
+            await do_clone(
+                runtime, update, str(state["agent_id"]), str(state["target_instance"]), instances,
+                target_agent_id=state.get("requested_target_agent_id"),
+                history_mode=str(state.get("history_mode") or "none"),
+                transfer_mode=state.get("transfer_mode") or "workspace",
+            )
+        except (AgentMoveError, OSError) as exc:
+            await query.edit_message_text(ui_language.tr("remote.clone.failed", error=html.escape(str(exc))), parse_mode="HTML")
+        return
+    if action == "refresh" and len(parts) >= 3:
+        try:
+            result = await asyncio.to_thread(get_outbound_move, instance_root(runtime), parts[2])
+            text, markup = _clone_transaction_card(result)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        except (AgentMoveError, OSError) as exc:
+            await query.edit_message_text(ui_language.tr("remote.clone.failed", error=html.escape(str(exc))), parse_mode="HTML")
         return
     if action in {"commit", "abort"} and len(parts) >= 3:
         package_id = parts[2]

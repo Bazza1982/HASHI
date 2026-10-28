@@ -857,6 +857,67 @@ def test_return_move_cannot_replace_target_owned_shared_secret():
         )
 
 
+def test_clone_staging_reports_import_problems_together_before_confirmation(tmp_path):
+    source, target, path = _roots(tmp_path)
+    data = json.loads((source / "agents.json").read_text())
+    data["agents"][0]["active_backend"] = "not-in-allowed-backends"
+    _write_json(source / "agents.json", data)
+    _write_json(target / "tasks.json", [])
+    _write_json(target / "secrets.json", [])
+    package = create_agent_move_package(
+        source, "zelda", path, operation="clone", transfer_mode="workspace",
+    )
+    before = {p.name: p.read_bytes() for p in target.glob("*.json")}
+    with pytest.raises(AgentMoveError) as error:
+        stage_agent_move(
+            target, path, expected_sha256=package_sha256(path), source_instance="HASHI1",
+            operation="clone",
+        )
+    assert "active_backend" in str(error.value)
+    assert "tasks.json" in str(error.value)
+    assert "secrets.json" in str(error.value)
+    assert {p.name: p.read_bytes() for p in target.glob("*.json")} == before
+    assert not list((target / "state/agent_moves/incoming").glob("*/state.json"))
+    assert package.manifest["operation"] == "clone"
+
+
+def test_clone_auto_id_includes_capability_only_reservations(tmp_path):
+    source, target, path = _roots(tmp_path)
+    _write_json(target / "agent_capabilities.json", {"agents": [{"name": "zelda"}]})
+    create_agent_move_package(source, "zelda", path, operation="clone", transfer_mode="workspace")
+    staged = stage_agent_move(
+        target, path, expected_sha256=package_sha256(path), source_instance="HASHI1", operation="clone",
+    )
+    assert staged["target_agent_id"] == "zelda_1"
+
+
+@pytest.mark.parametrize("requested,expected", [("sheik", "sheik"), (None, "clone_CON.txt")])
+def test_clone_source_metadata_id_is_not_a_target_windows_filename(tmp_path, requested, expected):
+    source, target, path = _roots(tmp_path)
+    data = json.loads((source / "agents.json").read_text())
+    data["agents"][0]["name"] = "CON.txt"
+    _write_json(source / "agents.json", data)
+    create_agent_move_package(source, "CON.txt", path, operation="clone", transfer_mode="workspace")
+    staged = stage_agent_move(
+        target, path, expected_sha256=package_sha256(path), source_instance="HASHI1",
+        operation="clone", target_agent_id=requested, target_platform="windows",
+    )
+    assert staged["target_agent_id"] == expected
+    committed = commit_agent_move(target, staged["package_id"], target_platform="windows")
+    assert committed["status"] == "committed_inactive"
+    assert (target / "workspaces" / expected / "agent.md").is_file()
+
+
+def test_clone_auto_suffix_fits_maximum_length_source_id(tmp_path):
+    _, target, _ = _roots(tmp_path)
+    name = "a" * 128
+    data = json.loads((target / "agents.json").read_text())
+    data["agents"].append({"name": name})
+    _write_json(target / "agents.json", data)
+    result = resolve_agent_transfer_target(target, name, operation="clone")
+    assert result["target_agent_id"] == "a" * 126 + "_1"
+
+
 def test_target_id_resolution_uses_first_free_suffix_and_rejects_explicit_collision(
     tmp_path,
 ):

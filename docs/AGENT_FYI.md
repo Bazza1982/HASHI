@@ -14,7 +14,7 @@
   evidence; explicit cancellation, safety, transport, Provider and single-Tool
   limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Move qualifies at staging; confirmation is forward-only, never rolls back.
-  Clone: stable PAO owner snapshots, not Telegram IDs/drain gates.
+  Clone: PAO-owner snapshots; retries resume, no automatic rollback.
   See [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback is selected model, same-Provider visual model, then LAN Compute;
   it is visible/request-only and shares these [admission facts](repairs/HERV3_VISUAL_FALLBACK_20261018.md).

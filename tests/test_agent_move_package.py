@@ -736,6 +736,75 @@ def test_packaging_fences_eligible_history_not_presentation_counts(
         assert current["summary"]["excluded_message_count"] == 1
 
 
+@pytest.mark.parametrize("change", ["history", "workspace"])
+def test_clone_is_a_frozen_snapshot_not_a_source_freshness_fence(tmp_path, monkeypatch, change):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Before snapshot", source="fixture",
+        idempotency_key="before", history_eligible=True,
+    )
+    write = owner._write_bytes
+    memory = root / "workspaces/zelda/memory/continuity.md"
+
+    def write_then_continue_source(archive, name, content, checksums):
+        write(archive, name, content, checksums)
+        if name == CONVERSATION_CONTINUITY_ARCHIVE_PATH:
+            if change == "history":
+                store.append_presentation_message(
+                    session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+                    role="assistant", text="After snapshot", source="fixture",
+                    idempotency_key="after", history_eligible=True,
+                )
+            else:
+                memory.write_text("After snapshot", encoding="utf-8")
+                (memory.parent / "new-file.md").write_text("new live work", encoding="utf-8")
+
+    monkeypatch.setattr(owner, "_write_bytes", write_then_continue_source)
+    result = create_agent_move_package(
+        root, "zelda", tmp_path / "frozen.hashi-agent", operation="clone",
+        transfer_mode="workspace", history_mode="copy",
+    )
+    assert [m["text"] for s in result.conversation_continuity["sessions"] for m in s["messages"]] == [
+        "Before snapshot",
+    ]
+    with zipfile.ZipFile(tmp_path / "frozen.hashi-agent") as archive:
+        assert archive.read("workspace/memory/continuity.md") == b"durable memory"
+        assert "workspace/memory/new-file.md" not in archive.namelist()
+
+
+@pytest.mark.parametrize("excluded", ["large_software", "many_cache_files"])
+def test_clone_limits_measure_payload_not_excluded_software(tmp_path, monkeypatch, excluded):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces/zelda"
+    cache = workspace / ".venv"
+    cache.mkdir()
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 64 * 1024)
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 64)
+    if excluded == "large_software":
+        (cache / "old-software.bin").write_bytes(b"x" * 128 * 1024)
+    else:
+        for i in range(128):
+            (cache / f"cache-{i}").write_bytes(b"cache")
+    output = tmp_path / "without-software.hashi-agent"
+    result = create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    assert result.workspace_metadata["inventory_scope"] == "portable_clone_payload"
+    assert result.workspace_metadata["total_workspace_bytes"] < 64 * 1024
+    assert not any(".venv" in name for name in result.names)
+    assert cache.is_dir()
+    valid = output.read_bytes()
+    (workspace / "real-work.bin").write_bytes(b"x" * 128 * 1024)
+    with pytest.raises(AgentMoveError, match="limit"):
+        create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    assert output.read_bytes() == valid
+
+
 def test_package_rejects_inactive_retained_source_copy(tmp_path):
     root = _source_root(tmp_path)
     data = json.loads((root / "agents.json").read_text())
@@ -1066,8 +1135,8 @@ def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path, tra
         prepare = package_module._prepare_workspace_entries
         shm = root / "workspaces" / "zelda" / "bridge_memory.sqlite-shm"
 
-        def prepare_with_reader_bookkeeping(entries, temp_dir):
-            result = prepare(entries, temp_dir)
+        def prepare_with_reader_bookkeeping(entries, temp_dir, **kwargs):
+            result = prepare(entries, temp_dir, **kwargs)
             stat = shm.stat()
             os.utime(shm, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
             return result

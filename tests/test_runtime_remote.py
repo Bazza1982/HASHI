@@ -51,6 +51,46 @@ async def _reply(replies, text, kwargs):
     replies.append({"text": text, **kwargs})
 
 
+@pytest.mark.asyncio
+async def test_clone_picker_includes_inactive_source_but_not_moved_source(tmp_path):
+    runtime = _runtime(tmp_path)
+    (tmp_path / "agents.json").write_text(json.dumps({"agents": [
+        {"name": "sleeping", "is_active": False},
+        {"name": "moved", "transfer_state": "moved_out_pending_reboot"},
+    ]}), encoding="utf-8")
+    await runtime_remote.clone_show_agent_picker(runtime, SimpleNamespace())
+    buttons = runtime.replies[-1]["reply_markup"].inline_keyboard
+    assert [button.callback_data for row in buttons for button in row] == ["clone:agent:sleeping"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,action", [
+    ("packaging", "refresh"), ("uploading", "refresh"),
+    ("staged_remote", "commit"), ("clone_activating", "commit"),
+    ("prepare_failed", "prepare"),
+    ("completed", None),
+])
+async def test_clone_reused_transaction_renders_appropriate_next_action(tmp_path, monkeypatch, status, action):
+    runtime = _runtime(tmp_path)
+    prepared = {
+        "package_id": "existing-clone", "operation": "clone", "status": status,
+        "agent_id": "zelda", "target_agent_id": "zelda_1",
+        "target_instance": "HASHI_TEST", "history_mode": "none", "reused": True,
+    }
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_clone", lambda *args, **kwargs: prepared)
+    await runtime_remote.do_clone(
+        runtime, SimpleNamespace(effective_chat=SimpleNamespace(id=1)), "zelda", "HASHI_TEST",
+        {"local": {"instance_id": "HASHI_TEST", "local": True}},
+    )
+    message = runtime.replies[-1]
+    markup = message.get("reply_markup")
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row] if markup else []
+    assert (f"clone:{action}:existing-clone" in callbacks) if action else not callbacks
+    if status in {"packaging", "uploading"}:
+        assert "clone:commit:existing-clone" not in callbacks
+    assert "❌" not in message["text"]
+
+
 def test_load_instances_reads_first_available_file(tmp_path):
     missing = tmp_path / "missing.json"
     path = tmp_path / "instances.json"

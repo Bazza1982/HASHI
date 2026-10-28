@@ -22,7 +22,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable, Mapping
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -88,7 +88,8 @@ _CONTROL_MEMBER_LIMITS = {
 
 MAX_TRANSFER_PACKAGE_BYTES = WORKSPACE_LIMIT_BYTES + sum(_CONTROL_MEMBER_LIMITS.values()) + MAX_ARCHIVE_MEMBERS * 4096
 
-_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+AGENT_ID_MAX_LENGTH = 128
+_AGENT_ID_RE = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9_.-]{{0,{AGENT_ID_MAX_LENGTH - 1}}}$")
 _SQLITE_SUFFIXES = {".sqlite", ".sqlite3", ".db"}
 _SKIP_DIR_NAMES = {
     ".aws",
@@ -161,6 +162,12 @@ class AgentMoveError(ValueError):
     """Raised when a move package or migration operation is invalid."""
 
 
+class CloneImportPreflightError(AgentMoveError):
+    """A definitive, pre-publication rejection, not an uncertain upload ACK."""
+
+    code = "CLONE_IMPORT_PREFLIGHT_FAILED"
+
+
 class _WorkspaceChangedError(AgentMoveError):
     def __init__(self, changes: list[dict[str, Any]]) -> None:
         self.workspace_changes = {
@@ -214,7 +221,8 @@ def normalize_agent_id(agent_id: str) -> str:
     if not _AGENT_ID_RE.fullmatch(value):
         raise AgentMoveError(
             "agent_id must begin with an alphanumeric character and contain "
-            "only letters, digits, dots, underscores, or hyphens"
+            "only letters, digits, dots, underscores, or hyphens "
+            f"(1 to {AGENT_ID_MAX_LENGTH} characters)"
         )
     return value
 
@@ -396,7 +404,10 @@ def create_agent_move_package(
     workspace = _resolve_workspace(root, raw_config, name)
     if transfer_mode is not None and transfer_mode not in TRANSFER_MODES:
         raise AgentMoveError("unknown Agent transfer mode")
-    inventory = _workspace_inventory(workspace) if transfer_mode else []
+    # Move discloses all files that source cleanup would delete. Clone neither
+    # copies nor deletes excluded software/cache trees; inventorying/counting
+    # those trees would introduce unrelated size, file-count and access gates.
+    inventory = _workspace_inventory(workspace) if transfer_mode and transfer_operation == "move" else []
     total_workspace_bytes = sum(item["size"] for item in inventory)
     if transfer_mode == "workspace" and total_workspace_bytes > WORKSPACE_LIMIT_BYTES:
         raise AgentMoveError(
@@ -656,7 +667,9 @@ def create_agent_move_package(
 
     with tempfile.TemporaryDirectory(prefix="hashi-agent-move-") as temp_name:
         temp_dir = Path(temp_name)
-        prepared_entries = _prepare_workspace_entries(entries, temp_dir)
+        prepared_entries = _prepare_workspace_entries(
+            entries, temp_dir, freeze_files=transfer_operation == "clone",
+        )
         sqlite_snapshot_paths = {
             item.relative_path for item in prepared_entries if item.sqlite_snapshot
         }
@@ -671,7 +684,23 @@ def create_agent_move_package(
             if transfer_mode == "workspace"
             else None
         )
-        if transfer_mode == "workspace" and total_workspace_bytes + snapshot_growth > WORKSPACE_LIMIT_BYTES:
+        if transfer_operation == "clone" and transfer_mode:
+            inventory = [
+                {"path": item.relative_path, "size": item.size, "mtime_ns": 0, "link": False}
+                for item in prepared_entries
+            ]
+            inventory.append({"path": "agent.md", "size": len(pcm_text.encode("utf-8")), "mtime_ns": 0, "link": False})
+            if retained_identity_bytes is not None:
+                inventory.append({"path": "AGENT.md", "size": len(retained_identity_bytes), "mtime_ns": 0, "link": False})
+            total_workspace_bytes = sum(item["size"] for item in inventory)
+            workspace_metadata.update(
+                inventory=sorted(inventory, key=lambda item: item["path"]),
+                inventory_scope="portable_clone_payload", total_workspace_bytes=total_workspace_bytes,
+                discarded=[],
+            )
+        if transfer_mode == "workspace" and (
+            total_workspace_bytes + (snapshot_growth if transfer_operation == "move" else 0)
+        ) > WORKSPACE_LIMIT_BYTES:
             raise AgentMoveError("consistent workspace snapshots exceed the 1 GB full move limit")
         if prepared_bytes > (WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES):
             raise AgentMoveError(
@@ -737,7 +766,7 @@ def create_agent_move_package(
                         checksums,
                         mode=item.mode,
                     )
-                if transfer_mode:
+                if transfer_mode and transfer_operation == "move":
                     final_inventory = _workspace_inventory(workspace)
                     _assert_packaging_inventory_current(
                         inventory, final_inventory, sqlite_snapshot_paths,
@@ -780,13 +809,13 @@ def create_agent_move_package(
             # existing output. This also catches files that grew after the
             # initial workspace scan.
             read_agent_move_package(temporary, verify=True)
-            if transfer_mode:
+            if transfer_mode and transfer_operation == "move":
                 final_inventory = _workspace_inventory(workspace)
                 _assert_packaging_inventory_current(
                     inventory, final_inventory, sqlite_snapshot_paths,
                     max_workspace_bytes=inventory_limit,
                 )
-            if conversation_continuity is not None:
+            if conversation_continuity is not None and transfer_operation == "move":
                 final_continuity = _export_conversation_continuity_snapshot(
                     root,
                     source_instance=str(conversation_continuity["source_instance"]),
@@ -973,7 +1002,9 @@ def read_agent_move_package(
         except ValueError as exc:
             raise AgentMoveError(f"packaged agent.md is invalid: {exc}") from exc
         target_kind = target_platform or detect_environment_kind()
-        if str(target_kind).lower() == "windows":
+        if str(target_kind).lower() == "windows" and not (
+            manifest.get("operation") == "clone" and int(manifest["schema_version"]) >= 3
+        ):
             _validate_windows_component(
                 str(manifest.get("agent_id") or ""),
                 context="Agent ID",
@@ -1676,12 +1707,12 @@ def _is_windows_junction(path: Path) -> bool:
 
 
 def _prepare_workspace_entries(
-    entries: Iterable[WorkspaceEntry], temp_dir: Path
+    entries: Iterable[WorkspaceEntry], temp_dir: Path, *, freeze_files: bool = False,
 ) -> list[WorkspaceEntry]:
     prepared: list[WorkspaceEntry] = []
     for index, item in enumerate(entries):
         if not item.sqlite_snapshot:
-            prepared.append(item)
+            prepared.append(_freeze_workspace_file(item, temp_dir, index) if freeze_files else item)
             continue
         snapshot = temp_dir / f"sqlite-{index}.db"
         try:
@@ -1711,8 +1742,7 @@ def _prepare_workspace_entries(
                 raise AgentMoveError(
                     f"could not create a consistent SQLite snapshot for {item.relative_path!r}"
                 ) from exc
-            prepared.append(
-                WorkspaceEntry(
+            fallback = WorkspaceEntry(
                     source=item.source,
                     relative_path=item.relative_path,
                     mode=item.mode,
@@ -1720,8 +1750,47 @@ def _prepare_workspace_entries(
                     sqlite_snapshot=False,
                     materialized_symlink=item.materialized_symlink,
                 )
-            )
+            prepared.append(_freeze_workspace_file(fallback, temp_dir, index) if freeze_files else fallback)
     return prepared
+
+
+def _freeze_workspace_file(item: WorkspaceEntry, temp_dir: Path, index: int) -> WorkspaceEntry:
+    """Capture one stable file; later source work cannot veto this clone.
+
+    SQLite uses the backup API above. Ordinary files are checked across the
+    copy, not against a second *live workspace* after the whole archive builds.
+    """
+    snapshot = temp_dir / f"file-{index}"
+
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        # On Windows, stat() and fstat() may disagree about whether ctime
+        # denotes creation or metadata-change time. Compare ctime only within
+        # the same API, not across these two representations.
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+    for _attempt in range(3):
+        before = item.source.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise AgentMoveError(f"clone snapshot source is no longer a regular file: {item.relative_path!r}")
+        with item.source.open("rb") as reader, snapshot.open("wb") as writer:
+            opened = os.fstat(reader.fileno())
+            if identity(before) != identity(opened):
+                continue
+            copied = 0
+            while chunk := reader.read(1024 * 1024):
+                copied += len(chunk)
+                if copied > WORKSPACE_LIMIT_BYTES:
+                    raise AgentMoveError(f"clone snapshot file exceeds the workspace limit: {item.relative_path!r}")
+                writer.write(chunk)
+            after = os.fstat(reader.fileno())
+        end = item.source.lstat()
+        if (
+            identity(opened) == identity(after) == identity(end)
+            and opened.st_ctime_ns == after.st_ctime_ns
+            and before.st_ctime_ns == end.st_ctime_ns
+        ):
+            return replace(item, source=snapshot, size=copied)
+    raise AgentMoveError(f"could not capture a stable clone snapshot of {item.relative_path!r} after 3 attempts")
 
 
 def _write_bytes(
