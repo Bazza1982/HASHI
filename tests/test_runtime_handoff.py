@@ -244,6 +244,31 @@ def test_recovery_retains_mixed_agent_versions_selected_set_and_latest_offsets(
         runtime_handoff.agent_artifacts(app, handoff)
 
 
+def test_telegram_checkpoint_binds_offset_to_bot_across_shared_recovery(tmp_path):
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    app = SimpleNamespace(
+        paths=SimpleNamespace(bridge_home=tmp_path), _shared_committed=True,
+        shared_generation_id="shared-test", runtimes=[],
+        function_workers=SimpleNamespace(_telegram_ingress={
+            "alpha": SimpleNamespace(token="old-token", offset=900),
+        }),
+    )
+    runtime_handoff.persist(app)
+    fingerprint = telegram_bot_fingerprint("new-token")
+    # Registering a replacement invalidates an unrelated Bot's legacy cursor
+    # even when the new Bot has not received its first update yet.
+    runtime_handoff.checkpoint_offset(tmp_path, "alpha", None, bot_fingerprint=fingerprint)
+    recovered = runtime_handoff.load(app)
+    assert recovered["telegram_offsets"]["alpha"] is None
+    assert recovered["telegram_bot_offsets"]["alpha"] == {
+        "offset": None, "bot_fingerprint": fingerprint,
+    }
+    runtime_handoff.checkpoint_offset(tmp_path, "alpha", 8, bot_fingerprint=fingerprint)
+    recovered = runtime_handoff.load(app)
+    assert recovered["telegram_bot_offsets"]["alpha"]["offset"] == 8
+
+
 @pytest.mark.asyncio
 async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_older(
     tmp_path,

@@ -172,6 +172,7 @@ class RuntimeAppHost:
             self.app._allow_empty_start = not handoff["agents"]
             self.app.selected_agents = set(handoff["agents"])
         self.app._handoff_offsets = handoff.get("telegram_offsets", {})
+        self.app._handoff_bot_offsets = handoff.get("telegram_bot_offsets", {})
         if self.bootstrap.get("recovery"):
             for name in handoff["agents"]:
                 self.app._handoff_offsets.setdefault(name, None)

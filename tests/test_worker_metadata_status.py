@@ -381,6 +381,69 @@ async def _close_stack(stack, process_task: asyncio.Task | None = None) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outbound,inbound,app_running,current_saved_bot,ready", [
+    (False, True, False, True, False),
+    (False, True, True, True, False),
+    (True, False, True, True, False),
+    (True, True, True, True, True),
+    (True, True, False, True, False),
+    (True, True, True, False, False),
+])
+async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
+    tmp_path, outbound, inbound, app_running, current_saved_bot, ready,
+):
+    from orchestrator.config_json import write_config_json
+    from orchestrator.telegram_credential import TelegramCredentialService
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    stack = await _build_stack(tmp_path, outcome="success")
+    token = "123456:TEST_ONLY_CURRENT_BOT_abcdefghijklmnopqrstuvwxyz"
+    saved_token = token if current_saved_bot else "654321:TEST_ONLY_OTHER_BOT_abcdefghijklmnopqrstuvwxyz"
+    fingerprint = telegram_bot_fingerprint(token)
+    runtime = stack.runtime
+    runtime.token = token
+    runtime.app = SimpleNamespace(running=app_running)
+    runtime.telegram_connected = outbound
+    stack.handle.kernel.function_workers = SimpleNamespace(
+        telegram_ingress_snapshot=lambda _: {
+            "running": True, "connected": inbound, "bot_fingerprint": fingerprint,
+        },
+    )
+    config_path, secrets_path = tmp_path / "agents.json", tmp_path / "secrets.json"
+    write_config_json(config_path, {
+        "global": {"authorized_id": 42},
+        "agents": [{"name": runtime.name, "telegram_token_key": "test.telegram"}],
+    })
+    write_config_json(secrets_path, {"test.telegram": saved_token})
+    service = TelegramCredentialService(config_path=config_path, secrets_path=secrets_path)
+    try:
+        # Receiver transitions cannot enable an unprepared application, disable
+        # a healthy sender, or make an old Bot ready for a newly saved token.
+        observations = []
+        for receiver_connected in (False, True, False, inbound):
+            result = await stack.host.handle_request("worker.telegram_status", {
+                "connected": receiver_connected,
+            })
+            observations.append((runtime.telegram_connected, result["metadata"]))
+            stack.handle.update_metadata(stack.client, result["metadata"])
+        metadata = stack.handle.get_runtime_metadata()
+        status = service.status(runtime.name, runtime_active=True, runtime_metadata=metadata)
+        assert status["bidirectional_ready"] is ready
+        assert status["outbound_connected"] is bool(outbound and app_running and current_saved_bot)
+        assert status["inbound_connected"] is bool(inbound and current_saved_bot)
+        assert (status["activation_status"] == "connected") is ready
+        assert token not in json.dumps(status)
+        for receiver_connected, (application_ready, worker_metadata) in zip(
+            (False, True, False, inbound), observations,
+        ):
+            assert application_ready is outbound
+            assert worker_metadata["telegram_outbound_connected"] is bool(outbound and app_running)
+            assert worker_metadata["telegram_ingress_connected"] is receiver_connected
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projection_reports_actual_agent_mode(tmp_path):
     stack = await _build_stack(tmp_path, outcome="success")
     try:

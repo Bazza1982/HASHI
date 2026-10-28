@@ -79,6 +79,49 @@ async def test_first_validated_poll_is_immediate_then_normal_long_poll_resumes()
         await ingress.stop()
 
 
+@pytest.mark.asyncio
+async def test_inflight_old_bot_poll_cannot_deliver_to_new_bot_worker():
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    started, release, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    delivered = []
+
+    async def deliver(payload):
+        delivered.append(payload)
+
+    handle = SimpleNamespace(
+        metadata={"telegram_bot_fingerprint": telegram_bot_fingerprint("old-token")},
+        deliver_telegram_update=deliver,
+    )
+    bot = _Bot("old-token")
+
+    async def poll(**kwargs):
+        started.set()
+        await release.wait()
+        return [bot.update]
+
+    async def status(connected):
+        if not connected:
+            rejected.set()
+
+    bot.get_updates = poll
+    ingress = CoreTelegramIngress(
+        agent_name="alpha", token="old-token", handle_lookup=lambda _: handle,
+        bot_factory=lambda _: bot, status_callback=status,
+    )
+    ingress.connected = True  # An already healthy poll spans the pointer swap.
+    try:
+        await ingress.start(drop_pending_updates=False)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        handle.metadata["telegram_bot_fingerprint"] = telegram_bot_fingerprint("new-token")
+        release.set()
+        await asyncio.wait_for(rejected.wait(), timeout=1)
+        assert delivered == []
+        assert ingress.offset is None
+    finally:
+        await ingress.stop()
+
+
 def test_missing_ingress_with_configured_token_is_not_tokenless_local_mode():
     supervisor = object.__new__(FunctionWorkerSupervisor)
     supervisor._telegram_ingress = {}
@@ -89,7 +132,7 @@ def test_missing_ingress_with_configured_token_is_not_tokenless_local_mode():
     )
     assert supervisor.telegram_ingress_snapshot("alpha") == {
         "configured": True, "running": False, "connected": False, "offset": None,
-        "diagnostics": None,
+        "diagnostics": None, "bot_fingerprint": None,
     }
     assert not supervisor.telegram_ingress_snapshot("tokenless-clone")["configured"]
 

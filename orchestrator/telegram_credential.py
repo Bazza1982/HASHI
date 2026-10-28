@@ -11,7 +11,7 @@ import hashlib
 import hmac
 import re
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -38,6 +38,7 @@ from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
 )
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 _TOKEN_PATTERN = re.compile(r"^[1-9][0-9]{4,19}:[A-Za-z0-9_-]{20,200}$")
@@ -283,16 +284,37 @@ class TelegramCredentialService:
             secrets=self._read_secrets(),
         )
 
-    def status(self, agent_id: str, *, runtime_active: bool = False) -> dict:
+    def status(
+        self, agent_id: str, *, runtime_active: bool = False,
+        runtime_metadata: Mapping | None = None,
+    ) -> dict:
         context = self.context(agent_id)
-        return self._status_payload(context, runtime_active=runtime_active)
+        return self._status_payload(
+            context, runtime_active=runtime_active, runtime_metadata=runtime_metadata
+        )
 
     def _status_payload(
         self,
         context: TelegramCredentialContext,
         *,
         runtime_active: bool,
+        runtime_metadata: Mapping | None = None,
     ) -> dict:
+        metadata = runtime_metadata or {}
+        expected_bot = telegram_bot_fingerprint(context.secrets.get(context.token_key))
+        adopted = bool(expected_bot and metadata.get("telegram_bot_fingerprint") == expected_bot)
+        live = bool(runtime_active and metadata.get("online"))
+        ingress = metadata.get("telegram_ingress") or {}
+        receiver_adopted = bool(expected_bot and ingress.get("bot_fingerprint") == expected_bot)
+        inbound = bool(live and adopted and receiver_adopted and ingress.get("running") and ingress.get("connected"))
+        outbound = bool(live and adopted and metadata.get("telegram_outbound_connected"))
+        ready = inbound and outbound
+        activation_status = (
+            "unconfigured" if not context.configured else
+            "inactive" if not runtime_active else
+            "connected" if ready else
+            "connecting" if adopted and receiver_adopted and live and ingress.get("running") else "pending"
+        )
         instance_mirror_enabled = get_connector_preference(
             self.state_root,
             context.owner_scope_id,
@@ -314,7 +336,14 @@ class TelegramCredentialService:
             "shared_reference": context.shared_reference,
             "credential_revision": context.credential_revision,
             "runtime_active": bool(runtime_active),
-            "activation_required": None,
+            "activation_required": (
+                "agent_restart" if runtime_metadata is not None and activation_status == "pending"
+                else None
+            ),
+            "activation_status": activation_status,
+            "inbound_connected": inbound,
+            "outbound_connected": outbound,
+            "bidirectional_ready": ready,
             "mirror_policy": context.mirror_policy,
             "mirror_policy_revision": context.mirror_policy_revision,
             "instance_mirror_enabled": instance_mirror_enabled,
@@ -331,6 +360,7 @@ class TelegramCredentialService:
         policy: str,
         expected_revision: str,
         runtime_active: bool = False,
+        runtime_metadata: Mapping | None = None,
     ) -> dict:
         try:
             normalized_policy = normalize_telegram_mirror_policy(policy)
@@ -398,7 +428,11 @@ class TelegramCredentialService:
         result = self._status_payload(
             published_context,
             runtime_active=runtime_active,
+            runtime_metadata=runtime_metadata,
         )
+        # Mirror policy is immediate; a disconnected receive path is a
+        # separate connection fact, not a restart prerequisite for this save.
+        result["activation_required"] = None
         result["mirror_policy_updated"] = True
         if durability_warning:
             result["warning_code"] = durability_warning

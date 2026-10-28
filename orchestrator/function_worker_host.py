@@ -990,6 +990,15 @@ class FunctionWorkerHost:
                 "startup_success": bool(runtime.startup_success),
                 "backend_ready": bool(runtime.backend_ready),
                 "telegram_connected": bool(runtime.telegram_connected),
+                # Only application preparation owns outbound readiness. Receiver
+                # connectivity arrives independently over worker.telegram_status.
+                "telegram_outbound_connected": bool(
+                    runtime.telegram_connected
+                    and getattr(getattr(runtime, "app", None), "running", False)
+                ),
+                "telegram_ingress_connected": bool(
+                    getattr(runtime, "telegram_ingress_connected", False)
+                ),
                 "primary_chat_id": int(runtime._primary_chat_id()),
                 "media_dir": str(runtime.media_dir),
                 "transcript_log_path": str(runtime.transcript_log_path),
@@ -1407,7 +1416,7 @@ class FunctionWorkerHost:
             return await self.shutdown()
         if method == "worker.telegram_status":
             runtime = self._require_runtime()
-            runtime.telegram_connected = bool(params.get("connected"))
+            runtime.telegram_ingress_connected = bool(params.get("connected"))
             await self.emit_metadata()
             return {"ok": True, "metadata": self.metadata()}
         if method == "worker.identity.refresh":
