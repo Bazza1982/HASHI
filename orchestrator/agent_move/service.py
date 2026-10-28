@@ -65,6 +65,7 @@ from .package import (
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
+    configured_conversation_owner_id,
     decrypt_agent_secrets,
     detect_environment_kind,
     extract_agent_workspace,
@@ -2493,19 +2494,7 @@ def _configured_instance_id(root: Path) -> str:
 
 
 def _configured_session_owner_id(root: Path) -> str:
-    agents = _load_json(root / "agents.json")
-    global_config = agents.get("global") if isinstance(agents, Mapping) else {}
-    raw_owner = (global_config or {}).get("authorized_id") or 0
-    secrets = _load_json_or_default(root / "secrets.json", {})
-    if isinstance(secrets, Mapping):
-        raw_owner = secrets.get("authorized_telegram_id") or raw_owner
-    try:
-        owner_number = int(raw_owner)
-    except (TypeError, ValueError) as exc:
-        raise AgentMoveError("target authorized owner configuration is invalid") from exc
-    if owner_number <= 0:
-        raise AgentMoveError("target authorized conversation owner is not configured")
-    return f"user:{owner_number}"
+    return configured_conversation_owner_id(root, instance_role="target")
 
 
 def _session_store(root: Path) -> SessionStore:

@@ -448,6 +448,102 @@ def test_schema5_clone_read_only_history_is_archived_and_source_is_unchanged(tmp
     ) == 2
 
 
+@pytest.mark.parametrize("history_mode", ["copy", "inherit_read_only"])
+def test_clone_receiver_uses_stable_owner_after_telegram_account_replacement(
+    tmp_path, history_mode
+):
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
+    source_store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = source_store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    _complete_history(
+        source_store,
+        session_id=session["session_id"],
+        agent_id="zelda",
+        request_id="clone-stable",
+        question="owned question",
+        answer="owned answer",
+    )
+    config = json.loads((target / "agents.json").read_text())
+    config["global"].update(
+        owner_scope_id="user:7", authorized_id=99, telegram_owner_id=100
+    )
+    _write_json(target / "agents.json", config)
+    package_path = tmp_path / "stable-clone.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        transfer_mode="workspace",
+        history_mode=history_mode,
+        include_telegram_secret=False,
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        operation="clone",
+        target_agent_id="zelda-copy",
+    )
+    first = commit_agent_move(target, staged["package_id"])
+    replay = commit_agent_move(target, staged["package_id"])
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    imported = target_store.list_sessions(
+        owner_id="user:7", agent_id="zelda-copy", include_archived=True
+    )
+    assert len(imported) == 1
+    assert imported[0]["status"] == (
+        "archived" if history_mode == "inherit_read_only" else "active"
+    )
+    assert [
+        row["text"]
+        for row in target_store.messages(imported[0]["session_id"], owner_id="user:7")
+    ] == [
+        "owned question",
+        "owned answer",
+    ]
+    assert first["conversation_continuity"]["imported_messages"] == 2
+    assert replay["conversation_continuity"]["imported_messages"] == 2
+    assert target_store.list_sessions(owner_id="user:99", agent_id="zelda-copy") == []
+    assert len(source_store.messages(session["session_id"], owner_id="user:7")) == 2
+
+
+def test_clone_receiver_does_not_confuse_telegram_id_with_authorized_scope(tmp_path):
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
+    config = json.loads((target / "agents.json").read_text())
+    config["global"]["owner_scope_id"] = "user:8"
+    _write_json(target / "agents.json", config)
+    before = (target / "agents.json").read_bytes()
+    package_path = tmp_path / "different-owner.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        transfer_mode="workspace",
+        history_mode="copy",
+        include_telegram_secret=False,
+    )
+    with pytest.raises(AgentMoveError, match="target authorized owner"):
+        stage_agent_move(
+            target,
+            package_path.read_bytes(),
+            expected_sha256=package_sha256(package_path),
+            source_instance="HASHI1",
+            operation="clone",
+            target_agent_id="zelda-copy",
+        )
+    assert (target / "agents.json").read_bytes() == before
+    assert not (target / "workspaces/zelda-copy").exists()
+
+
 def test_move_commit_adopts_owned_delivery_state_and_rollback_retires_it(tmp_path):
     source, target, _ = _roots(tmp_path)
     _authorize_owner(source)

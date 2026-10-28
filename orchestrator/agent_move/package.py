@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import os
 import platform
@@ -52,6 +51,7 @@ from orchestrator.session_store import (
     SessionStore,
     validate_conversation_continuity_capsule,
 )
+from orchestrator.telegram_identity import resolve_owner_scope_id, resolve_telegram_owner_id
 
 PACKAGE_TYPE = "hashi-agent-move"
 PACKAGE_SCHEMA_MIN_VERSION = 1
@@ -374,12 +374,17 @@ def create_agent_move_package(
     transfer_operation = str(operation or "").strip().lower()
     if transfer_operation not in {"move", "clone"}:
         raise AgentMoveError("Agent transfer operation must be 'move' or 'clone'")
+    # Clone is always a new Bot identity, including for direct API callers
+    # that leave the legacy Move-oriented argument at its default.
+    include_telegram_secret = (
+        transfer_operation == "move" and include_telegram_secret
+    )
     package_key = str(package_id or uuid4())
     _validate_package_id(package_key)
     output = Path(output_path).expanduser().resolve()
 
     raw_config = _find_agent_config(root, name)
-    if raw_config.get("is_active", True) is False:
+    if transfer_operation == "move" and raw_config.get("is_active", True) is False:
         raise AgentMoveError(
             f"source Agent '{name}' is inactive; activate and verify the intended "
             "source copy before moving it"
@@ -1239,26 +1244,32 @@ def _configured_instance_id(root: Path) -> str | None:
     return str((data.get("global") or {}).get("instance_id") or "").strip() or None
 
 
-def _configured_owner_id(root: Path) -> str:
+def _configured_owner_id(root: Path, *, instance_role: str = "source") -> str:
     data = _load_json_file(root / "agents.json")
     global_config = data.get("global") if isinstance(data, Mapping) else {}
-    raw_owner = (global_config or {}).get("authorized_id") or 0
-    secrets_path = root / "secrets.json"
-    if secrets_path.is_file():
-        secrets = _load_json_file(secrets_path)
-        if isinstance(secrets, Mapping):
-            raw_owner = secrets.get("authorized_telegram_id") or raw_owner
-    try:
-        configured = int(raw_owner)
-    except (TypeError, ValueError) as exc:
+    if not isinstance(global_config, Mapping):
         raise AgentMoveError(
-            "source authorized conversation owner configuration is invalid"
-        ) from exc
-    if configured <= 0:
-        raise AgentMoveError(
-            "source authorized conversation owner is not configured"
+            f"{instance_role} authorized conversation owner configuration is invalid"
         )
-    return f"user:{configured}"
+    try:
+        # PAO ownership remains stable when a Telegram account is replaced.
+        # Telegram is optional when an explicit PAO owner scope exists.
+        if str(global_config.get("owner_scope_id") or "").strip():
+            return resolve_owner_scope_id(global_config, None)
+        secrets_path = root / "secrets.json"
+        secrets = _load_json_file(secrets_path) if secrets_path.is_file() else {}
+        if not isinstance(secrets, Mapping):
+            raise ValueError("owner compatibility configuration must be an object")
+        telegram_owner = resolve_telegram_owner_id(global_config, secrets)
+        if telegram_owner is not None:
+            return resolve_owner_scope_id(global_config, telegram_owner)
+    except ValueError as exc:
+        raise AgentMoveError(
+            f"{instance_role} authorized conversation owner configuration is invalid"
+        ) from exc
+    raise AgentMoveError(
+        f"{instance_role} authorized conversation owner is not configured"
+    )
 
 
 def _export_conversation_continuity_snapshot(
@@ -1290,8 +1301,6 @@ def _export_conversation_continuity_snapshot(
         store = SessionStore(snapshot_path, instance_id=source_instance)
         owner = _resolve_conversation_owner(
             root,
-            store,
-            agent_id=agent_id,
             explicit_owner_id=explicit_owner_id,
         )
         return store.export_conversation_continuity(
@@ -1324,41 +1333,29 @@ def export_conversation_continuity_snapshot(
     )
 
 
-def configured_conversation_owner_id(root: Path) -> str:
+def configured_conversation_owner_id(
+    root: Path, *, instance_role: str = "source"
+) -> str:
     """Return the configured conversation owner without exposing secret values."""
 
-    return _configured_owner_id(root)
+    return _configured_owner_id(root, instance_role=instance_role)
 
 
 def _resolve_conversation_owner(
     root: Path,
-    store: SessionStore,
     *,
-    agent_id: str,
     explicit_owner_id: str | None,
 ) -> str:
-    observed = store.conversation_owner_ids(agent_id=agent_id)
     configured = _configured_owner_id(root)
     explicit = str(explicit_owner_id or "").strip()
-    if explicit:
-        owner = explicit
-        if observed and owner not in observed:
-            raise AgentMoveError(
-                "requested conversation owner has no SessionStore history for this Agent"
-            )
-    elif len(observed) == 1:
-        owner = observed[0]
-    elif len(observed) > 1:
-        raise AgentMoveError(
-            "Agent history has multiple owners; an exact conversation_owner_id is required"
-        )
-    else:
-        owner = configured
-    if owner != configured:
+    if explicit and explicit != configured:
         raise AgentMoveError(
             "SessionStore history owner does not match the configured authorized owner"
         )
-    return owner
+    # SessionStore already filters export by exact owner + Agent + instance.
+    # Other scopes (including empty transport-account Sessions) neither grant
+    # access nor veto the configured owner's export. No history is also valid.
+    return configured
 
 
 def _collect_agent_capability(

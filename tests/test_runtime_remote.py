@@ -228,6 +228,42 @@ async def test_clone_requires_explicit_history_choice_and_carries_it_to_executio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("source_state", [(0, True), (2, False)])
+async def test_clone_snapshot_does_not_require_move_drain_preflight(
+    tmp_path,
+    monkeypatch,
+    source_state,
+    dry_run,
+):
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(
+        runtime_remote, "_move_preflight", AsyncMock(return_value=source_state)
+    )
+    result = {
+        "package_id": "clone-test",
+        "agent_id": "zelda",
+        "target_agent_id": "zelda_1",
+        "target_instance": "HASHI_TEST",
+        "history_mode": "none",
+    }
+    prepare = Mock(return_value=result)
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_clone", prepare)
+    monkeypatch.setattr(runtime_remote, "preview_outbound_clone", prepare)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
+    await runtime_remote.do_clone(
+        runtime,
+        update,
+        "zelda",
+        "HASHI_TEST",
+        {"HASHI_TEST": {"instance_id": "HASHI_TEST", "local": True, "active": True}},
+        dry_run=dry_run,
+    )
+    prepare.assert_called_once()
+    assert prepare.call_args.kwargs["history_mode"] == "none"
+
+
+@pytest.mark.asyncio
 async def test_handle_move_callback_cancel(tmp_path):
     runtime = _runtime(tmp_path)
     update = SimpleNamespace(callback_query=_Query("move:cancel"))

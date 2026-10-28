@@ -16,8 +16,9 @@ Current decisions, with full rationale in the linked owners:
 - HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
   state and evidence; only explicit cancellation, safety, transport, Provider and
   single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-- Agent Move qualifies mutable state at staging, becomes forward-only after
-  confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Move qualifies at staging; confirmation is forward-only, never rolls back.
+  Clone uses stable PAO owner snapshots, not Telegram IDs or Move drain gates.
+  See [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback is selected model, same-Provider visual model, then LAN Compute;
   it is visible/request-only and shares these [admission facts](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute services resolve through PAO's fail-closed Function directory; no

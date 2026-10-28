@@ -11,6 +11,7 @@ from orchestrator.agent_move import coordinator
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.agent_move.source_guard import source_move_guard_state
 from orchestrator.pcm import render_pcm_document
+from orchestrator.session_store import SessionStore
 
 
 def _write_json(path: Path, value) -> None:
@@ -649,6 +650,82 @@ async def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchange
     ]
     assert len(clone_tasks) == 1
     assert clone_tasks[0]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_local_clone_copies_stable_history_without_activating_inactive_source(
+    tmp_path, monkeypatch
+):
+    root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["global"].update(
+        owner_scope_id="user:7", authorized_id=99, telegram_owner_id=99
+    )
+    config["agents"][0]["is_active"] = False
+    _write_json(root / "agents.json", config)
+    running = _install_local_lifecycle(monkeypatch)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    source_session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.ensure_default_session(owner_id="user:99", agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=source_session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="stable-history",
+        text="same human",
+        source="workbench",
+        idempotency_key="stable-history",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="retained answer",
+        assistant_source="fixture",
+    )
+    prepared = coordinator.prepare_outbound_clone(
+        root,
+        {},
+        "zelda",
+        "HASHI1",
+        source_instance="HASHI1",
+        history_mode="copy",
+    )
+    from types import SimpleNamespace
+    from orchestrator.agent_move.manager import AgentMoveManager
+
+    manager = AgentMoveManager(SimpleNamespace(paths=SimpleNamespace(bridge_home=root)))
+    await manager.start()
+    try:
+        manager.submit(prepared["package_id"], {})
+        receipt = await manager.wait(prepared["package_id"])
+    finally:
+        await manager.stop()
+    assert receipt["status"] == "completed"
+    target_session = store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda_1",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert target_session["session_id"] != source_session["session_id"]
+    assert [
+        m["text"]
+        for m in store.messages(target_session["session_id"], owner_id="user:7")
+    ] == [
+        "same human",
+        "retained answer",
+    ]
+    assert len(store.messages(source_session["session_id"], owner_id="user:7")) == 2
+    assert store.list_sessions(owner_id="user:99", agent_id="zelda_1") == []
+    agents = {
+        row["name"]: row
+        for row in json.loads((root / "agents.json").read_text())["agents"]
+    }
+    assert agents["zelda"]["is_active"] is False
+    assert agents["zelda_1"]["is_active"] is True
+    assert "zelda_1" in running and "zelda" not in running
+    assert "zelda_1" not in json.loads((root / "secrets.json").read_text())
 
 
 def test_remote_clone_runs_full_lifecycle_without_disabling_source(

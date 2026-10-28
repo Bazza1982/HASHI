@@ -782,18 +782,8 @@ async def do_clone(
     history_mode: str = "none",
 ) -> None:
     chat_id = update.effective_chat.id
-    selected_runtime = _find_agent_runtime(runtime, agent_id)
-    delayed, busy = await _move_preflight(runtime, agent_id, selected_runtime)
-    if delayed or busy:
-        await runtime._send_text(
-            chat_id,
-            ui_language.tr(
-                "remote.clone.agent_busy",
-                agent=html.escape(agent_id),
-            ),
-            parse_mode="HTML",
-        )
-        return
+    # Clone snapshots durable state and leaves source execution/queues alone.
+    # Move's drain gate is not applicable; packaging still checks consistency.
     try:
         resolved_target, entry = resolve_transfer_instance(instances, target)
         if entry.get("active") is False:

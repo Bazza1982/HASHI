@@ -8,6 +8,31 @@ operations are separate from live task/session handoff and from the HASHI ↔
 Hermes transfer format, but deliberately share one package, receiver,
 authentication, transaction journal, and registry-writing implementation.
 
+## Stable owner and Clone qualification (2026-10-29)
+
+PAO owns this Functions-layer repair. A replaceable Telegram account is not the
+stable conversation owner. Source export, receiver staging/import and source
+retirement share `configured_conversation_owner_id`, which uses the canonical
+`telegram_identity` resolvers and honours `global.owner_scope_id`. An explicit
+stable scope does not require Telegram to be configured. Legacy configuration
+without a stable scope retains the canonical Telegram-owner compatibility order.
+
+SessionStore exports by exact instance, Agent and configured owner. A second
+scope, including a technical empty Session under a replacement account ID, does
+not prove a second human owner and cannot veto that export. Empty owner-scoped
+history is valid. An explicit foreign owner, unknown configured ownership and
+receiver owner mismatch still fail; histories are never merged across scopes.
+
+Clone can snapshot an inactive Agent, and pending messages or a busy source do
+not trigger Move's drain preflight. Package consistency checks remain in force;
+cloning never drains or disables source execution. A source already in Move
+cutover remains fenced. Clone always strips the Telegram credential, even when
+a direct caller leaves Move-oriented defaults unchanged. Move's active-source,
+last-active-Agent and source-stop gates are unchanged. Authentication, encryption,
+target-ID reservations, size/path/integrity checks, disabled imported schedules,
+and rollback remain mandatory. Offline regression and production adoption are
+separate; this repair does not require a production restart as a test.
+
 The source sends a platform-neutral `agent-move-v1` archive to a target-owned
 receiver. The source never writes a target filesystem path directly.
 
