@@ -77,17 +77,17 @@ authorization fields. Semantic Phone sections are matched to scoped durable even
 by stable event-identity digest; the stored display text and its old content
 hash are not authorities over that source. Differences in punctuation,
 whitespace, rendering, timestamps or a stale display hash therefore do not
-block a request when the source identities are complete. A missing or stale
-projection sequence is only a lost search hint when an identity interval can
-otherwise be found. Provider arrival sequence is used only to reconstruct a
-candidate snapshot, never as transcript chronology or a typed Message ordinal.
-Missing, malformed or incomplete source identity fails closed and preserves the
-old section. Snapshot search checks complete high-water snapshots before
-enumerating aligned intervals, then locates arrival extrema to rule out impossible
-intervals. Highly interleaved arrival sequences can still have many valid
-candidate intervals and remain a performance risk;
-the legacy digest does not record the source identity list. Verified source is
-rebuilt as ordinary semantic
+block a request when the source identities are complete and can be verified.
+New semantic sections retain the first and last arrival sequence in their PCM
+metadata. Verification uses those exact bounds and the event-identity digest;
+arrival sequence never determines transcript chronology or a typed Message ordinal.
+For older sections without the last bound, the search checks complete snapshots
+and intervals, then stops after 100,000 candidate digests. If verification fails
+or this bound is exhausted, the section is retained and the request reports
+incomplete source; it is never silently removed. The user has stated that earlier
+Phone data was test data and legacy migration is not required. A very unusual
+complete legacy section can therefore need a fresh context rather than automatic
+migration. Verified source is rebuilt as ordinary semantic
 `recent_exchange:phone:*` history. If the first upgraded turn is a Phone
 action, earlier ended calls are rebuilt in that same request beside the
 protected action snapshot, so cleanup cannot create a history gap. Existing

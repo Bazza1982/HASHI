@@ -1254,7 +1254,10 @@ async def test_legacy_phone_section_without_exact_source_fails_safe(phone):
 
 
 @pytest.mark.asyncio
-async def test_semantic_phone_section_without_complete_source_fails_safe(phone):
+@pytest.mark.parametrize("legacy_budget", [0, 100_000])
+@pytest.mark.parametrize("new_format", [False, True])
+async def test_semantic_phone_section_without_complete_source_fails_safe(phone, monkeypatch, legacy_budget, new_format):
+    monkeypatch.setattr("orchestrator.phone_context_handoff.LEGACY_SNAPSHOT_CANDIDATE_LIMIT", legacy_budget)
     from orchestrator.phone_context_handoff import (
         PhoneContextError,_fragment_digest,_fragments,_semantic_transcript,prepare_turn,
     )
@@ -1282,6 +1285,8 @@ async def test_semantic_phone_section_without_complete_source_fails_safe(phone):
         "text":_semantic_transcript(expected),"authority":"history","protected":False,
         "metadata":{"sequence":available[0]["sequence"]},
     }
+    if new_format:
+        semantic_section["metadata"]["phone_source_last_sequence"] = missing["sequence"]
     runtime=turn_runtime(phone)
     runtime.backend_manager.current_backend.current_pcm_section_keys=lambda: (semantic_key,)
     runtime.backend_manager.current_backend.current_pcm_sections=lambda _keys: {
@@ -1370,6 +1375,7 @@ async def test_changed_phone_projection_migrates_into_real_her_prompt_once(phone
         )
 
     title, body, metadata = _ordinary_history_section(fragments)
+    assert metadata["phone_source_last_sequence"] == max(row["sequence"] for row in fragments)
     old_key = metadata["key"]
     coordinator = HerBackendSessionCoordinator(tmp_path / "her-state")
     (tmp_path / "pcm").mkdir()
@@ -1393,6 +1399,8 @@ async def test_changed_phone_projection_migrates_into_real_her_prompt_once(phone
     adapter = HERv2Adapter.__new__(HERv2Adapter)
     adapter._session_coordinator = coordinator
     adapter._session_id = "her-phone"
+    persisted = adapter.current_pcm_sections((old_key,))[old_key]
+    assert persisted["metadata"]["phone_source_last_sequence"] == metadata["phone_source_last_sequence"]
     runtime = turn_runtime(phone)
     runtime.config.active_backend = "her-v2"
     backend = runtime.backend_manager.current_backend

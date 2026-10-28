@@ -17,6 +17,8 @@ LEGACY_SECTION_PREFIX = "phone_external_context:"
 SEMANTIC_SECTION_PREFIX = "recent_exchange:phone:"
 SEMANTIC_CONSUMER_VERSION = "phone-semantic-history-v4"
 ACTION_OWNER_DIGEST_FIELD = "phone_action_owner_sha256"
+PHONE_SOURCE_LAST_SEQUENCE = "phone_source_last_sequence"
+LEGACY_SNAPSHOT_CANDIDATE_LIMIT = 100_000
 
 
 class PhoneContextError(RuntimeError):
@@ -442,6 +444,7 @@ def _identity_interval_matches(
     *,
     first_arrival: int | None = None,
     last_arrival: int | None = None,
+    candidate_budget: list[int] | None = None,
 ) -> bool:
     # A candidate snapshot must include both of its arrival extrema.  Locate
     # their units first instead of hashing every interval that cannot contain
@@ -486,6 +489,10 @@ def _identity_interval_matches(
 
         digest = hashlib.sha256(b"[" + b",".join(unit_bytes[lower:earliest_end + 1]))
         for upper in range(earliest_end, len(units)):
+            if candidate_budget is not None:
+                if candidate_budget[0] <= 0:
+                    return False
+                candidate_budget[0] -= 1
             if upper != earliest_end:
                 digest.update(b",")
                 digest.update(unit_bytes[upper])
@@ -525,12 +532,31 @@ def _semantic_source_matches(
         id(row): json.dumps(_fragment_identity(row), separators=(",", ":")).encode()
         for row in replacement_fragments
     }
-    # A stale or missing projection sequence is just a lost search hint; a
-    # matching interval of scoped event identities is still authoritative.
+    metadata = section.get("metadata")
+    if isinstance(metadata, Mapping) and PHONE_SOURCE_LAST_SEQUENCE in metadata:
+        # New sections record both arrival bounds. Verify one snapshot exactly,
+        # without searching possible high-water marks or trusting rendered text.
+        try:
+            if isinstance(metadata["sequence"], bool) or isinstance(metadata[PHONE_SOURCE_LAST_SEQUENCE], bool):
+                return False
+            first = int(metadata["sequence"])
+            last = int(metadata[PHONE_SOURCE_LAST_SEQUENCE])
+            if first > last:
+                return False
+            eligible = [row for row in replacement_fragments
+                        if first <= int(row["sequence"]) <= last]
+            return _identity_interval_matches(
+                _history_units(eligible), target_digest, encoded_identities,
+                first_arrival=first, last_arrival=last,
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    # A stale or missing legacy projection sequence is only a lost search hint;
+    # a matching interval of scoped identities is still authoritative.
     if _identity_interval_matches(units, target_digest, encoded_identities):
         return True
 
-    metadata = section.get("metadata")
     if not isinstance(metadata, Mapping):
         return False
     try:
@@ -565,6 +591,7 @@ def _semantic_source_matches(
     # active at that high-water may now appear between completed history units.
     # Rebuild aligned dialogue-unit intervals using only event identities.
     # Text is a derived projection and can differ after formatting or correction.
+    candidate_budget = [LEGACY_SNAPSHOT_CANDIDATE_LIMIT]
     for last_arrival in arrivals:
         eligible = [
             row
@@ -575,8 +602,12 @@ def _semantic_source_matches(
         if _identity_interval_matches(
             units, target_digest, encoded_identities,
             first_arrival=first_arrival, last_arrival=last_arrival,
+            candidate_budget=candidate_budget,
         ):
             return True
+        if candidate_budget[0] <= 0:
+            # No match was verified: keep the old section rather than delete it.
+            return False
     return False
 
 
@@ -623,6 +654,7 @@ def _ordinary_history_section(fragments: list[dict[str, Any]]) -> tuple:
         "authority": "history",
         "protected": False,
         "sequence": min(int(row["sequence"]) for row in fragments),
+        PHONE_SOURCE_LAST_SEQUENCE: max(int(row["sequence"]) for row in fragments),
         "exchange_id": key.removeprefix("recent_exchange:"),
         "source": "live-phone",
     }
