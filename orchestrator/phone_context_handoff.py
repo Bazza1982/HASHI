@@ -542,8 +542,22 @@ def _semantic_source_matches(
         })
     except (KeyError, TypeError, ValueError):
         return False
-    if not arrivals:
+    if not arrivals or first_arrival not in arrivals:
         return False
+
+    # Whole snapshots were emitted by earlier consumers. Check them before
+    # reconstructing intervals, newest first; this verifies the same exact
+    # identity digest without scanning millions of impossible subintervals.
+    target_bytes = bytes.fromhex(target_digest)
+    for last_arrival in reversed(arrivals):
+        identities = (
+            encoded_identities[id(row)]
+            for row in replacement_fragments
+            if first_arrival <= int(row["sequence"]) <= last_arrival
+        )
+        candidate = hashlib.sha256(b"[" + b",".join(identities) + b"]").digest()
+        if candidate[:12] == target_bytes:
+            return True
 
     # Old v2 sections were snapshots of every unconsumed Phone event from their
     # first arrival through one durable high-water mark.  Arrival sequence only
