@@ -11,7 +11,9 @@ import pytest
 
 from orchestrator.command_interactions import (
     Binding, Capture, InteractionError, MenuStore, markup_rows, perform_action, safe_url,
+    validate_operation,
 )
+from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
 
 
 @pytest.mark.asyncio
@@ -340,6 +342,36 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(InteractionError, 'capacity'):
             await self.store.once(self.binding, 'requesttwoabcdefgh', {}, run)
         result = await self.store.once(self.binding, 'requestoneabcdefgh', {}, run)
+        self.assertTrue(result['ok'])
+        self.assertEqual(calls, [1])
+
+    async def test_sys_request_size_counts_prompt_characters_not_json_escapes(self):
+        prefix = '  first\n\n"quoted" C:\\Prompt\\rule\n'
+        suffix = '  '
+        prompt = prefix + (
+            '\n"\\' * ((MAX_SYS_PROMPT_CHARS - len(prefix) - len(suffix)) // 3)
+        )
+        prompt += 'x' * (MAX_SYS_PROMPT_CHARS - len(prompt) - len(suffix))
+        prompt += suffix
+        payload = {
+            'version': 1,
+            'op': 'open',
+            'client_id': 'clientabcdefghijkl',
+            'request_id': 'sysrequestabcdefgh',
+            'command': f'/sys 7 save {prompt}',
+        }
+        calls = []
+
+        async def run():
+            calls.append(1)
+            return {'ok': True}
+
+        validate_operation(payload)
+        result = await self.store.once(
+            self.binding, payload['request_id'], payload, run
+        )
+
+        self.assertEqual(len(prompt), MAX_SYS_PROMPT_CHARS)
         self.assertTrue(result['ok'])
         self.assertEqual(calls, [1])
 

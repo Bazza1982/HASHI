@@ -17,7 +17,7 @@ from orchestrator.frontend_connector_registry import (
     require_connector_operation,
 )
 from orchestrator.frontend_contracts import normalize_frontend_operation
-from orchestrator.slash_command_audit import split_slash_command_words
+from orchestrator.slash_command_audit import parse_slash_command_text
 
 
 class ConnectorLocalCommand(ValueError):
@@ -51,12 +51,12 @@ def normalize_compatibility_operation(
 
 def _command_parts(command_line: str) -> tuple[str, list[str]]:
     raw = str(command_line or "").strip()
-    if raw.startswith("/"):
-        raw = raw[1:]
-    parts = split_slash_command_words(raw)
-    if not parts:
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    command, arguments = parse_slash_command_text(raw)
+    if not command:
         raise ValueError("empty command")
-    return parts[0].split("@", 1)[0].casefold(), list(parts[1:])
+    return command, arguments
 
 
 def _connector_id(

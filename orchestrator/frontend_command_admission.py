@@ -7,6 +7,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from orchestrator.sys_command_contract import (
+    MAX_SYS_COMMAND_CHARS,
+    SysCommandContractError,
+)
+
+MAX_FRONTEND_COMMAND_REQUEST_BYTES = (MAX_SYS_COMMAND_CHARS * 5) + 65_536
+
 
 def _request_digest(payload: Mapping[str, Any], invocation: Mapping[str, Any]) -> str:
     encoded = json.dumps(
@@ -16,7 +23,7 @@ def _request_digest(payload: Mapping[str, Any], invocation: Mapping[str, Any]) -
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    if len(encoded) > 65536:
+    if len(encoded) > MAX_FRONTEND_COMMAND_REQUEST_BYTES:
         raise ValueError("frontend command request exceeds the storage limit")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -251,14 +258,26 @@ async def execute_frontend_command_invocation(
     )
     from orchestrator.slash_command_audit import redact_args
 
-    normalized = normalize_compatibility_operation(
-        compatibility_adapter_id,
-        {
-            "kind": "command",
-            "name": command_name,
-            "arguments": list(arguments or []),
-        },
-    )
+    try:
+        normalized = normalize_compatibility_operation(
+            compatibility_adapter_id,
+            {
+                "kind": "command",
+                "name": command_name,
+                "arguments": list(arguments or []),
+            },
+        )
+    except SysCommandContractError as exc:
+        return {
+            "ok": False,
+            "command": str(command_name or "").casefold(),
+            "execution_state": "failed",
+            "error_code": exc.error_code,
+            "error_message": exc.error_message,
+            "connector_id": connector_id,
+            "transport_delivery_state": "not_observed",
+            "request_outcome": "rejected",
+        }
     adapter = normalized["adapter"]
     if (
         adapter["connector_id"] != connector_id
@@ -395,6 +414,9 @@ async def execute_frontend_command_invocation(
                 "transport_delivery_state": "not_observed",
                 "result": res_dict,
             }
+            error_message = str(res_dict.get("error_message") or "").strip()
+            if error_message:
+                response["error_message"] = error_message
         else:
             response = {
                 "ok": True,

@@ -2,10 +2,9 @@
 
 Current decisions (details linked):
 
-- `/forget` (in development) covers all Sessions of the selected Agent, preserves
-  verified older Memory+ archives across a clean Session, and retains audit
-  copies outside Context. Unproven summaries/Wiki and cross-boundary exchanges
-  can still lose outside-window content; exact retention remains unqualified.
+- `/forget` covers all Sessions of the selected Agent. Only traceable information
+  can be removed accurately; untraceable summaries may retain forgotten content.
+  Retained audit copies remain outside automatic Context.
   [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
 - Task/local /sys deletion requires authenticated management and a current snapshot.
@@ -116,7 +115,8 @@ Scheduler/recovery and `/bg` use an Agent-owned hidden Session; separate
 execution/delivery/receipts and show each final once. `/bg` freezes admission;
 schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
 
-HASHI3 Telegram health needs a bounded poll; startup preserves pending updates.
+Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
+Bounded polls preserve pending updates. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery
 

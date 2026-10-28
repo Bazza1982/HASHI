@@ -284,6 +284,40 @@ def test_parse_slash_command_text_preserves_windows_paths():
     ) == ("worzone", ["2", "C:\\Users\\Example\\Projects\\HASHI4"])
 
 
+def test_parse_sys_command_text_keeps_prompt_as_one_lossless_argument():
+    prompt = (
+        '  indented first line\n\nsecond\tline with "quotes", '
+        'C:\\Temp\\rule and  repeated spaces  '
+    )
+    command, arguments = parse_slash_command_text(f"/sys 3 save {prompt}")
+
+    assert command == "sys"
+    assert arguments == ["3", "save", prompt]
+    assert len(parse_slash_command_text(
+        "/sys 4 save " + " ".join(f"word-{index}" for index in range(200))
+    )[1]) == 3
+
+
+@pytest.mark.asyncio
+async def test_local_command_propagates_typed_handler_failure(tmp_path):
+    class _TypedFailureRuntime(_Runtime):
+        async def cmd_status(self, update, context):
+            await update.message.reply_text("Actionable failure")
+            return {
+                "ok": False,
+                "error_code": "typed_failure",
+                "error_message": "Actionable failure",
+                "request_outcome": "rejected",
+            }
+
+    result = await execute_local_command(_TypedFailureRuntime(tmp_path), "/status")
+
+    assert result["ok"] is False
+    assert result["error_code"] == "typed_failure"
+    assert result["error_message"] == "Actionable failure"
+    assert result["messages"][0]["text"] == "Actionable failure"
+
+
 def test_split_slash_command_words_unified_non_posix():
     assert split_slash_command_words(
         "workzone 2 C:\\Users\\Example\\Projects\\HASHI4"
@@ -482,11 +516,13 @@ async def test_native_telegram_command_is_durably_admitted_and_replay_safe(
     runtime = _TelegramRuntime()
     calls = []
 
-    async def handler(_update, _context):
-        calls.append("executed")
+    async def handler(_update, context):
+        calls.append(list(context.args))
 
     message = SimpleNamespace(
-        message_id=321, text="/sys 1 on", date=datetime.now(timezone.utc)
+        message_id=321,
+        text='/sys 1 save first\n  second "quoted"',
+        date=datetime.now(timezone.utc),
     )
     update = SimpleNamespace(
         update_id=654321,
@@ -498,15 +534,16 @@ async def test_native_telegram_command_is_durably_admitted_and_replay_safe(
     )
     wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "sys", handler)
 
-    await wrapped(update, SimpleNamespace(args=["1", "on"]))
-    await wrapped(update, SimpleNamespace(args=["1", "on"]))
+    mangled_args = ["1", "save", "first", "second", "quoted"]
+    await wrapped(update, SimpleNamespace(args=mangled_args))
+    await wrapped(update, SimpleNamespace(args=mangled_args))
     from orchestrator.session_store import IdempotencyConflict
 
     message.text = "/sys 2 on"
     with pytest.raises(IdempotencyConflict):
         await wrapped(update, SimpleNamespace(args=["2", "on"]))
 
-    assert calls == ["executed"]
+    assert calls == [["1", "save", 'first\n  second "quoted"']]
     store = runtime_session.ensure_store(runtime)
     session = runtime_session.current_session_for_update(runtime, update)
     owner = runtime_session.owner_id(runtime)
