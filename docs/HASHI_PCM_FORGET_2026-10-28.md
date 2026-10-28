@@ -76,5 +76,13 @@ unverifiable isolation is a release blocker, never a successful forget.
   filtered memory/export paths are implemented on the same branch.
 - Offline validation: 378 related tests passed, followed by 49 focused tests
   after the repeated-forget export correction.
-- Worker adoption, a complete live confirmation on disposable data, and user
-  acceptance remain separate evidence; the provenance limitation above is open.
+- HASHI3 live verification of implementation commit `6cd533f3`: a full
+  reboot loaded the matching Function generation. On a disposable Agent, a
+  real conversation was forgotten, its audit copy was retained, and a new
+  Session answered that the test marker was unavailable. A second disposable
+  Agent with a synthetic historical owner completed confirmation and removed
+  both test messages. Both temporary Agents were removed after testing.
+- The following user-facing warning clarifies that quarantined memory and HCC
+  may include older information. Adoption of that wording requires its own
+  Worker verification. User acceptance and the provenance limitation remain
+  open; the user's real Agent memory was not modified during these tests.

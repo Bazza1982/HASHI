@@ -150,6 +150,9 @@ def test_forget_preview_has_readable_line_breaks(locale):
     )
     assert "\n" in text
     assert "\\n" not in text
+    assert "HCC" in text
+    assert ("更早内容" if locale == "zh-CN" else "older information") in text
+    assert ("不能自动恢复" if locale == "zh-CN" else "cannot yet be restored automatically") in text
 
 
 @pytest.mark.parametrize("duration", ["0h", "1w", "-1h", "9999d", "3", "1.5d"])
