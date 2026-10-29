@@ -16,6 +16,7 @@ class FakeProcessAPI:
         self.write_result = True
         self.did_stop = True
         self.job_close_error = False
+        self.terminate_error = False
         self.sentinel = None
         self.nonce = None
 
@@ -49,6 +50,12 @@ class FakeProcessAPI:
     def stopped(self, process, milliseconds):
         self.events.append("stopped")
         return self.did_stop
+
+    def terminate(self, process):
+        self.events.append("terminate")
+        if self.terminate_error:
+            raise OSError("injected termination failure")
+        self.did_stop = True
 
     def close_process(self, process):
         self.events.append("close_process")
@@ -105,6 +112,7 @@ def test_timeout_closes_owned_job_and_checks_the_child_stopped(running_setup):
 def test_failed_or_unknown_cleanup_is_never_reported_as_success(running_setup):
     identity, stage, api = running_setup
     api.did_stop = False
+    api.terminate_error = True
     with pytest.raises(ProbeCleanupUnverified, match="cleanup is unverified"):
         run_owned_sentinel(api, identity, stage)
     assert api.events[-1] == "close_process"
@@ -144,3 +152,25 @@ def test_windows_start_failure_closes_only_the_owned_job(running_setup):
     with pytest.raises(StageError, match="privilege unavailable"):
         run_owned_sentinel(api, identity, stage)
     assert api.events == ["create_job", "start_suspended", "close_job"]
+
+
+
+def test_unassigned_suspended_child_is_terminated_and_verified(running_setup):
+    identity, stage, api = running_setup
+    api.child_facts = ChildFacts(identity.sid, False, False, False)
+    api.did_stop = False
+    with pytest.raises(StageError, match="wrong identity or job"):
+        run_owned_sentinel(api, identity, stage)
+    assert "resume" not in api.events
+    assert api.events[-5:] == ["close_job", "stopped", "terminate", "stopped", "close_process"]
+
+
+def test_owned_child_is_terminated_even_when_job_close_fails(running_setup):
+    identity, stage, api = running_setup
+    api.exit_code = None
+    api.did_stop = False
+    api.job_close_error = True
+    with pytest.raises(ProbeCleanupUnverified, match="cleanup is unverified"):
+        run_owned_sentinel(api, identity, stage)
+    assert "terminate" in api.events
+    assert api.events[-1] == "close_process"

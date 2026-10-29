@@ -65,7 +65,11 @@ def run_owned_sentinel(api, identity, stage) -> None:
         if process is not None:
             try:
                 if not api.stopped(process, 5_000):
-                    cleanup_error = StageError("test process did not stop")
+                    # If job assignment was not honored, the suspended child is
+                    # still ours. Terminate via its retained handle and verify.
+                    api.terminate(process)
+                    if not api.stopped(process, 5_000):
+                        cleanup_error = StageError("test process did not stop")
             except Exception as exc:
                 cleanup_error = exc
             try:
@@ -109,7 +113,9 @@ class _ExtendedLimit(ctypes.Structure):
 class WindowsProbeProcess:
     """Windows API implementation for the fixed sentinel, with a kill-on-close job."""
 
-    def __init__(self, computer_name: str) -> None:
+    def __init__(self, computer_name: str, *, launcher: str = "as_user") -> None:
+        if launcher not in {"as_user", "with_token"}:
+            raise ValueError("unsupported disposable process launcher")
         if os.name != "nt" or not computer_name:
             raise StageError("native Windows and a local computer name are required")
         from scripts.permissions import windows_appcontainer_probe as probe
@@ -118,6 +124,7 @@ class WindowsProbeProcess:
         self.kernel = probe.KERNEL
         self.adv = probe.ADVAPI
         self.computer_name = computer_name
+        self.launcher = launcher
         self.kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
         self.kernel.SetInformationJobObject.argtypes = [
@@ -140,6 +147,12 @@ class WindowsProbeProcess:
             ctypes.POINTER(probe.PROCESS_INFORMATION),
         ]
         self.adv.CreateProcessAsUserW.restype = wintypes.BOOL
+        self.adv.CreateProcessWithTokenW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPWSTR,
+            wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR,
+            ctypes.POINTER(probe.STARTUPINFOW), ctypes.POINTER(probe.PROCESS_INFORMATION),
+        ]
+        self.adv.CreateProcessWithTokenW.restype = wintypes.BOOL
 
     def create_job(self):
         job = self.kernel.CreateJobObjectW(None, None)
@@ -197,10 +210,17 @@ class WindowsProbeProcess:
                 "\0".join(f"{key}={value}" for key, value in sorted(env.items())) + "\0\0"
             )
             flags = 0x00080000 | 0x00000004 | 0x00000400 | 0x08000000
-            if not self.adv.CreateProcessAsUserW(
-                token, str(executable), command, None, None, False, flags,
-                environment, str(scratch), ctypes.byref(startup.StartupInfo), ctypes.byref(process),
-            ):
+            if self.launcher == "with_token":
+                success = self.adv.CreateProcessWithTokenW(
+                    token, 0, str(executable), command, flags, environment, str(scratch),
+                    ctypes.byref(startup.StartupInfo), ctypes.byref(process),
+                )
+            else:
+                success = self.adv.CreateProcessAsUserW(
+                    token, str(executable), command, None, None, False, flags,
+                    environment, str(scratch), ctypes.byref(startup.StartupInfo), ctypes.byref(process),
+                )
+            if not success:
                 raise StageError(f"cannot start suspended test process (Windows error {ctypes.get_last_error()})")
             created = True
             return process
@@ -266,6 +286,10 @@ class WindowsProbeProcess:
 
     def stopped(self, process, milliseconds: int) -> bool:
         return self.kernel.WaitForSingleObject(process.hProcess, milliseconds) == 0
+
+    def terminate(self, process) -> None:
+        if not self.kernel.TerminateProcess(process.hProcess, 1) and not self.stopped(process, 0):
+            raise StageError("cannot terminate the owned test process")
 
     def close_process(self, process) -> None:
         thread_closed = bool(self.kernel.CloseHandle(process.hThread))
