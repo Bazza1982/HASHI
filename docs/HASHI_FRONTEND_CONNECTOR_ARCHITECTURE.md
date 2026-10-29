@@ -151,6 +151,17 @@ queue. The continuation's internal source names its purpose; it is not a new
 frontend. A parked topic is marked loaded only after its continuation has been
 accepted by the queue, so an admission failure leaves the topic available.
 
+A connector may remove a parked topic only after explicit confirmation of the
+Agent-bound record revision. PAO compares that revision with the current record
+and publishes the removal through its revision-checked atomic store. Slots can
+be reused, so a slot number alone is never sufficient. Concurrent changes are
+reported as conflicts; a committed durability error is outcome-unknown and must
+not be retried blindly. The operation removes only the parked record, not the
+conversation. All parked-topic writers use the same revision-aware file
+primitive, and a running Worker must advertise support before the API exposes a
+deletion revision or accepts this operation. Older Workers remain read-only for
+this action. Offline tests and live Worker adoption are separate evidence.
+
 ## 4. Authority and projection
 
 ```text

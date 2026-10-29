@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from orchestrator.config_json import ConfigDocument, new_config_json, read_config_json, write_config_json
+
+
+class ParkedTopicConflict(RuntimeError):
+    """The confirmed topic is absent or no longer matches the displayed record."""
+
+
+def parked_topic_deletion_revision(topic: dict[str, Any], *, agent_name: str) -> str:
+    """Bind an opaque revision to the complete topic and its owning Agent."""
+    payload = {
+        "kind": "parked-topic-deletion-v1",
+        "agent": str(agent_name or "").strip().casefold(),
+        "topic": topic,
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class ParkedTopicStore:
@@ -17,7 +36,7 @@ class ParkedTopicStore:
         if not self.path.exists():
             return {"topics": []}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = read_config_json(self.path)
         except Exception:
             return {"topics": []}
         if not isinstance(data, dict):
@@ -27,11 +46,36 @@ class ParkedTopicStore:
             topics = []
         return {"topics": topics}
 
-    def _save(self, payload: dict[str, Any]):
-        self.path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+    def _load_for_write(self) -> ConfigDocument:
+        try:
+            data = read_config_json(self.path)
+        except FileNotFoundError:
+            return new_config_json(self.path, {"topics": []})
+        topics = data.get("topics", [])
+        if not isinstance(topics, list) or any(not isinstance(item, dict) for item in topics):
+            raise ValueError("parked topics are invalid")
+        seen: set[int] = set()
+        for item in topics:
+            raw_slot = item.get("slot_id")
+            if isinstance(raw_slot, bool) or not isinstance(raw_slot, (int, str)):
+                raise ValueError("parked topic slot is invalid")
+            if isinstance(raw_slot, str) and (not raw_slot.isascii() or not raw_slot.isdigit()
+                                              or raw_slot.startswith("0")):
+                raise ValueError("parked topic slot is invalid")
+            try:
+                slot = int(raw_slot)
+            except ValueError:
+                raise ValueError("parked topic slot is invalid") from None
+            if slot <= 0 or slot in seen:
+                raise ValueError("parked topic slot is invalid")
+            seen.add(slot)
+        data.setdefault("topics", topics)
+        return data
+
+    def _save(self, payload: ConfigDocument):
+        if not isinstance(payload, ConfigDocument):
+            raise TypeError("parked topic writes require a revision-bearing snapshot")
+        write_config_json(self.path, payload)
 
     def list_topics(self) -> list[dict[str, Any]]:
         data = self._load()
@@ -39,13 +83,16 @@ class ParkedTopicStore:
         topics.sort(key=lambda item: int(item.get("slot_id", 0)))
         return topics
 
-    def next_slot_id(self) -> int:
-        topics = self.list_topics()
+    @staticmethod
+    def _next_slot_id(topics: list[dict[str, Any]]) -> int:
         used = {int(item.get("slot_id", 0)) for item in topics if int(item.get("slot_id", 0)) > 0}
         slot_id = 1
         while slot_id in used:
             slot_id += 1
         return slot_id
+
+    def next_slot_id(self) -> int:
+        return self._next_slot_id(self.list_topics())
 
     def get_topic(self, slot_id: int) -> dict[str, Any] | None:
         for topic in self.list_topics():
@@ -66,11 +113,12 @@ class ParkedTopicStore:
         source_session: str,
         title_user_override: str | None = None,
     ) -> dict[str, Any]:
-        data = self._load()
+        data = self._load_for_write()
         now = datetime.now()
-        slot_id = self.next_slot_id()
+        slot_id = self._next_slot_id(data["topics"])
         topic = {
             "slot_id": slot_id,
+            "topic_id": uuid.uuid4().hex,
             "title": (title_user_override or title or f"Parked Topic {slot_id}").strip(),
             "summary_short": (summary_short or "").strip(),
             "summary_long": (summary_long or "").strip(),
@@ -99,7 +147,7 @@ class ParkedTopicStore:
         return topic
 
     def delete_topic(self, slot_id: int) -> dict[str, Any] | None:
-        data = self._load()
+        data = self._load_for_write()
         kept: list[dict[str, Any]] = []
         removed = None
         for topic in data.get("topics", []):
@@ -113,8 +161,19 @@ class ParkedTopicStore:
         self._save(data)
         return removed
 
+    def delete_if_unchanged(
+        self, slot_id: int, *, expected_revision: str, agent_name: str,
+    ) -> dict[str, Any]:
+        data = self._load_for_write()
+        target = next((item for item in data["topics"] if int(item["slot_id"]) == int(slot_id)), None)
+        if target is None or parked_topic_deletion_revision(target, agent_name=agent_name) != expected_revision:
+            raise ParkedTopicConflict("parked topic changed since it was displayed")
+        data["topics"] = [item for item in data["topics"] if int(item["slot_id"]) != int(slot_id)]
+        self._save(data)
+        return target
+
     def mark_loaded(self, slot_id: int) -> dict[str, Any] | None:
-        data = self._load()
+        data = self._load_for_write()
         now = datetime.now().isoformat()
         updated = None
         for topic in data.get("topics", []):
@@ -151,7 +210,7 @@ class ParkedTopicStore:
         return due
 
     def record_followup_sent(self, slot_id: int, sent_at: datetime | None = None) -> dict[str, Any] | None:
-        data = self._load()
+        data = self._load_for_write()
         sent_at = sent_at or datetime.now()
         updated = None
         for topic in data.get("topics", []):

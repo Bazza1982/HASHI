@@ -5,9 +5,9 @@
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys deletion: authenticated management + current snapshot;
-  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
-  [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
+- Task/local /sys + parked deletion: authenticated, revision-checked;
+  /sys excludes global/permanent, parked needs guarded Worker, keeps chat.
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration needs verified ownership/safe paths; PAO settlement
   is cancellation-safe; HERV3 checkpoint claims stay immutable.

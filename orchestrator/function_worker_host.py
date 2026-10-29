@@ -1006,6 +1006,9 @@ class FunctionWorkerHost:
                 "session_id": str(runtime.session_id_dt),
                 "worker_pid": os.getpid(),
                 "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
+                "parked_topic_guarded_writes": callable(
+                    getattr(getattr(runtime, "parked_topics", None), "delete_if_unchanged", None)
+                ),
                 "worker_nonce": self.nonce,
                 "worker_phase": self.phase,
                 "worker_accepting": self.accepting,

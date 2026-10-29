@@ -945,6 +945,10 @@ class WorkbenchApiServer:
             "/api/agents/{name}/system-prompts/{slot}/delete-if-unchanged",
             self.handle_agent_sys_prompt_conditional_delete,
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/parked-topics/{slot}/delete-if-unchanged",
+            self.handle_agent_parked_topic_conditional_delete,
+        )
         self.app.router.add_patch(
             "/api/agents/{name}/metadata", self.handle_agent_metadata
         )
@@ -5761,6 +5765,62 @@ class WorkbenchApiServer:
                 return web.json_response({"ok": False, "error": "management access required"}, status=403)
         return None
 
+    @staticmethod
+    def _parked_topic_guarded_writes_ready(runtime, metadata: dict) -> bool:
+        if runtime is None or metadata.get("online") is not True:
+            return False
+        store = getattr(runtime, "parked_topics", None)
+        return callable(getattr(store, "delete_if_unchanged", None)) or (
+            metadata.get("parked_topic_guarded_writes") is True
+        )
+
+    async def handle_agent_parked_topic_conditional_delete(self, request):
+        """Remove only the confirmed parked record, never the conversation."""
+        from orchestrator.parked_topics import ParkedTopicConflict, ParkedTopicStore
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        revision = payload.get("expected_revision")
+        if (set(payload) != {"authorization", "expected_revision"}
+            or not re.fullmatch(r"[1-9][0-9]{0,15}", slot) or int(slot) > 9007199254740991
+            or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)):
+            return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
+
+        row = next((item for item in self._load_agent_rows() if item.get("name") == agent_name), None)
+        if row is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        metadata = self._metadata_for_agent(row, runtime)
+        if not self._parked_topic_guarded_writes_ready(runtime, metadata):
+            return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+        store = getattr(runtime, "parked_topics", None)
+        if not callable(getattr(store, "delete_if_unchanged", None)):
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+            store = ParkedTopicStore(Path(workspace))
+        canonical_agent = str(getattr(runtime, "name", agent_name))
+        try:
+            store.delete_if_unchanged(int(slot), expected_revision=revision, agent_name=canonical_agent)
+        except (ParkedTopicConflict, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        except (OSError, ValueError):
+            return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+        return web.json_response({"ok": True, "agent": canonical_agent, "slot": int(slot)})
+
     async def handle_agent_sys_prompt_conditional_delete(self, request):
         """Clear a local PCM slot only if it still matches the confirmed view."""
         from orchestrator.bridge_memory import (
@@ -5847,9 +5907,13 @@ class WorkbenchApiServer:
             runtime=runtime,
             desired_workzone_state=desired_workzone_state,
         )
-        if not self._can_view_deletion_revision(request, name):
+        can_view_revisions = self._can_view_deletion_revision(request, name)
+        if not can_view_revisions:
             for slot in overview.get("system_prompts", {}).get("slots", []):
                 slot.pop("deletion_revision", None)
+        if not can_view_revisions or not self._parked_topic_guarded_writes_ready(runtime, metadata):
+            for topic in overview.get("parked_topics", {}).get("topics", []):
+                topic.pop("deletion_revision", None)
         response = web.json_response({"ok": True, "overview": overview})
         response.headers["Cache-Control"] = "no-store"
         return response

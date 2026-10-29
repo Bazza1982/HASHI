@@ -451,6 +451,27 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
+async def test_worker_projects_guarded_parked_store_capability(tmp_path):
+    from orchestrator.parked_topics import ParkedTopicStore
+
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        first = await _wait_for_projection(
+            stack, lambda row: row.get("parked_topic_guarded_writes") is False,
+        )
+        assert first["parked_topic_guarded_writes"] is False
+        stack.runtime.parked_topics = ParkedTopicStore(stack.runtime.workspace_dir)
+        await stack.host.emit_metadata()
+        ready = await _wait_for_projection(
+            stack, lambda row: row.get("parked_topic_guarded_writes") is True,
+        )
+        assert ready["parked_topic_guarded_writes"] is True
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projection_reports_actual_agent_mode(tmp_path):
     stack = await _build_stack(tmp_path, outcome="success")
     try:
