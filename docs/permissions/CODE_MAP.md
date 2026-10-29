@@ -190,7 +190,7 @@
 
 ## MAP-11 — 拟新增模块与边界
 
-除已新增但未接入的 `models.py`、`authority.py` 与 `descriptors.py` 外，以下其余路径均为**建议新增、尚不存在**。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
+下表区分已经新增但未接入的领域代码和仍拟新增的路径。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
 
 | 建议路径 | 唯一职责 | 消费者 / 验收主题 |
 |---|---|---|
@@ -199,7 +199,7 @@
 | `orchestrator/permissions/descriptors.py` | 部分已知工具的范围和参数摘要；未知工具拒绝 | 已新增；未接入执行器，不宣称 OS 强制 |
 | 规范化与 subset | 当前由 `models.py` 唯一实现；如后续拆出则迁移而不复制 | authority、执行绑定；SCOPE |
 | `orchestrator/permissions/interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 | L1/L2 实现与消费者；单一权威 |
-| 账本与迁移 | `authority.py` 有内部事务及 v1→v2 请求快照迁移；service epoch、备份恢复及资源对账待实现 | service；并发/恢复/迁移 |
+| 账本与迁移 | `authority.py` 有内部事务及 v1/v2→v3 申请迁移；service epoch、备份恢复及资源对账待实现 | service；并发/恢复/迁移 |
 | 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
 | `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
 | `orchestrator/permissions/continuation.py` | PendingOperation、PermissionWait、park、恢复计划与回执消费 | HERV3、PAO lifecycle；CASE-LIFE |
@@ -208,7 +208,7 @@
 | `orchestrator/permissions/fc_bridge.py` | 私有 principal/receipt 与命令输入到权限服务的桥接 | 公共 FC Functions；CASE-FC |
 | `orchestrator/permissions/trusted_decisions.py` | 验证 VerifiedPrincipal 和一次 DecisionReceipt；与执行票据分离 | 公共 FC ingress/service；APPROVAL |
 | `orchestrator/commands/safety.py` | `/safety` RuntimeCommand/RuntimeCallback | 既有 generic action；FC_CONTRACT |
-| `tools/request_access.py` | 三个 agent 控制工具的薄适配，不拥有授权状态 | schema/ToolRegistry；UX |
+| `tools/request_access.py` | 三个 agent 控制工具与按需 schema 的薄适配，不拥有授权状态 | 已新增；尚未注册或接入 ToolRegistry |
 | L2 trusted service / restricted runner | OS 受信控制边界、受限进程及专用 IPC | 包位置/部署详见 L2_WINDOWS；真实平台验收 |
 
 不得为了上述模块改 protected tuple、Core bootstrap、Core envelope 或 dependency baseline。新的可选/原生依赖使用隔离 sidecar/environment，不能安装到运行中的 Core interpreter。

@@ -222,6 +222,9 @@ class FlexibleAgentConfig:
     extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
     telegram_mirror_policy: str = TELEGRAM_MIRROR_INHERIT
+    permission_settings: Any = field(default=None, repr=False)
+    permission_settings_present: bool = field(default=False, repr=False)
+    permission_settings_conflict: bool = field(default=False, repr=False)
 
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
@@ -822,7 +825,19 @@ class ConfigManager:
                 a_raw.pop("telegram_mirror_policy", TELEGRAM_MIRROR_INHERIT)
             )
 
+            permission_settings_present = "permission_settings" in a_raw
+            permission_settings = a_raw.pop("permission_settings", None)
+            permission_settings_conflict = False
             extra = a_raw.pop("extra", None) or a_raw or None
+            if isinstance(extra, dict) and "permission_settings" in extra:
+                extra = dict(extra)
+                nested_settings = extra.pop("permission_settings")
+                if permission_settings_present:
+                    permission_settings_conflict = True
+                else:
+                    permission_settings_present = True
+                    permission_settings = nested_settings
+                extra = extra or None
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
                 telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
@@ -830,6 +845,9 @@ class ConfigManager:
                 default_mode=default_mode, access_scope=access_scope, extra=extra,
                 project_root=code_root,
                 telegram_mirror_policy=telegram_mirror_policy,
+                permission_settings=permission_settings,
+                permission_settings_present=permission_settings_present,
+                permission_settings_conflict=permission_settings_conflict,
             )
             agents.append(cfg)
 

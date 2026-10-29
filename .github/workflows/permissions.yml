@@ -1,0 +1,89 @@
+name: Permission system checks
+
+on:
+  push:
+    paths:
+      - "orchestrator/permissions/**"
+      - "orchestrator/config_admin.py"
+      - "orchestrator/config.py"
+      - "orchestrator/flexible_backend_manager.py"
+      - "tools/request_access.py"
+      - "tests/test_permission_agent_tools.py"
+      - "tests/test_permissions_*.py"
+      - "tests/test_config.py"
+      - "tests/test_config_json.py"
+      - "tests/test_config_admin_invariants.py"
+      - "tests/test_flexible_backend_state.py"
+      - "constraints/standard-py312.lock"
+      - "pyproject.toml"
+      - "tests/fixtures/permission_l0_baseline.json"
+      - "scripts/permissions/**"
+      - ".github/workflows/permissions.yml"
+  pull_request:
+    paths:
+      - "orchestrator/permissions/**"
+      - "orchestrator/config_admin.py"
+      - "orchestrator/config.py"
+      - "orchestrator/flexible_backend_manager.py"
+      - "tools/request_access.py"
+      - "tests/test_permission_agent_tools.py"
+      - "tests/test_permissions_*.py"
+      - "tests/test_config.py"
+      - "tests/test_config_json.py"
+      - "tests/test_config_admin_invariants.py"
+      - "tests/test_flexible_backend_state.py"
+      - "constraints/standard-py312.lock"
+      - "pyproject.toml"
+      - "tests/fixtures/permission_l0_baseline.json"
+      - "scripts/permissions/**"
+      - ".github/workflows/permissions.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  permission-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare Python
+        shell: bash
+        run: |
+          uv venv --seed --python "3.12.13" .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      - name: Check focused code
+        run: >-
+          python -m ruff check orchestrator/permissions orchestrator/config.py tools/request_access.py
+          scripts/permissions/windows_appcontainer_probe.py
+          tests/test_permission_agent_tools.py tests/test_permissions_authority.py
+          tests/test_permissions_config.py tests/test_permissions_descriptors.py
+          tests/test_permissions_l0_baseline.py tests/test_permissions_models.py
+          tests/test_permissions_requests.py tests/test_permissions_runtime_guard.py
+      - name: Check backend manager against its existing import baseline
+        run: python -m ruff check orchestrator/flexible_backend_manager.py --ignore E402
+      - name: Test permission and legacy contracts
+        run: >-
+          python -m pytest -q
+          tests/test_permission_agent_tools.py
+          tests/test_permissions_authority.py
+          tests/test_permissions_config.py
+          tests/test_permissions_descriptors.py
+          tests/test_permissions_l0_baseline.py
+          tests/test_permissions_models.py
+          tests/test_permissions_requests.py
+          tests/test_permissions_runtime_guard.py
+          tests/test_config_admin_invariants.py
+          tests/test_config_json.py
+          tests/test_config.py
+          tests/test_flexible_backend_state.py

@@ -72,13 +72,13 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只�
 | `orchestrator/permissions/descriptors.py` | 部分工具的范围、参数摘要与实际覆盖说明；未知工具拒绝 |
 | 规范化 | 当前由 `models.py` 实现；如需拆分则迁移唯一实现，不复制状态 |
 | `interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 |
-| 账本与迁移 | 当前 `authority.py` 有基础事务、outbox 与事务性 v1→v2 请求快照迁移；备份恢复、真实 service epoch 与资源对账待实现 |
+| 账本与迁移 | 当前 `authority.py` 有基础事务、outbox 与事务性 v1/v2→v3 请求迁移；备份恢复、真实 service epoch 与资源对账待实现 |
 | 权限服务 | 当前 `authority.py` 有部分决定与 claim/start；派生授权及真实入口待实现 |
 | `task_binding.py`、`lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 |
 | `continuation.py` | PendingOperation、等待、恢复计划、回执消费 |
 | `trusted_decisions.py`、`fc_bridge.py` | Principal、receipt、标准 FC 投影和统一权限写门 |
 | `enforcement.py`、`backend_capabilities.py` | L1/L2 实现选择、实际覆盖与提示去重 |
-| `tools/request_access.py` | 三个 agent 工具的薄适配，不拥有状态 |
+| `tools/request_access.py` | 三个 agent 工具的薄适配已实现但未接入，不拥有授权状态 |
 
 共享服务在 `manager_registry.FUNCTION_MANAGER_SPECS` 对应 Functions 内按需接线。不要仅因添加 manager spec 就在所有 L0 worker 构造 SQLite、连接 service 或导入 Windows native 模块。可使用懒 facade，但 L0 执行分支不得调用它；Core 不能导入权限产品模块。
 

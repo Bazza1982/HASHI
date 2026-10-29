@@ -1369,7 +1369,33 @@ class FlexibleBackendManager:
         target_provider: str | None = None,
         apply_persisted_timeout: bool = True,
     ) -> AgentConfig:
+        # Until a managed executor and trusted approval ingress are attached,
+        # do not silently run an explicitly managed Agent through legacy L0.
+        raw_permission_settings = getattr(self.config, "permission_settings", None)
+        settings_present = getattr(self.config, "permission_settings_present", False) or (
+            raw_permission_settings is not None
+        )
         agent_extra = dict(getattr(self.config, "extra", None) or {})
+        if getattr(self.config, "permission_settings_conflict", False):
+            raise ValueError("conflicting permission settings")
+        if "permission_settings" in agent_extra:
+            if settings_present:
+                raise ValueError("conflicting permission settings")
+            raw_permission_settings = agent_extra.pop("permission_settings")
+            settings_present = True
+        if "permission_settings" in backend_cfg_raw:
+            raise ValueError("permission settings must belong to the Agent")
+        if settings_present:
+            if raw_permission_settings is None:
+                raise ValueError("invalid permission settings")
+            from orchestrator.permissions.models import PermissionLevel, PermissionSettings
+
+            try:
+                permission_settings = PermissionSettings.from_mapping(raw_permission_settings)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid permission settings") from exc
+            if permission_settings.requested_level is not PermissionLevel.L0:
+                raise ValueError("requested permission controls are not yet available")
         backend_extra = dict(backend_cfg_raw)
         backend_extra.pop("engine", None)
         backend_extra.pop("model", None)
