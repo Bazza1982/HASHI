@@ -57,13 +57,16 @@ def intake(store, session, *, filename="voice.wav", voice=False):
         attachment_id=row["attachment_id"], item_index=1)
 
 
-def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False):
+def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False, voice_count=1):
     store = store or SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
     session = store.ensure_default_session(owner_id=owner, agent_id=agent)
-    part = intake(store, session, voice=codex)
+    parts = [dict(intake(store, session, filename=f"voice-{index}.wav", voice=codex), item_index=index)
+             for index in range(1, voice_count + 1)]
+    part = parts[0]
     accepted = store.accept_run(session_id=session["session_id"], owner_id=owner, agent_id=agent,
         request_id=f"req-{agent}-{part['attachment_id']}", text="synthetic", source="workbench",
-        idempotency_key=part["attachment_id"], content=[{"type":"attachment", "attachment_id":part["attachment_id"]}])
+        idempotency_key=part["attachment_id"],
+        content=[{"type":"attachment", "attachment_id":entry["attachment_id"]} for entry in parts])
     fence = store.mark_request_running(accepted.request_id, worker_id="qa-worker")
     run = store.get_run_by_request(accepted.request_id)
     cfg = SimpleTestConfig(name=agent, workspace_dir=str(tmp_path / agent))
@@ -78,7 +81,7 @@ def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False):
     mgr.runtime = runtime
     mgr.config = cfg
     mgr.logger = logging.getLogger("session-media-test")
-    content = {"type":"hashi.request-content", "version":1, "parts":[part]}
+    content = {"type":"hashi.request-content", "version":1, "parts":parts}
     return mgr, backend, store, session, run, meta, content
 
 
@@ -276,8 +279,8 @@ async def test_codex_waits_for_safevoice_confirmation_and_honors_discard(tmp_pat
     response = await asyncio.wait_for(task, 2)
     assert response.is_success == confirm
     if not confirm:
-        assert response.error_code == "MEDIA_FALLBACK_UNAVAILABLE"
-        assert "discarded" in response.error
+        assert response.stop_reason == "safe_voice_discarded"
+        assert response.error is None and response.error_code is None
         assert not hasattr(backend, "seen_prompt")
 
 

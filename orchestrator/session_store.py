@@ -5189,9 +5189,15 @@ class SessionStore:
         error_text: str | None = None,
         error_context: Mapping[str, Any] | None = None,
         failure_state: str = "failed",
+        termination_reason: str = "",
         fencing_token: int | None = None,
         _unsubmitted_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        reason = str(termination_reason or "")
+        if reason not in {"", "safe_voice_discarded"} or (
+            reason and (success or failure_state != "stopped")
+        ):
+            raise ValueError("invalid normal termination reason")
         now = _utc_now()
         public_error_context: dict[str, Any] = {}
         if isinstance(error_context, Mapping):
@@ -5305,6 +5311,15 @@ class SessionStore:
             ):
                 raise StaleFencingToken("executor fencing token is stale")
             session_id = str(run["session_id"])
+            if reason == "safe_voice_discarded":
+                discarded = connection.execute(
+                    """SELECT 1 FROM voice_transcripts
+                       WHERE run_id=? AND session_id=? AND message_id=?
+                         AND safe_voice_state='discarded' LIMIT 1""",
+                    (str(run["run_id"]), session_id, str(run["user_message_id"])),
+                ).fetchone()
+                if discarded is None:
+                    raise SessionConflict("Safe Voice discard has not been persisted")
             unpublished_rows = connection.execute(
                 """SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
                    FROM run_output_attachments AS o
@@ -5415,7 +5430,8 @@ class SessionStore:
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
-            error_code = None if success else (
+            normal_discard = reason == "safe_voice_discarded"
+            error_code = None if success or normal_discard else (
                 "run_superseded" if state == "superseded" else "run_failed"
             )
             connection.execute(
@@ -5428,7 +5444,7 @@ class SessionStore:
                     state,
                     final_message_id,
                     error_code,
-                    None if success else str(error_text or "run failed"),
+                    None if success or normal_discard else str(error_text or "run failed"),
                     now,
                     now,
                     run["run_id"],
@@ -5450,9 +5466,13 @@ class SessionStore:
                 phase="terminal",
                 summary="Assistant response completed"
                 if success
+                else "Safe Voice transcript discarded"
+                if normal_discard
                 else str(error_text or "Run failed"),
                 detail={"message_id": final_message_id}
                 if success
+                else {"reason": reason}
+                if normal_discard
                 else {
                     "error": str(error_text or "run failed"),
                     "error_context": public_error_context,
@@ -5472,7 +5492,7 @@ class SessionStore:
                 "state": state,
                 "user_message_id": str(run["user_message_id"]),
                 "final_message_id": final_message_id,
-                "error": None if success else str(error_text or "run failed"),
+                "error": None if success or normal_discard else str(error_text or "run failed"),
                 "latest_event_sequence": event["sequence"],
             }
             connection.execute(
@@ -8896,6 +8916,23 @@ class SessionStore:
         if row is None:
             raise SessionNotFound(str(request_id))
         return self._run_dict(row)
+
+    def request_terminal_reason(
+        self, request_id: str, *, owner_id: str, agent_id: str
+    ) -> str:
+        """Read the reason from the canonical stopped Run event."""
+        run = self.get_run_by_request(request_id, owner_id=owner_id, agent_id=agent_id)
+        if run.get("state") != "stopped":
+            return ""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT detail_json FROM run_events
+                   WHERE run_id=? AND kind='run.stopped'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (run["run_id"],),
+            ).fetchone()
+        detail = _json_object(row["detail_json"]) if row is not None else {}
+        return str(detail.get("reason") or "")
 
     def request_failure_detail(
         self,

@@ -87,6 +87,8 @@ Diagnostics join Tool/job evidence.
 Accepted non-voice attachments commit atomically to the target Agent's ignored
 `.attachments/{session}/{message}/`; only its home scope may read them and
 Session retention removes them. Safe Voice has its own lifecycle.
+An admitted Codex Session voice Run ends without error when its Safe Voice
+transcript is discarded; actual transcription/authorization failures remain errors.
 
 Telegram proactive routes are owner-only; actor/egress revalidate after restart.
 Only the owner's same-ID private chat may bind. `/askme` controls instance and

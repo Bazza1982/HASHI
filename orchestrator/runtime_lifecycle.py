@@ -567,7 +567,16 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
         has_deliverable_content = runtime_pipeline.response_has_deliverable_content(
             response
         )
-        if response.is_success and not has_deliverable_content:
+        if runtime_pipeline.is_safe_voice_discard(response):
+            runtime._notify_right_brain_interrupted(
+                item,
+                effective_prompt,
+                is_bridge_request=is_bridge_request,
+                reason="safe_voice_discarded",
+                error="",
+            )
+            await runtime_pipeline.handle_safe_voice_discard(runtime, item)
+        elif response.is_success and not has_deliverable_content:
             runtime._notify_right_brain_interrupted(
                 item,
                 effective_prompt,

@@ -471,6 +471,7 @@ class RequestActivityStore:
         *,
         success: bool,
         error: object = "",
+        termination_reason: str = "",
         timestamp: float | None = None,
     ) -> None:
         with self._lock:
@@ -480,15 +481,18 @@ class RequestActivityStore:
             if record.get("terminal"):
                 return
             now = float(timestamp if timestamp is not None else time.time())
-            record["state"] = "completed" if success else "failed"
+            normal_discard = not success and termination_reason == "safe_voice_discarded"
+            status = "interrupted" if normal_discard else "completed" if success else "failed"
+            record["state"] = status
             record["terminal"] = True
             record["success"] = bool(success)
             event = self._append_unlocked(
                 record,
-                kind="completed" if success else "error",
-                summary="Completed" if success else (_safe_text(error, limit=2_000) or "Failed"),
-                detail="" if success else error,
-                status="completed" if success else "failed",
+                kind="interrupted" if normal_discard else "completed" if success else "error",
+                summary=("Safe Voice transcript discarded" if normal_discard else
+                         "Completed" if success else (_safe_text(error, limit=2_000) or "Failed")),
+                detail="" if success or normal_discard else error,
+                status=status,
                 timestamp=now,
             )
             record["completed_at"] = event["timestamp"]
