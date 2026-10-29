@@ -4,7 +4,7 @@ import pytest
 from orchestrator.permissions.authority import PermissionDenied
 from tests.test_permissions_guarded_dispatch import prepared
 
-pytest_plugins = ("tests.test_permissions_guarded_dispatch",)
+from tests.test_permissions_guarded_dispatch import environment as environment
 
 
 @pytest.mark.parametrize("change", ["expiry", "revoke"])

@@ -8,7 +8,7 @@ import pytest
 from orchestrator.workbench_api import WorkbenchApiServer
 from tests.test_session_api import _Request
 
-pytest_plugins = ("tests.test_permission_decision_commands",)
+from tests.test_permission_decision_commands import control as control
 
 
 def api_fixture(control, tmp_path):

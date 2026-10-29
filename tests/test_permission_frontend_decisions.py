@@ -7,7 +7,7 @@ from orchestrator.command_interaction_bridge import dispatch_command_interaction
 from orchestrator.permissions.frontend_control import (
     PermissionCommandProjection, PermissionIngress, bind_permission_ingress,
 )
-pytest_plugins = ("tests.test_permission_decision_commands",)
+from tests.test_permission_decision_commands import control as control
 
 
 @pytest.mark.asyncio

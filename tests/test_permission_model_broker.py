@@ -10,7 +10,7 @@ from orchestrator.permissions.model_broker import SelectedModelBroker
 from orchestrator.permissions.models import RuntimeExecutionBinding
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 
-pytest_plugins = ("tests.test_permission_decision_commands",)
+from tests.test_permission_decision_commands import control as control
 
 
 @pytest.fixture

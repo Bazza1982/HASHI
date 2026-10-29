@@ -12,7 +12,7 @@ from orchestrator.permissions.descriptors import describe_tool
 from orchestrator.permissions.registry import ManagedToolRegistry
 from tests.test_deepseek_api import _adapter
 from tests.test_permission_execution_gate import RecoverableFileSupervisor
-pytest_plugins = ("tests.test_permission_registry",)
+from tests.test_permission_registry import environment as environment
 
 
 def durable_registry(base, authority, context, supervisor, tmp_path):

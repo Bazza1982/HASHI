@@ -15,7 +15,7 @@ from orchestrator.permissions.restricted_her_host import run_command
 from tests.test_permission_execution_gate import RecoverableFileSupervisor
 from tests.test_permission_provider_park import durable_registry, tool
 
-pytest_plugins = ("tests.test_permission_registry",)
+from tests.test_permission_registry import environment as environment
 
 
 def command(registry):
