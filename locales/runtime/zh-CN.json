@@ -40,6 +40,8 @@
     "safety.action.receive": "接收",
     "safety.action.use": "使用",
     "safety.action.control": "控制",
+    "safety.backend_unmanaged": "后端 {backend} 采用自身权限设置，HASHI 未完整实施 {level} 控制。当前后端选择继续生效。",
+    "safety.backend_unavailable": "后端 {backend}：请求的 {level} 控制尚不可用。",
     "safety.title": "权限",
     "safety.configured": "配置等级",
     "safety.control_unknown": "实际控制状态：尚未验证。",

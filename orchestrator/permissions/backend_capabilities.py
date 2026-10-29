@@ -16,6 +16,21 @@ from typing import Iterable
 from orchestrator.permissions.models import PermissionLevel
 
 
+@dataclass(frozen=True, slots=True)
+class BackendPermissionStatus:
+    """Configured level and conservative coverage, not an enforcement receipt."""
+
+    requested_level: PermissionLevel
+    backend_id: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.requested_level, PermissionLevel)
+                or self.requested_level is PermissionLevel.L0
+                or not _text(self.backend_id) or self.state not in {"unmanaged", "unavailable"}):
+            raise ValueError("invalid current-backend permission status")
+
+
 CONTROLS = ("files", "scripts", "network", "credentials", "devices", "approval", "cleanup")
 _STATES = frozenset({"enforced", "partial", "unmanaged", "unavailable", "unknown"})
 _LAYERS = frozenset({"L1", "L2"})

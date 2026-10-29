@@ -123,3 +123,74 @@ def test_admin_update_and_runtime_agree_on_nested_level(tmp_path):
     manager = FlexibleBackendManager(agent, global_config, secrets)
     with pytest.raises(ValueError, match="permission"):
         manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+
+
+@pytest.mark.asyncio
+async def test_user_selected_cli_keeps_its_own_controls_and_discloses_hashi_coverage(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from orchestrator import runtime_menu_views, runtime_model_selection, runtime_session, ui_language
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from tests.test_backend_selection_transaction import make_selection
+
+    manager, _, candidate, _ = make_selection(tmp_path, monkeypatch)
+    manager.config.permission_settings = {"requested_level": "L2"}
+    manager.config.permission_settings_present = True
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = manager.config.name
+    runtime.config = manager.config
+    runtime.backend_manager = manager
+    runtime.global_config = manager.global_config
+    runtime._evaluate_enterprise_policy = lambda *a, **kw: SimpleNamespace(allowed=True)
+    runtime._backend_busy = lambda: False
+    runtime._sync_workzone_to_backend_config = lambda: None
+    runtime._clear_handoff_state = lambda: None
+    runtime._arm_session_primer = lambda *a, **kw: None
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime.get_current_provider = lambda: None
+    runtime._get_current_effort = lambda: None
+    monkeypatch.setattr(runtime_session, "current_session", lambda *a, **kw: {"session_id": "test"})
+    monkeypatch.setattr(runtime_session, "apply_session_workzones", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime_model_selection, "schedule_current_model_metadata", lambda *a, **kw: None)
+    with ui_language.language_scope(runtime, None, locale="en"):
+        ok, notice = await runtime._switch_backend_mode(1, "claude-cli", "claude-haiku-4-5")
+    assert ok and manager.current_backend is candidate
+    assert manager.config.active_backend == "claude-cli"
+    assert json.loads(manager.state_store.path.read_text(encoding="utf-8"))["active_backend"] == "claude-cli"
+    assert manager.config.permission_settings == {"requested_level": "L2"}
+    assert "L2" in notice and "not fully enforced by HASHI" in notice
+    status = manager.permission_status()
+    assert status.requested_level.value == "L2" and status.state == "unmanaged"
+    assert status.backend_id == "claude-cli"
+    assert "permission_settings" not in candidate.config.extra
+
+    from orchestrator.commands.safety import safety_command
+
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {}, "agents": [{
+        "name": manager.config.name, "permission_settings": {"requested_level": "L2"},
+    }]}), encoding="utf-8")
+    runtime.global_config.config_path = config_path
+    runtime._is_authorized_user = lambda actor: actor == 1
+    messages = []
+
+    async def reply(update, text, **kwargs):
+        messages.append(text)
+
+    runtime._reply_text = reply
+    with ui_language.language_scope(runtime, None, locale="en"):
+        await safety_command(
+            runtime, SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+            SimpleNamespace(args=["status"]),
+        )
+    assert "not fully enforced by HASHI" in messages[0] and "claude-cli" in messages[0]
+
+    # L0 is still a true compatibility path with no new notice.
+    manager.config.permission_settings = {"requested_level": "L0"}
+    assert manager.permission_status() is None
+    plain = runtime_menu_views.backend_switch_notice_text(
+        backend="claude-cli", model="example", mode="fixed", provider=None,
+        effort=None, with_context=False,
+    )
+    assert "L2" not in plain and "not fully enforced" not in plain

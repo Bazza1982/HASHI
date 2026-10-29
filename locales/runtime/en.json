@@ -40,6 +40,8 @@
     "safety.action.receive": "Receive",
     "safety.action.use": "Use",
     "safety.action.control": "Control",
+    "safety.backend_unmanaged": "Backend {backend} uses its own permission settings; {level} controls are not fully enforced by HASHI. Your backend selection remains in effect.",
+    "safety.backend_unavailable": "Backend {backend}: the requested {level} controls are unavailable.",
     "safety.title": "Permissions",
     "safety.configured": "Configured level",
     "safety.control_unknown": "Actual controls: not verified.",

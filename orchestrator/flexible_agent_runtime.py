@@ -9418,6 +9418,7 @@ class FlexibleAgentRuntime:
             mode=self.backend_manager.agent_mode,
             effort=self._get_current_effort(),
             with_context=with_context,
+            permission_status=getattr(self.backend_manager, "permission_status", lambda: None)(),
         )
 
     cmd_model = runtime_model_selection.cmd_model

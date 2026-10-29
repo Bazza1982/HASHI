@@ -65,3 +65,13 @@ def request_detail_card(view: SessionRequestView) -> str:
         lines.extend(("", _label("withdraw"), f"<code>{escape(command)}</code>"))
     lines.extend(("", _label("no_grants"), "<code>/safety requests</code>"))
     return "\n".join(lines)
+
+
+def backend_permission_notice(status) -> str:
+    """Plain text shared by settings and backend selection; no observed L2 claim."""
+    from orchestrator.permissions.backend_capabilities import BackendPermissionStatus
+
+    if not isinstance(status, BackendPermissionStatus):
+        raise ValueError("a current backend permission status is required")
+    key = "safety.backend_unmanaged" if status.state == "unmanaged" else "safety.backend_unavailable"
+    return ui_language.tr(key, backend=status.backend_id, level=status.requested_level.value)

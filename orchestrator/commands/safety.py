@@ -31,6 +31,21 @@ def _read_level(runtime: Any) -> str:
     return snapshot.settings.requested_level.value
 
 
+def _read_status(runtime: Any) -> tuple[str, str]:
+    level = _read_level(runtime)
+    getter = getattr(getattr(runtime, "backend_manager", None), "permission_status", None)
+    status = getter() if callable(getter) else None
+    if status is not None:
+        from orchestrator.permissions.backend_capabilities import BackendPermissionStatus
+        from orchestrator.permissions.presentation import backend_permission_notice
+
+        # Disk configuration and active Function state may not yet agree.
+        # Such a mismatch is unknown, never a report of enforcement.
+        if isinstance(status, BackendPermissionStatus) and status.requested_level.value == level:
+            return level, backend_permission_notice(status)
+    return level, ui_language.tr("safety.control_unknown")
+
+
 def _request_command(runtime: Any, update: Any, args: list[str]) -> str:
     from orchestrator import runtime_session
     from orchestrator.permissions.authority import PermissionAuthority
@@ -95,7 +110,7 @@ async def safety_command(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, ui_language.tr("safety.action_unavailable"))
         return
     try:
-        level = await asyncio.to_thread(_read_level, runtime)
+        level, control_text = await asyncio.to_thread(_read_status, runtime)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         await runtime._reply_text(update, ui_language.tr("safety.config_unavailable"))
         return
@@ -103,7 +118,7 @@ async def safety_command(runtime: Any, update: Any, context: Any) -> None:
         card_title("🛡️", ui_language.tr("safety.title")),
         "",
         f"<b>{escape(ui_language.tr('safety.configured'))}</b> · <code>{escape(level)}</code>",
-        escape(ui_language.tr("safety.control_unknown")),
+        escape(control_text),
     ))
     await runtime._reply_text(update, text, parse_mode="HTML")
 

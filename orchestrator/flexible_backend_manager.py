@@ -42,6 +42,8 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
+    is_cli_backend,
+    public_backend_engine,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.v3_config import (
@@ -1360,6 +1362,43 @@ class FlexibleBackendManager:
             if str(name).strip() and isinstance(profile, dict)
         }
 
+    def _agent_permission_settings(self):
+        """Read the one Agent setting without constructing any permission service."""
+        raw = getattr(self.config, "permission_settings", None)
+        present = getattr(self.config, "permission_settings_present", False) or raw is not None
+        extra = dict(getattr(self.config, "extra", None) or {})
+        if getattr(self.config, "permission_settings_conflict", False):
+            raise ValueError("conflicting permission settings")
+        if "permission_settings" in extra:
+            if present:
+                raise ValueError("conflicting permission settings")
+            raw = extra.pop("permission_settings")
+            present = True
+        if not present:
+            return None, extra
+        if raw is None:
+            raise ValueError("invalid permission settings")
+        from orchestrator.permissions.models import PermissionSettings
+
+        try:
+            return PermissionSettings.from_mapping(raw), extra
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid permission settings") from exc
+
+    def permission_status(self):
+        """Conservative current-backend status; never claim enforced controls."""
+        settings, _ = self._agent_permission_settings()
+        if settings is None or settings.requested_level.value == "L0":
+            return None
+        from orchestrator.permissions.backend_capabilities import BackendPermissionStatus
+
+        backend = self.current_backend
+        engine = str(getattr(getattr(backend, "config", None), "engine", "") or self.config.active_backend)
+        state = "unmanaged" if backend is not None and is_cli_backend(engine) else "unavailable"
+        return BackendPermissionStatus(
+            settings.requested_level, public_backend_engine(engine), state,
+        )
+
     def _build_adapter_config(
         self,
         engine: str,
@@ -1369,33 +1408,15 @@ class FlexibleBackendManager:
         target_provider: str | None = None,
         apply_persisted_timeout: bool = True,
     ) -> AgentConfig:
-        # Until a managed executor and trusted approval ingress are attached,
-        # do not silently run an explicitly managed Agent through legacy L0.
-        raw_permission_settings = getattr(self.config, "permission_settings", None)
-        settings_present = getattr(self.config, "permission_settings_present", False) or (
-            raw_permission_settings is not None
-        )
-        agent_extra = dict(getattr(self.config, "extra", None) or {})
-        if getattr(self.config, "permission_settings_conflict", False):
-            raise ValueError("conflicting permission settings")
-        if "permission_settings" in agent_extra:
-            if settings_present:
-                raise ValueError("conflicting permission settings")
-            raw_permission_settings = agent_extra.pop("permission_settings")
-            settings_present = True
+        settings, agent_extra = self._agent_permission_settings()
         if "permission_settings" in backend_cfg_raw:
             raise ValueError("permission settings must belong to the Agent")
-        if settings_present:
-            if raw_permission_settings is None:
-                raise ValueError("invalid permission settings")
-            from orchestrator.permissions.models import PermissionLevel, PermissionSettings
-
-            try:
-                permission_settings = PermissionSettings.from_mapping(raw_permission_settings)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("invalid permission settings") from exc
-            if permission_settings.requested_level is not PermissionLevel.L0:
-                raise ValueError("requested permission controls are not yet available")
+        # The user's third-party Engine remains selectable with an explicit
+        # unmanaged coverage notice. Native HASHI tool paths cannot claim a
+        # requested level until their trusted executor is installed.
+        if (settings is not None and settings.requested_level.value != "L0"
+                and not is_cli_backend(engine)):
+            raise ValueError("requested permission controls are not yet available")
         backend_extra = dict(backend_cfg_raw)
         backend_extra.pop("engine", None)
         backend_extra.pop("model", None)

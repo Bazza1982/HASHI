@@ -13,6 +13,9 @@ on:
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
       - "orchestrator/flexible_backend_manager.py"
+      - "orchestrator/flexible_agent_runtime.py"
+      - "orchestrator/runtime_menu_views.py"
+      - "tests/test_backend_selection_transaction.py"
       - "adapters/her_v2_provider.py"
       - "tools/request_access.py"
       - "tests/test_permission_agent_tools.py"
@@ -58,6 +61,9 @@ on:
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
       - "orchestrator/flexible_backend_manager.py"
+      - "orchestrator/flexible_agent_runtime.py"
+      - "orchestrator/runtime_menu_views.py"
+      - "tests/test_backend_selection_transaction.py"
       - "adapters/her_v2_provider.py"
       - "tools/request_access.py"
       - "tests/test_permission_agent_tools.py"
@@ -120,6 +126,7 @@ jobs:
         run: >-
           python -m ruff check orchestrator/permissions orchestrator/config.py
           orchestrator/commands/safety.py orchestrator/command_registry.py orchestrator/session_store.py
+          orchestrator/runtime_menu_views.py
           tests/test_permission_safety_command.py tests/test_permission_frontend_views.py
           tests/test_command_registry.py tests/test_permission_pao_fence.py
           orchestrator/enterprise/identity.py tests/test_permission_enterprise_decisions.py
@@ -176,6 +183,7 @@ jobs:
           tests/test_permissions_models.py
           tests/test_permissions_requests.py
           tests/test_permissions_runtime_guard.py
+          tests/test_backend_selection_transaction.py
           tests/test_config_admin_invariants.py
           tests/test_config_json.py
           tests/test_config.py
