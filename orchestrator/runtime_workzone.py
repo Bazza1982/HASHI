@@ -644,6 +644,17 @@ def _validate_unique_path(
             )
 
 
+def validate_workzone_path(
+    *, state: Mapping[str, Any], slot_id: str, raw_path: str,
+    project_root: Path, workspace_dir: Path,
+) -> tuple[str, Path]:
+    """Apply the canonical platform, directory and duplicate checks."""
+    slot = normalize_workzone_slot(slot_id)
+    path = resolve_workzone_input(raw_path, project_root, workspace_dir)
+    _validate_unique_path(state, slot, path)
+    return slot, path
+
+
 async def _save_path(
     runtime: Any,
     *,
@@ -657,13 +668,11 @@ async def _save_path(
 ) -> tuple[dict[str, Any], bool]:
     from orchestrator import runtime_session
 
-    slot = normalize_workzone_slot(slot_id)
-    path = resolve_workzone_input(
-        raw_path,
-        runtime.global_config.project_root,
-        runtime.workspace_dir,
+    slot, path = validate_workzone_path(
+        state=state, slot_id=slot_id, raw_path=raw_path,
+        project_root=runtime.global_config.project_root,
+        workspace_dir=runtime.workspace_dir,
     )
-    _validate_unique_path(state, slot, path)
     current = configured_workzone_slot(state, slot)
     if enable is None:
         enable = bool(current["enabled"]) if current is not None else True

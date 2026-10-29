@@ -451,6 +451,26 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
+async def test_worker_projects_revisioned_workzone_support(tmp_path):
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        old = await _wait_for_projection(stack, lambda row: row.get("workzone_revisioned_profile") is False)
+        assert old["workzone_revisioned_profile"] is False
+        stack.runtime.session_store = SimpleNamespace(
+            get_agent_workzone_set=lambda **_kwargs: None,
+            set_agent_workzone_slot=lambda **_kwargs: None,
+            delete_agent_workzone_slot=lambda **_kwargs: None,
+        )
+        stack.runtime._sync_workzone_to_backend_config = lambda: None
+        await stack.host.emit_metadata()
+        supported = await _wait_for_projection(stack, lambda row: row.get("workzone_revisioned_profile") is True)
+        assert supported["workzone_revisioned_profile"] is True
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projects_guarded_parked_store_capability(tmp_path):
     from orchestrator.parked_topics import ParkedTopicStore
 

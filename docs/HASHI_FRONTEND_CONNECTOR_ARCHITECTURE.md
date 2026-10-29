@@ -628,6 +628,20 @@ failure or cancellation does not remove earlier committed deliverables.
 The HASHI3 implementation decision and validation scope are recorded in
 [Incremental deliverables, 2026-10-02](HASHI_INCREMENTAL_DELIVERABLES_2026-10-02.md).
 
+### 6.5 Revisioned Workzone management
+
+A management-authorized Frontend may add or replace a slot using
+`PUT /api/agents/{agent}/workzones/{slot}`, or detach it using
+`POST /api/agents/{agent}/workzones/{slot}/delete-if-unchanged`. Both require
+the displayed PAO revision; detachment also requires explicit confirmation.
+Stale revisions and occupied or missing slots are rejected without overwriting.
+Directory contents remain intact. The overview advertises management only when
+the online Worker supports revisioned profiles; a pending-activation flag
+distinguishes the saved configuration from the active Run snapshot.
+
+The current HASHI3 Function-layer implementation has offline checks. Live Worker
+adoption and user acceptance have not been verified.
+
 ## 7. Retired Workbench boundary
 
 Workbench is retired. A successor frontend is maintained separately and is not

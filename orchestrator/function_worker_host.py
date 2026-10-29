@@ -1009,6 +1009,10 @@ class FunctionWorkerHost:
                 "parked_topic_guarded_writes": callable(
                     getattr(getattr(runtime, "parked_topics", None), "delete_if_unchanged", None)
                 ),
+                "workzone_revisioned_profile": all(
+                    callable(getattr(getattr(runtime, "session_store", None), name, None))
+                    for name in ("get_agent_workzone_set", "set_agent_workzone_slot", "delete_agent_workzone_slot")
+                ) and callable(getattr(runtime, "_sync_workzone_to_backend_config", None)),
                 "worker_nonce": self.nonce,
                 "worker_phase": self.phase,
                 "worker_accepting": self.accepting,

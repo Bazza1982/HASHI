@@ -63,10 +63,11 @@ Verified capabilities survive lookup failure until identity/source changes;
 pricing freshness is separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
 Portable has no credentials; PAO starts Workers. Wildcards grant permission,
-not capability; paths grant nothing. Agent Workzones freeze active revisions for
-busy Runs; saved state stays visible. Windows rejects POSIX Workzones. Browser
-disconnects preserve the shared Windows named-pipe listener. Keep experiments,
-secrets, media bytes and remote paths out of PCM/logs/chat/Git.
+not capability; paths grant nothing. Workzone Frontend edits use Agent-scoped
+revisions; admitted Runs keep their snapshots and saved state stays visible. Windows
+rejects POSIX Workzones. Browser disconnects preserve the shared Windows
+named-pipe listener. Keep experiments, secrets, media bytes and remote paths out
+of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.

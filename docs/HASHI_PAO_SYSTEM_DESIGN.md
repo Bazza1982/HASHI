@@ -244,14 +244,22 @@ or overwrite a Run whose execution ownership has already advanced.
 Workzone configuration is Agent control state, not Conversation Session state.
 `/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
 the current Agent Workzone revision into each admitted Run so an in-flight Run
-cannot observe a later menu change. Legacy Session Workzone rows remain inert
-compatibility records and are not silently migrated or merged.
+cannot observe a later menu change. Schema migration may promote one legacy
+Session snapshot into an empty Agent profile; afterward legacy rows remain inert
+and are not merged into the profile.
 
 Configuration mutations may commit while Runs are active or queued. Every Run
 already admitted keeps its frozen snapshot, while the next admission after the
 commit reads the new revision. PAO defers runtime, Tool-root, and Engine-session
 activation to a Run boundary. Explicit Workzone `reload`/`reset` remains
 idle-only because it immediately resets the selected Engine Session.
+
+Owner-authorized Frontends may add, replace, or detach a specific Agent Workzone
+with the displayed revision. PAO checks the revision in the same transaction as
+the write; a conflict never overwrites another change. Path validation uses the
+existing platform and duplicate rules. Detaching never deletes directory contents.
+The HASHI3 Function-layer implementation has offline validation; live Worker
+adoption and user acceptance remain separate, unverified steps.
 
 A live phone call is another transport bound to the same Conversation Session.
 Each role-labelled transcript fragment is durable PAO Session evidence as it

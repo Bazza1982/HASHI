@@ -949,6 +949,13 @@ class WorkbenchApiServer:
             "/api/agents/{name}/parked-topics/{slot}/delete-if-unchanged",
             self.handle_agent_parked_topic_conditional_delete,
         )
+        self.app.router.add_put(
+            "/api/agents/{name}/workzones/{slot}", self.handle_agent_workzone_set,
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/workzones/{slot}/delete-if-unchanged",
+            self.handle_agent_workzone_delete,
+        )
         self.app.router.add_patch(
             "/api/agents/{name}/metadata", self.handle_agent_metadata
         )
@@ -5766,6 +5773,105 @@ class WorkbenchApiServer:
         return None
 
     @staticmethod
+    def _workzone_profile_ready(runtime, metadata: dict) -> bool:
+        return bool(
+            runtime is not None and metadata.get("online") is True
+            and metadata.get("workzone_revisioned_profile") is True
+        )
+
+    async def handle_agent_workzone_set(self, request):
+        return await self._handle_agent_workzone_mutation(request, removing=False)
+
+    async def handle_agent_workzone_delete(self, request):
+        return await self._handle_agent_workzone_mutation(request, removing=True)
+
+    async def _handle_agent_workzone_mutation(self, request, *, removing: bool):
+        """Publish one confirmed Agent Workzone profile revision through PAO."""
+        from orchestrator import runtime_workzone
+        from orchestrator.workzone import configured_workzone_slot, normalize_workzone_state
+
+        name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(name.casefold())
+        row = next((item for item in self._load_agent_rows() if item.get("name") == name), None)
+        if runtime is None or row is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        metadata = self._metadata_for_agent(row, runtime)
+        if not self._workzone_profile_ready(runtime, metadata):
+            return web.json_response({"ok": False, "error_code": "workzone_unavailable"}, status=503)
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if removing and (not isinstance(payload, dict)
+                         or payload.get("authorization") != "explicit_user_authorization"):
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        if not isinstance(payload, dict) or not re.fullmatch(r"(?:main|[1-9])", slot):
+            return web.json_response({"ok": False, "error_code": "invalid_target"}, status=400)
+        expected = payload.get("expected_revision")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+        if removing:
+            if set(payload) != {"expected_revision", "authorization"}:
+                return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+        else:
+            raw_path = payload.get("path")
+            if (set(payload) != {"expected_revision", "mode", "path"}
+                or not isinstance(payload.get("mode"), str)
+                or payload["mode"] not in {"add", "replace"}
+                or not isinstance(raw_path, str) or not raw_path.strip()
+                or len(raw_path) > 4096 or re.search(r"[\x00-\x1f\x7f]", raw_path)):
+                return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+
+        state = normalize_workzone_state(
+            self.session_store.get_agent_workzone_set(owner_id=owner, agent_id=name)
+        )
+        if int(state["revision"]) != expected:
+            return web.json_response({"ok": False, "error_code": "workzone_revision_conflict"}, status=409)
+        current = configured_workzone_slot(state, slot)
+        if not removing and payload["mode"] == "add" and current is not None:
+            return web.json_response({"ok": False, "error_code": "workzone_slot_occupied"}, status=409)
+        if (removing or payload.get("mode") == "replace") and current is None:
+            return web.json_response({"ok": False, "error_code": "workzone_slot_missing"}, status=409)
+        if not removing:
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error_code": "workzone_unavailable"}, status=503)
+            try:
+                _, path = runtime_workzone.validate_workzone_path(
+                    state=state, slot_id=slot, raw_path=raw_path,
+                    project_root=Path(self.global_config.project_root), workspace_dir=Path(workspace),
+                )
+            except (ValueError, OSError):
+                return web.json_response({"ok": False, "error_code": "workzone_path_invalid"}, status=400)
+        try:
+            if removing:
+                updated = self.session_store.delete_agent_workzone_slot(
+                    owner_id=owner, agent_id=name, slot_id=slot,
+                    expected_revision=expected, source="frontend_workzone",
+                )
+            else:
+                updated = self.session_store.set_agent_workzone_slot(
+                    owner_id=owner, agent_id=name, slot_id=slot, path=str(path),
+                    enabled=True if payload["mode"] == "add" else None,
+                    expected_revision=expected, source="frontend_workzone",
+                )
+        except SessionConflict:
+            return web.json_response({"ok": False, "error_code": "workzone_revision_conflict"}, status=409)
+        except Exception:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        return web.json_response({
+            "ok": True, "agent": name, "slot": slot,
+            "revision": int(updated["revision"]), "activation": "next_request",
+        }, headers={"Cache-Control":"no-store"})
+
+    @staticmethod
     def _parked_topic_guarded_writes_ready(runtime, metadata: dict) -> bool:
         if runtime is None or metadata.get("online") is not True:
             return False
@@ -5907,6 +6013,10 @@ class WorkbenchApiServer:
             runtime=runtime,
             desired_workzone_state=desired_workzone_state,
         )
+        if (self._workzone_profile_ready(runtime, metadata)
+            and self._guard_agent_management_access(request, name) is None
+            and int(overview["workzone"]["revision"]) == int(desired_workzone_state["revision"])):
+            overview["workzone"]["management_supported"] = True
         can_view_revisions = self._can_view_deletion_revision(request, name)
         if not can_view_revisions:
             for slot in overview.get("system_prompts", {}).get("slots", []):
