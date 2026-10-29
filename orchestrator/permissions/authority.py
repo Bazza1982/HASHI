@@ -163,6 +163,31 @@ class PermissionEvent:
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SCHEMA_VERSION = 3
+_REQUIRED_COLUMNS = {
+    "authority_metadata": {"key", "value"},
+    "permission_tasks": {"task_id", "instance_id", "owner_id", "agent_id", "session_id",
+                         "state", "revision", "created_at", "ended_at"},
+    "execution_bindings": {"execution_epoch", "task_id", "run_id", "worker_generation",
+                           "context_generation", "backend_id", "executor_id", "policy_revision", "state"},
+    "access_requests": {"request_id", "task_id", "run_id", "session_id", "context_generation",
+                        "execution_epoch", "policy_revision", "operation_id", "arguments_digest",
+                        "scopes_json", "scope_digest", "purpose", "revision", "state",
+                        "created_at", "expires_at"},
+    "approval_decisions": {"decision_id", "request_id", "request_revision", "nonce",
+                           "idempotency_key", "proof_hash", "choice", "approved_scopes",
+                           "principal_id", "created_at"},
+    "permission_leases": {"lease_id", "decision_id", "task_id", "scopes_json", "lifetime",
+                          "operation_id", "run_id", "policy_revision", "expires_at",
+                          "status", "reserved_claim"},
+    "pending_operations": {"operation_id", "task_id", "run_id", "arguments_digest",
+                           "scope_digest", "execution_epoch", "state"},
+    "execution_claims": {"claim_id", "operation_id", "task_id", "execution_epoch",
+                         "lease_ids_json", "scopes_json", "state", "result_digest", "created_at"},
+    "execution_resources": {"claim_id", "state"},
+    "resource_stop_receipts": {"nonce", "claim_id", "proof_hash", "recorded_at"},
+    "permission_events_outbox": {"sequence", "task_id", "event", "reference_id", "created_at"},
+    "outbox_cursors": {"task_id", "consumer_id", "sequence"},
+}
 
 _REQUEST_VERSIONS_SCHEMA = """CREATE TABLE access_request_versions (
     request_id TEXT NOT NULL REFERENCES access_requests(request_id),
@@ -377,9 +402,11 @@ class PermissionAuthority:
         self._monotonic_anchor = float(monotonic())
         self._clock_lock = threading.Lock()
         self._clock_observations: dict[int, tuple[float, float]] = {}
+        self._service_generation: str | None = None
         if not math.isfinite(self._wall_anchor) or not math.isfinite(self._monotonic_anchor):
             raise ValueError("invalid clock")
         self._initialize()
+        self._begin_service()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
@@ -393,6 +420,12 @@ class PermissionAuthority:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if self._service_generation is not None:
+                active = connection.execute(
+                    "SELECT value FROM authority_metadata WHERE key='service_generation'"
+                ).fetchone()
+                if active is None or active["value"] != self._service_generation:
+                    raise PermissionDenied("permission service generation is fenced")
             yield connection
             connection.commit()
         except BaseException:
@@ -416,9 +449,103 @@ class PermissionAuthority:
                 self._clock_observations.pop(id(connection), None)
             connection.close()
 
+    def _begin_service(self) -> None:
+        """Fence old executions before a newly started authority can accept work."""
+        generation = uuid4().hex
+        with self._transaction() as connection:
+            now = self._now(connection)
+            epochs = connection.execute(
+                "SELECT execution_epoch,task_id FROM execution_bindings WHERE state='active'"
+            ).fetchall()
+            for row in epochs:
+                epoch = row["execution_epoch"]
+                connection.execute(
+                    "UPDATE execution_bindings SET state='fenced' WHERE execution_epoch=?", (epoch,),
+                )
+                self._stop_epoch_resources(connection, epoch)
+                connection.execute(
+                    "UPDATE pending_operations SET state='unknown' WHERE state='started' "
+                    "AND operation_id IN (SELECT operation_id FROM execution_claims "
+                    "WHERE execution_epoch=? AND state='started')", (epoch,),
+                )
+                connection.execute(
+                    "UPDATE execution_claims SET state='unknown' WHERE execution_epoch=? AND state='started'",
+                    (epoch,),
+                )
+                self._event(connection, row["task_id"], "execution_fenced", epoch, now)
+            connection.execute(
+                "INSERT INTO authority_metadata(key,value) VALUES('service_generation',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (generation,),
+            )
+        self._service_generation = generation
+
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection, version: int) -> None:
+        required = {table: set(columns) for table, columns in _REQUIRED_COLUMNS.items()}
+        if version >= 2:
+            required["access_request_versions"] = {
+                "request_id", "revision", "scopes_json", "scope_digest", "run_id",
+                "session_id", "context_generation", "execution_epoch", "policy_revision",
+                "operation_id", "arguments_digest", "purpose", "recorded_at",
+            }
+        if version >= 3:
+            for table in ("access_requests", "access_request_versions"):
+                required[table].update({"suggested_lifetime", "suggested_seconds", "request_key"})
+            required["request_idempotency"] = {"task_id", "request_key", "fingerprint", "request_id", "outcome"}
+        primary = {
+            "authority_metadata": ("key",), "permission_tasks": ("task_id",),
+            "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
+            "approval_decisions": ("decision_id",), "permission_leases": ("lease_id",),
+            "pending_operations": ("operation_id",), "execution_claims": ("claim_id",),
+            "execution_resources": ("claim_id",), "resource_stop_receipts": ("nonce",),
+            "permission_events_outbox": ("sequence",), "outbox_cursors": ("task_id", "consumer_id"),
+        }
+        if version >= 2:
+            primary["access_request_versions"] = ("request_id", "revision")
+        if version >= 3:
+            primary["request_idempotency"] = ("task_id", "request_key")
+        for table, columns in required.items():
+            rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {row["name"] for row in rows}
+            keys = tuple(row["name"] for row in sorted(rows, key=lambda row: row["pk"]) if row["pk"])
+            if not columns.issubset(actual) or keys != primary[table]:
+                raise ValueError("permission ledger schema is incomplete")
+
+        for table, columns in (
+            ("approval_decisions", ("nonce",)),
+            ("approval_decisions", ("idempotency_key",)),
+            ("approval_decisions", ("request_id", "request_revision")),
+            ("permission_leases", ("decision_id",)),
+        ):
+            valid = False
+            for index in connection.execute(f"PRAGMA index_list({table})"):
+                if not index["unique"] or index["partial"]:
+                    continue
+                members = tuple(row["name"] for row in connection.execute(
+                    "SELECT name FROM pragma_index_info(?) ORDER BY seqno", (index["name"],)
+                ))
+                if members == columns:
+                    valid = True
+                    break
+            if not valid:
+                raise ValueError("permission ledger uniqueness is incomplete")
+        index = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_pending_request'"
+        ).fetchone()
+        expected = (
+            "createuniqueindexone_pending_requestonaccess_requests"
+            "(task_id,operation_id,scope_digest,policy_revision)wherestate='pending'"
+        )
+        if index is None or not isinstance(index["sql"], str) or (
+            "".join(index["sql"].split()).casefold() != expected
+        ):
+            raise ValueError("permission ledger pending uniqueness is incomplete")
+
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version in {1, 2, _SCHEMA_VERSION}:
+                self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
             if version == 0:
@@ -465,6 +592,7 @@ class PermissionAuthority:
                 "CHECK ((outcome='request' AND request_id IS NOT NULL) OR "
                 "(outcome='granted_existing' AND request_id IS NULL)))"
             )
+            self._validate_schema(connection, _SCHEMA_VERSION)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
     @staticmethod

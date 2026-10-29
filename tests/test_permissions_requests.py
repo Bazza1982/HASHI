@@ -300,18 +300,26 @@ def test_v2_upgrade_keeps_live_request_and_adds_safe_suggestions(environment):
 @pytest.mark.parametrize("conflicting_table", [False, True])
 def test_v1_to_v3_migration_is_atomic_and_preserves_existing_request(tmp_path, conflicting_table):
     path = tmp_path / "legacy.sqlite"
+    from orchestrator.permissions.authority import _REQUEST_VERSIONS_SCHEMA, _SCHEMA
+
     with sqlite3.connect(path) as connection:
+        # A v1 ledger contains the complete authority schema, without the
+        # request-version table or the v3 suggestion/idempotency fields.
+        for statement in _SCHEMA:
+            if statement != _REQUEST_VERSIONS_SCHEMA:
+                connection.execute(statement)
         connection.execute(
-            "CREATE TABLE access_requests ("
-            "request_id TEXT PRIMARY KEY, revision INTEGER, scopes_json TEXT, "
-            "scope_digest TEXT, run_id TEXT, session_id TEXT, context_generation TEXT, "
-            "execution_epoch TEXT, policy_revision INTEGER, operation_id TEXT, "
-            "arguments_digest TEXT, created_at REAL, purpose TEXT)"
+            "INSERT INTO permission_tasks VALUES(?,?,?,?,?,?,?,?,?)",
+            ("task", "instance", "owner", "agent", "session", "active", 1, 1000.0, None),
         )
         connection.execute(
-            "INSERT INTO access_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("legacy", 1, "old-scope", "b" * 64, "run", "session", "generation",
-             "epoch", 7, "op", "a" * 64, 1000.0, "keep this reason"),
+            "INSERT INTO execution_bindings VALUES(?,?,?,?,?,?,?,?,?)",
+            ("epoch", "task", "run", "worker", "generation", "herv3", "registry", 7, "active"),
+        )
+        connection.execute(
+            "INSERT INTO access_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("legacy", "task", "run", "session", "generation", "epoch", 7, "op", "a" * 64,
+             "old-scope", "b" * 64, "keep this reason", 1, "pending", 1000.0, 4000000000.0),
         )
         connection.execute("PRAGMA user_version=1")
         if conflicting_table:

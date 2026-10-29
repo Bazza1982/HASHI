@@ -244,19 +244,17 @@ def test_monotonic_expiry_cannot_revive_after_reopen(tmp_path, failing_access):
     else:
         assert not authority.evaluate(context, [scope])
     reopened = PermissionAuthority(path, verifier=issuer, clock=wall, monotonic=monotonic)
-    try:
-        permitted = reopened.evaluate(context, [scope])
-    except PermissionDenied:
-        permitted = False
-    assert not permitted, "an expired permission became valid after restart"
+    later = replace(context, worker_generation="worker-new", execution_epoch="epoch-new")
+    reopened.bind_execution(later)
+    assert not reopened.evaluate(later, [scope]), "an expired permission became valid after restart"
 
     # Once re-anchored, monotonic time must continue advancing even if the
     # wall clock stays frozen, including after a rejected transaction.
-    first = reopened.request_access(context, [scope], purpose="new request")
+    first = reopened.request_access(later, [scope], purpose="new request")
     assert first.expires_at == 1_061.0 + 24 * 60 * 60
     monotonic.value += 10
     other_scope = normalize_scope("network", "https://example.com", ["fetch"], cwd=tmp_path)
-    second = reopened.request_access(context, [other_scope], purpose="other request")
+    second = reopened.request_access(later, [other_scope], purpose="other request")
     assert second.expires_at == 1_071.0 + 24 * 60 * 60
 
 
@@ -276,7 +274,10 @@ def test_decisions_and_leases_survive_authority_reopen(environment, tmp_path):
     request, ref, lease = approve(authority, issuer, clock, context, [scope])
     reopened = PermissionAuthority(tmp_path / "permissions.sqlite", verifier=issuer, clock=clock, monotonic=clock)
     assert reopened.decide(ref, approved_scopes=[scope]) == lease
-    assert reopened.evaluate(context, [scope])
+    assert not reopened.evaluate(context, [scope])
+    later = replace(context, worker_generation="worker-new", execution_epoch="epoch-new")
+    reopened.bind_execution(later)
+    assert reopened.evaluate(later, [scope])
     assert reopened.decision_count(request.request_id) == 1
 
 
@@ -440,8 +441,10 @@ def test_outbox_redelivers_until_ack_and_cursor_survives_reopen(environment, tmp
     authority.ack_events(context, consumer_id="frontend", expected=0, through=last)
     reopened = PermissionAuthority(tmp_path / "permissions.sqlite", verifier=issuer,
                                    clock=clock, monotonic=clock)
-    assert reopened.pending_events(context, consumer_id="frontend") == ()
+    pending = reopened.pending_events(context, consumer_id="frontend")
+    assert [event.event for event in pending] == ["execution_fenced"]
     assert reopened.ack_events(context, consumer_id="frontend", expected=0, through=last) == last
+    assert reopened.pending_events(context, consumer_id="frontend") == pending
 
 
 def test_outbox_cursor_rejects_skipped_or_stale_acknowledgements(environment):

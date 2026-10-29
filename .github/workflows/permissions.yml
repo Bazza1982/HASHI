@@ -83,6 +83,7 @@ jobs:
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
+          tests/test_permissions_service_recovery.py
           tests/test_permissions_config.py tests/test_permissions_descriptors.py
           tests/test_permissions_l0_baseline.py tests/test_permissions_models.py
           tests/test_permissions_requests.py tests/test_permissions_runtime_guard.py
@@ -98,6 +99,7 @@ jobs:
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
           tests/test_permissions_authority.py
+          tests/test_permissions_service_recovery.py
           tests/test_permissions_config.py
           tests/test_permissions_descriptors.py
           tests/test_permissions_l0_baseline.py
