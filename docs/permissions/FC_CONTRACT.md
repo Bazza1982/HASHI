@@ -291,6 +291,8 @@ PermissionLease 的时长以正式决定事务的 **`ApprovalDecision.committed_
 
 现有 MenuStore binding、revision 检查与 generic close 的投影语义可复用；业务跨通道去重必须另外由权限账本保证。[菜单绑定][S-MENU] [close 与 bridge][S-BRIDGE-CLOSE] [动作校验][S-ACTION]
 
+权限账本内部已支持可信展示服务用服务端画面 ID 与动作槽位重试同一快照；重复展示不延长动作期限或占用新的动作名额。不同画面必须使用不同 ID，槽位已绑定后不能改成不同范围、选择或时长；画面过期或业务版本变化须重新生成绑定。该机制尚未接入 FC，且不能代替现有 menu 的连接、用户与 revision 校验或可信人类批准。
+
 ## 7. 可信 VerifiedPrincipal / DecisionReceipt：仅存在于服务端
 
 ### 7.1 普通认证与正式批准分开

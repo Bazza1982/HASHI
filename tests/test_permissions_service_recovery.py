@@ -206,6 +206,7 @@ def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflic
     path, old, issuer, clock, context, scope = service
     request, reference, lease = approve(old, issuer, clock, context, [scope])
     with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE decision_action_presentations")
         connection.execute("DROP TABLE decision_actions")
         connection.execute("DROP TABLE operation_outcome_receipts")
         connection.execute("PRAGMA user_version=3")
@@ -221,7 +222,7 @@ def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflic
         assert reopened.decide(reference, approved_scopes=[scope]) == lease
         assert reopened.decision_count(request.request_id) == 1
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 5)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 6)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM operation_outcome_receipts").fetchone() == ("preserve",)
 

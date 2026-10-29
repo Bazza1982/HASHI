@@ -198,7 +198,8 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
+_MAX_LIVE_DECISION_ACTIONS = 1024
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
     "permission_tasks": {"task_id", "instance_id", "owner_id", "agent_id", "session_id",
@@ -259,6 +260,13 @@ _DECISION_ACTIONS_SCHEMA = """CREATE TABLE decision_actions (
     expires_at REAL NOT NULL,
     FOREIGN KEY(request_id,request_revision)
         REFERENCES access_request_versions(request_id,revision)
+)"""
+
+_DECISION_PRESENTATIONS_SCHEMA = """CREATE TABLE decision_action_presentations (
+    presentation_id TEXT NOT NULL,
+    presentation_slot TEXT NOT NULL,
+    action_id TEXT NOT NULL UNIQUE REFERENCES decision_actions(action_id),
+    PRIMARY KEY(presentation_id,presentation_slot)
 )"""
 
 
@@ -567,6 +575,8 @@ class PermissionAuthority:
                 "approved_scopes", "approved_digest", "operation_id", "arguments_digest",
                 "choice", "lifetime", "duration_seconds", "created_at", "expires_at",
             }
+        if version >= 6:
+            required["decision_action_presentations"] = {"presentation_id", "presentation_slot", "action_id"}
         primary = {
             "authority_metadata": ("key",), "permission_tasks": ("task_id",),
             "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
@@ -583,6 +593,8 @@ class PermissionAuthority:
             primary["operation_outcome_receipts"] = ("nonce",)
         if version >= 5:
             primary["decision_actions"] = ("action_id",)
+        if version >= 6:
+            primary["decision_action_presentations"] = ("presentation_id", "presentation_slot")
         for table, columns in required.items():
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = {row["name"] for row in rows}
@@ -598,6 +610,8 @@ class PermissionAuthority:
         ]
         if version >= 5:
             unique_constraints.append(("decision_actions", ("nonce",)))
+        if version >= 6:
+            unique_constraints.append(("decision_action_presentations", ("action_id",)))
         for table, columns in unique_constraints:
             valid = False
             for index in connection.execute(f"PRAGMA index_list({table})"):
@@ -620,6 +634,15 @@ class PermissionAuthority:
                 != "".join(_DECISION_ACTIONS_SCHEMA.split()).casefold()
             ):
                 raise ValueError("permission ledger decision action constraints are incomplete")
+        if version >= 6:
+            table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='decision_action_presentations'"
+            ).fetchone()
+            if table is None or not isinstance(table["sql"], str) or (
+                "".join(table["sql"].split()).casefold()
+                != "".join(_DECISION_PRESENTATIONS_SCHEMA.split()).casefold()
+            ):
+                raise ValueError("permission ledger presentation constraints are incomplete")
         index = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_pending_request'"
         ).fetchone()
@@ -635,7 +658,7 @@ class PermissionAuthority:
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, 3, 4, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, 4, 5, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -694,6 +717,9 @@ class PermissionAuthority:
             if version == 4:
                 connection.execute(_DECISION_ACTIONS_SCHEMA)
                 version = 5
+            if version == 5:
+                connection.execute(_DECISION_PRESENTATIONS_SCHEMA)
+                version = 6
             if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
             self._validate_schema(connection, _SCHEMA_VERSION)
@@ -1381,11 +1407,15 @@ class PermissionAuthority:
         self, context: ExecutionContext, request_id: str, expected_revision: int, *,
         approved_scopes: Iterable[Scope], choice: str, lifetime: str,
         duration_seconds: int, action_ttl_seconds: int = 15 * 60,
+        presentation_id: str | None = None, presentation_slot: str | None = None,
     ) -> DecisionAction:
         """Register an exact UI choice; this does not grant or authenticate it.
 
-        Only a trusted presentation service may expose these snapshots. A later
-        action still requires an independently verified human decision receipt.
+        Only a trusted presentation service may expose these snapshots. It may
+        supply its own server-issued presentation and stable slot to retry the
+        same rendering without creating another action; these identifiers do
+        not authenticate a user or replace the frontend's menu binding checks.
+        A later action still requires an independently verified decision receipt.
         """
         _nonempty(request_id, "request_id")
         if type(expected_revision) is not int or expected_revision < 1:
@@ -1398,6 +1428,12 @@ class PermissionAuthority:
             raise ValueError("invalid decision duration")
         if type(action_ttl_seconds) is not int or not 1 <= action_ttl_seconds <= 15 * 60:
             raise ValueError("invalid action lifetime")
+        if (presentation_id is None) != (presentation_slot is None):
+            raise ValueError("presentation and slot must be supplied together")
+        if presentation_id is not None:
+            for value in (presentation_id, presentation_slot):
+                if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None:
+                    raise ValueError("invalid trusted presentation binding")
         normalized = canonical_scope_set(approved_scopes)
         approved_digest = scope_digest(normalized)
         with self._transaction() as connection:
@@ -1419,11 +1455,38 @@ class PermissionAuthority:
                 raise InvalidDecision("denial must bind the entire displayed request")
             if lifetime == "once" and not row["operation_id"]:
                 raise InvalidDecision("once requires an operation")
+            if presentation_id is not None:
+                existing = connection.execute(
+                    "SELECT a.* FROM decision_action_presentations p "
+                    "LEFT JOIN decision_actions a ON a.action_id=p.action_id "
+                    "WHERE p.presentation_id=? AND p.presentation_slot=?",
+                    (presentation_id, presentation_slot),
+                ).fetchone()
+                if existing is not None:
+                    if existing["action_id"] is None:
+                        raise InvalidDecision("presentation action is unavailable")
+                    if existing["expires_at"] <= now:
+                        raise InvalidDecision("presentation action has expired")
+                    if any((
+                        existing["request_id"] != request_id,
+                        existing["request_revision"] != expected_revision,
+                        existing["requested_digest"] != row["scope_digest"],
+                        existing["approved_digest"] != approved_digest,
+                        _load_scopes(existing["approved_scopes"]) != normalized,
+                        existing["operation_id"] != (row["operation_id"] or None),
+                        existing["arguments_digest"] != row["arguments_digest"],
+                        existing["choice"] != choice,
+                        existing["lifetime"] != lifetime,
+                        existing["duration_seconds"] != duration_seconds,
+                        existing["expires_at"] > min(row["expires_at"], now + action_ttl_seconds),
+                    )):
+                        raise RevisionConflict("presentation slot already binds different facts")
+                    return _action_from(existing)
             count = connection.execute(
                 "SELECT count(*) FROM decision_actions WHERE request_id=? "
                 "AND request_revision=? AND expires_at>?", (request_id, expected_revision, now),
             ).fetchone()[0]
-            if count >= 64:
+            if count >= _MAX_LIVE_DECISION_ACTIONS:
                 raise PermissionDenied("too many live decision actions")
             action_id, nonce = uuid4().hex, uuid4().hex
             connection.execute(
@@ -1433,6 +1496,11 @@ class PermissionAuthority:
                  row["arguments_digest"], choice, lifetime, duration_seconds, now,
                  min(row["expires_at"], now + action_ttl_seconds)),
             )
+            if presentation_id is not None:
+                connection.execute(
+                    "INSERT INTO decision_action_presentations VALUES(?,?,?)",
+                    (presentation_id, presentation_slot, action_id),
+                )
             return _action_from(connection.execute(
                 "SELECT * FROM decision_actions WHERE action_id=?", (action_id,)
             ).fetchone())

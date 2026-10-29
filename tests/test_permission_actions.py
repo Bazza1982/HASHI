@@ -196,6 +196,7 @@ def test_two_distinct_concurrent_actions_cannot_create_two_decisions(setup_actio
 def test_v4_action_migration_is_atomic_and_preserves_requests(setup_actions, conflicting_table):
     authority, _, verifier, clock, context, scope, request = setup_actions
     with sqlite3.connect(authority.path) as connection:
+        connection.execute("DROP TABLE decision_action_presentations")
         connection.execute("DROP TABLE decision_actions")
         connection.execute("PRAGMA user_version=4")
         if conflicting_table:
@@ -210,7 +211,7 @@ def test_v4_action_migration_is_atomic_and_preserves_requests(setup_actions, con
                                        clock=lambda: clock[0], monotonic=lambda: clock[0])
         assert reopened.get_request(context, request.request_id).scopes == (scope,)
     with sqlite3.connect(authority.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (4 if conflicting_table else 5)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (4 if conflicting_table else 6)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM decision_actions").fetchone() == ("preserve",)
 
@@ -285,3 +286,148 @@ def test_committed_action_can_be_reconstructed_for_idempotent_replay(setup_actio
     assert reopened.decide(reference, approved_scopes=[scope], action_id=action.action_id) == lease
     with pytest.raises(PermissionDenied):
         reopened.get_committed_decision_action(replace(context, owner_id="other"), action.action_id)
+
+
+def test_refresh_reuses_only_the_same_presentation_action_without_extending_it(setup_actions):
+    authority, key, _, clock, context, scope, request = setup_actions
+    view = {"presentation_id": "menu-one", "presentation_slot": "approve-once"}
+    first = _issue(authority, context, request, [scope], **view)
+    clock[0] += 1
+    for _ in range(70):
+        assert _issue(authority, context, request, [scope], **view) == first
+    other = _issue(
+        authority, context, request, [scope],
+        presentation_id="menu-two", presentation_slot="approve-once",
+    )
+    assert other.action_id != first.action_id
+    with pytest.raises(InvalidDecision):
+        authority.decide(
+            _token(key, _receipt(first, context)), approved_scopes=[scope], action_id=other.action_id,
+        )
+    assert authority.decision_count(request.request_id) == 0
+    assert not authority.evaluate(context, [scope], operation_id="operation")
+    clock[0] = first.expires_at
+    with pytest.raises(InvalidDecision):
+        _issue(authority, context, request, [scope], **view)
+    assert _issue(
+        authority, context, request, [scope],
+        presentation_id="menu-three", presentation_slot="approve-once",
+    ).action_id != first.action_id
+
+
+def test_presentation_slot_cannot_be_rebound_to_a_different_decision(setup_actions, tmp_path):
+    authority, _, _, clock, context, scope, request = setup_actions
+    view = {"presentation_id": "menu-one", "presentation_slot": "approve-once"}
+    first = _issue(authority, context, request, [scope], **view)
+    narrower = normalize_scope("file", str(tmp_path), ["read"], cwd=tmp_path)
+    for scopes, changes in (([scope], {"lifetime": "task"}), ([scope], {"choice": "deny"}),
+                            ([scope], {"duration_seconds": 121}), ([narrower], {})):
+        with pytest.raises(RevisionConflict):
+            _issue(authority, context, request, scopes, **view, **changes)
+    clock[0] += 1
+    with pytest.raises(RevisionConflict):
+        _issue(authority, context, request, [scope], **view, action_ttl_seconds=1)
+    assert authority.get_decision_action(context, first.action_id) == first
+    assert authority.decision_count(request.request_id) == 0
+
+
+def test_concurrent_same_presentation_is_idempotent_and_grants_only_after_signed_decision(setup_actions):
+    authority, key, _, _, context, scope, request = setup_actions
+    barrier = Barrier(8)
+
+    def render(_):
+        barrier.wait()
+        return _issue(authority, context, request, [scope],
+                      presentation_id="menu-one", presentation_slot="approve-once")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        actions = list(pool.map(render, range(8)))
+    assert len({action.action_id for action in actions}) == 1
+    assert authority.decision_count(request.request_id) == 0
+    action = actions[0]
+    authority.decide(_token(key, _receipt(action, context)),
+                     approved_scopes=[scope], action_id=action.action_id)
+    assert authority.evaluate(context, [scope], operation_id="operation")
+    assert authority.decision_count(request.request_id) == 1
+
+
+@pytest.mark.parametrize("partial", [
+    {"presentation_id": "menu-one"}, {"presentation_slot": "approve-once"},
+    {"presentation_id": "", "presentation_slot": "approve-once"},
+])
+def test_presentation_identifier_must_be_a_complete_trusted_binding(setup_actions, partial):
+    authority, _, _, _, context, scope, request = setup_actions
+    with pytest.raises(ValueError):
+        _issue(authority, context, request, [scope], **partial)
+
+
+def test_new_request_revision_cannot_reuse_the_previous_slot(setup_actions, tmp_path):
+    authority, _, _, _, context, scope, request = setup_actions
+    first = _issue(authority, context, request, [scope],
+                   presentation_id="menu-one", presentation_slot="approve-once")
+    narrower = normalize_scope("file", str(tmp_path), ["read"], cwd=tmp_path)
+    updated = authority.narrow_request(context, request.request_id, request.revision, [narrower])
+    with pytest.raises(RevisionConflict):
+        _issue(authority, context, updated, [narrower],
+               presentation_id="menu-one", presentation_slot="approve-once")
+    fresh = _issue(authority, context, updated, [narrower],
+                   presentation_id="menu-two", presentation_slot="approve-once")
+    assert fresh.action_id != first.action_id
+    assert fresh.request_revision == updated.revision
+    with pytest.raises(RevisionConflict):
+        authority.get_decision_action(context, first.action_id)
+
+
+def test_multiple_presentations_can_remain_independent(setup_actions):
+    authority, _, _, _, context, scope, request = setup_actions
+    actions = [
+        _issue(authority, context, request, [scope], presentation_id=f"menu-{menu}",
+               presentation_slot=f"choice-{slot}")
+        for menu in range(12) for slot in range(6)
+    ]
+    assert len({action.action_id for action in actions}) == 72
+    assert authority.decision_count(request.request_id) == 0
+    assert not authority.evaluate(context, [scope], operation_id="operation")
+
+
+@pytest.mark.parametrize("conflicting_table", [False, True])
+def test_v5_presentation_migration_preserves_a_committed_action(setup_actions, conflicting_table):
+    authority, key, verifier, clock, context, scope, request = setup_actions
+    action = _issue(authority, context, request, [scope])
+    reference = _token(key, _receipt(action, context))
+    lease = authority.decide(reference, approved_scopes=[scope], action_id=action.action_id)
+    with sqlite3.connect(authority.path) as connection:
+        connection.execute("DROP TABLE decision_action_presentations")
+        connection.execute("PRAGMA user_version=5")
+        if conflicting_table:
+            connection.execute("CREATE TABLE decision_action_presentations (keep TEXT)")
+            connection.execute("INSERT INTO decision_action_presentations VALUES('preserve')")
+    if conflicting_table:
+        with pytest.raises(sqlite3.OperationalError):
+            PermissionAuthority(authority.path, verifier=verifier,
+                                clock=lambda: clock[0], monotonic=lambda: clock[0])
+        assert authority.evaluate(context, [scope], operation_id="operation")
+    else:
+        reopened = PermissionAuthority(authority.path, verifier=verifier,
+                                       clock=lambda: clock[0], monotonic=lambda: clock[0])
+        assert reopened.get_committed_decision_action(context, action.action_id) == action
+        assert reopened.decide(reference, approved_scopes=[scope], action_id=action.action_id) == lease
+        assert reopened.decision_count(request.request_id) == 1
+    with sqlite3.connect(authority.path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (5 if conflicting_table else 6)
+        if conflicting_table:
+            assert connection.execute("SELECT keep FROM decision_action_presentations").fetchone() == ("preserve",)
+
+
+def test_reopening_rejects_a_presentation_table_without_foreign_key(setup_actions):
+    from orchestrator.permissions.authority import _DECISION_PRESENTATIONS_SCHEMA
+
+    authority, _, verifier, clock, _, _, _ = setup_actions
+    damaged = _DECISION_PRESENTATIONS_SCHEMA.replace(" REFERENCES decision_actions(action_id)", "")
+    assert damaged != _DECISION_PRESENTATIONS_SCHEMA
+    with sqlite3.connect(authority.path) as connection:
+        connection.execute("DROP TABLE decision_action_presentations")
+        connection.execute(damaged)
+    with pytest.raises(ValueError, match="presentation constraints are incomplete"):
+        PermissionAuthority(authority.path, verifier=verifier,
+                            clock=lambda: clock[0], monotonic=lambda: clock[0])
