@@ -6,6 +6,7 @@ current grants at every outbound path before exposing management.
 from __future__ import annotations
 
 import hashlib
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
@@ -76,7 +77,67 @@ def delivery_allowed(runtime: Any, *, owner_id: str | None, chat_id: Any) -> boo
         return False
 
 
-async def process_telegram_update(runtime: Any, update: Any) -> bool:
+def _safevoice_callback_matches_chat(runtime: Any, data: str, chat_id: int) -> bool:
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no"}:
+        return True
+    pending = getattr(runtime, "_pending_voice", None)
+    record = pending.get(parts[2]) if isinstance(pending, dict) else None
+    if record is None:
+        return parts[2] == str(chat_id)
+    try:
+        return int(record.get("chat_id")) == chat_id
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+async def _handle_scoped_interaction(
+    runtime: Any, update: Any, scope: TelegramActorScope, chat_id: int
+) -> bool:
+    """Consume management interactions for Agent-only chat grants."""
+    from orchestrator import ui_language
+
+    query = getattr(update, "callback_query", None)
+    data = str(getattr(query, "data", "") or "")
+    if query is not None and not scope.is_primary:
+        if not _safevoice_callback_matches_chat(runtime, data, chat_id):
+            await query.answer()
+            return True
+    if scope.is_global:
+        return False
+    locale = ui_language.preferred_locale(runtime, update)
+    if query is not None:
+        from orchestrator.runtime_command_binding import CALLBACK_BINDINGS
+
+        conversation_callback = any(
+            not binding.command and re.match(binding.pattern, data)
+            for binding in CALLBACK_BINDINGS
+        )
+        safevoice_callback = (
+            data.startswith(("safevoice:yes:", "safevoice:no:"))
+            and _safevoice_callback_matches_chat(runtime, data, chat_id)
+        )
+        if conversation_callback or safevoice_callback:
+            return False
+        if delivery_allowed(runtime, owner_id=scope.owner_id, chat_id=chat_id):
+            await query.answer(ui_language.tr("telegram.scoped.chat_only", locale=locale))
+        return True
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    raw_text = str(getattr(message, "text", "") or "").strip()
+    if not raw_text.startswith("/"):
+        return False
+    command = raw_text.split(None, 1)[0].split("@", 1)[0].casefold()
+    welcome = command == "/start" and len(raw_text.split(None, 1)) == 1
+    reply = getattr(runtime, "_reply_text", None)
+    if callable(reply):
+        key = "telegram.scoped.welcome" if welcome else "telegram.scoped.chat_only"
+        await reply(update, ui_language.tr(key, locale=locale))
+    return True
+
+
+async def process_telegram_update(
+    runtime: Any, update: Any, *, expected_owner_id: str | None = None
+) -> bool:
     """Process a real Telegram Update inside its authorized actor scope."""
     try:
         snapshot = runtime_snapshot(runtime)
@@ -92,6 +153,8 @@ async def process_telegram_update(runtime: Any, update: Any) -> bool:
         ):
             return False
         owner = snapshot.owner_scope_id if is_primary else _delegated_owner(snapshot, actor)
+        if expected_owner_id is not None and owner != expected_owner_id:
+            return False
         scope = TelegramActorScope(
             runtime=runtime,
             user_id=actor,
@@ -103,6 +166,8 @@ async def process_telegram_update(runtime: Any, update: Any) -> bool:
         return False
     token = _current_actor.set(scope)
     try:
+        if await _handle_scoped_interaction(runtime, update, scope, chat_id):
+            return True
         await runtime.app.process_update(update)
     finally:
         _current_actor.reset(token)

@@ -265,3 +265,209 @@ async def test_final_stream_rechecks_grant_after_async_gate(tmp_path, monkeypatc
     assert result.error == "telegram_access_revoked"
     assert runtime.app.bot.edit_message_text.await_count == 0
     assert completed[0]["status"] == "suppressed"
+
+@pytest.mark.asyncio
+async def test_text_transport_recovers_frozen_owner_from_request(tmp_path, monkeypatch):
+    runtime, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    runtime._request_meta_by_id = {
+        "one": {"request_id": "one", "owner_id": owner, "hashi_session_id": "s"}
+    }
+    runtime.telegram_connected = True
+    runtime.logger = logging.getLogger("test")
+    runtime.telegram_logger = runtime.logger
+    runtime.error_logger = runtime.logger
+    runtime.workspace_dir = tmp_path
+    runtime.config = SimpleNamespace(extra={})
+    sent = []
+
+    async def send_message(**kwargs):
+        sent.append(kwargs)
+        config = read_config_json(config_path)
+        config["global"]["authorized_telegram_user_ids"] = []
+        write_config_json(config_path, config)
+        return SimpleNamespace(message_id=1)
+
+    runtime.app.bot = SimpleNamespace(send_message=send_message)
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", AsyncMock())
+    monkeypatch.setattr(runtime_delivery.telegram_delivery_failover, "handle_blocked_send", AsyncMock(return_value=False))
+    outcome = {}
+    await runtime_delivery._send_long_message_transport(
+        runtime, chat_id=100, text="a" * 9000, request_id="one",
+        skip_local_capture=True, outbox_outcome=outcome,
+    )
+    assert len(sent) == 1
+    assert outcome["status"] == "unknown"
+
+@pytest.mark.asyncio
+async def test_her_resolution_does_not_edit_after_access_revocation(tmp_path):
+    from adapters.stream_events import (
+        DELIVERY_USER_COMMENTARY, KIND_ACKNOWLEDGEMENT, KIND_INITIAL_RESOLUTION, StreamEvent,
+    )
+    from orchestrator import runtime_pipeline, telegram_stream_policy
+    from tests.test_runtime_pipeline import _item, _runtime
+
+    fixture, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(fixture), 100)
+    runtime = _runtime()
+    runtime.name = "lily"
+    runtime.global_config.config_path = config_path
+    runtime.global_config.secrets_path = fixture.global_config.secrets_path
+    runtime.global_config.owner_scope_id = "user:42"
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=kwargs.get("parse_mode"))
+    runtime._send_text = send_text
+    item = _item(request_id="scoped-her", chat_id=100, owner_id=owner)
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None,
+    )
+    accepted = await feedback.on_stream_event(StreamEvent(
+        kind=KIND_ACKNOWLEDGEMENT, summary="Checking.", event_id="event-1",
+        delivery_class=DELIVERY_USER_COMMENTARY, origin="her_v2", phase="immediate",
+    ))
+    assert accepted is True
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+    await feedback.on_stream_event(StreamEvent(
+        kind=KIND_INITIAL_RESOLUTION, summary="Private answer.", event_id="event-2",
+        delivery_class="internal", origin="her_v2", phase="initial_resolution",
+        resolution="final", target_event_id="event-1", delivery_id="delivery-final",
+    ))
+    assert runtime.app.bot.edits == []
+
+@pytest.mark.asyncio
+async def test_verbose_placeholder_is_not_sent_after_access_revocation(tmp_path, monkeypatch):
+    from orchestrator import runtime_pipeline
+
+    runtime, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+    runtime.app.bot = SimpleNamespace(send_message=AsyncMock())
+    runtime.get_progress_placeholder = lambda: ("working", None)
+    runtime.telegram_logger = logging.getLogger("test")
+    item = SimpleNamespace(chat_id=100, request_id="r", owner_id=owner)
+    monkeypatch.setattr(runtime_pipeline.telegram_delivery_failover, "handle_blocked_send", AsyncMock(return_value=False))
+    result = await runtime_pipeline._send_live_verbose_placeholder(runtime, item)
+    assert result is None
+    assert runtime.app.bot.send_message.await_count == 0
+
+@pytest.mark.asyncio
+async def test_interactive_feedback_does_not_start_for_revoked_user(tmp_path):
+    from orchestrator import runtime_pipeline, telegram_stream_policy
+    from tests.test_runtime_pipeline import _item, _runtime
+
+    fixture, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(fixture), 100)
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+    runtime = _runtime()
+    runtime.name = "lily"
+    runtime.global_config.config_path = config_path
+    runtime.global_config.secrets_path = fixture.global_config.secrets_path
+    runtime.global_config.owner_scope_id = "user:42"
+    telegram_stream_policy.set_typing_enabled(runtime, True)
+    item = _item(request_id="revoked-feedback", chat_id=100, owner_id=owner)
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None,
+    )
+    assert feedback.placeholder is None
+    assert runtime.app.bot.sent == []
+    assert feedback.typing_task is None
+
+@pytest.mark.asyncio
+async def test_interactive_feedback_stops_if_access_is_revoked_during_wait(tmp_path, monkeypatch):
+    from orchestrator import runtime_pipeline, telegram_stream_policy
+    from tests.test_runtime_pipeline import _item, _runtime
+
+    fixture, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(fixture), 100)
+    runtime = _runtime()
+    runtime.name = "lily"
+    runtime.global_config.config_path = config_path
+    runtime.global_config.secrets_path = fixture.global_config.secrets_path
+    runtime.global_config.owner_scope_id = "user:42"
+    telegram_stream_policy.set_typing_enabled(runtime, True)
+
+    async def revoke(*args, **kwargs):
+        config = read_config_json(config_path)
+        config["global"]["authorized_telegram_user_ids"] = []
+        write_config_json(config_path, config)
+        return False
+
+    monkeypatch.setattr(runtime_pipeline.telegram_delivery_failover, "handle_blocked_send", revoke)
+    item = _item(request_id="revoked-during-feedback", chat_id=100, owner_id=owner)
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None,
+    )
+    try:
+        assert feedback.placeholder is None
+        assert runtime.app.bot.sent == []
+        assert feedback.typing_task is None
+    finally:
+        for task in (feedback.typing_task, feedback.escalation_task, feedback.think_flush_task):
+            if task is not None:
+                task.cancel()
+
+@pytest.mark.asyncio
+async def test_placeholder_edits_stop_when_access_is_revoked(tmp_path):
+    import asyncio
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    runtime.telegram_connected = True
+    runtime.config = SimpleNamespace(extra={"escalation_thresholds": [0]})
+    runtime._verbose = False
+    runtime._request_meta_by_id = {"r": {"owner_id": owner}}
+    runtime.app.bot = SimpleNamespace(edit_message_text=AsyncMock())
+    runtime.telegram_logger = logging.getLogger("test")
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(FlexibleAgentRuntime._escalating_placeholder_loop(
+        runtime, 100, SimpleNamespace(message_id=12), "r", stop
+    ))
+    await asyncio.sleep(0.02)
+    stop.set()
+    await asyncio.wait_for(task, timeout=1)
+    runtime.app.bot.edit_message_text.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_streaming_progress_stops_when_access_is_revoked(tmp_path):
+    import asyncio
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from adapters.stream_events import KIND_REVIEW, StreamEvent
+
+    runtime, _observations, config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    runtime.telegram_connected = True
+    runtime.workspace_dir = tmp_path
+    runtime.config = SimpleNamespace(active_backend="her-v2", extra={})
+    runtime._verbose = True
+    runtime._request_meta_by_id = {"r": {"owner_id": owner}}
+    runtime.app.bot = SimpleNamespace(edit_message_text=AsyncMock(), send_message=AsyncMock())
+    runtime.telegram_logger = logging.getLogger("test")
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+
+    queue = asyncio.Queue()
+    await queue.put(StreamEvent(kind=KIND_REVIEW, summary="Finished", phase="review"))
+    stop = asyncio.Event()
+    stop.set()
+    await FlexibleAgentRuntime._streaming_display_loop(
+        runtime, 100, SimpleNamespace(message_id=12), "r", stop, queue,
+    )
+    runtime.app.bot.edit_message_text.assert_not_awaited()
+    runtime.app.bot.send_message.assert_not_awaited()

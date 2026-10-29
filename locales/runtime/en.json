@@ -85,6 +85,8 @@
     "safety.maximum_seconds": "Maximum {value} seconds from approval; returned sooner when the task ends.",
     "safety.decision_denied": "Access denied. Completed work is kept; the restricted step will not run.",
     "safety.decision_rejected": "Permission decisions are unavailable on this connection, or the request changed. No permissions were granted.",
+    "telegram.scoped.welcome": "You can chat with this Agent. Send a message to begin.",
+    "telegram.scoped.chat_only": "This account can chat with this Agent. Commands are available to global users.",
     "forget.usage": "Use /forget 2h or /forget 3d. To resume interrupted work, use /forget resume.",
     "forget.unauthorized": "Forgetting requires an authenticated owner.",
     "forget.audit_unavailable": "The protected audit store is unavailable; forgetting did not start.",

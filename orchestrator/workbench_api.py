@@ -70,6 +70,7 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
+from orchestrator.telegram_access import TelegramAccessError, TelegramAccessService
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
     TelegramCredentialService,
@@ -436,6 +437,9 @@ class WorkbenchApiServer:
             verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
             private_full_control_sids=remote_runtime_sids,
         )
+        self.telegram_access_service = TelegramAccessService(
+            config_path=self.config_path, secrets_path=secrets_path,
+        )
         self._agent_config_lock = asyncio.Lock()
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
@@ -723,6 +727,14 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_post(
             "/api/admin/add-agent", self.handle_admin_add_agent
+        )
+        self.app.router.add_get(
+            "/api/admin/agents/{agent_id}/telegram-access",
+            self.handle_admin_agent_telegram_access,
+        )
+        self.app.router.add_put(
+            "/api/admin/agents/{agent_id}/telegram-access",
+            self.handle_admin_agent_telegram_access_change,
         )
         self.app.router.add_get(
             "/api/admin/agents/{agent_id}/telegram-credential",
@@ -5176,6 +5188,66 @@ class WorkbenchApiServer:
                 ),
             },
             status=int(outcome.get("status", 201)),
+        )
+
+    def _telegram_access_management_supported(self) -> bool:
+        """Keep management disabled until every delivery and generation gate is ready."""
+        return False
+
+    def _telegram_access_denial(self, request):
+        if (
+            (not self._is_governed_profile() and not self.admin_token)
+            or not self._check_admin_auth(request)
+        ):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "admin_auth_failed"}, status=403
+            )
+        if not self._telegram_access_management_supported():
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "telegram_access_unavailable"}, status=501
+            )
+        return None
+
+    async def handle_admin_agent_telegram_access(self, request):
+        denied = self._telegram_access_denial(request)
+        if denied is not None:
+            return denied
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        try:
+            snapshot = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
+        except TelegramAccessError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code
+            )
+        return self._telegram_credential_response(
+            {"ok": True, "management_supported": True, **snapshot}
+        )
+
+    async def handle_admin_agent_telegram_access_change(self, request):
+        denied = self._telegram_access_denial(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict) or set(payload) != {
+            "expected_revision", "scope", "action", "user_id"
+        }:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "invalid_request"}, status=400
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        try:
+            snapshot = await asyncio.to_thread(
+                self.telegram_access_service.change, agent_id, **payload
+            )
+        except TelegramAccessError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code
+            )
+        return self._telegram_credential_response(
+            {"ok": True, "management_supported": True, **snapshot}
         )
 
     def _telegram_credential_response(self, payload: dict, *, status: int = 200):

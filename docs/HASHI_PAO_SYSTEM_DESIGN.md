@@ -11,16 +11,23 @@
 
 PAO's intended authorization is additive: the configured primary and other
 global Telegram user IDs may access every Agent; additional Agent-scoped IDs
-may access only their selected Agent. Grant changes are revision checked, and
-replacing the primary revokes previously granted global users. An additional
+may access only their selected Agent. Grant changes are revision checked.
+Agent-scoped users receive chat and conversation-confirmation controls, while
+management commands remain reserved for global users. Direct Telegram management
+commands cannot use a chat-only grant to reach other Agents.
+Replacing the primary revokes previously granted global users. An additional
 actor's direct private Telegram chat must use its own Session owner scope; the
 existing primary owner scope and Workbench conversation remain unchanged.
 
-The candidate contains a non-advertised configuration service, actor-scope
-helpers, and initial delivery checks. It does not yet connect these helpers to
-Worker ingress or expose a management API. Command routing, all streaming/audio
+The candidate contains a configuration service, actor-scope helpers, and initial
+delivery checks. Worker ingress is behind an unset internal gate; the management
+API returns unavailable. Command routing, all streaming/audio
 and explicit-tool delivery paths, mixed Worker generations, and live Telegram
-acceptance remain unverified. The UI must not advertise this capability until
+acceptance remain unverified. Older Workers interpret the existing per-Agent
+allowlist using their legacy Session and command rules; they may retain a cached
+grant after it is removed. Qualification, fallback, and revocation across
+Worker generations therefore need an explicit compatibility fence before the
+management gate can open. The UI must not advertise this capability until
 those paths are enforced and tested together. An Agent's shared memory and tool
 permissions are distinct from its conversation scope; no sandbox guarantee
 follows from the Telegram grant.

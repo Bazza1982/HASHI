@@ -417,7 +417,15 @@ async def _replay_persisted_update(runtime: Any, record: Mapping[str, Any]) -> N
     }
     token = _CONFIRMED_RELEASE.set(release)
     try:
-        await process_update(replayed)
+        if getattr(runtime, "_telegram_scoped_access_enabled", False):
+            from orchestrator.telegram_actor_scope import process_telegram_update
+
+            if not await process_telegram_update(
+                runtime, replayed, expected_owner_id=release["owner_id"]
+            ):
+                raise ConfirmationConflictError("Telegram actor scope changed")
+        else:
+            await process_update(replayed)
     finally:
         _CONFIRMED_RELEASE.reset(token)
 

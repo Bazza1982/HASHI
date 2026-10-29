@@ -946,6 +946,10 @@ async def _send_long_message_transport(
 
         actor = current_actor(runtime)
         effective_owner = frontend_owner_id or (actor.owner_id if actor else None)
+        if not effective_owner and request_id:
+            from orchestrator.runtime_session import request_metadata
+
+            effective_owner = str(request_metadata(runtime, request_id).get("owner_id") or "").strip() or None
         if not delivery_allowed(runtime, owner_id=effective_owner, chat_id=chat_id):
             record_delivery("blocked", disposition="telegram_access_revoked")
             if outbox_outcome is not None:
@@ -1530,6 +1534,26 @@ async def send_long_message(
         from orchestrator import runtime_session
         from orchestrator.frontend_connector_registry import endpoint_id_for
 
+        from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+
+        actor = current_actor(runtime)
+        delivery_owner = (
+            frontend_owner_id
+            or str(runtime_session.request_metadata(runtime, request_id).get("owner_id") or "").strip()
+            or (actor.owner_id if actor else "")
+        )
+        scoped_publication: dict[str, Any] = {}
+        if delivery_owner.startswith("telegram-user:"):
+
+            session = runtime_session.request_session_id(runtime, request_id)
+            if (
+                not delivery_allowed(runtime, owner_id=delivery_owner, chat_id=chat_id)
+                or (session is None and (actor is None or actor.owner_id != delivery_owner))
+            ):
+                return 0.0, 0
+            scoped_publication = {"explicit_owner_id": delivery_owner}
+            if session is not None:
+                scoped_publication["explicit_session_id"] = session
         channel = (
             "meter"
             if "meter" in purpose
@@ -1562,6 +1586,7 @@ async def send_long_message(
                 else "plain-text"
             ),
             presentation_channel=channel,
+            **scoped_publication,
         )
         endpoint_id = endpoint_id_for(
             "telegram",
@@ -1645,7 +1670,7 @@ async def send_long_message(
     ):
         return 0.0, 1
 
-    from orchestrator.runtime_session import claim_run_delivery_outbox, ensure_store, owner_id
+    from orchestrator.runtime_session import claim_run_delivery_outbox, ensure_store, request_owner_id
 
     worker_id = f"fc-telegram-{getattr(runtime, 'name', 'agent')}-{uuid4().hex}"
     claim_result = claim_run_delivery_outbox(
@@ -1654,8 +1679,13 @@ async def send_long_message(
         surface="telegram",
         channel_key=str(chat_id),
         worker_id=worker_id,
+        **({"explicit_owner_id": frontend_owner_id} if frontend_owner_id else {}),
     )
     if claim_result is None:
+        # Delegated conversations must not bypass their frozen, scoped outbox.
+        resolved_owner = frontend_owner_id or request_owner_id(runtime, request_id)
+        if resolved_owner.startswith("telegram-user:"):
+            return 0.0, 0
         # A legacy or non-Session message still uses the compatibility adapter.
         return await _send_long_message_transport(
             runtime,
@@ -1685,7 +1715,7 @@ async def send_long_message(
         chat_id=chat_id,
         store=store,
         claim=claim,
-        frontend_owner_id=owner_id(runtime),
+        frontend_owner_id=frontend_owner_id or request_owner_id(runtime, request_id),
         request_id=request_id,
         purpose=purpose,
         delivery_mode=delivery_mode,

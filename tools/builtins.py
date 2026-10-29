@@ -1854,6 +1854,20 @@ async def execute_telegram_send_file(
     runtime = context.get("_runtime")
     if runtime is None:
         return "Error: standard Frontend Connector runtime is unavailable"
+    scoped_route = {}
+    scoped_owner = str(context.get("owner_id") or "")
+    if scoped_owner.startswith("telegram-user:"):
+        from orchestrator.telegram_actor_scope import delivery_allowed
+
+        scoped_session = str(context.get("hashi_session_id") or "").strip()
+        if not scoped_session or not delivery_allowed(
+            runtime, owner_id=scoped_owner, chat_id=chat_id
+        ):
+            return "Error: Telegram access or the conversation destination is no longer valid"
+        scoped_route = {
+            "explicit_owner_id": scoped_owner,
+            "explicit_session_id": scoped_session,
+        }
     try:
         payload = file_path.read_bytes()
         media_type = (
@@ -1876,6 +1890,7 @@ async def execute_telegram_send_file(
             publication_id=publication_id,
             surface="telegram",
             channel_key=str(chat_id),
+            **scoped_route,
         )
         endpoint_id = endpoint_id_for(
             "telegram",

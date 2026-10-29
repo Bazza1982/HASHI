@@ -134,6 +134,32 @@ def owner_id(runtime: Any, explicit: str | None = None) -> str:
     return SessionStore.owner_id_for(runtime.global_config, explicit)
 
 
+def request_metadata(runtime: Any, request_id: str | None) -> Mapping[str, Any]:
+    """Return only the matching Run's frozen metadata."""
+    key = str(request_id or "").strip()
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    metadata = registry.get(key) if key and isinstance(registry, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        current = getattr(runtime, "current_request_meta", None)
+        metadata = (
+            current if key and isinstance(current, Mapping)
+            and str(current.get("request_id") or "").strip() == key else None
+        )
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
+def request_owner_id(runtime: Any, request_id: str | None) -> str:
+    """Resolve an exact Run's frozen owner without using another active Run."""
+    metadata = request_metadata(runtime, request_id)
+    explicit = str(metadata.get("owner_id") or "").strip() if metadata else ""
+    return owner_id(runtime, explicit or None)
+
+
+def request_session_id(runtime: Any, request_id: str | None) -> str | None:
+    session = str(request_metadata(runtime, request_id).get("hashi_session_id") or "").strip()
+    return session or None
+
+
 def _telegram_owner_actor_id(runtime: Any) -> int | None:
     """Return the configured owner identity, never an allowlist fallback."""
 
@@ -1256,13 +1282,17 @@ def claim_run_delivery_outbox(
     channel_key: str,
     worker_id: str,
     lease_seconds: int = 60,
+    explicit_owner_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Claim the canonical Run delivery before a legacy transport adapter sends."""
 
     store = ensure_store(runtime)
     return store.claim_run_delivery_outbox(
         request_id=str(request_id),
-        owner_id=owner_id(runtime),
+        owner_id=(
+            owner_id(runtime, explicit_owner_id) if explicit_owner_id
+            else request_owner_id(runtime, request_id)
+        ),
         surface=surface,
         channel_key=channel_key,
         worker_id=worker_id,
