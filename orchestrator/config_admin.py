@@ -127,15 +127,33 @@ class ConfigAdmin:
             raise ValueError("ambiguous agent name in configuration")
         return matches[0]
 
+    @staticmethod
+    def _permission_settings_source(row: dict):
+        """Resolve the Agent-level placement without defaulting configuration errors."""
+        from orchestrator.permissions.models import PermissionSettings
+
+        extra = row.get("extra")
+        if extra is not None and not isinstance(extra, dict):
+            raise ValueError("agent extra settings must be an object")
+        nested = isinstance(extra, dict) and "permission_settings" in extra
+        top_level = "permission_settings" in row
+        if top_level and nested:
+            raise ValueError("conflicting permission settings")
+        source = extra if nested else row
+        if "permission_settings" not in source:
+            return source, PermissionSettings()
+        value = source["permission_settings"]
+        if value is None:
+            raise ValueError("explicit permission settings cannot be null")
+        return source, PermissionSettings.from_mapping(value)
+
     def read_agent_permission_settings(self, agent_name: str):
         """Read without rewriting old configuration or enabling an authority."""
-        from orchestrator.permissions.models import PermissionSettings, PermissionSettingsSnapshot
+        from orchestrator.permissions.models import PermissionSettingsSnapshot
 
         raw = self.load_raw_config()
         row = self._permission_agent_row(raw, agent_name)
-        if "permission_settings" in row and row["permission_settings"] is None:
-            raise ValueError("explicit permission settings cannot be null")
-        settings = PermissionSettings.from_mapping(row.get("permission_settings"))
+        _, settings = self._permission_settings_source(row)
         return PermissionSettingsSnapshot(row["name"], settings, raw.revision)
 
     def write_agent_permission_settings(
@@ -157,11 +175,8 @@ class ConfigAdmin:
         if raw.revision != expected_revision:
             raise ConfigConflictError("agents configuration changed")
         row = self._permission_agent_row(raw, agent_name)
-        if "permission_settings" in row:
-            if row["permission_settings"] is None:
-                raise ValueError("explicit permission settings cannot be null")
-            PermissionSettings.from_mapping(row["permission_settings"])
-        row["permission_settings"] = {
+        source, _ = self._permission_settings_source(row)
+        source["permission_settings"] = {
             "requested_level": settings.requested_level.value,
             "task_default_seconds": settings.task_default_seconds,
             "request_ttl_seconds": settings.request_ttl_seconds,

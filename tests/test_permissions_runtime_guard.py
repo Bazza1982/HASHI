@@ -96,3 +96,30 @@ def test_conflicting_duplicate_settings_fail_closed(tmp_path):
     manager = FlexibleBackendManager(agent, global_config, secrets)
     with pytest.raises(ValueError, match="permission"):
         manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+
+
+def test_admin_update_and_runtime_agree_on_nested_level(tmp_path):
+    from types import SimpleNamespace
+
+    from orchestrator.config_admin import ConfigAdmin
+    from orchestrator.permissions.models import PermissionLevel, PermissionSettings
+
+    row = _minimal_flex_agent()
+    row["extra"] = {"permission_settings": {"requested_level": "L2"}, "unrelated": "kept"}
+    config_path, secrets_path = _write_base_files(tmp_path, row)
+    admin = ConfigAdmin(SimpleNamespace(config_path=config_path))
+    snapshot = admin.read_agent_permission_settings("flexy")
+    assert snapshot.settings.requested_level is PermissionLevel.L2
+    admin.write_agent_permission_settings(
+        "flexy", PermissionSettings(requested_level=PermissionLevel.L1),
+        expected_revision=snapshot.revision,
+    )
+    global_config, agents, secrets = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path,
+    ).load()
+    agent = agents[0]
+    assert agent.permission_settings["requested_level"] == "L1"
+    assert agent.extra["unrelated"] == "kept"
+    manager = FlexibleBackendManager(agent, global_config, secrets)
+    with pytest.raises(ValueError, match="permission"):
+        manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
