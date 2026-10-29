@@ -1320,6 +1320,9 @@ owns renditions and endpoint receipts. These changes stay in Functions.
   fail closed; invalid bindings never fall back into another conversation.
 - Typed command admission atomically records centrally redacted user input in
   the existing SessionStore transaction. Actions do not invent user input.
+  Unified ingress also redacts invocation arguments before reservation and
+  projection; original arguments remain only in execution and the transient
+  request-digest calculation, not invocation JSON or command display history.
   Command displays remain outside model history. Local reply/send/long-message
   capture publishes a canonical Message and its outbox before returning a
   rendition; it cannot replace persistence or capture later background work.
@@ -1334,12 +1337,21 @@ owns renditions and endpoint receipts. These changes stay in Functions.
   managers reconcile stable publication IDs into SessionStore. Endpoint
   outboxes and receipts remain independent; publication does not prove that
   a browser rendered the message or that every mirror was delivered.
+  Authenticated Session-bound API and TUI origins, including `session-api`,
+  use the same notice intent. The admin notification boundary validates the
+  configured owner, Agent, Conversation Session and current generation before
+  PAO publication, even with no running Agent Worker. A bad or stale binding
+  never falls back to a default Session or legacy transport.
 - Session-bound cold restarts require `restart_origin_delivery_v1`. The
   independent Remote saves the original route before lifecycle effects and
   republishes terminal notices after caller exit. Cross-instance notification
   uses accepted peer discovery and HMAC, never an arbitrary callback URL.
   Its recovery scans only terminal receipt notice intent, with eight bounded
-  attempts; exhaustion remains inspectable. It never repeats a restart.
+  attempts; exhaustion remains inspectable. Each pass reads at most 512
+  receipts and advances a disposable filename cursor, wrapping after the
+  directory tail so historical records cannot starve pending notices.
+  Resetting that cursor never resets durable delivery identity or attempts.
+  Recovery never repeats a restart.
   Transport uncertainty is reported separately from a terminal operation
   result. Legacy requests without a Session retain their existing behavior.
 

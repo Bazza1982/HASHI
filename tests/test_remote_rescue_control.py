@@ -999,6 +999,56 @@ def test_terminal_restart_notice_recovers_after_caller_exit_without_restarting_a
     assert len(requests) == 2 and requests[0] == requests[1]
 
 
+def test_restart_notice_recovery_pages_past_512_completed_records(tmp_path, monkeypatch):
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process",
+                        lambda: pytest.fail("notification recovery cannot restart"))
+    origin = {"instance_id": "HASHI_TEST", "surface": "session-api", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:pending"}
+    for index in range(513):
+        remote_server._write_restart_record({
+            "restart_id": f"rst_20261029T000000Z_{index:012x}",
+            "state": "completed", "notify_origin": origin,
+            "notification": {"state": "delivered"},
+        })
+    pending = remote_server._write_restart_record({
+        "restart_id": "rst_20261029T000000Z_ffffffffffff", "state": "completed",
+        "notify_agent": "agent1", "target_instance": "HASHI_TEST", "notify_origin": origin,
+    })
+    directory = remote_server._restart_records_dir()
+    # File enumeration order is not portable. Keep real files/JSON/atomic writes,
+    # but put the pending record after historical records on every platform.
+    original_glob = type(directory).glob
+
+    def ordered_glob(path, pattern, **kwargs):
+        found = original_glob(path, pattern, **kwargs)
+        return iter(sorted(found)) if path == directory else found
+
+    monkeypatch.setattr(type(directory), "glob", ordered_glob)
+    reads, requests = [], []
+    original_read = remote_server._read_restart_record
+
+    def read_record(restart_id):
+        reads.append(restart_id)
+        return original_read(restart_id)
+
+    def forward(**kwargs):
+        requests.append(json.loads(kwargs["body_bytes"].decode()))
+        return 200, b'{"ok":true}', {}
+
+    monkeypatch.setattr(remote_server, "_read_restart_record", read_record)
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+    for _ in range(3):
+        reads.clear()
+        remote_server._recover_restart_notifications()
+        assert len(reads) <= 512, "the per-pass record-read budget must remain bounded"
+    result = original_read(pending["restart_id"])
+    assert result["state"] == "completed"
+    assert result["notification"]["state"] == "delivered"
+    assert len(requests) == 1
+    assert requests[0]["publication_id"] == "restart:pending"
+
+
 def test_restart_result_notification_falls_back_for_older_workbench(monkeypatch):
     captured = []
 

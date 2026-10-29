@@ -61,14 +61,23 @@ async def test_admin_notify_sends_text_to_primary_chat(tmp_path):
     assert response.status == 200
     assert payload["ok"] is True
     assert runtime.sent == [{"chat_id": 123, "text": "restarted"}]
+    server.runtimes = []
+    offline = await server.handle_admin_notify(_FakeRequest({"agent": "hashiko", "text": "legacy"}))
+    assert offline.status == 404, "legacy notices still require their runtime transport"
+    assert runtime.sent == [{"chat_id": 123, "text": "restarted"}]
 
 
 @pytest.mark.asyncio
-async def test_session_notice_retries_after_ack_loss_without_telegram_or_default_fallback(tmp_path):
+@pytest.mark.parametrize("worker_online", [True, False])
+async def test_session_notice_retries_after_ack_loss_without_telegram_or_default_fallback(
+    tmp_path, worker_online
+):
     runtime = _FakeRuntime(locale="en")
     server = _server(tmp_path, runtime)
     server.global_config.authorized_id = 123
     selected = server.session_store.create_session(owner_id="user:123", agent_id="hashiko")
+    if not worker_online:
+        server.runtimes = []
     origin = {"surface": "workbench", "owner_id": "user:123", "session_id": selected["session_id"],
               "context_generation": 1, "session_channel_key": "default"}
     request = _FakeRequest({"agent": "hashiko", "message_key": "api.restart.completed",
@@ -82,6 +91,43 @@ async def test_session_notice_retries_after_ack_loss_without_telegram_or_default
     rows = server.session_store.messages(selected["session_id"], owner_id="user:123")
     assert len(rows) == 1
     assert "PEER 已重启并恢复在线" in rows[0]["text"]
+    assert not runtime.sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid_scope", "expected_status"),
+    [("owner", 403), ("missing_owner", 403), ("agent", 404),
+     ("session", 404), ("generation", 409)],
+)
+async def test_offline_session_notice_validates_scope_without_writes(
+    tmp_path, invalid_scope, expected_status
+):
+    runtime = _FakeRuntime()
+    server = _server(tmp_path, runtime)
+    server.runtimes = []
+    selected = server.session_store.create_session(owner_id="user:123", agent_id="hashiko")
+    origin = {"surface": "session-api", "owner_id": "user:123",
+              "session_id": selected["session_id"], "context_generation": 1}
+    payload = {"agent": "hashiko", "text": "result", "origin": origin,
+               "publication_id": "offline-invalid-scope"}
+    if invalid_scope == "owner":
+        foreign = server.session_store.create_session(owner_id="user:999", agent_id="hashiko")
+        origin.update(owner_id="user:999", session_id=foreign["session_id"])
+    elif invalid_scope == "missing_owner":
+        del origin["owner_id"]
+    elif invalid_scope == "agent":
+        payload["agent"] = "another-agent"
+    elif invalid_scope == "session":
+        origin["session_id"] = "ses_missing"
+    else:
+        origin["context_generation"] = 2
+    with server.session_store._connection() as connection:
+        before = "\n".join(connection.iterdump())
+    response = await server.handle_admin_notify(_FakeRequest(payload))
+    assert response.status == expected_status, response.text
+    with server.session_store._connection() as connection:
+        assert "\n".join(connection.iterdump()) == before
     assert not runtime.sent
 
 

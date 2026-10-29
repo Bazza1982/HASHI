@@ -225,10 +225,11 @@ def clean_origin(origin):
 def origin_delivery_requested(origin) -> bool:
     """Whether a reboot receipt should attempt delivery to its origin.
 
-    Telegram receipts need a resolved chat to send to.  Workbench receipts are
-    delivered through the shared primary session that survives Worker cutover,
-    so they are always deliverable.  Unknown frontends remain ``not_requested``
-    (fail closed) instead of inventing a new transport.
+    Telegram needs a resolved chat. Authenticated API/TUI admission freezes a
+    Session binding whose notification is published by PAO across Worker
+    cutover. This predicate does not authenticate a caller: publication still
+    checks owner, Agent, Session and generation. Legacy Workbench receipts keep
+    their primary-session behavior; unknown frontends remain fail-closed.
     """
 
     if not isinstance(origin, dict):
@@ -236,7 +237,19 @@ def origin_delivery_requested(origin) -> bool:
     surface = origin.get("surface", "telegram")
     if surface == "telegram":
         return bool(origin.get("chat_id"))
-    return surface == "workbench"
+    if surface == "workbench":
+        return True
+    from orchestrator.frontend_connector_registry import canonical_connector_id
+
+    try:
+        bound = clean_origin(origin)
+        connector = canonical_connector_id(surface, surface=surface)
+    except (ValueError, TypeError):
+        return False
+    return bool(
+        bound.get("owner_id") and bound.get("session_id")
+        and connector in {"backend_api", "session_api", "tui"}
+    )
 
 
 def validate_record(record):

@@ -174,9 +174,9 @@ acceptance/execution/playback/listening and source/adoption/device separately.
 See [PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
 [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
-Commands persist redacted input/results in the explicit Session, outside model
-history. Closed menus keep text; notices freeze origin/locale. Retry delivery,
-never operations. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+Command history redacts args; originals execute. PAO notices keep Session/locale
+without Workers; check scope, retry delivery only. Remote pages fairly; closed
+cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 `/new` preserves history; PAO owns Agent deletion.
 
 `/say` reads the latest final; `2`–`4` choose a count and `1-3` the latest

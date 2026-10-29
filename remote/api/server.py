@@ -2617,15 +2617,30 @@ def _retry_restart_notification(record):
     return _write_restart_record(record)
 
 
+_restart_notification_scan_after: tuple[Path, str] | None = None
+
+
 def _recover_restart_notifications():
+    global _restart_notification_scan_after
+
     if not _control_hashi_root:
         return
     directory = _restart_records_dir()
     if not directory.exists():
         return
-    for index, path in enumerate(directory.glob("*.json")):
-        if index >= 512:
-            break
+    paths = sorted(directory.glob("*.json"), key=lambda path: path.name)
+    if _restart_notification_scan_after is not None:
+        previous_directory, after_name = _restart_notification_scan_after
+        if previous_directory == directory:
+            remaining = [path for path in paths if path.name > after_name]
+            if remaining:
+                paths = remaining
+    # Bound payload reads, not the lifetime coverage. Advance past historical,
+    # deferred and invalid records too; wrap after the last filename. A process
+    # restart can safely reset this disposable cursor because notice identity
+    # and delivery state remain in each durable restart receipt.
+    for path in paths[:512]:
+        _restart_notification_scan_after = (directory, path.name)
         try:
             if path.stat().st_size > 512 * 1024:
                 continue

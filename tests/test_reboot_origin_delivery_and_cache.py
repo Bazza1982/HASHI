@@ -30,6 +30,13 @@ def test_origin_delivery_requested_by_surface():
     assert origin_delivery_requested({"surface": "workbench"}) is True
     assert origin_delivery_requested({"surface": "whatsapp"}) is False
     assert origin_delivery_requested(None) is False
+    binding = {"owner_id": "user:7", "session_id": "ses_selected", "context_generation": 1}
+    for surface in ("tui", "session-api", "backend-api"):
+        assert origin_delivery_requested({"surface": surface, **binding}) is True
+        assert origin_delivery_requested({"surface": surface}) is False
+        assert origin_delivery_requested({"surface": surface, **binding,
+                                          "context_generation": True}) is False
+    assert not origin_delivery_requested({"surface": "unregistered", **binding})
 
 
 def test_create_marks_delivery_by_origin_surface(tmp_path):

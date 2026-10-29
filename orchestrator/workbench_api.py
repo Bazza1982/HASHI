@@ -14876,7 +14876,30 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "agent is required"}, status=400
             )
         runtime = self._runtime_map().get(agent_name)
-        if runtime is None:
+        if origin is not None:
+            # Admin transport authentication is not a substitute for the
+            # frozen PAO scope. No Worker is needed to publish into that scope.
+            owner = SessionStore.owner_id_for(self.global_config)
+            if origin.get("owner_id") != owner:
+                return web.json_response(
+                    {"ok": False, "error": "notice owner does not match"}, status=403
+                )
+            try:
+                session = self.session_store.get_session(
+                    origin["session_id"], owner_id=owner, agent_id=agent_name,
+                    include_deleted=False,
+                )
+            except SessionNotFound:
+                return web.json_response(
+                    {"ok": False, "error": "notice session not found"}, status=404
+                )
+            if (session["session_kind"] != SESSION_KIND_CONVERSATION
+                    or session["status"] != "active"
+                    or session["context_generation"] != origin["context_generation"]):
+                return web.json_response(
+                    {"ok": False, "error": "notice session context changed"}, status=409
+                )
+        elif runtime is None:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
