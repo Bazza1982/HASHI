@@ -162,7 +162,15 @@ def request_session_id(runtime: Any, request_id: str | None) -> str | None:
 
 def _telegram_owner_actor_id(runtime: Any) -> int | None:
     """Return the configured owner identity, never an allowlist fallback."""
+    from orchestrator.telegram_actor_scope import scoped_access_enabled
 
+    if scoped_access_enabled(runtime):
+        from orchestrator.telegram_actor_scope import runtime_snapshot
+
+        try:
+            return runtime_snapshot(runtime).primary_user_id
+        except (OSError, ValueError, TypeError, LookupError):
+            return None
     try:
         actor_id = int(getattr(runtime.global_config, "authorized_id", 0) or 0)
     except (TypeError, ValueError):

@@ -169,3 +169,27 @@ async def test_scoped_updates_create_distinct_real_sessions_and_honor_revocation
     assert await host.handle_request("runtime.telegram_update", {"update": {}})
     assert len(observations) == 3
     assert runtime_session.agent_workzone_state(runtime, owner=global_owner)["slots"] == []
+
+
+def test_first_primary_user_is_used_by_proactive_route_without_restart(tmp_path, monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.telegram_access import TelegramAccessService
+
+    runtime, config_path, _global_owner, _local_owner = setup_scoped_workzone(tmp_path)
+    config = read_config_json(config_path)
+    config["global"].pop("telegram_owner_id", None)
+    config["global"]["owner_scope_id"] = "user:0"
+    config["global"]["authorized_telegram_user_ids"] = []
+    write_config_json(config_path, config)
+    runtime.global_config.authorized_id = 0
+    runtime.global_config.owner_scope_id = "user:0"
+    runtime._authorized_telegram_ids = ()
+    runtime._is_authorized_user = lambda actor: FlexibleAgentRuntime._is_authorized_user(runtime, actor)
+    monkeypatch.setattr(runtime_session, "_telegram_egress_allowed", lambda *args, **kwargs: True)
+    service = TelegramAccessService(config_path=config_path,
+                                    secrets_path=runtime.global_config.secrets_path)
+    state = service.status("lily")
+    service.change("lily", expected_revision=state["revision"],
+                   scope="global", action="add", user_id="42")
+
+    assert runtime_session.primary_telegram_chat_id(runtime) == 42

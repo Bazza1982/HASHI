@@ -23,7 +23,8 @@ global users may manage that profile, while Agent-only users cannot.
 
 The candidate contains a configuration service, actor-scope helpers, and initial
 delivery checks. New Workers use a revisioned policy marker to adopt saved grants
-without a restart and reject unreadable or unsupported policies. The management
+without a restart and reject unreadable or unsupported policies. The primary
+proactive Telegram route also reads the current configured owner. The management
 API remains unavailable while generation compatibility is incomplete. Command
 routing, all streaming/audio
 and explicit-tool delivery paths, mixed Worker generations, and live Telegram
