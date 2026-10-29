@@ -467,6 +467,15 @@ class RebootManager:
 
         idempotency_key = f"reboot:{record['id']}:{'starting' if starting else 'final'}"
 
+        if origin.get("session_id"):
+            from orchestrator.frontend_notice_delivery import deliver_notice
+
+            return await deliver_notice(
+                self.kernel, agent_id=record["source_agent"], origin=origin,
+                text=render(record["source_agent"], None), publication_id=idempotency_key,
+                send_notice=send_runtime_notice,
+            )
+
         if surface == "telegram":
             result = await send_runtime_notice(
                 self.kernel,

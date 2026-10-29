@@ -1309,6 +1309,64 @@ instead of hardcoding outer success. Completed and pending replays do not
 re-execute handlers, and unknown outcomes remain fail-closed without automatic
 retry.
 
+### Command presentation recovery (2026-10-29)
+
+Candidate source only; deployment and live acceptance remain separate.
+PAO owns the Session, Messages, invocation reservation and notice intent. FC
+owns renditions and endpoint receipts. These changes stay in Functions.
+
+- A valid explicit Session wins over shared-primary routing for both published
+  and already-delivered text. Owner/Agent and context-generation checks still
+  fail closed; invalid bindings never fall back into another conversation.
+- Typed command admission atomically records centrally redacted user input in
+  the existing SessionStore transaction. Actions do not invent user input.
+  Unified ingress also redacts invocation arguments before reservation and
+  projection; original arguments remain only in execution and the transient
+  request-digest calculation, not invocation JSON or command display history.
+  Command displays remain outside model history. Local reply/send/long-message
+  capture publishes a canonical Message and its outbox before returning a
+  rendition; it cannot replace persistence or capture later background work.
+- Menu edits replace standard text and action blocks together with the
+  compatibility menu revision. Closed menus remove executable actions, not
+  their body. Native Telegram card edits resolve their existing transport
+  reference, update the same canonical Message and cannot retarget a card to
+  the newly selected Session. Old cards without a recorded reference retain
+  their legacy transport path; this candidate does not backfill old history.
+- Asynchronous reboot and transfer notices retain owner, Agent, Session,
+  generation, origin endpoint, mirror policy and saved locale. The existing
+  managers reconcile stable publication IDs into SessionStore. Endpoint
+  outboxes and receipts remain independent; publication does not prove that
+  a browser rendered the message or that every mirror was delivered.
+  Authenticated Session-bound API and TUI origins, including `session-api`,
+  use the same notice intent. The admin notification boundary validates the
+  configured owner, Agent, Conversation Session and current generation before
+  PAO publication, even with no running Agent Worker. A bad or stale binding
+  never falls back to a default Session or legacy transport.
+- Session-bound cold restarts require `restart_origin_delivery_v1`. The
+  independent Remote saves the original route before lifecycle effects and
+  republishes terminal notices after caller exit. Cross-instance notification
+  uses accepted peer discovery and HMAC, never an arbitrary callback URL.
+  Its recovery scans only terminal receipt notice intent, with eight bounded
+  attempts; exhaustion remains inspectable. Each pass reads at most 512
+  receipts and advances a disposable filename cursor, wrapping after the
+  directory tail so historical records cannot starve pending notices.
+  Resetting that cursor never resets durable delivery identity or attempts.
+  Recovery never repeats a restart.
+  Transport uncertainty is reported separately from a terminal operation
+  result. Legacy requests without a Session retain their existing behavior.
+
+Display visibility is independent of model-context eligibility and button
+expiry. External clients must retain durable command/status/control bodies
+after polling, refresh and cache loss, while preserving owner/Session/generation
+isolation and explicit deletion/navigation semantics. A browser cache is never
+the canonical history. Archived/stale Session publication remains fail-closed
+and pending/exhausted at its existing operation owner, never redirected.
+
+Focused regressions execute real commands, SQLite admission/publication,
+standard FC projection and transport-receipt resolution. Lifecycle/network
+actuators are isolated fixtures; passing them is not a production reboot,
+transfer, deployment or physical frontend acceptance claim.
+
 ### Manual desktop candidate (2026-09-30)
 
 The opt-in, client-neutral manual desktop ingress and Windows worker projection are

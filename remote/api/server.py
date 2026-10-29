@@ -34,6 +34,7 @@ import socket
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -102,6 +103,7 @@ from ..security.auth import (
 )
 from ..security.pairing import PairingManager, PairingState
 from ..security.shared_token import (
+    HEADER_AUTH_SCHEME,
     HEADER_FROM_INSTANCE,
     HEADER_NONCE,
     build_auth_headers,
@@ -266,6 +268,7 @@ API_PROTOCOL_CAPABILITIES = [
     "workbench_gateway_v1",
     "version_query_v1",
     "tui_proxy_v1",
+    "restart_origin_delivery_v1",
     AGENT_MOVE_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
 ]
@@ -450,6 +453,8 @@ class HashiRestartPayload(BaseModel):
     request_source: Optional[str] = None
     notify_agent: Optional[str] = None
     notify_via: Optional[str] = None
+    notify_origin: Optional[dict[str, Any]] = None
+    notify_locale: Optional[str] = None
 
 
 class HashiRebootPayload(BaseModel):
@@ -2521,6 +2526,27 @@ def _notify_restart_result(
         "message_key": message_key,
         "message_args": message_args,
     }
+    origin = record.get("notify_origin")
+    if origin:
+        notification.update(origin=origin, ui_locale=record.get("notify_locale"),
+                            publication_id=origin["notice_id"])
+        source = str(origin["instance_id"]).upper()
+        if source != str(_instance_info.get("instance_id") or "").upper():
+            trusted, reason, _peer = _peer_has_completed_handshake(source)
+            if not trusted or _protocol_manager is None or not get_shared_token():
+                return {"state": "failed", "error": reason if not trusted else "trusted_route_unavailable"}
+            urls = _protocol_manager.resolve_forward_urls(source, "/workbench/v1/proxy/api/admin/notify")
+            if not urls:
+                return {"state": "failed", "error": "peer_route_unavailable"}
+            # Stable publication identity makes a lost ACK recoverable. Do not
+            # fan out to alternate addresses in the same uncertain attempt.
+            try:
+                response = _post_json_with_optional_hmac(urls[0], notification, timeout=5)
+            except Exception as exc:
+                return {"state": "failed", "error": str(exc)}
+            return ({"state": "delivered", "agent": normalized_agent}
+                    if isinstance(response, dict) and response.get("ok") is True
+                    else {"state": "failed", "error": "origin_publication_not_confirmed"})
     body = json.dumps(
         notification,
         separators=(",", ":"),
@@ -2536,7 +2562,7 @@ def _notify_restart_result(
         )
         response = json.loads(content.decode("utf-8")) if content else {}
         if (
-            status == 400
+            not origin and status == 400
             and isinstance(response, dict)
             and response.get("error") == "message_key is not supported"
         ):
@@ -2571,6 +2597,73 @@ def _notify_restart_result(
         "agent": normalized_agent,
         "chat_id": response.get("chat_id"),
     }
+
+
+def _retry_restart_notification(record):
+    """Recover only terminal notice intent; never launch or repeat a restart."""
+    if not record.get("notify_origin") or record.get("state") not in {"completed", "failed", "rejected"}:
+        return record
+    delivery = record.get("notification") or {}
+    if delivery.get("state") == "delivered" or float(delivery.get("next_attempt_at") or 0) > time.time():
+        return record
+    attempts = int(delivery.get("attempts") or 0)
+    if attempts >= 8:
+        return record
+    record["notification"] = {"state": "pending", "attempts": attempts + 1,
+                              "next_attempt_at": time.time() + min(300, 5 * 3 ** attempts)}
+    record = _write_restart_record(record)
+    result = _notify_restart_result(agent=record.get("notify_agent") or record.get("requester_agent"), record=record)
+    record["notification"].update(result)
+    return _write_restart_record(record)
+
+
+_restart_notification_scan_after: tuple[Path, str] | None = None
+
+
+def _recover_restart_notifications():
+    global _restart_notification_scan_after
+
+    if not _control_hashi_root:
+        return
+    directory = _restart_records_dir()
+    if not directory.exists():
+        return
+    paths = sorted(directory.glob("*.json"), key=lambda path: path.name)
+    if _restart_notification_scan_after is not None:
+        previous_directory, after_name = _restart_notification_scan_after
+        if previous_directory == directory:
+            remaining = [path for path in paths if path.name > after_name]
+            if remaining:
+                paths = remaining
+    # Bound payload reads, not the lifetime coverage. Advance past historical,
+    # deferred and invalid records too; wrap after the last filename. A process
+    # restart can safely reset this disposable cursor because notice identity
+    # and delivery state remain in each durable restart receipt.
+    for path in paths[:512]:
+        _restart_notification_scan_after = (directory, path.name)
+        try:
+            if path.stat().st_size > 512 * 1024:
+                continue
+            _retry_restart_notification(_read_restart_record(path.stem))
+        except (ValueError, OSError, KeyError, TypeError):
+            logger.warning("Restart notification remains pending: %s", path.stem)
+
+
+@asynccontextmanager
+async def _restart_notification_lifespan(_app):
+    async def recover():
+        while True:
+            try:
+                await asyncio.to_thread(_recover_restart_notifications)
+            except (ValueError, OSError):
+                logger.warning("Restart notification recovery storage is unavailable")
+            await asyncio.sleep(30)
+    task = asyncio.create_task(recover())
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _fetch_workbench_json(
@@ -2744,6 +2837,7 @@ def create_app(
         description="HASHI inter-instance communication and control",
         version="1.0.0",
         docs_url="/docs",
+        lifespan=_restart_notification_lifespan,
     )
 
     app.add_middleware(
@@ -4299,6 +4393,23 @@ def create_app(
 
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
+        if payload.notify_origin is not None:
+            from orchestrator.reboot_receipts import clean_origin
+
+            origin = payload.notify_origin
+            source = str(origin.get("instance_id") or "").strip().upper()
+            # Admission already verified and consumed this HMAC nonce. Never
+            # verify it again (which would reject a valid request as replay).
+            if not request.headers.get(HEADER_AUTH_SCHEME) or client_id.upper() != source:
+                raise HTTPException(status_code=403, detail="Restart notification origin requires matching HMAC identity")
+            try:
+                clean_origin(origin)
+                if (not origin.get("session_id") or not source or len(json.dumps(origin)) > 8192
+                        or not isinstance(origin.get("notice_id"), str) or not 1 <= len(origin["notice_id"]) <= 200
+                        or origin.get("agent_id") != payload.requester_agent):
+                    raise ValueError("invalid restart notification identity")
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not _terminal_executor or not _terminal_executor.allows_level(
             AuthLevel.L3_RESTART
         ):
@@ -4329,6 +4440,9 @@ def create_app(
                 or None,
                 "request_source": str(payload.request_source or "").strip()
                 or None,
+                "notify_origin": payload.notify_origin,
+                "notify_locale": payload.notify_locale,
+                "notify_agent": payload.notify_agent,
                 "reason": reason_meta["reason"],
                 "reason_truncated": reason_meta["truncated"],
                 "started_at": _utc_timestamp(),
@@ -4469,7 +4583,9 @@ def create_app(
             new_pid=evidence.get("new_pid"),
             failure_stage=None if completed else "terminal_verification",
         )
-        if payload.notify_agent:
+        if payload.notify_origin:
+            record = await asyncio.to_thread(_retry_restart_notification, record)
+        elif payload.notify_agent:
             record["notification"] = await asyncio.to_thread(
                 _notify_restart_result,
                 agent=payload.notify_agent,
@@ -4861,7 +4977,7 @@ def create_app(
                 return _agent_move_response(request, result)
         except (AgentMoveError, OSError, ValueError) as exc:
             return _agent_move_response(request, status_code=400,
-                                        content={"ok": False, "error": str(exc)})
+                                        content={"ok": False, "error": str(exc), "code": getattr(exc, "code", None)})
 
     @app.post("/agent-move/v1/stage")
     async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
@@ -4939,7 +5055,7 @@ def create_app(
             return _agent_move_response(
                 request,
                 status_code=status_code,
-                content={"ok": False, "error": str(exc)},
+                content={"ok": False, "error": str(exc), "code": getattr(exc, "code", None)},
             )
 
     @app.post("/agent-move/v1/resolve")

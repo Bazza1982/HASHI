@@ -736,6 +736,26 @@ def test_hashi_rescue_restart_rejects_wrong_target_before_launch(tmp_path, monke
     assert response.json()["error"] == "restart_target_mismatch"
 
 
+@pytest.mark.parametrize("authenticated_instance, expected_status", [("HASHI1", 409), ("HASHI3", 403)])
+def test_session_restart_origin_is_authenticated_once_and_saved_before_launch(tmp_path, monkeypatch, authenticated_instance, expected_status):
+    (tmp_path / "secrets.json").write_text('{"hashi_remote_shared_token":"test-secret"}', encoding="utf-8")
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process", lambda: pytest.fail("no restart allowed"))
+    origin = {"instance_id": "HASHI1", "agent_id": "agent1", "surface": "workbench", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:cmd_1"}
+    body = json.dumps({"target_instance": "HASHI_OTHER", "requester_agent": "agent1",
+                       "notify_origin": origin, "notify_locale": "zh-CN"}).encode()
+    headers = build_auth_headers(shared_token="test-secret", method="POST", path="/control/hashi/restart",
+                                 from_instance=authenticated_instance, body_bytes=body)
+    headers["Content-Type"] = "application/json"
+    response = client.post("/control/hashi/restart", content=body, headers=headers)
+    assert response.status_code == expected_status, response.text
+    if expected_status == 409:
+        persisted = remote_server._read_restart_record(response.json()["restart_id"])
+        assert persisted["notify_origin"] == origin
+        assert persisted["notify_locale"] == "zh-CN"
+
+
 def test_hashi_rescue_restart_fails_when_terminal_evidence_is_incomplete(
     tmp_path, monkeypatch
 ):
@@ -934,6 +954,99 @@ def test_restart_result_notification_explains_nonblocking_degraded_success(monke
             "warning": "Remote/HChat is unavailable; local startup will continue.",
         },
     }
+
+
+def test_restart_result_notification_preserves_frozen_session_and_locale(monkeypatch):
+    captured = {}
+    def forward(**kwargs):
+        captured.update(json.loads(kwargs["body_bytes"].decode("utf-8")))
+        return 200, b'{"ok":true}', {}
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
+    origin = {"instance_id": "HASHI1", "surface": "workbench", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:cmd_1"}
+    remote_server._notify_restart_result(agent="agent1", record={"state": "completed",
+        "target_instance": "HASHI1", "notify_origin": origin, "notify_locale": "zh-CN"})
+    assert captured["origin"] == origin
+    assert captured["ui_locale"] == "zh-CN"
+    assert captured["publication_id"] == "restart:cmd_1"
+
+
+def test_terminal_restart_notice_recovers_after_caller_exit_without_restarting_again(tmp_path, monkeypatch):
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process", lambda: pytest.fail("notice recovery cannot restart"))
+    requests = []
+    def forward(**kwargs):
+        requests.append(json.loads(kwargs["body_bytes"].decode()))
+        if len(requests) == 1:
+            raise TimeoutError("publication ACK lost")
+        return 200, b'{"ok":true}', {}
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+    origin = {"instance_id": "HASHI_TEST", "surface": "workbench", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:stable"}
+    record = remote_server._write_restart_record({"restart_id": remote_server._new_restart_id(),
+        "state": "completed", "target_instance": "HASHI_TEST", "notify_origin": origin,
+        "notify_agent": "agent1", "notify_locale": "zh-CN"})
+    remote_server._recover_restart_notifications()
+    pending = remote_server._read_restart_record(record["restart_id"])
+    assert pending["state"] == "completed"
+    assert pending["notification"]["state"] == "failed"
+    pending["notification"]["next_attempt_at"] = 0
+    remote_server._write_restart_record(pending)
+    remote_server._recover_restart_notifications()
+    remote_server._recover_restart_notifications()
+    assert remote_server._read_restart_record(record["restart_id"])["notification"]["state"] == "delivered"
+    assert len(requests) == 2 and requests[0] == requests[1]
+
+
+def test_restart_notice_recovery_pages_past_512_completed_records(tmp_path, monkeypatch):
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process",
+                        lambda: pytest.fail("notification recovery cannot restart"))
+    origin = {"instance_id": "HASHI_TEST", "surface": "session-api", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:pending"}
+    for index in range(513):
+        remote_server._write_restart_record({
+            "restart_id": f"rst_20261029T000000Z_{index:012x}",
+            "state": "completed", "notify_origin": origin,
+            "notification": {"state": "delivered"},
+        })
+    pending = remote_server._write_restart_record({
+        "restart_id": "rst_20261029T000000Z_ffffffffffff", "state": "completed",
+        "notify_agent": "agent1", "target_instance": "HASHI_TEST", "notify_origin": origin,
+    })
+    directory = remote_server._restart_records_dir()
+    # File enumeration order is not portable. Keep real files/JSON/atomic writes,
+    # but put the pending record after historical records on every platform.
+    original_glob = type(directory).glob
+
+    def ordered_glob(path, pattern, **kwargs):
+        found = original_glob(path, pattern, **kwargs)
+        return iter(sorted(found)) if path == directory else found
+
+    monkeypatch.setattr(type(directory), "glob", ordered_glob)
+    reads, requests = [], []
+    original_read = remote_server._read_restart_record
+
+    def read_record(restart_id):
+        reads.append(restart_id)
+        return original_read(restart_id)
+
+    def forward(**kwargs):
+        requests.append(json.loads(kwargs["body_bytes"].decode()))
+        return 200, b'{"ok":true}', {}
+
+    monkeypatch.setattr(remote_server, "_read_restart_record", read_record)
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+    for _ in range(3):
+        reads.clear()
+        remote_server._recover_restart_notifications()
+        assert len(reads) <= 512, "the per-pass record-read budget must remain bounded"
+    result = original_read(pending["restart_id"])
+    assert result["state"] == "completed"
+    assert result["notification"]["state"] == "delivered"
+    assert len(requests) == 1
+    assert requests[0]["publication_id"] == "restart:pending"
 
 
 def test_restart_result_notification_falls_back_for_older_workbench(monkeypatch):

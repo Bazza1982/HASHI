@@ -692,6 +692,10 @@ class FlexibleAgentRuntime:
                         or "telegram"
                     ).strip().casefold()
                     if surface == "telegram":
+                        from orchestrator.telegram_command_presentation import project_callback_update
+
+                        update = project_callback_update(self, update)
+                        query = update.callback_query
                         from orchestrator.frontend_connector_registry import (
                             get_compatibility_adapter,
                             require_connector_operation,
@@ -2046,6 +2050,11 @@ class FlexibleAgentRuntime:
                         await self.enqueue_request(chat_id, prompt, "startup", "Startup bootstrap", silent=True)
 
     async def _reply_text(self, update: Update, text: str, **kwargs):
+        from orchestrator.admin_local_testing import local_command_capture
+
+        capture = local_command_capture(self)
+        if capture is not None:
+            return await capture.capture_send(update.effective_chat.id, text, **kwargs)
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "reply")
@@ -2177,6 +2186,14 @@ class FlexibleAgentRuntime:
                     getattr(sent, "_hashi_transport_message_id", None)
                     or getattr(sent, "message_id", None)
                 )
+                if transport_message_id is not None:
+                    self.session_store.record_frontend_transport_reference(
+                        session_id=str(publication["session_id"]),
+                        owner_id=str(publication["owner_id"]), connector_id=connector_id,
+                        endpoint_id=str(claim["endpoint_id"]),
+                        transport_message_id=str(transport_message_id),
+                        event_id=str(publication["delivery_event_id"]),
+                    )
                 receipt_status = (
                     "delivered" if transport_message_id is not None else "accepted"
                 )

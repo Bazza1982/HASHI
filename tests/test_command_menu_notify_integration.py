@@ -1,9 +1,7 @@
-"""Run locally in the assembled HASHI environment.
+"""Offline /notify integration with the real executor, registry and SQLite.
 
-Uses the real /notify handler, Telegram SDK markup, command executor, registry
-callback and language/audit helpers. Notification storage is a fixture, so this
-never changes a real installation or contacts Telegram. Not run in the sandbox,
-where the HASHI dependency environment and complete checkout were unavailable.
+Only notification settings are a fixture. No live installation or transport
+is changed; this is not physical frontend acceptance evidence.
 """
 from __future__ import annotations
 
@@ -16,6 +14,7 @@ from unittest.mock import patch
 from orchestrator import admin_local_testing, command_registry, telegram_notifications
 from orchestrator.command_interaction_bridge import dispatch_command_interaction
 from orchestrator.commands.notify import COMMANDS, CALLBACKS
+from orchestrator.session_store import SessionStore
 
 
 class NotifyIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -33,8 +32,10 @@ class NotifyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                                           instance_id='COMMAND_MENU_TEST'),
                          _is_authorized_user=lambda actor: actor == 7,
                          _is_command_allowed=lambda name: name == 'notify')
+            runtime.session_store = SessionStore(root / 'sessions.sqlite3', instance_id='COMMAND_MENU_TEST')
+            selected = runtime.session_store.create_session(owner_id='user:7', agent_id='fixture')
             metadata = {'actor_id': 7, 'instance_id': 'COMMAND_MENU_TEST',
-                        'session_id': 'test-session', 'context_generation': 1,
+                        'session_id': selected['session_id'], 'context_generation': 1,
                         'session_surface': 'workbench', 'session_channel_key': 'default',
                         'connection_binding': 'bindingabcdefghijk'}
             operation = {'version': 1, 'op': 'open', 'command': '/notify', 'ui_locale': 'en',
