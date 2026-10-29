@@ -16,11 +16,20 @@ from orchestrator.command_registry import (
     runtime_bot_commands,
     runtime_registry_notices,
 )
+from orchestrator.session_store import SessionStore
+
+
+def _configure_pao(runtime, root):
+    runtime.name = "fixture"
+    if root is not None:
+        runtime.workspace_dir = root
+        runtime.session_store = SessionStore(root / "sessions.sqlite3", instance_id="REGISTRY_TEST")
 
 
 class _FakeRuntime:
-    def __init__(self):
+    def __init__(self, root=None):
         self.global_config = SimpleNamespace(authorized_id=1)
+        _configure_pao(self, root)
         self.queued = []
 
     async def enqueue_request(self, chat_id, prompt, source, summary, **kwargs):
@@ -69,8 +78,9 @@ class _FakeBackgroundJobManager:
 
 
 class _RuntimeWithNativeCommands:
-    def __init__(self):
+    def __init__(self, root=None):
         self.global_config = SimpleNamespace(authorized_id=1)
+        _configure_pao(self, root)
 
     async def cmd_mode(self, update, context):
         await update.message.reply_text("mode ok")
@@ -304,7 +314,7 @@ async def test_admin_local_command_executes_registered_private_command(monkeypat
         encoding="utf-8",
     )
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
-    runtime = _FakeRuntime()
+    runtime = _FakeRuntime(tmp_path)
 
     result = await execute_local_command(runtime, "/private_sample hello", chat_id=123)
 
@@ -326,7 +336,7 @@ async def test_admin_local_command_exposes_message_text_to_handlers(monkeypatch,
         encoding="utf-8",
     )
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
-    runtime = _FakeRuntime()
+    runtime = _FakeRuntime(tmp_path)
 
     result = await execute_local_command(runtime, "/read_text validate sl-demo", chat_id=123)
 
@@ -335,8 +345,8 @@ async def test_admin_local_command_exposes_message_text_to_handlers(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_bg_command_defaults_to_run_and_preserves_task_text():
-    runtime = _FakeRuntime()
+async def test_bg_command_defaults_to_run_and_preserves_task_text(tmp_path):
+    runtime = _FakeRuntime(tmp_path)
 
     result = await execute_local_command(runtime, "/bg full citalio service for paper 3", chat_id=123)
 
@@ -346,19 +356,18 @@ async def test_bg_command_defaults_to_run_and_preserves_task_text():
     assert runtime.queued[0]["chat_id"] == 123
     assert runtime.queued[0]["source"] == "background:prompt"
     assert runtime.queued[0]["summary"] == "Background task: full citalio service for paper 3"
-    assert runtime.queued[0]["request_metadata"] == {
-        "agent_activity_context": {
-            "kind": "background_request",
-            "trigger": "user",
-        }
-    }
+    activity = runtime.queued[0]["request_metadata"]["agent_activity_context"]
+    assert activity["kind"] == "background_request"
+    assert activity["trigger"] == "user"
+    assert activity["origin_session_id"]
+    assert activity["origin_context_generation"] == 1
     assert "--- USER TASK ---\nfull citalio service for paper 3" in runtime.queued[0]["prompt"]
     assert "BackgroundJobManager" in runtime.queued[0]["prompt"]
 
 
 @pytest.mark.asyncio
-async def test_bg_command_run_alias_matches_default_run():
-    runtime = _FakeRuntime()
+async def test_bg_command_run_alias_matches_default_run(tmp_path):
+    runtime = _FakeRuntime(tmp_path)
 
     result = await execute_local_command(runtime, "/bg run quoted task", chat_id=123)
 
@@ -398,8 +407,8 @@ async def test_bg_command_freezes_origin_conversation_generation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bg_command_reserved_status_is_not_treated_as_task():
-    runtime = _FakeRuntime()
+async def test_bg_command_reserved_status_is_not_treated_as_task(tmp_path):
+    runtime = _FakeRuntime(tmp_path)
     runtime.background_job_manager = _FakeBackgroundJobManager()
 
     result = await execute_local_command(runtime, "/bg status", chat_id=123)
@@ -410,8 +419,8 @@ async def test_bg_command_reserved_status_is_not_treated_as_task():
 
 
 @pytest.mark.asyncio
-async def test_bg_command_tail_uses_background_job_manager():
-    runtime = _FakeRuntime()
+async def test_bg_command_tail_uses_background_job_manager(tmp_path):
+    runtime = _FakeRuntime(tmp_path)
     runtime.background_job_manager = _FakeBackgroundJobManager()
 
     result = await execute_local_command(runtime, "/bg tail job-test", chat_id=123)
@@ -431,7 +440,7 @@ def test_admin_supported_commands_include_runtime_bound_native_commands():
 
 @pytest.mark.asyncio
 async def test_admin_local_command_supports_declared_native_alias(tmp_path):
-    runtime = _RuntimeWithNativeCommands()
+    runtime = _RuntimeWithNativeCommands(tmp_path)
     runtime.workspace_dir = tmp_path
 
     commands = supported_commands(runtime)
@@ -445,8 +454,8 @@ async def test_admin_local_command_supports_declared_native_alias(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_admin_local_command_allows_supported_restart(monkeypatch):
-    runtime = _FakeRuntime()
+async def test_admin_local_command_allows_supported_restart(monkeypatch, tmp_path):
+    runtime = _FakeRuntime(tmp_path)
     called = []
 
     async def restart_callback(_runtime, update, context):
