@@ -44,13 +44,17 @@ def _security_api():
     return kernel, security
 
 
-def create_private_job(kernel, name, owner_sid):
+def create_private_job(kernel, name, owner_sid, *, assignees=()):
     _validate(name, owner_sid)
     memory, security = _security_api()
     descriptor = wintypes.LPVOID()
     # Explicit owner and protected DACL; no broad application-package/user
     # trustee, no inherited handle and no new Windows privilege is requested.
-    sddl = f"O:{owner_sid}D:P(A;;GA;;;{owner_sid})(A;;GA;;;SY)(A;;GA;;;BA)"
+    for trustee in assignees:
+        _validate(name, trustee)
+    # A separate trusted Runner may assign/query, never terminate this parent.
+    delegated = "".join(f"(A;;0x20005;;;{trustee})" for trustee in dict.fromkeys(assignees))
+    sddl = f"O:{owner_sid}D:P(A;;GA;;;{owner_sid})(A;;GA;;;SY)(A;;GA;;;BA)" + delegated
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
         raise ctypes.WinError(ctypes.get_last_error())
 
@@ -73,11 +77,11 @@ def create_private_job(kernel, name, owner_sid):
         memory.LocalFree(descriptor)
 
 
-def open_private_job(kernel, name, owner_sid):
+def open_private_job(kernel, name, owner_sid, *, access=0x0004 | 0x0008 | 0x00020000):
     _validate(name, owner_sid)
     kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.OpenJobObjectW.restype = wintypes.HANDLE
-    handle = kernel.OpenJobObjectW(0x0004 | 0x0008 | 0x00020000, False, name)
+    handle = kernel.OpenJobObjectW(access, False, name)
     if not handle:
         error = ctypes.get_last_error()
         if error == 2:

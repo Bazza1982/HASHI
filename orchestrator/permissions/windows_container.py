@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+import re
 from uuid import uuid4
 
 
@@ -48,7 +49,26 @@ def protect_task_scratch(path, *, runner_sid, appcontainer_sid):
 
 
 class TaskContainerProfile:
-    def __init__(self):
+    @staticmethod
+    def _name(name):
+        if not isinstance(name, str) or re.fullmatch(r"HASHI\.Task\.[0-9a-f]{32}", name) is None:
+            raise ValueError("an exact private task profile reservation is required")
+        return name
+
+    @classmethod
+    def remove_reserved(cls, name):
+        cls._name(name)
+        if os.name != "nt":
+            raise OSError("native AppContainer profiles are required")
+        userenv = ctypes.WinDLL("userenv", use_last_error=True)
+        userenv.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
+        userenv.DeleteAppContainerProfile.restype = ctypes.c_long
+        status = userenv.DeleteAppContainerProfile(name)
+        if status < 0 and status & 0xFFFFFFFF != 0x80070002:
+            raise OSError(status & 0xFFFFFFFF, "task AppContainer profile cleanup is unverified")
+        return True
+
+    def __init__(self, name=None):
         if os.name != "nt":
             raise OSError("native AppContainer profiles are required")
         userenv = ctypes.WinDLL("userenv", use_last_error=True)
@@ -65,7 +85,7 @@ class TaskContainerProfile:
         security.ConvertSidToStringSidW.restype = wintypes.BOOL
         kernel.LocalFree.argtypes, kernel.LocalFree.restype = [wintypes.LPVOID], wintypes.LPVOID
         security.FreeSid.argtypes, security.FreeSid.restype = [wintypes.LPVOID], wintypes.LPVOID
-        self.name, self._api, self._closed = "HASHI.Task." + uuid4().hex, userenv, False
+        self.name, self._api, self._closed = self._name(name or ("HASHI.Task." + uuid4().hex)), userenv, False
         pointer = wintypes.LPVOID()
         status = userenv.CreateAppContainerProfile(self.name, self.name, self.name, None, 0, ctypes.byref(pointer))
         if status < 0 or not pointer:

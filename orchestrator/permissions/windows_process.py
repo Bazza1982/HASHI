@@ -58,6 +58,7 @@ class ProcessObservation:
     atomic_job: bool
     executable_digest: str
     creation_time_100ns: int = 0
+    parent_job_count: int = 0
 
 
 def _api():
@@ -79,6 +80,7 @@ def _api():
                              ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME)], wintypes.BOOL),
         "WaitForSingleObject": ([_HANDLE, _DWORD], _DWORD),
         "GetExitCodeProcess": ([_HANDLE, ctypes.POINTER(_DWORD)], wintypes.BOOL),
+        "IsProcessInJob": ([_HANDLE, _HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
         "CloseHandle": ([_HANDLE], wintypes.BOOL),
         "TerminateProcess": ([_HANDLE, wintypes.UINT], wintypes.BOOL),
         "LocalFree": ([wintypes.HLOCAL], wintypes.HLOCAL),
@@ -141,7 +143,7 @@ def observe_original_process_stopped(observation):
         _checked(kernel.CloseHandle(handle))
 
 
-def _observe(process, kernel, security, job, digest):
+def _observe(process, kernel, security, job, digest, parent_jobs=()):
     token = _HANDLE()
     _checked(security.OpenProcessToken(process.process, 0x0008, ctypes.byref(token)))
     try:
@@ -162,11 +164,16 @@ def _observe(process, kernel, security, job, digest):
         app_sid = _sid_text(ctypes.cast(data(31), ctypes.POINTER(_PTR))[0], kernel, security) if container else None
         capability_count = int(ctypes.cast(data(30), ctypes.POINTER(_DWORD))[0]) if container else 0
         lpac = token_is_lpac(token, security) if container else False
+        parent_bound = True
+        for parent in parent_jobs:
+            contained = wintypes.BOOL()
+            _checked(kernel.IsProcessInJob(process.process, parent, ctypes.byref(contained)))
+            parent_bound = parent_bound and bool(contained.value)
         return ProcessObservation(
             int(process.pid), user_sid, app_sid, capability_count,
             lpac,
-            bool(ctypes.cast(data(20), ctypes.POINTER(_DWORD))[0]), job.contains(process.process), digest,
-            _creation_time(process.process, kernel),
+            bool(ctypes.cast(data(20), ctypes.POINTER(_DWORD))[0]), job.contains(process.process) and parent_bound, digest,
+            _creation_time(process.process, kernel), len(parent_jobs),
         )
     finally:
         kernel.CloseHandle(token)
@@ -250,7 +257,7 @@ def inheritable_handle_copy(handle):
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),
-                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None):
+                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None, parent_jobs=()):
     kernel, security = _api()
     executable, cwd = Path(executable), Path(cwd)
     if (not executable.is_absolute() or not cwd.is_absolute() or not cwd.is_dir()
@@ -285,7 +292,9 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                 attributes, 0, kind, ctypes.byref(value), ctypes.sizeof(value), None, None,
             ))
 
-        jobs = job.creation_attribute()
+        if not isinstance(parent_jobs, tuple) or any(type(handle) is not int or handle <= 0 for handle in parent_jobs):
+            raise ValueError("verified non-inherited parent Job handles are required")
+        jobs = (_HANDLE * (len(parent_jobs) + 1))(*parent_jobs, job.handle)
         attribute(0x0002000D, jobs)
         if appcontainer_sid:
             _checked(security.ConvertStringSidToSidW(appcontainer_sid, ctypes.byref(sid)))
@@ -326,7 +335,7 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             # stale output values and hide the actual creation error.
             process = _Process()
             raise creation_error
-        observation = _observe(process, kernel, security, job, executable_digest)
+        observation = _observe(process, kernel, security, job, executable_digest, parent_jobs)
         if (observation.user_sid != expected_user_sid or observation.appcontainer_sid != appcontainer_sid
                 or observation.elevated or not observation.atomic_job or observation.capability_count != 0
                 or require_lpac and not observation.lpac):

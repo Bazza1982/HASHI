@@ -36,7 +36,7 @@ def api_result_from_wire(value):
 
 
 class SelectedModelBroker:
-    def __init__(self, authority, binding, *, drivers, run_guard, max_parallel_calls=4, event_sink=None):
+    def __init__(self, authority, binding, *, drivers, run_guard, max_parallel_calls=4, event_sink=None, receipt_store=None):
         if (not isinstance(drivers, dict) or not drivers or type(max_parallel_calls) is not int
                 or not 1 <= max_parallel_calls <= 32):
             raise ValueError("qualified selected model drivers are required")
@@ -49,13 +49,16 @@ class SelectedModelBroker:
         self._event_sink = event_sink
         self._active = set()
         self._receipts = []
+        self._receipt_store = receipt_store
 
     def _current(self):
         status = self._authority.execution_status(self._binding.context)
         if status.task_state != "active" or status.binding_state != "active":
             raise PermissionDenied("selected model capability is inactive")
 
-    async def provider_call(self, *, engine, model, payload, use_stream):
+    async def provider_call(self, *, engine, model, payload, use_stream, origin="host"):
+        if origin not in {"host", "worker"}:
+            raise PermissionDenied("invalid model accounting owner")
         if type(use_stream) is not bool or not isinstance(payload, dict) or set(payload) - _MODEL_FIELDS:
             raise PermissionDenied("model payload exceeds the inference capability")
         if payload.get("model") != model or not isinstance(model, str) or not isinstance(engine, str):
@@ -81,11 +84,13 @@ class SelectedModelBroker:
                 self._active.add(task)
             request = monitor = None
             receipt = {"id": uuid4().hex, "engine": engine, "model": model, "status": "unknown",
-                       "token_source": "unknown", "input_tokens": 0, "output_tokens": 0,
+                       "origin": origin, "execution_epoch": self._binding.context.execution_epoch, "token_source": "unknown", "input_tokens": 0, "output_tokens": 0,
                        "thinking_tokens": 0, "cost_usd": None, "provider_ids": [], "tool_batch": False,
                        "prompt_cache_hit_tokens": None, "prompt_cache_miss_tokens": None}
-            self._receipts.append(receipt)
             try:
+                if self._receipt_store is not None:
+                    self._receipt_store.reserve(self._binding, receipt)
+                self._receipts.append(receipt)
                 headers = driver._request_headers()
                 request = asyncio.create_task(
                     driver._stream_api_once(frozen, headers, self._event_sink) if use_stream
@@ -118,6 +123,8 @@ class SelectedModelBroker:
                     prompt_cache_hit_tokens=result.prompt_cache_hit_tokens,
                     prompt_cache_miss_tokens=result.prompt_cache_miss_tokens,
                 )
+                if self._receipt_store is not None:
+                    self._receipt_store.complete(self._binding, receipt)
                 with self._run_guard(self._binding.context):
                     self._current()
                 return api_result_to_wire(result)
@@ -137,8 +144,15 @@ class SelectedModelBroker:
                         raise OSError("selected model request stop is unverified")
                 self._active.discard(task)
 
-    def usage_receipts(self):
-        return json.loads(json.dumps(self._receipts, allow_nan=False))
+    def commit_usage(self, projections):
+        if self._receipt_store is None:
+            raise OSError("durable model observations are unavailable")
+        return self._receipt_store.commit_projections(self._binding, projections)
+
+    def usage_receipts(self, *, origin="host"):
+        if self._receipt_store is not None:
+            return self._receipt_store.observations(self._binding, origin=origin)
+        return json.loads(json.dumps([item for item in self._receipts if item.get("origin", "host") == origin], allow_nan=False))
 
     async def close(self):
         tasks = tuple(task for task in self._active if task is not asyncio.current_task())

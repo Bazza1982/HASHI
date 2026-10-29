@@ -185,6 +185,10 @@ jobs:
           tests/test_permission_installed_boundaries.py
           tests/test_permission_start_wait.py
           tests/test_permission_physical_journal.py
+          tests/test_permission_runner_records.py
+          tests/test_permission_model_receipts.py
+          tests/test_permission_runtime_ports.py
+          tests/test_permission_questions.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py
@@ -255,6 +259,10 @@ jobs:
           tests/test_permission_installed_boundaries.py
           tests/test_permission_start_wait.py
           tests/test_permission_physical_journal.py
+          tests/test_permission_runner_records.py
+          tests/test_permission_model_receipts.py
+          tests/test_permission_runtime_ports.py
+          tests/test_permission_questions.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py

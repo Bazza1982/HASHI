@@ -13,9 +13,14 @@ import json
 from orchestrator.her_v2.config import HERv2Config, ProviderProfile, ProviderTarget
 from orchestrator.her_v2.models import DeliveryRecord, Effort, Route, Stage, TerminalState, TriageClassification, TurnResult
 from orchestrator.her_v2.v3_config import CompanionConfig
+from orchestrator.her_v2.presentation import (RequiredUserMessage, RenderedRequiredMessage,
+    PresentationRequirement, FinalStyleRequest, FinalStyleResult)
+from orchestrator.her_v2.commentary import NeutralCommentary, DraftResponseCommentary
 
 _CLASSES = {c.__name__: c for c in (HERv2Config, ProviderProfile, ProviderTarget, CompanionConfig,
-                                     TurnResult, DeliveryRecord)}
+                                     TurnResult, DeliveryRecord, RequiredUserMessage, RenderedRequiredMessage,
+                                     PresentationRequirement, FinalStyleRequest, FinalStyleResult,
+                                     NeutralCommentary, DraftResponseCommentary)}
 _ENUMS = {c.__name__: c for c in (Effort, Route, Stage, TerminalState, TriageClassification)}
 
 

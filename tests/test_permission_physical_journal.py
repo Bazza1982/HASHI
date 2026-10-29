@@ -142,6 +142,49 @@ def test_unverified_job_stop_cannot_be_replaced_by_a_dead_root_pid(tmp_path):
     assert authority.operation_state("original-operation") == "unknown"
 
 
+
+@pytest.mark.asyncio
+async def test_worker_only_execution_cleanup_does_not_depend_on_an_unavailable_l2_runner(tmp_path):
+    from orchestrator.permissions.models import RuntimeExecutionBinding
+    from orchestrator.permissions.native_factory import InstalledExecutorFactory
+
+    authority, context, _, journal, _, _ = interrupted(tmp_path)
+    binding = RuntimeExecutionBinding(context, "request", 1, "INSTANCE:agent")
+    journal.record_execution(binding, native_host=False)
+    class Unavailable:
+        async def stop(self, binding):
+            pytest.fail("worker-only execution never created a host in this Runner")
+    factory = InstalledExecutorFactory.__new__(InstalledExecutorFactory)
+    factory.authority, factory.physical_journal, factory._owned = authority, journal, {}
+    factory.runner = Unavailable()
+    assert await factory.retire(binding) is True
+    assert journal.execution_retired(binding)
+
+
+@pytest.mark.asyncio
+async def test_a_verified_retired_host_is_not_reopened_by_a_late_old_worker_close(tmp_path):
+    from orchestrator.permissions.models import RuntimeExecutionBinding
+    from orchestrator.permissions.native_factory import InstalledExecutorFactory
+
+    authority, context, _, journal, _, _ = interrupted(tmp_path)
+    binding = RuntimeExecutionBinding(context, "request", 1, "INSTANCE:agent")
+    journal.record_execution(binding, native_host=False)
+    journal.prepare_native_host(binding)
+    class Runner:
+        calls = 0
+        async def stop(self, binding):
+            self.calls += 1
+            if self.calls > 1:
+                raise OSError("Runner has since become unavailable")
+            return True
+    factory = InstalledExecutorFactory.__new__(InstalledExecutorFactory)
+    factory.authority, factory.physical_journal, factory._owned = authority, journal, {}
+    factory.runner = Runner()
+    assert await factory.retire(binding) is True
+    assert await factory.retire(binding) is True
+    assert factory.runner.calls == 1
+
+
 def test_damaged_physical_evidence_cannot_release_a_claim(tmp_path):
     authority, _, claim, journal, _, _ = interrupted(tmp_path)
     with journal._connection() as connection:

@@ -77,11 +77,28 @@ def _job_kernel():
     return kernel
 
 
+class _AssignmentJob:
+    def __init__(self, kernel, handle):
+        self._kernel, self._handle = kernel, handle
+
+    @property
+    def handle(self):
+        if self._handle is None:
+            raise JobControlError("the parent Job reference is closed")
+        return self._handle
+
+    def close(self):
+        if self._handle is not None:
+            if not self._kernel.CloseHandle(self._handle):
+                raise JobControlError("parent Job reference cleanup is unverified")
+            self._handle = None
+
+
 class WindowsJob:
     _recovery_owners = {}
     _recovery_lock = threading.RLock()
 
-    def __init__(self, *, max_processes=None, name=None, owner_sid=None) -> None:
+    def __init__(self, *, max_processes=None, name=None, owner_sid=None, assignees=()) -> None:
         if max_processes is not None and (type(max_processes) is not int or max_processes <= 0):
             raise ValueError("a positive explicit Job process limit is required")
         if os.name != "nt":
@@ -92,7 +109,7 @@ class WindowsJob:
             raise ValueError("a recoverable Job requires both its name and owner SID")
         self.name, self.owner_sid = name, owner_sid
         self._handle = (kernel.CreateJobObjectW(None, None) if name is None
-                        else create_private_job(kernel, name, owner_sid))
+                        else create_private_job(kernel, name, owner_sid, assignees=assignees))
         if not self._handle:
             raise JobControlError(ctypes.get_last_error(), "cannot create execution Job")
         self._stopped = False
@@ -119,6 +136,20 @@ class WindowsJob:
             self._handle = None
             raise
 
+    @staticmethod
+    def open_parent(name, owner_sid):
+        kernel = _job_kernel()
+        handle = open_private_job(kernel, name, owner_sid, access=0x20005)
+        if handle is None:
+            raise JobControlError("the owning Safety process has no live parent Job")
+        parent = _AssignmentJob(kernel, handle)
+        limits = _ExtendedLimit()
+        if not kernel.QueryInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits), None
+        ) or (limits.basic.flags & 0x3800) != 0x2000:
+            parent.close()
+            raise JobControlError("the Safety parent Job has unverified containment")
+        return parent
+
     @classmethod
     def recover_stop(cls, name, owner_sid, *, max_processes=1, timeout_ms=4500):
         """Stop only a reserved, owner-verified original Job; absence is kernel evidence."""
@@ -140,7 +171,8 @@ class WindowsJob:
             ):
                 raise JobControlError("the reserved Job limits could not be observed")
             if (observed.basic.flags & 0x3800) != 0x2000 or (
-                not observed.basic.flags & 0x8 or observed.basic.active_process_limit != max_processes
+                max_processes is not None and (not observed.basic.flags & 0x8
+                                               or observed.basic.active_process_limit != max_processes)
             ):
                 # A crash can occur after CreateJobObject but before limits
                 # are installed. Only the kernel's never-assigned count can

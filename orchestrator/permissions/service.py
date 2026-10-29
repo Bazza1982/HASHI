@@ -183,6 +183,20 @@ class PermissionServiceApplication:
         executor = self.runs.execution_registry(binding)
         return await executor.configure_inference(unpack(config))
 
+    def project_model_usage(self, *, binding, projections):
+        executor = self.runs.execution_registry(binding)
+        executor.channel._current()
+        return executor.channel._models.commit_usage(projections)
+
+    async def auxiliary_provider_call(self, *, binding, engine, model, payload, use_stream):
+        executor = self.runs.execution_registry(binding)
+        executor.channel._current()
+        result = await executor.channel._models.provider_call(
+            engine=engine, model=model, payload=payload, use_stream=use_stream, origin="worker",
+        )
+        executor.channel._current()
+        return result
+
     async def run_her(self, *, binding, command):
         executor = self.runs.execution_registry(binding)
         # The actual fixed host launcher, not this application, owns OS

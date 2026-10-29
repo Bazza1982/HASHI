@@ -76,6 +76,7 @@ async def serve(path):
         previous[kind] = signal.getsignal(kind)
         signal.signal(kind, lambda *args: loop.call_soon_threadsafe(stopped.set))
     try:
+        await asyncio.to_thread(runner.records.recover_all)
         await endpoint.start()
         await stopped.wait()
     finally:

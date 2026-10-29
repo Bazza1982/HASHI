@@ -4,25 +4,18 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from hashlib import sha256
-import json
 from multiprocessing import Pipe
 from pathlib import Path
-import shutil
 
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.ipc_rpc import emit_private_event
-from orchestrator.permissions.models import RuntimeExecutionBinding
+from orchestrator.permissions.runner_records import RunnerRecords, binding_digest as _binding_digest
 from orchestrator.permissions.windows_container import TaskContainerProfile, protect_task_scratch
 from orchestrator.permissions.windows_ipc import JsonPipe, PipePeerPolicy
-from orchestrator.permissions.windows_process import inheritable_handle_copy, launch_suspended
+from orchestrator.permissions.windows_process import WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended
 from orchestrator.permissions.windows_security import require_nonadmin_identity, require_private_path
+from orchestrator.permissions.windows_jobs import WindowsJob
 from orchestrator.permissions.wire import decode
-
-
-def _binding_digest(binding):
-    if not isinstance(binding, RuntimeExecutionBinding):
-        raise PermissionDenied("a fixed trusted Run binding is required")
-    return sha256(json.dumps(asdict(binding), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 class RestrictedHerRunner:
@@ -45,6 +38,7 @@ class RestrictedHerRunner:
         for root in capsule_roots:
             require_private_path(Path(root), trusted_sids=(runner_sid, safety_sid), read_only_public=True)
         self._owned, self._locks, self._closing = {}, {}, False
+        self.records = RunnerRecords(self.private, instance_id=self.instance_id, runner_sid=self.runner_sid)
         self._verify_images()
 
     def _verify_images(self):
@@ -56,9 +50,10 @@ class RestrictedHerRunner:
         self._verify_images()
         return {"state": "ready", "identity": self.identity, "instance_id": self.instance_id, "safety_sid": self.safety_sid,
                 "worker_sid": self.worker_sid, "executable_digest": self.executable_digest,
-                "entry_digest": self.entry_digest}
+                "entry_digest": self.entry_digest, "runner_contract": 2,
+                "capsule_digest": self.capsule.digest if self.capsule is not None else None}
 
-    async def prepare_host(self, *, binding):
+    async def prepare_host(self, *, binding, parent_job_name):
         identity = _binding_digest(binding)
         if binding.context.instance_id != self.instance_id:
             raise PermissionDenied("host belongs to another installed instance")
@@ -67,43 +62,56 @@ class RestrictedHerRunner:
                 raise PermissionDenied("the Runner is closing")
             existing = self._owned.get(identity)
             if existing is not None:
-                if existing["binding"] != binding or existing["started"]:
+                if existing["binding"] != binding or existing["started"] or existing["process"] is None:
                     raise PermissionDenied("host was already started or rebound")
                 return asdict(existing["process"].observation)
             self._verify_images()
-            profile = TaskContainerProfile()
-            scratch = self.private / ("host-" + identity)
+            reserved = self.records.reserve(binding)
+            scratch = Path(reserved["scratch"])
+            record = {"binding": binding, "profile": None, "scratch": scratch, "pipe": None,
+                      "process": None, "started": False, "lock": asyncio.Lock(),
+                      "transfer": None, "child": None, "parent_job": None}
+            self._owned[identity] = record
             parent = child = owned = kernel = transfer = None
             try:
+                parent_job = WindowsJob.open_parent(parent_job_name, self.safety_sid)
+                record["parent_job"] = parent_job
+                profile = TaskContainerProfile(reserved["profile"])
+                record["profile"] = profile
                 scratch.mkdir(exist_ok=False)
                 protect_task_scratch(scratch, runner_sid=self.runner_sid, appcontainer_sid=profile.sid)
                 parent, child = Pipe(duplex=True)
+                record["pipe"], record["child"] = JsonPipe(parent), child
+                parent = None
                 kernel, transfer = inheritable_handle_copy(child.fileno())
+                record.update(transfer=transfer, transfer_kernel=kernel)
                 owned = launch_suspended(
-                    executable=self.executable, arguments=["-I", "-S", str(self.entry), str(transfer), str(scratch)],
+                    executable=self.executable, arguments=["-I", "-S", "-B", str(self.entry), str(transfer), str(scratch)],
                     cwd=scratch, environment={**self.environment, "TMP": str(scratch), "TEMP": str(scratch)},
                     expected_user_sid=self.runner_sid,
                     executable_digest=self.executable_digest, inherited_handles=(transfer,),
-                    appcontainer_sid=profile.sid, require_lpac=True,
+                    appcontainer_sid=profile.sid, require_lpac=True, max_processes=1, job_name=reserved["job_name"],
+                    parent_jobs=(int(parent_job.handle),),
                 )
-                record = {"binding": binding, "profile": profile, "scratch": scratch,
-                          "pipe": JsonPipe(parent), "process": owned, "started": False,
-                          "lock": asyncio.Lock()}
-                parent = None
-                self._owned[identity] = record
+                record["process"] = owned
+                self.records.observe(binding, owned.observation)
                 return asdict(owned.observation)
-            except BaseException:
-                if owned is not None:
-                    await asyncio.to_thread(owned.stop, timeout_ms=4500)
-                profile.close()
-                if scratch.exists():
-                    shutil.rmtree(scratch)
+            except BaseException as error:
+                if isinstance(error, WindowsProcessCleanupFailed):
+                    record["launch_failure"] = error
+                await self.stop_host(binding=binding)
                 raise
             finally:
-                if transfer is not None and not kernel.CloseHandle(transfer):
-                    raise OSError("host transfer handle cleanup is unverified")
-                if child is not None:
-                    child.close()
+                if record["parent_job"] is not None:
+                    record["parent_job"].close()
+                    record["parent_job"] = None
+                if record["transfer"] is not None:
+                    if not kernel.CloseHandle(record["transfer"]):
+                        raise OSError("host transfer handle cleanup is unverified")
+                    record["transfer"] = None
+                if record["child"] is not None:
+                    record["child"].close()
+                    record["child"] = None
                 if parent is not None:
                     parent.close()
 
@@ -149,17 +157,34 @@ class RestrictedHerRunner:
         identity = _binding_digest(binding)
         record = self._owned.get(identity)
         if record is None:
+            await asyncio.to_thread(self.records.retire, binding)
             return {"stopped": True, "already_stopped": True}
         if record["binding"] != binding:
             raise PermissionDenied("another execution owns this host")
         async with record["lock"]:
-            await asyncio.to_thread(record["process"].stop, timeout_ms=4500)
-            record["pipe"].close()
-            await asyncio.to_thread(record["profile"].close)
-            if record["scratch"].exists():
-                await asyncio.to_thread(shutil.rmtree, record["scratch"])
+            if record.get("launch_failure") is not None:
+                await asyncio.to_thread(record["launch_failure"].retry_cleanup)
+                record.pop("launch_failure")
+            process = record["process"]
+            if process is not None:
+                await asyncio.to_thread(process.stop, timeout_ms=4500)
+            if record["parent_job"] is not None:
+                record["parent_job"].close()
+                record["parent_job"] = None
+            if record["pipe"] is not None:
+                record["pipe"].close()
+            if record["child"] is not None:
+                record["child"].close()
+                record["child"] = None
+            if record["transfer"] is not None:
+                if not record["transfer_kernel"].CloseHandle(record["transfer"]):
+                    raise OSError("host transfer handle cleanup is unverified")
+                record["transfer"] = None
+            await asyncio.to_thread(self.records.retire, binding, process_stopped=process is not None)
+            if record["profile"] is not None:
+                record["profile"]._closed = True
             self._owned.pop(identity, None)
-            return {"stopped": True, "process_id": record["process"].observation.process_id,
+            return {"stopped": True, "process_id": process.observation.process_id if process is not None else None,
                     "zero_job": True}
 
     async def close(self):
@@ -170,16 +195,20 @@ class RestrictedHerRunner:
         )
         if any(isinstance(result, BaseException) for result in results) or self._owned:
             raise OSError("Runner cleanup remains unverified")
+        await asyncio.to_thread(self.records.recover_all)
+        if self.records.pending():
+            raise OSError("persistent Runner cleanup remains unverified")
         return True
 
 
 class RunnerClient:
     """Safety's pinned private Runner client; no host receives this surface."""
 
-    def __init__(self, client, *, runner_sid, safety_sid, worker_sid, instance_id):
+    def __init__(self, client, *, runner_sid, safety_sid, worker_sid, instance_id, capsule_digest=None):
         self.client, self.runner_sid, self.safety_sid, self.worker_sid = client, runner_sid, safety_sid, worker_sid
-        self.instance_id = instance_id
+        self.instance_id, self.capsule_digest = instance_id, capsule_digest
         self.observation, self._prepared = None, {}
+        self.parent_job_name = None
 
     async def qualify(self):
         return self._accept_qualification(await self.client.call_async("health", {}))
@@ -189,7 +218,8 @@ class RunnerClient:
 
     def _accept_qualification(self, result):
         if (not isinstance(result, dict) or result.get("state") != "ready"
-                or result.get("instance_id") != self.instance_id
+                or result.get("instance_id") != self.instance_id or result.get("runner_contract") != 2
+                or (self.capsule_digest is not None and result.get("capsule_digest") != self.capsule_digest)
                 or result.get("identity") != {"user_sid": self.runner_sid, "elevated": False,
                                               "administrator_member": False}
                 or result.get("safety_sid") != self.safety_sid or result.get("worker_sid") != self.worker_sid
@@ -199,15 +229,18 @@ class RunnerClient:
         return True
 
     def qualified_for(self, safety_sid, worker_sid):
-        return (self.observation is not None and self.safety_sid == safety_sid and self.worker_sid == worker_sid)
+        return (self.observation is not None and self.parent_job_name is not None and self.safety_sid == safety_sid and self.worker_sid == worker_sid)
 
     async def prepare(self, binding):
         if self.observation is None or binding.context.instance_id != self.instance_id:
             raise PermissionDenied("the Runner is not qualified for this instance")
-        result = await self.client.call_async("prepare_host", {"binding": binding})
+        if self.parent_job_name is None:
+            raise PermissionDenied("the owning Safety process has no parent Job")
+        result = await self.client.call_async("prepare_host", {"binding": binding, "parent_job_name": self.parent_job_name})
         if (not isinstance(result, dict) or result.get("user_sid") != self.runner_sid
                 or result.get("elevated") is not False or result.get("atomic_job") is not True
                 or result.get("lpac") is not True or result.get("capability_count") != 0
+                or result.get("parent_job_count") != 1
                 or result.get("executable_digest") != self.observation["executable_digest"]
                 or not isinstance(result.get("appcontainer_sid"), str)
                 or type(result.get("process_id")) is not int):

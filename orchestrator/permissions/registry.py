@@ -38,6 +38,7 @@ class ManagedToolRegistry(ToolRegistry):
         permission_supervisor: Any,
         requestable_scopes: tuple[Scope, ...],
         durable_wait: bool = False,
+        ordinary_questions: Any = None,
         **legacy_options: Any,
     ) -> None:
         if secrets:
@@ -45,6 +46,7 @@ class ManagedToolRegistry(ToolRegistry):
         if type(durable_wait) is not bool:
             raise ValueError("durable wait must be explicit")
         self.permission_durable_wait = durable_wait
+        self._ordinary_questions = ordinary_questions
         super().__init__(
             allowed_tools=allowed_tools, access_root=access_root,
             workspace_dir=workspace_dir, secrets={}, **legacy_options,
@@ -106,7 +108,19 @@ class ManagedToolRegistry(ToolRegistry):
     ) -> ToolResult | GateResult:
         # Ordinary questions remain ordinary questions and never grant access.
         if tool_name in _ORDINARY_QUESTION_NAMES:
-            return await super().execute(tool_name, arguments, tool_call_id)
+            if self._ordinary_questions is None:
+                if not self.permission_durable_wait:
+                    return await super().execute(tool_name, arguments, tool_call_id)
+                return ToolResult(tool_call_id=tool_call_id, output="Error: question_scope_unavailable", is_error=True)
+            started = time.monotonic()
+            admission = self.evaluate_admission(tool_name, arguments, str(tool_call_id or ""))
+            if admission is not None:
+                return self._finish_result(tool_name, arguments, admission, started)
+            output = await self._ordinary_questions.execute(tool_name, arguments, str(tool_call_id or ""))
+            return self._finish_result(tool_name, arguments, ToolResult(
+                tool_call_id=tool_call_id, output=output, is_error=output.startswith("Error:"),
+                details={"grants_permissions": False},
+            ), started)
         started = time.monotonic()
         call_id = str(tool_call_id or "")
         admission = self.evaluate_admission(tool_name, arguments, call_id)

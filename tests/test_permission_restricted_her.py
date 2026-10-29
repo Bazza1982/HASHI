@@ -50,6 +50,9 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
 
     class Connection:
         def call(self, method, arguments):
+            if method == "runtime_port":
+                assert arguments["operation"] == "manifest"
+                return pack({"operations": [], "allow_immediate_response": False, "workzone_ref": str(tmp_path)})
             if method == "provider_checkpoint":
                 metadata = coordinator.record_provider_context_checkpoint(turn, arguments["checkpoint"])
                 checkpoints.append(coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id))
@@ -123,6 +126,9 @@ async def test_service_loss_before_first_model_answer_retains_the_exact_ready_re
 
     class Connection:
         def call(self, method, arguments):
+            if method == "runtime_port":
+                assert arguments["operation"] == "manifest"
+                return pack({"operations": [], "allow_immediate_response": False, "workzone_ref": str(tmp_path)})
             if method == "provider_checkpoint":
                 result = coordinator.record_provider_context_checkpoint(turn, arguments["checkpoint"])
                 checkpoints.append(coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id))

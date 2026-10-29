@@ -26,6 +26,7 @@ class ManagedHerTurn:
     adapter: object | None = None
     accepted: object | None = None
     resumed_unstarted: bool = False
+    runtime: object | None = None
 
     def bind_provider(self, provider):
         binder = getattr(self.executor, "bind_provider", None)
@@ -35,6 +36,7 @@ class ManagedHerTurn:
             provider.tool_registry = getattr(self.executor, "registry", self.executor)
 
     async def run(self, runtime, prompt, request_id, **arguments):
+        self.runtime = runtime
         delegated = getattr(self.executor, "run_her", None)
         if callable(delegated):
             return await delegated(runtime, prompt, request_id, binding=self.binding,
@@ -277,16 +279,22 @@ class PermissionAgentController:
 
     async def close(self):
         self._closing = True
-        for binding in tuple(self._owned_bindings.values()):
-            self.service.authority.fence_execution(binding.context)
+        bindings = tuple(self._owned_bindings.values())
+        errors = await asyncio.gather(*(asyncio.to_thread(
+            self.service.authority.fence_execution, binding.context,
+        ) for binding in bindings), return_exceptions=True)
         if self._wake_task is not None:
             self._wake_task.cancel()
             await asyncio.gather(self._wake_task, return_exceptions=True)
             self._wake_task = None
-        for binding in tuple(self._owned_bindings.values()):
-            await self.service.close_execution(binding=binding)
+        errors.extend(await asyncio.gather(*(self.service.close_execution(binding=binding)
+                                           for binding in bindings), return_exceptions=True))
         if self._callback_endpoint is not None:
-            await self._callback_endpoint.close()
-            self._callback_endpoint = None
+            result = await asyncio.gather(self._callback_endpoint.close(), return_exceptions=True)
+            errors.extend(result)
+            if not isinstance(result[0], BaseException):
+                self._callback_endpoint = None
+        if any(isinstance(error, BaseException) for error in errors):
+            raise OSError("permission Worker cleanup remains unverified")
         self._turns.clear()
         self._owned_bindings.clear()

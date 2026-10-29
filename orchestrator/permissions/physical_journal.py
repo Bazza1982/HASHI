@@ -38,6 +38,108 @@ class PhysicalFileJournal:
                 state TEXT NOT NULL CHECK(state IN ('open','stopped','unknown','finished')),
                 payload BLOB NOT NULL, digest TEXT NOT NULL
             )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS safety_parent_jobs(
+                name TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('active','retired')),
+                payload BLOB NOT NULL, digest TEXT NOT NULL
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS execution_owners(
+                epoch TEXT PRIMARY KEY, binding BLOB NOT NULL, digest TEXT NOT NULL,
+                native_host INTEGER NOT NULL CHECK(native_host IN (0,1)),
+                state TEXT NOT NULL CHECK(state IN ('active','retired'))
+            )""")
+
+    def reserve_parent(self, name, owner_sid):
+        value = {"name": name, "owner_sid": owner_sid, "generation": self.authority._service_generation}
+        data = _encoded(value)
+        with self._connection() as connection:
+            connection.execute("INSERT INTO safety_parent_jobs VALUES(?,'active',?,?)",
+                               (name, data, sha256(data).hexdigest()))
+
+    def retire_parent(self, name):
+        with self._connection() as connection:
+            connection.execute("UPDATE safety_parent_jobs SET state='retired' WHERE name=?", (name,))
+
+    def _recover_parents(self):
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM safety_parent_jobs WHERE state='active'").fetchall()
+        for row in rows:
+            if sha256(row["payload"]).hexdigest() != row["digest"]:
+                raise ValueError("Safety parent Job evidence is damaged")
+            value = json.loads(row["payload"])
+            if value["name"] != row["name"]:
+                raise ValueError("Safety parent Job reservation changed")
+            if value["generation"] == self.authority._service_generation:
+                continue
+            proof = self._recover_job(value["name"], value["owner_sid"], max_processes=None)
+            if not isinstance(proof, dict) or proof.get("zero_job") is not True:
+                raise OSError("the previous Safety process still owns native resources")
+            self.retire_parent(value["name"])
+
+    def record_execution(self, binding, *, native_host):
+        data = _encoded(asdict(binding))
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM execution_owners WHERE epoch=?",
+                                     (binding.context.execution_epoch,)).fetchone()
+            if row is not None:
+                if (row["digest"] != sha256(data).hexdigest() or row["binding"] != data
+                        or bool(row["native_host"]) != native_host or row["state"] != "active"):
+                    raise ValueError("physical execution ownership changed")
+                return
+            connection.execute("INSERT INTO execution_owners VALUES(?,?,?,?,'active')",
+                               (binding.context.execution_epoch, data, sha256(data).hexdigest(), int(native_host)))
+
+    def execution_mode(self, binding):
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM execution_owners WHERE epoch=?",
+                                     (binding.context.execution_epoch,)).fetchone()
+            if row is None:
+                return None
+            data = _encoded(asdict(binding))
+            if row["digest"] != sha256(data).hexdigest() or row["binding"] != data:
+                raise ValueError("physical execution binding changed")
+            return bool(row["native_host"])
+
+    def prepare_native_host(self, binding):
+        # A monotonic physical intention, not a permission or a level switch.
+        self.execution_mode(binding)
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM execution_owners WHERE epoch=?",
+                                     (binding.context.execution_epoch,)).fetchone()
+            if row is None or row["state"] != "active":
+                raise ValueError("native host ownership is unavailable")
+            connection.execute("UPDATE execution_owners SET native_host=1 WHERE epoch=? AND state='active'",
+                               (binding.context.execution_epoch,))
+
+    def execution_retired(self, binding):
+        self.execution_mode(binding)
+        with self._connection() as connection:
+            row = connection.execute("SELECT state FROM execution_owners WHERE epoch=?",
+                                     (binding.context.execution_epoch,)).fetchone()
+            return row is not None and row["state"] == "retired"
+
+    def retire_execution(self, binding):
+        self.execution_mode(binding)
+        with self._connection() as connection:
+            connection.execute("UPDATE execution_owners SET state='retired' WHERE epoch=?",
+                               (binding.context.execution_epoch,))
+
+    def outstanding_executions(self):
+        from orchestrator.permissions.models import RuntimeExecutionBinding
+
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM execution_owners WHERE state='active'").fetchall()
+            result = []
+            for row in rows:
+                if sha256(row["binding"]).hexdigest() != row["digest"]:
+                    raise ValueError("physical execution history is damaged")
+                raw = json.loads(row["binding"])
+                binding = RuntimeExecutionBinding(
+                    ExecutionContext(**raw["context"]), raw["request_id"], raw["fencing_token"], raw["worker_id"],
+                )
+                if binding.context.execution_epoch != row["epoch"]:
+                    raise ValueError("physical execution epoch changed")
+                result.append(binding)
+            return tuple(result)
 
     @contextmanager
     def _connection(self):
@@ -134,6 +236,7 @@ class PhysicalFileJournal:
 
     def reconcile(self):
         """Read original PID identity and fixed result artifacts; never execute."""
+        self._recover_parents()
         for state, value, evidence_digest in self.pending():
             observation = ProcessObservation(**value["observation"]) if value["observation"] is not None else None
             if state != "stopped":

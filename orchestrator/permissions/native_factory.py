@@ -64,6 +64,7 @@ class InstalledExecution:
         callbacks = CallbackClient(descriptor)
         self._callbacks = callbacks
         self.channel._checkpoint = callbacks.checkpoint
+        self.channel._runtime_port = callbacks.runtime_port
         self.channel._audit = lambda record: callbacks.audit(self.binding, record)
 
     async def configure_inference(self, config):
@@ -163,7 +164,7 @@ class InstalledExecutorFactory:
 
     def __init__(self, authority, run_store, *, helper, results, stop_issuer, signing_key,
                  worker_sid, validate_resource, checkpoint_writer, audit_writer, runner=None,
-                 policy_observer=None, model_factory=None, physical_journal=None):
+                 policy_observer=None, model_factory=None, physical_journal=None, parent_job=None):
         helper.verify()
         if (not callable(validate_resource) or not callable(checkpoint_writer) or not callable(audit_writer)
                 or not callable(getattr(stop_issuer, "issue_stop", None))):
@@ -178,7 +179,7 @@ class InstalledExecutorFactory:
         self._closing, self._creates = False, set()
         self._policy_observer = policy_observer
         self.model_factory = model_factory
-        self.physical_journal = physical_journal
+        self.physical_journal, self.parent_job = physical_journal, parent_job
         self.public_key = base64.b64encode(signing_key.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw,
         )).decode("ascii")
@@ -187,7 +188,7 @@ class InstalledExecutorFactory:
         if self._closing:
             raise PermissionDenied("the installed execution owner is closing")
         if policy.settings.requested_level is PermissionLevel.L2:
-            if (self.runner is None or self.sid == self.worker_sid
+            if (self.runner is None or self.parent_job is None or self.sid == self.worker_sid
                     or not self.runner.qualified_for(self.sid, self.worker_sid)):
                 raise PermissionDenied("independent L2 service and runner qualification is unavailable")
         return self.issuer.key_id
@@ -196,6 +197,8 @@ class InstalledExecutorFactory:
         task = asyncio.current_task()
         self._creates.add(task)
         try:
+            if self.physical_journal is not None:
+                self.physical_journal.record_execution(binding, native_host=False)
             self.helper.verify()
             self.executor_id(policy)
             if self._policy_observer is not None:
@@ -215,11 +218,13 @@ class InstalledExecutorFactory:
                 expected_user_sid=self.sid, validate_resource=self.validate_resource,
                 physical_journal=self.physical_journal,
             )
+            from orchestrator.permissions.questions import ScopedRunQuestions
+
             registry = ManagedToolRegistry(
                 allowed_tools=list(policy.allowed_tools), access_root=roots[0], workspace_dir=policy.cwd,
                 secrets={}, permission_authority=self.authority, permission_context=binding.context,
                 permission_supervisor=supervisor, requestable_scopes=policy.requestable_scopes,
-                durable_wait=True, **options,
+                durable_wait=True, ordinary_questions=ScopedRunQuestions(self.store, binding, guard), **options,
             )
             channel = PermissionExecutionChannel(
                 binding, authority=self.authority, run_guard=guard, registry=registry,
@@ -234,6 +239,8 @@ class InstalledExecutorFactory:
                 if policy.settings.requested_level is PermissionLevel.L2:
                     # Register ownership before preparing the suspended host: even
                     # a failed prepare can have native resources to reconcile.
+                    if self.physical_journal is not None:
+                        self.physical_journal.prepare_native_host(binding)
                     peer = await self.runner.prepare(binding)
                 else:
                     peer = PipePeerPolicy(self.worker_sid)
@@ -262,12 +269,25 @@ class InstalledExecutorFactory:
         if executor is None:
             # Service recovery may not invent a clean stop. A separate native
             # resource reconciliation must settle any persisted outstanding Job.
-            if self.runner is not None:
-                await self.runner.stop(binding)
-            return not self.authority.unsettled_resources(binding.context)
+            journal = getattr(self, "physical_journal", None)
+            mode = journal.execution_mode(binding) if journal is not None else None
+            if journal is not None and journal.execution_retired(binding):
+                return not self.authority.unsettled_resources(binding.context)
+            if mode is not False:
+                if self.runner is not None:
+                    await self.runner.stop(binding)
+                elif journal is not None:
+                    raise OSError("the original host owner is unavailable")
+            stopped = not self.authority.unsettled_resources(binding.context)
+            if stopped and journal is not None:
+                journal.retire_execution(binding)
+            return stopped
         if executor.binding != binding:
             raise PermissionDenied("retirement belongs to another binding")
         await executor.close()
+        journal = getattr(self, "physical_journal", None)
+        if journal is not None:
+            journal.retire_execution(binding)
         self._owned.pop(binding.context.execution_epoch, None)
         return True
 
@@ -280,11 +300,21 @@ class InstalledExecutorFactory:
             _, pending = await asyncio.wait(creating, timeout=5)
             if pending:
                 raise OSError("executor preparation cleanup remains unverified")
+        bindings = {executor.binding.context.execution_epoch: executor.binding for executor in tuple(self._owned.values())}
+        journal = getattr(self, "physical_journal", None)
+        if journal is not None:
+            for binding in journal.outstanding_executions():
+                bindings.setdefault(binding.context.execution_epoch, binding)
         results = await asyncio.gather(
-            *(self.retire(executor.binding) for executor in tuple(self._owned.values())),
+            *(self.retire(binding) for binding in bindings.values()),
             return_exceptions=True,
         )
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors or self._owned:
             raise OSError("installed execution resources remain unverified") from (errors[0] if errors else None)
+        parent = getattr(self, "parent_job", None)
+        if parent is not None:
+            await asyncio.to_thread(parent.stop, timeout_ms=4500)
+            if journal is not None:
+                journal.retire_parent(parent.name)
         return True

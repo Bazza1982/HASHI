@@ -11,7 +11,7 @@ from orchestrator.permissions.models import RuntimeExecutionBinding
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.registry import ManagedToolRegistry
 
-EXECUTION_METHODS = frozenset({"tool_execute", "provider_call", "provider_checkpoint", "audit_record"})
+EXECUTION_METHODS = frozenset({"tool_execute", "provider_call", "provider_checkpoint", "audit_record", "runtime_port"})
 
 
 class PermissionExecutionChannel:
@@ -25,6 +25,7 @@ class PermissionExecutionChannel:
         self.binding, self._guard, self._authority = binding, run_guard, authority
         self.registry, self._models = registry, model_broker
         self._checkpoint, self._audit = checkpoint_writer, audit_writer
+        self._runtime_port = None
         self._closed, self._parked = False, False
         self._completed_tool_calls = set()
         self._require_checkpoints = bool(require_checkpoints)
@@ -109,6 +110,14 @@ class PermissionExecutionChannel:
                     checkpoint["messages"], sort_keys=True, separators=(",", ":"), allow_nan=False,
                 ))
             self._pending_calls, self._ready_provider = pending, ready
+
+    async def runtime_port(self, *, operation, arguments):
+        self._current()
+        if self._runtime_port is None:
+            raise PermissionDenied("the actual HER runtime ports are unavailable")
+        result = await self._runtime_port(self.binding, operation, arguments)
+        self._current()
+        return result
 
     async def audit_record(self, *, record):
         self._current()

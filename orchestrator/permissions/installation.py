@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import signal
+from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
@@ -207,9 +208,14 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
                 base64.b64decode(runner_descriptor["public_key"], validate=True),
             ), methods=RestrictedHerRunner.METHODS),
             runner_sid=runner_descriptor["runner_sid"], safety_sid=sid,
-            worker_sid=installation["worker_sid"], instance_id=installation["instance_id"],
+            worker_sid=installation["worker_sid"], instance_id=installation["instance_id"], capsule_digest=capsule.digest,
         )
-        runner.qualify_sync()
+        try:
+            runner.qualify_sync()
+        except OSError:
+            # A temporarily offline L2 Runner must not prevent independent L1
+            # work. Every L2 prepare still requires fresh qualification.
+            runner.observation = None
     for entry in installation["protected_roots"]:
         _path(entry)
 
@@ -237,6 +243,7 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         trusted_supervisor_keys={issuer.key_id: issuer.public_key},
     )
     ownership = InstallationLock(private)
+    parent_job = journal = None
     try:
         authority = PermissionAuthority(private / "permissions.sqlite", verifier=verifier,
                                         baseline_resolver=policies.baseline,
@@ -268,19 +275,29 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
                 or file_helper.environment != capsule.environment):
             raise PermissionDenied("the fixed helper does not match the qualified runtime capsule")
         from orchestrator.permissions.physical_journal import PhysicalFileJournal
+        from orchestrator.permissions.model_receipts import ModelReceiptJournal
 
         result_store = EncryptedResultStore(private / "results.sqlite", key=key_bytes("result_key", 32))
         journal = PhysicalFileJournal(
             private / "physical.sqlite", artifact_root=file_helper.private_root,
             authority=authority, results=result_store, issuer=issuer,
         )
+        if runner is not None:
+            from orchestrator.permissions.windows_jobs import WindowsJob
+            from orchestrator.permissions.windows_job_security import private_job_name
+
+            name = private_job_name(uuid4().hex)
+            journal.reserve_parent(name, sid)
+            parent_job = WindowsJob(name=name, owner_sid=sid, assignees=(runner.runner_sid,))
+            runner.parent_job_name = name
         factory = InstalledExecutorFactory(
             authority, store, helper=file_helper, results=result_store, physical_journal=journal,
             stop_issuer=issuer, signing_key=transport, worker_sid=installation["worker_sid"],
             validate_resource=policies.validate, checkpoint_writer=checkpoint_writer or _CheckpointUnavailable(),
             audit_writer=audit_writer or _CheckpointUnavailable(), runner=runner,
-            policy_observer=policies.freeze,
-            model_factory=ConfiguredModelFactory(manager, authority, private_workspace=private),
+            policy_observer=policies.freeze, parent_job=parent_job,
+            model_factory=ConfiguredModelFactory(manager, authority, private_workspace=private,
+                                                 receipt_store=ModelReceiptJournal(private / "model-receipts.sqlite")),
         )
         qualified_l2 = runner is not None and runner.qualified_for(sid, installation["worker_sid"])
         levels = ("L1", "L2") if qualified_l2 else ("L1",)
@@ -321,6 +338,11 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         ))
         return application, prepared
     except BaseException:
+        # Closing this owner kills any nested native hosts. Only a confirmed
+        # zero-process Job may be retired and release installation ownership.
+        if parent_job is not None:
+            parent_job.stop(timeout_ms=4500)
+            journal.retire_parent(parent_job.name)
         ownership.close()
         raise
 

@@ -22,7 +22,7 @@ from orchestrator.permissions.wire import PermissionServiceRouter
 
 
 class WorkerHerCallbacks:
-    METHODS = frozenset({"provider_checkpoint", "audit_record", "recovery_context"})
+    METHODS = frozenset({"provider_checkpoint", "audit_record", "recovery_context", "runtime_port"})
 
     def __init__(self, controller):
         self.controller = controller
@@ -38,6 +38,15 @@ class WorkerHerCallbacks:
         with guard(binding.context):
             pass
         return turn, guard
+
+    async def runtime_port(self, *, binding, operation, arguments):
+        from orchestrator.permissions.runtime_ports import invoke
+
+        turn, guard = self._turn(binding)
+        result = await invoke(turn, operation, arguments)
+        with guard(binding.context):
+            pass
+        return result
 
     async def recovery_context(self, *, binding):
         turn, guard = self._turn(binding)
@@ -106,6 +115,11 @@ class CallbackClient:
                 descriptor["public_key"], validate=True,
             )), methods=WorkerHerCallbacks.METHODS,
         )
+
+    async def runtime_port(self, binding, operation, arguments):
+        return await self.client.call_async("runtime_port", {
+            "binding": binding, "operation": operation, "arguments": arguments,
+        })
 
     async def recovery(self, binding):
         return await self.client.call_async("recovery_context", {"binding": binding})

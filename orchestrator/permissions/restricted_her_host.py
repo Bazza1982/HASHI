@@ -59,6 +59,10 @@ async def run_command(command, *, client, scratch_root, emit):
         privacy_level=command["privacy_level"],
     )
     registry = BrokeredToolRegistry(client, definitions=command["tool_definitions"], scratch_root=root)
+    from orchestrator.permissions.runtime_ports import HostRuntimePorts
+
+    ports = HostRuntimePorts(client)
+    services = ports.services()
     audit = DurableAuditLog(primary_writer=_BrokerAuditWriter(client),
                             fallback_path=root / "audit-fallback.jsonl")
     usage = []
@@ -76,10 +80,15 @@ async def run_command(command, *, client, scratch_root, emit):
         observer=lambda checkpoint: client.call("provider_checkpoint", {"checkpoint": dict(checkpoint)}),
         recovery=command["recovery"],
     )
-    delivery = _AdapterDelivery(stream, allow_immediate_response=False)
+    provider.bind_commentary_port(services or ports.port("commentary"))
+    provider.bind_turn_services(services)
+    delivery = _AdapterDelivery(stream, allow_immediate_response=ports.manifest["allow_immediate_response"])
     runtime = HERv2Runtime(
         config=config, provider=provider, ledger_store=LedgerStore(root / "ledgers"),
-        audit_log=audit, delivery=delivery, workzone_ref=str(root),
+        audit_log=audit, delivery=delivery, workzone_ref=ports.manifest["workzone_ref"],
+        commentary=services or ports.port("commentary"), required_persona=ports.port("required_persona"),
+        final_style=ports.port("final_style"), habits=ports.port("habits"), meditation=ports.port("meditation"),
+        turn_services=services,
         skills_catalogue=command["skills_catalogue"], pcm_input=command["pcm_input"],
     )
     try:
@@ -88,6 +97,11 @@ async def run_command(command, *, client, scratch_root, emit):
             effort=command["effort"], request_content=command["request_content"],
             request_mode=command["request_mode"],
         )
+        # The existing runtime schedules only a durable Meditation enqueue.
+        # Let that enqueue reach its original owner before the disposable host
+        # exits; its background model work remains separately owned.
+        if runtime._background_tasks:
+            await asyncio.gather(*tuple(runtime._background_tasks))
         return {"state": "completed", "result": pack(result), "usage": usage,
                 "token_usage": asdict(provider.usage), "cost_usd": provider.cost_usd,
                 "tool_call_count": provider.tool_call_count, "tool_loop_count": provider.tool_loop_count}
@@ -118,7 +132,7 @@ def main():
         client = PermissionPipeClient(
             initial["endpoint"],
             Ed25519PublicKey.from_public_bytes(base64.b64decode(initial["public_key"], validate=True)),
-            methods=("provider_call", "tool_execute", "provider_checkpoint", "audit_record"),
+            methods=("provider_call", "tool_execute", "provider_checkpoint", "audit_record", "runtime_port"),
         )
 
         async def emit(event):

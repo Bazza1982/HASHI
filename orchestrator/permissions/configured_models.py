@@ -24,9 +24,9 @@ class _ServiceModelAuthority:
 
 
 class ConfiguredModelFactory:
-    def __init__(self, config_manager, authority, *, private_workspace):
+    def __init__(self, config_manager, authority, *, private_workspace, receipt_store=None):
         self.config_manager, self.authority = config_manager, authority
-        self.private_workspace = private_workspace
+        self.private_workspace, self.receipt_store = private_workspace, receipt_store
 
     async def create(self, binding, config, run_guard):
         if not isinstance(config, HERv2Config):
@@ -62,6 +62,6 @@ class ConfiguredModelFactory:
             raise PermissionDenied("the Turn has no selected model capability")
         broker = SelectedModelBroker(
             self.authority, binding, drivers=drivers, run_guard=run_guard,
-            event_sink=emit_private_event,
+            event_sink=emit_private_event, receipt_store=self.receipt_store,
         )
         return broker, {"profiles": public, "privacy_level": int(manager.privacy_level)}

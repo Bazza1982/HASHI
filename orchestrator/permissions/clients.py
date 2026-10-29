@@ -21,6 +21,7 @@ from orchestrator.permissions.remote_registry import BrokeredToolRegistry
 PAO_METHODS = frozenset({
     "health", "open_execution", "execution_descriptor", "close_execution",
     "settle_run", "context_status", "request_state", "fence_context", "run_her", "configure_inference",
+    "auxiliary_provider_call", "project_model_usage",
     "operation_status",
 })
 CONTROL_METHODS = frozenset({
@@ -101,6 +102,20 @@ class _AuthorityViews:
         return self._client.call("fence_context", {"context": context})
 
 
+class _AuxiliaryModelClient:
+    """Only the trusted Worker uses this PAO surface for its original ports."""
+
+    def __init__(self, client, binding):
+        self.client, self.binding = client, binding
+
+    async def call_async(self, method, arguments, *, on_event=None):
+        if method != "provider_call":
+            raise PermissionDenied("the Worker auxiliary model port is fixed")
+        return await self.client.call_async("auxiliary_provider_call", {
+            "binding": self.binding, **arguments,
+        }, on_event=on_event)
+
+
 class RemoteRunExecutor:
     def __init__(self, owner, binding, descriptor):
         if (not isinstance(descriptor, dict)
@@ -111,7 +126,7 @@ class RemoteRunExecutor:
         client = PermissionPipeClient(
             descriptor["endpoint"],
             Ed25519PublicKey.from_public_bytes(base64.b64decode(descriptor["public_key"], validate=True)),
-            methods=("tool_execute", "provider_call", "provider_checkpoint", "audit_record"),
+            methods=("tool_execute", "provider_call", "provider_checkpoint", "audit_record", "runtime_port"),
         )
         self._execution_client = client
         self._stage_provider = None
@@ -145,8 +160,14 @@ class RemoteRunExecutor:
             self._permission_prestart_failure = True
             raise PermissionPark(GateResult("unavailable", "")) from error
         if self._stage_provider is not None:
+            client = self._execution_client
+            if self._level == "L2":
+                client = _AuxiliaryModelClient(self._owner._client, binding)
+                # Only the host owns main-loop continuation. Presentation and
+                # companion calls must not overwrite its ready/pending batch.
+                self._stage_provider.bind_provider_context(observer=None)
             self._stage_provider.backend_manager = BrokeredProviderFactory(
-                self._execution_client, profile_config=public["profiles"],
+                client, profile_config=public["profiles"],
                 scratch_root=self._owner.workspace_dir, privacy_level=public["privacy_level"],
             )
         if self._level == "L1":
@@ -184,6 +205,9 @@ class RemoteRunExecutor:
         # a zero-cost invocation. Adoption refuses an absent usage consumer.
         from orchestrator.permissions.host_usage import accept_host_usage
 
+        self._stage_provider._permission_projection_commit = lambda projections: self._owner._client.call(
+            "project_model_usage", {"binding": binding, "projections": projections},
+        )
         accept_host_usage(self._stage_provider, response)
         if response["state"] == "parked":
             raise PermissionPark(decode(response["control"]))
