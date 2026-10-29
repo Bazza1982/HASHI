@@ -18,6 +18,7 @@ class QueuedRequest:
     source: str
     summary: str
     created_at: str
+    request_mode: str = "text"
     silent: bool = False
     is_retry: bool = False
     deliver_to_telegram: bool = True
@@ -49,6 +50,9 @@ class QueuedRequest:
     def __post_init__(self) -> None:
         # A queued turn owns its attachment identity.  Callers may safely reuse
         # or mutate their source dictionaries after enqueueing.
+        self.request_mode = (
+            str(self.request_mode or "text").strip().casefold() or "text"
+        )
         self.request_metadata = copy.deepcopy(self.request_metadata)
         self.private_authorization_evidence = copy.deepcopy(
             self.private_authorization_evidence

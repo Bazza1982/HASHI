@@ -97,6 +97,7 @@ class CentralMemorySearch:
         *,
         scope: MemorySearchScope,
         limit: int,
+        forgotten_raw: set[tuple[float, str]] | None = None,
     ) -> list[dict[str, Any]]:
         if not self.configured:
             return []
@@ -125,6 +126,8 @@ class CentralMemorySearch:
                     "agent_id",
                     "content",
                     "source_ts",
+                    "consolidated_at",
+                    "ts_source",
                     "source",
                     "memory_type",
                     "importance",
@@ -142,6 +145,15 @@ class CentralMemorySearch:
         scored: list[tuple[float, dict[str, Any]]] = []
         for raw in rows:
             row = dict(raw)
+            if forgotten_raw and ":transcript:" in str(row.get("ts_source") or ""):
+                from orchestrator.timezone_policy import parse_absolute_timestamp
+
+                source_time = parse_absolute_timestamp(row.get("source_ts"))
+                content_hash = __import__("hashlib").sha256(
+                    str(row.get("content") or "").strip().encode("utf-8")
+                ).hexdigest()
+                if source_time is not None and (source_time.timestamp(), content_hash) in forgotten_raw:
+                    continue
             content = str(row.get("content") or "")
             embedding = self._decode_embedding(row.get("embedding"))
             vector_score = (
@@ -250,8 +262,17 @@ class MemorySearchService:
             )
         central_status = "not_requested"
         if source in {"central", "all"}:
-            central_status = "configured" if self.central.configured else "unconfigured"
-            results.extend(self.central.search(query, scope=scope, limit=limit))
+            from orchestrator.pcm_forget_memory import oldest_forget_start, forgotten_raw_fingerprints
+
+            has_boundary = oldest_forget_start(self.workspace_dir) is not None
+            forgotten_raw = forgotten_raw_fingerprints(self.workspace_dir) if not scope.cross_agent else set()
+            if has_boundary and self.central.configured and not scope.cross_agent:
+                central_status = "filtered_after_forget"
+            else:
+                central_status = "configured" if self.central.configured else "unconfigured"
+            results.extend(self.central.search(
+                query, scope=scope, limit=limit, forgotten_raw=forgotten_raw,
+            ))
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return {
             "query": query,

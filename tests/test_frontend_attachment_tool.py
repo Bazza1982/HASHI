@@ -1232,3 +1232,86 @@ async def test_standalone_telegram_file_compatibility_uses_fc_outbox_once(tmp_pa
             "SELECT retention_indefinite FROM session_attachments"
         ).fetchone()[0]
     assert retained == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_second", [False, True])
+async def test_telegram_keeps_each_accepted_attachment_receipt(tmp_path, monkeypatch, fail_second):
+    from orchestrator import telegram_delivery_failover
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(telegram_delivery_failover, "handle_blocked_send", not_blocked)
+    route = freeze_run_delivery_route(
+        message_source_id="telegram", session_surface="telegram",
+        session_channel_key="7", chat_id=7, telegram_requested=False,
+    )
+    store, owner, session, _ = _running_session(tmp_path, delivery_route=route)
+    runtime = _ToolRuntime(tmp_path, store)
+    original_send = runtime.app.bot.send_document
+    attempts = []
+
+    async def send_document(**kwargs):
+        attempts.append(kwargs["chat_id"])
+        if fail_second and len(attempts) == 2:
+            raise RuntimeError("second transport outcome unknown")
+        return await original_send(**kwargs)
+
+    runtime.app.bot.send_document = send_document
+    paths = [tmp_path / "first.txt", tmp_path / "second.txt"]
+    for path in paths:
+        path.write_text(path.name, encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session, runtime=runtime,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    args = {
+        "publication_id": "per-attachment-receipts",
+        "attachments": [{"path": str(path)} for path in paths],
+    }
+    response = await registry.execute("frontend_publish_deliverable", args, tool_call_id="first")
+    assert response.is_error is False, response.output
+    result = json.loads(response.output)
+    message = store.get_message(
+        result["message_id"], session_id=session["session_id"], owner_id=owner
+    )
+    attachment_ids = [part["attachment_id"] for part in message["content"]]
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"], owner_id=owner, event_id=result["event_id"]
+    )
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == ("unknown" if fail_second else "delivered")
+    expected = [
+        {"attachment_id": attachment_ids[0], "transport_message_id": "101"},
+    ]
+    if not fail_second:
+        expected.append({"attachment_id": attachment_ids[1], "transport_message_id": "102"})
+    assert receipts[0]["proof"]["attachment_receipts"] == expected
+    reopened = SessionStore(store.db_path, instance_id="HASHI3")
+    assert reopened.frontend_delivery_receipts(
+        session_id=session["session_id"], owner_id=owner, event_id=result["event_id"]
+    )[0]["proof"]["attachment_receipts"] == expected
+
+    # A receipt may not claim a file from another canonical message.
+    from orchestrator.session_store import SessionConflict
+    with pytest.raises(SessionConflict, match="attachment.*message"):
+        store.record_frontend_delivery_receipt(
+            session_id=session["session_id"], owner_id=owner,
+            receipt={
+                "type": "hashi.delivery-receipt", "version": 1,
+                "event_id": result["event_id"], "endpoint_id": "ep-test-foreign",
+                "status": "unknown",
+                "proof": {
+                    "type": "telegram-api-accepted", "value": "proof",
+                    "attachment_receipts": [
+                        {"attachment_id": "unrelated-attachment", "transport_message_id": "999"}
+                    ],
+                },
+            },
+        )
+
+    replay = await registry.execute("frontend_publish_deliverable", args, tool_call_id="replay")
+    assert replay.is_error is False
+    assert attempts == [7, 7]

@@ -12,6 +12,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from orchestrator.config_json import read_config_json
+from orchestrator.tts_routing import normalize_language
 
 
 DEFAULT_VOICE_CATALOG_PATH = Path(__file__).with_name("voice_catalog.default.json")
@@ -57,6 +58,7 @@ _COMMON_SERVICE_FIELDS = frozenset(
         "menu_label",
         "location",
         "style_support",
+        "language_voices",
         "fallbacks",
         "platforms",
         "enabled",
@@ -273,6 +275,14 @@ def _validate_service(value: object) -> dict[str, object]:
         "platforms": _platforms(value.get("platforms")),
         "enabled": value.get("enabled", True),
     }
+    if "language_voices" in value:
+        mapping = value["language_voices"]
+        if not isinstance(mapping, Mapping) or not mapping or set(mapping) - {"zh", "en", "ja"}:
+            raise VoiceCatalogError("service language_voices must map supported language codes to voice IDs")
+        service["language_voices"] = {
+            language: _identifier(alias, "language voice")
+            for language, alias in mapping.items()
+        }
     default_location = "cloud" if adapter == "edge" else "local"
     location = str(value.get("location") or default_location).strip().casefold()
     if location not in {"local", "lan", "cloud"}:
@@ -528,6 +538,12 @@ class VoiceCatalog:
             if voice.get("style"):
                 preset["style"] = voice["style"]
             presets[voice_id] = preset
+        for service_id, service in active_services.items():
+            for language, alias in service.get("language_voices", {}).items():
+                preset = presets.get(alias)
+                if (preset is None or preset["provider"] != service_id
+                        or normalize_language(preset["language"]) != language):
+                    raise VoiceCatalogError("language voice must be an active voice of the same service and language")
         return cls(
             services=active_services,
             presets=presets,
@@ -582,6 +598,8 @@ class VoiceCatalog:
             service_id: {
                 "style_support": service["style_support"],
                 "fallbacks": tuple(service["fallbacks"]),
+                **({"language_voices": copy.deepcopy(service["language_voices"])}
+                   if "language_voices" in service else {}),
             }
             for service_id, service in self._services.items()
         }

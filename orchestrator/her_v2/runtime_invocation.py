@@ -174,6 +174,36 @@ def _used_typed_media_fallback(value: Any) -> bool:
 
 
 class RuntimeInvocationMixin:
+    async def _resolve_stage_capacity_retry(
+        self,
+        *,
+        request: StageRequest,
+        selected: ProviderProfile,
+        error: StageInvocationError,
+        retry_index: int,
+        side_effects_possible: bool,
+    ) -> Mapping[str, Any] | None:
+        """Resolve the PAO-level long capacity retry for this HER Turn."""
+
+        resolve = getattr(self.provider, "resolve_stage_capacity_retry", None)
+        if not callable(resolve):
+            return None
+        try:
+            decision = resolve(
+                request=request,
+                selected=selected,
+                failure_code=error.error_code,
+                retryable=bool(error.retryable),
+                retry_after_s=error.retry_after_s,
+                retry_index=int(retry_index),
+                side_effects_possible=bool(side_effects_possible),
+            )
+            if inspect.isawaitable(decision):
+                decision = await decision
+            return decision
+        except Exception:
+            return None
+
     async def _resolve_stage_fallback(
         self,
         *,
@@ -246,6 +276,9 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        # The outer PAO admission owns this classification.  Stage-local
+        # callers cannot widen it back to ordinary text.
+        base_context["request_mode"] = state.request_mode
         registry = getattr(self.provider, "tool_registry", None)
         execution_cwd = (
             getattr(registry, "workspace_dir", None)
@@ -399,6 +432,9 @@ class RuntimeInvocationMixin:
         if stage is Stage.EXECUTION and not role.startswith("sub_agent:"):
             state.last_execution_invocation_id = invocation_id
         provider_retry_count = 0
+        capacity_retry_count = 0
+        capacity_continuation = False
+        side_effects_seen = False
         fallback_level = 0
         media_fallback_consumed = False
         attempt = 0
@@ -408,6 +444,16 @@ class RuntimeInvocationMixin:
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
             attempt_context = copy.deepcopy(base_context)
+            if capacity_continuation:
+                attempt_context["capacity_recovery"] = {
+                    "mode": "resume_unfinished_work",
+                    "original_request_replayed": False,
+                    "instruction": (
+                        "Inspect prior Tool receipts and observable effects, then "
+                        "continue only unfinished work. Do not repeat completed actions; "
+                        "stop and report uncertainty when completion cannot be proved."
+                    ),
+                }
             provider_activity = ProviderActivityTracker()
             request = StageRequest(
                 turn_id=state.ledger.turn_id,
@@ -415,14 +461,25 @@ class RuntimeInvocationMixin:
                 stage=stage,
                 role=role,
                 attempt=attempt,
-                goal=stage_goal,
+                goal=(
+                    "Continue only the unfinished work from the preceding failed "
+                    "attempt in this same HER Engine Session. Inspect recorded Tool "
+                    "receipts and effects first; do not replay the original request."
+                    if capacity_continuation
+                    else stage_goal
+                ),
                 classification=state.ledger.classification,
                 effort=state.effort,
                 plan_id=invocation_plan_id,
                 context=attempt_context,
-                request_content=copy.deepcopy(stage_request_content),
+                request_content=(
+                    None
+                    if capacity_continuation
+                    else copy.deepcopy(stage_request_content)
+                ),
                 attachment_manifest=tuple(
-                    copy.deepcopy(item) for item in stage_attachment_manifest
+                    copy.deepcopy(item)
+                    for item in (() if capacity_continuation else stage_attachment_manifest)
                 ),
                 force_local_media_fallback=media_fallback_consumed,
                 allow_tools=allow_tools,
@@ -830,77 +887,115 @@ class RuntimeInvocationMixin:
             unobserved_side_effects = bool(
                 last_error.side_effects_possible and not provider_activity.tool_started
             )
+            side_effects_seen = bool(
+                side_effects_seen
+                or provider_activity.side_effects_possible
+                or unobserved_side_effects
+            )
             replay_safe = bool(
                 provider_activity.replay_safe(allow_side_effects=allow_side_effects)
                 and not unobserved_side_effects
+                and not side_effects_seen
             )
             retry_kind = "provider_recovery"
             retry_reason = "eligible"
             fallback_choice: tuple[int, ProviderProfile] | None = None
             fallback_decision: Mapping[str, Any] | None = None
+            capacity_retry_decision: Mapping[str, Any] | None = None
+            next_invariant_payload: dict[str, Any] | None = None
             if not retry_on_failure:
                 retry_reason = "retry_disabled_for_call"
             elif not last_error.retryable:
                 retry_reason = "failure_non_retryable"
-            elif not replay_safe:
-                retry_reason = "side_effect_replay_blocked"
             elif (
-                fallback_level == 0
+                replay_safe
+                and fallback_level == 0
                 and provider_retry_count < self.retry_policy.max_provider_retries
             ):
                 retry_reason = "eligible"
-            elif not fallback_failure_eligible(last_error):
-                retry_reason = "fallback_failure_ineligible"
             else:
-                fallback_decision = await self._resolve_stage_fallback(
+                capacity_retry_decision = await self._resolve_stage_capacity_retry(
                     request=request,
                     selected=selected,
-                    provider_activity=provider_activity,
+                    error=last_error,
+                    retry_index=capacity_retry_count,
+                    side_effects_possible=side_effects_seen,
                 )
                 if (
-                    fallback_decision is not None
-                    and fallback_decision.get("allowed") is True
-                    and str(fallback_decision.get("target_label") or "").strip()
-                    and fallback_decision.get("tool_started") is not True
-                    and fallback_decision.get("visible_partial_answer") is not True
+                    capacity_retry_decision is not None
+                    and capacity_retry_decision.get("allowed") is True
                 ):
-                    target_engine, _separator, target_model = str(
-                        fallback_decision.get("target_label") or ""
-                    ).partition("/")
-                    target_model = target_model.strip()
+                    retry_kind = "capacity_policy_retry"
+                    retry_reason = "capacity_policy_retry"
                     if (
-                        str(fallback_decision.get("target_kind") or "")
-                        == "codex_cli"
+                        capacity_retry_decision.get("continue_session") is True
                     ):
-                        from orchestrator.flexible_backend_registry import (
-                            get_default_model,
-                        )
-
-                        target_model = target_model or str(
-                            get_default_model("codex-cli") or ""
-                        )
-                    fallback_choice = (
-                        fallback_level + 1,
-                        replace(
-                            primary_selected,
-                            engine=target_engine.strip() or primary_selected.engine,
-                            model=target_model or primary_selected.model,
-                        ),
-                    )
-                    retry_kind = "provider_fallback"
-                    retry_reason = "fallback_eligible"
-                elif fallback_decision is not None and fallback_decision.get(
-                    "reason"
-                ):
-                    retry_reason = (
-                        f"fallback_blocked:{fallback_decision.get('reason')}"
-                    )
+                        if not capacity_continuation:
+                            next_invariant_payload = {
+                                **invariant_payload,
+                                "capacity_recovery": "resume_unfinished_work",
+                                "original_request_replayed": False,
+                                "attachments": [],
+                            }
+                        capacity_continuation = True
+                elif not replay_safe:
+                    retry_reason = "side_effect_replay_blocked"
+                elif not fallback_failure_eligible(last_error):
+                    retry_reason = "fallback_failure_ineligible"
                 else:
-                    retry_reason = "fallback_unavailable_or_exhausted"
-            same_target_retry = retry_reason == "eligible"
+                    fallback_decision = await self._resolve_stage_fallback(
+                        request=request,
+                        selected=selected,
+                        provider_activity=provider_activity,
+                    )
+                    if (
+                        fallback_decision is not None
+                        and fallback_decision.get("allowed") is True
+                        and str(fallback_decision.get("target_label") or "").strip()
+                        and fallback_decision.get("tool_started") is not True
+                        and fallback_decision.get("visible_partial_answer") is not True
+                    ):
+                        if (
+                            str(fallback_decision.get("target_kind") or "")
+                            == "codex_cli"
+                        ):
+                            # Defensive boundary: even a malformed/mocked
+                            # internal decision cannot turn Codex into a HERV3
+                            # Stage Provider. The typed failure returns to PAO,
+                            # which owns the cross-Engine request-local call.
+                            retry_reason = (
+                                "pao_cross_engine_fallback_required"
+                            )
+                        else:
+                            target_engine, _separator, target_model = str(
+                                fallback_decision.get("target_label") or ""
+                            ).partition("/")
+                            target_model = target_model.strip()
+                            fallback_choice = (
+                                fallback_level + 1,
+                                replace(
+                                    primary_selected,
+                                    engine=(
+                                        target_engine.strip()
+                                        or primary_selected.engine
+                                    ),
+                                    model=target_model or primary_selected.model,
+                                ),
+                            )
+                            retry_kind = "provider_fallback"
+                            retry_reason = "fallback_eligible"
+                    elif fallback_decision is not None and fallback_decision.get(
+                        "reason"
+                    ):
+                        retry_reason = (
+                            f"fallback_blocked:{fallback_decision.get('reason')}"
+                        )
+                    else:
+                        retry_reason = "fallback_unavailable_or_exhausted"
+            same_target_retry = retry_reason in {"eligible", "capacity_policy_retry"}
             will_retry = same_target_retry or fallback_choice is not None
             possible_side_effects = bool(
-                provider_activity.side_effects_possible or unobserved_side_effects
+                side_effects_seen
             )
             recovery_decision: dict[str, Any] | None = None
             if not will_retry and not replay_safe and last_error.retryable:
@@ -924,14 +1019,19 @@ class RuntimeInvocationMixin:
                 }
             retry_delay = 0.0
             if same_target_retry:
-                retry_delay = (
-                    last_error.retry_after_s
-                    if last_error.retry_after_s is not None
-                    else min(
-                        5.0,
-                        0.25 * (2 ** min(max(0, attempt - 1), 5)),
+                if retry_reason == "capacity_policy_retry":
+                    retry_delay = float(
+                        (capacity_retry_decision or {}).get("delay_s") or 0.0
                     )
-                )
+                else:
+                    retry_delay = (
+                        last_error.retry_after_s
+                        if last_error.retry_after_s is not None
+                        else min(
+                            5.0,
+                            0.25 * (2 ** min(max(0, attempt - 1), 5)),
+                        )
+                    )
             try:
                 self._audit(
                     state,
@@ -967,6 +1067,7 @@ class RuntimeInvocationMixin:
                         "replay_safe": replay_safe,
                         "side_effects_possible": possible_side_effects,
                         "recovery_decision": recovery_decision,
+                        "capacity_retry_decision": capacity_retry_decision,
                     },
                 )
             except AuditPersistenceError:
@@ -988,6 +1089,11 @@ class RuntimeInvocationMixin:
                                 + turn_local_recovery_total
                             ),
                             "recovery_decision": recovery_decision,
+                            **(
+                                {"capacity_retry_decision": capacity_retry_decision}
+                                if capacity_retry_decision
+                                else {}
+                            ),
                             "foreground_cleanup": cleanup or None,
                         },
                     ) from last_error
@@ -1003,6 +1109,11 @@ class RuntimeInvocationMixin:
                         **(
                             {"fallback_decision": fallback_decision}
                             if fallback_decision
+                            else {}
+                        ),
+                        **(
+                            {"capacity_retry_decision": capacity_retry_decision}
+                            if capacity_retry_decision
                             else {}
                         ),
                     },
@@ -1077,7 +1188,12 @@ class RuntimeInvocationMixin:
                 }
                 retry_invariant_hash = _payload_hash(invariant_payload)
                 continue
+            if next_invariant_payload is not None:
+                invariant_payload = next_invariant_payload
+                retry_invariant_hash = _payload_hash(invariant_payload)
             provider_retry_count += 1
+            if retry_reason == "capacity_policy_retry":
+                capacity_retry_count += 1
             await self._wait_for_stage_retry(
                 state,
                 stage=stage,

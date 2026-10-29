@@ -175,7 +175,40 @@ def _option_for(runtime: Any, engine: str) -> tuple[dict[str, Any] | None, bool]
 
 def _codex_available(runtime: Any) -> bool:
     option, available = _option_for(runtime, "codex-cli")
-    return bool(option is not None and available)
+    return bool(option is not None and available and _codex_backend_rows(runtime))
+
+
+def _allowed_backend_rows(runtime: Any) -> list[dict[str, Any]]:
+    config = getattr(runtime, "config", None)
+    if config is None:
+        config = getattr(getattr(runtime, "backend_manager", None), "config", None)
+    return list(getattr(config, "allowed_backends", ()) or ())
+
+
+def _codex_backend_rows(runtime: Any) -> list[dict[str, Any]]:
+    from orchestrator.flexible_backend_registry import canonical_backend_engine
+
+    return [
+        row
+        for row in _allowed_backend_rows(runtime)
+        if canonical_backend_engine(str(row.get("engine") or "")) == "codex-cli"
+    ]
+
+
+def _codex_models(runtime: Any) -> list[str]:
+    from orchestrator.runtime_effort_options import get_available_models
+
+    rows = _codex_backend_rows(runtime)
+    if not rows:
+        return []
+    try:
+        return list(
+            dict.fromkeys(
+                get_available_models("codex-cli", allowed_backends=rows)
+            )
+        )
+    except (TypeError, ValueError):
+        return []
 
 
 def _privacy_policy(runtime: Any) -> PrivacyLevel:
@@ -208,9 +241,14 @@ def _mode_label(mode: str) -> str:
     return ui_language.tr(f"fallback.mode.{mode}")
 
 
+def _effect_label(mode: str) -> str:
+    return ui_language.tr(f"fallback.effect.{mode}")
+
+
 def _target_label(route: policy_owner.FallbackRoute) -> str:
     if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI:
-        return ui_language.tr("fallback.target.codex")
+        label = ui_language.tr("fallback.target.codex")
+        return f"{label} / {route.model}" if route.model else label
     return f"{route.provider} / {route.model}"
 
 
@@ -220,6 +258,8 @@ def _route_state(runtime: Any, route: policy_owner.FallbackRoute) -> tuple[bool,
     if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI:
         if not _codex_available(runtime):
             return False, ui_language.tr("fallback.locked.runtime_missing")
+        if route.model and route.model not in _codex_models(runtime):
+            return False, ui_language.tr("fallback.locked.model_unsupported")
         return True, ""
     option, available = _option_for(runtime, route.provider)
     if not available:
@@ -257,6 +297,7 @@ def fallback_menu_text(runtime: Any) -> str:
     codex_rule = policy.source_rule(policy_owner.SOURCE_CODEX_CLI)
     facts = [
         ui_language.tr("fallback.fact.scope"),
+        ui_language.tr(f"fallback.mode_help.{policy.mode}"),
         ui_language.tr("fallback.fact.privacy", privacy=_privacy_label(runtime)),
         ui_language.tr("fallback.fact.targets"),
         *_target_lines(runtime, policy),
@@ -264,6 +305,17 @@ def fallback_menu_text(runtime: Any) -> str:
             "fallback.fact.sources",
             herv3=_on_off(herv3_rule.enabled),
             codex=_on_off(codex_rule.enabled),
+        ),
+        ui_language.tr(
+            "fallback.fact.retries",
+            delays=" / ".join(
+                str(int(value)) for value in policy_owner.CAPACITY_RETRY_DELAYS_S
+            ),
+        ),
+        ui_language.tr(
+            "fallback.fact.effects",
+            herv3=_effect_label(herv3_rule.side_effect_mode),
+            codex=_effect_label(codex_rule.side_effect_mode),
         ),
         ui_language.tr(
             "fallback.fact.budget",
@@ -299,6 +351,9 @@ def fallback_menu_keyboard(runtime: Any) -> InlineKeyboardMarkup:
         [
             [
                 _mode_button(policy, policy_owner.MODE_OFF),
+                _mode_button(policy, policy_owner.MODE_RETRY),
+            ],
+            [
                 _mode_button(policy, policy_owner.MODE_ASK),
                 _mode_button(policy, policy_owner.MODE_AUTO),
             ],
@@ -341,12 +396,14 @@ def _sources_text(runtime: Any) -> str:
                 state=_on_off(herv3_rule.enabled),
                 targets=_on_off(herv3_rule.allow_herv3_targets),
                 codex_targets=_on_off(herv3_rule.allow_codex_cli_targets),
+                effect=_effect_label(herv3_rule.side_effect_mode),
             ),
             ui_language.tr(
                 "fallback.sources.codex",
                 state=_on_off(codex_rule.enabled),
                 targets=_on_off(codex_rule.allow_herv3_targets),
                 codex_targets=_on_off(codex_rule.allow_codex_cli_targets),
+                effect=_effect_label(codex_rule.side_effect_mode),
             ),
         ],
         consequence=ui_language.tr("fallback.sources.consequence"),
@@ -369,6 +426,20 @@ def _sources_keyboard(runtime: Any) -> InlineKeyboardMarkup:
                     ("✓ " if rule.enabled else "") + source_label,
                     callback_data=f"fallback:source:{name}",
                 )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    ("✓ " if rule.side_effect_mode == policy_owner.EFFECT_PAUSE else "")
+                    + ui_language.tr("fallback.effect.pause.short"),
+                    callback_data=f"fallback:effect:{name}:pause",
+                ),
+                InlineKeyboardButton(
+                    ("✓ " if rule.side_effect_mode == policy_owner.EFFECT_RESUME else "")
+                    + ui_language.tr("fallback.effect.resume.short"),
+                    callback_data=f"fallback:effect:{name}:resume",
+                ),
             ]
         )
         rows.append(
@@ -536,9 +607,45 @@ def _same_model_candidates(runtime: Any) -> list[dict[str, Any]]:
     return candidates
 
 
+def _herv3_model_candidates(runtime: Any) -> list[dict[str, Any]]:
+    """Derive all exact HERV3 Provider/model targets from runtime options."""
+
+    same_model = _same_model_candidates(runtime)
+    candidates = list(same_model)
+    seen = {(item["engine"], item["model"]) for item in candidates}
+    try:
+        current = runtime.backend_manager.get_her_v3_target()
+        current_key = (str(current.provider).casefold(), str(current.model))
+    except Exception:
+        current_key = ("", "")
+    for option in _provider_options(runtime):
+        engine = str(option.get("engine") or "").strip().casefold()
+        if not engine or engine in {"codex-cli", "her-v2", "hashi-api"}:
+            continue
+        available = option.get("available") is not False
+        for raw_model in option.get("models") or []:
+            model = str(raw_model or "").strip()
+            key = (engine, model)
+            if not model or key in seen or key == current_key:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "engine": engine,
+                    "model": model,
+                    "usable": bool(available),
+                    "reason": (
+                        "" if available else ui_language.tr("fallback.locked.key_missing")
+                    ),
+                    "same_model": False,
+                }
+            )
+    return candidates
+
+
 def _model_candidates(runtime: Any, source: str) -> list[dict[str, Any]]:
     if source == policy_owner.SOURCE_HERV3:
-        return _same_model_candidates(runtime)
+        return _herv3_model_candidates(runtime)
     if source != policy_owner.SOURCE_CODEX_CLI:
         return []
     candidates: list[dict[str, Any]] = []
@@ -566,6 +673,25 @@ def _model_candidates(runtime: Any, source: str) -> list[dict[str, Any]]:
                 }
             )
     return candidates
+
+
+def _codex_model_candidates(runtime: Any) -> list[dict[str, Any]]:
+    available = _codex_available(runtime)
+    try:
+        current = str(runtime.backend_manager.current_backend.config.model or "")
+    except Exception:
+        current = ""
+    return [
+        {
+            "model": model,
+            "usable": available,
+            "reason": (
+                "" if available else ui_language.tr("fallback.locked.runtime_missing")
+            ),
+        }
+        for model in _codex_models(runtime)
+        if model != current
+    ]
 
 
 def _targets_text(runtime: Any) -> str:
@@ -634,17 +760,21 @@ def _targets_keyboard(runtime: Any) -> InlineKeyboardMarkup:
                     )
                 ]
             )
-        if source == policy_owner.SOURCE_HERV3:
-            codex_locked = not _codex_available(runtime)
+        for index, candidate in enumerate(_codex_model_candidates(runtime)):
+            marker = "" if candidate["usable"] else "🔒 "
             rows.append(
                 [
                     InlineKeyboardButton(
                         (
-                            ("🔒 " if codex_locked else "")
+                            marker
                             + f"+ {source_label} → "
                             + ui_language.tr("fallback.target.codex")
+                            + f" / {candidate['model']}"
                         )[:60],
-                        callback_data=f"fallback:add:codex:{source}:-",
+                        callback_data=(
+                            f"fallback:add:codexmodel:{source}:{index}:"
+                            f"{_token(candidate['model'])}"
+                        ),
                     )
                 ]
             )
@@ -830,6 +960,29 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             )
             await query.answer()
             return
+        elif action == "effect":
+            name, mode = parts[2], parts[3]
+            if (
+                name not in policy_owner.FALLBACK_SOURCES
+                or mode not in policy_owner.SIDE_EFFECT_MODES
+            ):
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            policy, document = _load_for_update(runtime)
+            rule = policy.source_rule(name)
+            updated = replace(
+                policy,
+                sources={
+                    **policy.sources,
+                    name: replace(rule, side_effect_mode=mode),
+                },
+            )
+            if not _save(runtime, updated, document=document):
+                raise ValueError(ui_language.tr("fallback.save_failed"))
+            await _render(
+                runtime, query, _sources_text(runtime), _sources_keyboard(runtime)
+            )
+            await query.answer()
+            return
         elif action == "privacy":
             if len(parts) == 3 and parts[2] == "block":
                 policy, document = _load_for_update(runtime)
@@ -912,6 +1065,23 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
                 route = policy_owner.FallbackRoute(
                     source=source,
                     target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
+                )
+            elif kind == "codexmodel":
+                index = int(parts[4])
+                token = parts[5]
+                candidates = _codex_model_candidates(runtime)
+                if index < 0 or index >= len(candidates):
+                    raise ValueError(ui_language.tr("fallback.error.stale"))
+                candidate = candidates[index]
+                if (
+                    _token(candidate["model"]) != token
+                    or not candidate["usable"]
+                ):
+                    raise ValueError(ui_language.tr("fallback.error.stale"))
+                route = policy_owner.FallbackRoute(
+                    source=source,
+                    target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
+                    model=candidate["model"],
                 )
             elif kind == "model":
                 index = int(parts[4])

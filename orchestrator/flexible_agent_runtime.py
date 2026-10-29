@@ -95,6 +95,7 @@ from orchestrator.slash_command_audit import (
     bind_slash_command_audit_session,
     default_audit_path,
     parse_inline_callback_command,
+    parse_slash_command_text,
     resolve_handler_kind,
 )
 from orchestrator.enterprise.audit_schema import AuditEventWriter
@@ -473,27 +474,37 @@ class FlexibleAgentRuntime:
         self.reload_post_turn_observers()
 
     def _record_active_chat(self, update) -> None:
-        """Track the chat_id for each authorized user who messages this bot."""
+        """Persist the latest authorized Telegram route as PAO Session state."""
         user = getattr(update, "effective_user", None)
         chat = getattr(update, "effective_chat", None)
         if user and chat and self._is_authorized_user(user.id):
             self._active_chat_ids[user.id] = chat.id
+            try:
+                runtime_session.record_telegram_route(
+                    self,
+                    chat_id=chat.id,
+                    actor_id=user.id,
+                )
+            except Exception:
+                logger = getattr(self, "logger", logging.getLogger("HASHI.TelegramRoute"))
+                logger.warning(
+                    "Could not persist the authorized Telegram route",
+                    exc_info=True,
+                )
 
     def _primary_chat_id(self) -> int:
-        """Return the best chat_id for proactive messages (forks, notifications).
+        """Return the durable owner/Agent Telegram endpoint for proactive work."""
 
-        Prefer a chat_id from an authorized user who has actually messaged
-        this bot (i.e. has an established conversation).  Fall back to the
-        first authorized ID only if no active chat has been recorded yet.
-        """
-        # Return the first active chat we find, in config order
-        for uid in self._authorized_telegram_ids:
-            if uid in self._active_chat_ids:
-                return self._active_chat_ids[uid]
-        # Fallback: original behaviour
-        if self._authorized_telegram_ids:
-            return self._authorized_telegram_ids[0]
-        return self.global_config.authorized_id
+        try:
+            persisted = runtime_session.primary_telegram_chat_id(self)
+        except Exception:
+            logger = getattr(self, "logger", logging.getLogger("HASHI.TelegramRoute"))
+            logger.warning(
+                "Could not restore the durable Telegram route",
+                exc_info=True,
+            )
+            persisted = None
+        return persisted or 0
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None:
@@ -795,7 +806,18 @@ class FlexibleAgentRuntime:
 
     def _wrap_cmd(self, cmd: str, handler):
         async def _wrapped(update: Update, context: Any):
-            args = list(getattr(context, "args", None) or [])
+            message = getattr(update, "effective_message", None) or getattr(
+                update, "message", None
+            )
+            parsed_command, parsed_args = parse_slash_command_text(
+                str(getattr(message, "text", "") or "")
+            )
+            args = (
+                parsed_args
+                if parsed_command == str(cmd).casefold()
+                else list(getattr(context, "args", None) or [])
+            )
+            setattr(context, "args", args)
             actor_id = getattr(getattr(update, "effective_user", None), "id", None)
             chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
             session = SlashCommandAuditSession(
@@ -831,9 +853,6 @@ class FlexibleAgentRuntime:
                         session.block("stale_confirmation_required")
                         return
                     self._record_active_chat(update)
-                    message = getattr(update, "effective_message", None) or getattr(
-                        update, "message", None
-                    )
                     runtime_session.record_frontend_message_for_update(
                         self,
                         update,
@@ -956,6 +975,14 @@ class FlexibleAgentRuntime:
                                 )
                         else:
                             session.fail(error_code)
+                            error_message = str(
+                                outcome.get("error_message")
+                                or (outcome.get("result") or {}).get(
+                                    "error_message", ""
+                                )
+                            ).strip()
+                            if error_message:
+                                await self._reply_text(update, error_message)
                         return outcome
 
                     return outcome
@@ -1128,6 +1155,10 @@ class FlexibleAgentRuntime:
             state_root=getattr(
                 getattr(self, "global_config", None), "bridge_home", None
             ),
+            agent_id=self.name,
+            agent_config_path=getattr(
+                getattr(self, "global_config", None), "config_path", None
+            ),
         )
         silent = False
         normalized_request_content = None
@@ -1279,6 +1310,31 @@ class FlexibleAgentRuntime:
                 candidate=metadata.get("live_voice"),
             )
             metadata["live_voice"] = live_voice_origin
+        voice_origin = metadata.get("voice_origin") is True
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import (
+                request_content_is_voice_origin,
+            )
+
+            voice_origin = bool(
+                voice_origin
+                or request_content_is_voice_origin(normalized_request_content)
+            )
+        request_mode = (
+            "phone"
+            if live_voice_origin is not None
+            else "call"
+            if isinstance(metadata.get("call_media"), Mapping)
+            else "voice"
+            if voice_origin
+            else "text"
+        )
+        # This admission-owned field deliberately overwrites caller input.
+        # Phone and call facts have already crossed their authoritative
+        # validation boundaries above; voice is backed by the admitted media
+        # envelope or an internal voice-origin marker.
+        metadata["request_mode"] = request_mode
+        metadata["voice_origin"] = voice_origin
         existing_idempotent_run = None
         if idempotency_key:
             existing_idempotent_run = await asyncio.to_thread(
@@ -1304,6 +1360,8 @@ class FlexibleAgentRuntime:
             source=source,
             request_metadata=metadata,
             state_root=getattr(self.global_config, "bridge_home", None),
+            agent_id=self.name,
+            agent_config_path=getattr(self.global_config, "config_path", None),
         )
         from orchestrator.session_store import SessionConflict, SessionNotFound
 
@@ -1606,6 +1664,12 @@ class FlexibleAgentRuntime:
             if request_session_id != str(session["session_id"]):
                 raise SessionConflict("admission receipt Session changed")
             request_id = accepted.request_id
+        from orchestrator.frontend_agent_presence import schedule_agentpresence_message_received
+
+        schedule_agentpresence_message_received(
+            self, ingress=frontend_ingress_envelope, accepted=accepted,
+            delivery_route=delivery_route,
+        )
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import attachment_manifest
 
@@ -1631,16 +1695,6 @@ class FlexibleAgentRuntime:
                 accepted.run_id,
                 accepted.request_id,
             )
-        if normalized_request_content is not None:
-            from orchestrator.multimodal_contract import (
-                request_content_is_voice_origin,
-            )
-
-            metadata.setdefault(
-                "voice_origin",
-                request_content_is_voice_origin(normalized_request_content),
-            )
-
         async def fail_unsubmitted_preparation(
             failure: BaseException,
             *,
@@ -1718,6 +1772,7 @@ class FlexibleAgentRuntime:
             source=source,
             summary=summary,
             created_at=datetime.now().isoformat(),
+            request_mode=request_mode,
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
@@ -1913,6 +1968,8 @@ class FlexibleAgentRuntime:
                 request_id,
                 success=bool(payload.get("success")),
                 error=payload.get("error") or "",
+                **({"termination_reason": "safe_voice_discarded"}
+                   if payload.get("termination_reason") == "safe_voice_discarded" else {}),
             )
         except Exception as exc:  # display telemetry must never block delivery
             self.logger.warning(
@@ -11439,7 +11496,7 @@ class FlexibleAgentRuntime:
         await runtime_workspace.cmd_clear(self, update, context)
 
     async def cmd_stop(self, update: Update, context: Any):
-        await runtime_control.cmd_stop(self, update, context)
+        return await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_steer(self, update: Update, context: Any):
         return await runtime_control.cmd_steer(self, update, context)
@@ -12068,7 +12125,9 @@ class FlexibleAgentRuntime:
         edit_attempts = 0
         display_disabled = False
         current_message = placeholder
-        engine = getattr(self.config, "active_backend", "unknown")
+        engine = public_backend_engine(
+            getattr(self.config, "active_backend", "unknown")
+        )
         extra = getattr(self.config, "extra", {}) or {}
         display_name = str(extra.get("display_name") or self.name)
         digest = ActivityDigest(started_at=started)
@@ -13277,6 +13336,16 @@ class FlexibleAgentRuntime:
                 raise asyncio.CancelledError
             receipt_response = response
 
+            if runtime_pipeline.is_safe_voice_discard(response):
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_interrupted(
+                    item, item.prompt, is_bridge_request=is_bridge_request,
+                    reason="safe_voice_discarded", error="",
+                )
+                await runtime_pipeline.handle_safe_voice_discard(self, item)
+                receipt_disposition = "safe_voice_discarded"
+                return
+
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
@@ -13690,10 +13759,11 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     disposition=receipt_disposition,
                 )
-            runtime_cross_session.record_turn_result(
-                self, item, assistant_text=receipt_text, response=receipt_response,
-                error=receipt_error, delivered=receipt_delivered, completion_path="background",
-            )
+            if receipt_disposition != "safe_voice_discarded":
+                runtime_cross_session.record_turn_result(
+                    self, item, assistant_text=receipt_text, response=receipt_response,
+                    error=receipt_error, delivered=receipt_delivered, completion_path="background",
+                )
             getattr(self, "_background_request_ids", set()).discard(item.request_id)
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):

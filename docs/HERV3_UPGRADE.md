@@ -72,6 +72,8 @@ HERV3 is the current HASHI Engine Runtime upgrade and the canonical
 human-facing name. The public machine ID remains `her-v3`. The internal
 `her-v2` adapter, `her_v2` configuration key, and `HERv2*` Python names remain
 temporarily as compatibility boundaries; they are not the product name.
+Telegram activity and status cards must use the shared public Engine projection
+instead of rendering those storage compatibility names.
 
 The upgrade combines four decisions:
 
@@ -509,3 +511,15 @@ evidence only; adoption and live verification have not happened.
   interaction recovery used/limit, the Turn-wide cumulative count, and the
   fallback disposition, and says "already retried, but still failed" in the
   selected language.
+
+## Telegram public Engine label repair (2026-10-22)
+
+The user approved repair on HASHI3 branch `repair/main-audit-20261021` after a
+Telegram activity card exposed the internal `her-v2` storage ID. The Frontend
+Connector now derives that card label through the existing public Engine
+projection, so HERV3 renders as `her-v3` without changing persisted
+configuration or adapter identity.
+
+Focused red/green coverage reproduces the old leak and verifies the corrected
+card. Source implementation and offline tests are complete; Function adoption
+and live Telegram verification remain separate until performed.

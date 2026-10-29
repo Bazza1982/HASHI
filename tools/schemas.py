@@ -11,7 +11,7 @@ TOOL_SCHEMAS = [
               'name': 'ask_user',
               'parameters': {'additionalProperties': False,
                              'properties': {'allow_free_text': {'type': 'boolean'},
-                                            'expires_seconds': {'maximum': 3600,
+                                            'expires_seconds': {'maximum': 300,
                                                                 'minimum': 30,
                                                                 'type': 'integer'},
                                             'idempotency_key': {'maxLength': 160, 'type': 'string'},

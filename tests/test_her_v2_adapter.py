@@ -1817,6 +1817,144 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
 
 
 @pytest.mark.asyncio
+async def test_herv3_capacity_policy_adds_three_long_retries_after_local_retry(
+    tmp_path,
+):
+    class CapacityProvider(_DirectProvider):
+        def __init__(self):
+            super().__init__()
+            self.capacity_decisions = []
+
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            direct_count = sum(
+                1 for _profile, item in self.requests if item.stage is Stage.DIRECT
+            )
+            if request.stage is Stage.DIRECT and direct_count <= 4:
+                raise StageInvocationError(
+                    "model at capacity",
+                    code=ProviderFailureCode.PROVIDER_CAPACITY_UNAVAILABLE,
+                    human_description="The model is temporarily at capacity.",
+                )
+            if request.stage is Stage.DIRECT:
+                return StageResponse(
+                    text="Recovered after capacity retries.",
+                    provider=profile.engine,
+                    model=profile.model,
+                )
+            raise AssertionError(f"unexpected stage: {request.stage}")
+
+        async def resolve_stage_capacity_retry(self, **facts):
+            self.capacity_decisions.append(dict(facts))
+            index = int(facts["retry_index"])
+            return {
+                "allowed": index < 3,
+                "delay_s": 0,
+                "continue_session": False,
+                "blocking_reason": None if index < 3 else "retry_exhausted",
+            }
+
+    provider = CapacityProvider()
+    config = _agent_config(tmp_path, effort="zero")
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Complete the capacity-sensitive task",
+        "request-capacity-three-retries",
+    )
+
+    assert response.is_success is True, response.error
+    direct_requests = [
+        request for _profile, request in provider.requests if request.stage is Stage.DIRECT
+    ]
+    assert len(direct_requests) == 5
+    # Attempt 2 follows HERV3's existing short local retry; PAO then adds
+    # exactly three policy-controlled retries.
+    assert [item["retry_index"] for item in provider.capacity_decisions] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_herv3_effect_mode_b_continues_without_replaying_original_goal(tmp_path):
+    class CapacityAfterEffectProvider(_DirectProvider):
+        def __init__(self):
+            super().__init__()
+            self.capacity_decisions = []
+
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            direct = [
+                item for _profile, item in self.requests if item.stage is Stage.DIRECT
+            ]
+            if request.stage is Stage.DIRECT and len(direct) == 1:
+                request.provider_activity_callback(
+                    {
+                        "kind": "shell_exec",
+                        "content": "write started",
+                        "tool_name": "shell",
+                        "tool_read_only": False,
+                    }
+                )
+                raise StageInvocationError(
+                    "model at capacity after a write",
+                    code=ProviderFailureCode.PROVIDER_CAPACITY_UNAVAILABLE,
+                    human_description="The model is temporarily at capacity.",
+                    side_effects_possible=True,
+                )
+            if request.stage is Stage.DIRECT:
+                return StageResponse(
+                    text="Continued only the unfinished work.",
+                    provider=profile.engine,
+                    model=profile.model,
+                )
+            raise AssertionError(f"unexpected stage: {request.stage}")
+
+        async def resolve_stage_capacity_retry(self, **facts):
+            self.capacity_decisions.append(dict(facts))
+            return {
+                "allowed": True,
+                "delay_s": 0,
+                "continue_session": True,
+                "blocking_reason": None,
+            }
+
+    provider = CapacityAfterEffectProvider()
+    config = _agent_config(tmp_path, effort="zero")
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    original = "ORIGINAL GOAL MUST NOT BE REPLAYED"
+    response = await adapter.generate_response(
+        original,
+        "request-capacity-resume-effects",
+        request_content={
+            "version": 1,
+            "parts": [{"type": "text", "item_index": 1, "text": original}]
+        },
+    )
+
+    assert response.is_success is True, response.error
+    direct_requests = [
+        request for _profile, request in provider.requests if request.stage is Stage.DIRECT
+    ]
+    assert len(direct_requests) == 2
+    assert direct_requests[0].goal == original
+    assert original not in direct_requests[1].goal
+    assert "unfinished work" in direct_requests[1].goal
+    assert direct_requests[1].request_content is None
+    assert (
+        direct_requests[1].retry_invariant_hash
+        != direct_requests[0].retry_invariant_hash
+    )
+    assert direct_requests[1].context["capacity_recovery"][
+        "original_request_replayed"
+    ] is False
+    assert provider.capacity_decisions[0]["side_effects_possible"] is True
+
+
+@pytest.mark.asyncio
 async def test_adapter_binds_provider_commentary_to_persona_pipeline(tmp_path):
     class DirectCommentaryManager(_CommentaryManager):
         agent_mode = "fixed"

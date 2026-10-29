@@ -185,9 +185,19 @@ uses the invoking interactive identity unless an operator supplies
 or `NETWORK SERVICE` must name the intended Limited user explicitly. The
 private ACL contains only the setup writer, that runtime SID, `SYSTEM`, and
 Administrators; it never grants `Users` or `Everyone` access. Cross-account
-configuration publication passes the same runtime SID to the shared JSON
-writer so the initial file is born readable, rather than relying only on a
-later supervisor repair.
+configuration publication resolves the exact instance Remote scheduled-task
+principal and passes its SID to the shared JSON writer; it never guesses an
+account from folder ownership or allowlist order. A missing local API credential
+is therefore born readable, and an existing credential repairs that principal's
+ACL without rewriting the credential bytes. Principal lookup or ACL repair
+failure remains an actionable startup error rather than being reclassified as
+an absent credential.
+
+Credential publication and ACL repair are explicit shared-Function bootstrap
+work. The shared candidate performs them once before starting Agent Workers;
+ordinary configuration reads and per-Agent Workers are read-only. A targeted
+Worker reboot therefore never repeats scheduled-task principal discovery or
+rewrites the shared secrets-file ACL.
 
 Handshake and protocol message requests include:
 

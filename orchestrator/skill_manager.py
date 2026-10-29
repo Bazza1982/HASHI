@@ -61,6 +61,16 @@ class SkillValidationError(ValueError):
     """Raised when a HASHI Skill package violates the public package contract."""
 
 
+class SchedulerJobChanged(RuntimeError):
+    """The confirmed task no longer matches its persisted definition."""
+
+
+def scheduler_job_deletion_revision(job: dict[str, Any]) -> str:
+    """Bind a deletion confirmation to the complete persisted task definition."""
+    payload = json.dumps(job, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
 def _is_directory_link(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", None)
     return path.is_symlink() or bool(callable(is_junction) and is_junction())
@@ -1612,6 +1622,58 @@ class SkillManager:
         else:
             self._save_tasks(tasks)
         return True, f"Updated {kind} task [{task_id}].", dict(job)
+
+    def delete_owned_job_if_unchanged(
+        self, kind: str, task_id: str, *, agent_name: str,
+        expected_revision: str, only_disabled: bool = False,
+    ) -> tuple[bool, str]:
+        """Delete exactly the confirmed owned task using its read revision."""
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            raise ValueError("invalid scheduler task kind")
+        self._ensure_active_heartbeats_migrated()
+        tasks = self._load_tasks()
+        task_jobs = tasks.get(self._task_key_for_kind(kind), [])
+        if not isinstance(task_jobs, list):
+            raise ValueError("invalid scheduler task collection")
+        sources = [(task_jobs, "tasks")]
+
+        active_payload = None
+        if kind == "heartbeat":
+            active_payload = self._load_json(
+                self.active_heartbeats_path, {"heartbeats": []}, strict=True,
+            )
+            active_jobs = active_payload if isinstance(active_payload, ConfigList) else active_payload.get("heartbeats", [])
+            if not isinstance(active_jobs, list):
+                raise ValueError("invalid active heartbeat collection")
+            sources.append((active_jobs, "active"))
+
+        matches = [(jobs, index, source) for jobs, source in sources
+                   for index, job in enumerate(jobs)
+                   if isinstance(job, dict) and job.get("id") == task_id]
+        if len(matches) > 1:
+            raise SchedulerJobChanged("task identity is ambiguous")
+        if not matches:
+            return False, f"Unknown {kind} task for agent: {task_id}"
+        jobs, index, source = matches[0]
+        job = jobs[index]
+        if str(job.get("agent") or "") != str(agent_name or ""):
+            return False, f"Unknown {kind} task for agent: {task_id}"
+        if (only_disabled and bool(job.get("enabled", False))) or (
+            scheduler_job_deletion_revision(job) != expected_revision
+        ):
+            raise SchedulerJobChanged("task changed after confirmation")
+
+        jobs.pop(index)
+        if source == "tasks":
+            self._save_tasks(tasks)
+        elif isinstance(active_payload, ConfigList):
+            write_config_json(
+                self.active_heartbeats_path, {"heartbeats": list(active_payload)},
+                expected_revision=active_payload.revision,
+            )
+        else:
+            self._save_json(self.active_heartbeats_path, active_payload)
+        return True, f"Deleted {task_id}."
 
     def delete_owned_job(
         self, kind: str, task_id: str, *, agent_name: str

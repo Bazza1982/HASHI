@@ -14,10 +14,13 @@ Fallback applies only to ordinary general-model requests.  The default is
 installed CLI, available model, or catalogue entry proves capability only --
 never consent to spend money or send data to another destination.
 
-`/phone`, `/call`, and `/voice` requests are excluded at the policy evaluator
-itself (not merely hidden in UI), using authoritative request facts, so
-aliases, scheduler entry, Frontend Connector entry, and future renderers
-cannot bypass the exclusion.
+`/phone`, `/call`, and `/voice` requests are excluded from both the long
+same-target capacity retry and model fallback at the policy evaluator itself
+(not merely hidden in UI). PAO admission derives one authoritative
+`request_mode` from validated Live Phone origin, sealed Call media, or admitted
+voice-origin facts, overwrites caller-supplied mode hints, and propagates the
+same value through HERV3 Stage requests. Aliases, scheduler entry, Frontend
+Connector entry, and future renderers therefore cannot bypass the exclusion.
 
 Fallback is distinct from:
 
@@ -32,7 +35,7 @@ Persisted per user through `orchestrator.config_json` transaction rules in
 `state/model_fallback_policy.json` (actor-scoped, versioned, revision
 checked, never storing credentials, model catalogues, or resolved secrets):
 
-- global mode: `off` | `ask` | `auto`;
+- global mode: `off` | `retry` | `ask` | `auto`;
 - an explicit ordered allowlist of exact, typed routes;
 - independent rules for a HERV3 source and a Codex CLI source, including
   independent permission to use HERV3 or Codex CLI as a target;
@@ -52,7 +55,9 @@ Route kinds:
   (`orchestrator/flexible_backend_registry.same_model_target`) proves that the
   target serves the same canonical model as the failing source; string
   similarity never does.
-- `codex_cli`: the Codex CLI engine.  This switch is pre-effect only.
+- `codex_cli`: the Codex CLI engine. This switch is pre-effect only and is
+  executed by PAO as a request-local cross-Engine call, never as an internal
+  HERV3 Stage Provider.
 
 ## Effective resolution order (first blocking reason recorded)
 
@@ -82,7 +87,8 @@ conflict instead of overwriting newer policy state.
 
 ## Attempt order and safety
 
-1. finish the existing bounded same-target local recovery decision;
+1. for ordinary text only, finish the existing bounded same-target local
+   recovery decision; phone/call/voice stops before any 60/180/300-second wait;
 2. if it still fails and the failure class is recoverable -- 429, retryable
    5xx, or the typed stream-inactivity timeout -- evaluate the effective
    user fallback policy; the stage consumer uses the shared
@@ -95,7 +101,9 @@ conflict instead of overwriting newer policy state.
    fallback target;
 5. let the selected HERV3 target run its normal continuous model/tool loop and
    scoped same-target transport recovery. Continue to another eligible route
-   only while the user's total handover/cost budget remains. The consent budget
+   only while the user's cumulative handover/cost budget remains. HERV3 exports
+   its attempted route keys, count, and estimated cost to PAO so a later Codex
+   route cannot restart either budget. The consent budget
    never becomes a Turn, Tool, token, time, or physical-provider-call ceiling
    inside the selected target.
 
@@ -117,10 +125,10 @@ invocation context, reasoning/request parameters, and HERV3 stream-inactivity
 timeout.
 
 The hard enforceable default is the maximum count of additional fallback route
-handovers. A
-known configured ceiling is checked before the call with the best available
-bounded estimate; an unknown price requires `allow_unknown_cost=true` or an
-interactive confirmation.
+handovers. A known configured ceiling is checked before every call against the
+sum of all prior attempted-route estimates plus the next route estimate. An
+unknown current or prior estimate makes the cumulative amount unknown and
+requires `allow_unknown_cost=true` or an interactive confirmation.
 
 Provider options may expose an explicit
 `estimated_fallback_call_cost_usd`.  Only finite, non-negative configured
@@ -152,8 +160,10 @@ per-interaction limit.
 - `adapters/openrouter_api.py` (and its DeepSeek/xAI/Ollama siblings) expose
   `set_provider_fallback_port` / `continue_generation`; the PAO-owned HER
   bridge supplies the resolved decision and creates the authorised target.
-- `orchestrator/her_v2/runtime_invocation.py` resolves only pre-effect stage
-  fallback (HERV3 model target or Codex CLI), never restarting the Turn.
+- `orchestrator/her_v2/runtime_invocation.py` resolves only HERV3 Model
+  Provider fallback and defensively rejects Codex as an internal Stage
+  Provider; `orchestrator/runtime_capacity_recovery.py` owns PAO's
+  request-local cross-Engine call.
 - `orchestrator/runtime_her_fallback.py` renders `/fallback` from this one
   policy; locked choices show a plain reason.
 - Focused tests: `tests/test_model_fallback_policy.py`,

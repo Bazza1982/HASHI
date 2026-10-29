@@ -56,6 +56,7 @@ def test_owner_enabled_notifications_use_token_authenticated_local_api(
 
     assert agent_presence_notify.call_started(bridge_home, "owner-a") is True
     assert agent_presence_notify.call_ended(bridge_home, "owner-a") is True
+    assert agent_presence_notify.message_received("HASHI3", "req-input") is True
     assert (
         agent_presence_notify.voice_bytes(
             bridge_home, "owner-a", b"ogg-bytes", "audio/ogg"
@@ -67,6 +68,7 @@ def test_owner_enabled_notifications_use_token_authenticated_local_api(
     assert [request.full_url for request, _timeout in requests] == [
         "http://127.0.0.1:7740/v1/call/incoming",
         "http://127.0.0.1:7740/v1/call/ended",
+        "http://127.0.0.1:7740/v1/hashi/message-received",
         "http://127.0.0.1:7740/v1/voice/speak",
     ]
     assert all(
@@ -76,8 +78,11 @@ def test_owner_enabled_notifications_use_token_authenticated_local_api(
     headers = {key.casefold(): value for key, value in requests[0][0].header_items()}
     assert headers["x-ap-token"] == "local-token"
     assert json.loads(requests[0][0].data) == {}
-    assert requests[2][0].data == b"ogg-bytes"
-    assert dict(requests[2][0].header_items())["Content-type"] == "audio/ogg"
+    assert json.loads(requests[2][0].data) == {
+        "instance_id": "HASHI3", "request_id": "req-input",
+    }
+    assert requests[3][0].data == b"ogg-bytes"
+    assert dict(requests[3][0].header_items())["Content-type"] == "audio/ogg"
 
 
 def test_missing_companion_or_token_is_fail_open(tmp_path, monkeypatch):
@@ -153,9 +158,9 @@ async def test_standard_adapter_keeps_call_audio_with_call_frontend(
     monkeypatch.setattr(agent_presence_notify, "_post_json", _post_json)
     monkeypatch.setattr(agent_presence_notify, "_post", _post)
 
-    binding = {"call_id": "call-1", "session_id": "ses-1"}
-    started, _ = _call_event(binding, "call.started", {})
-    ended, _ = _call_event(binding, "call.ended", {"reason": "hangup"})
+    binding = {"call_id": "call-1", "session_id": "ses-1", "instance_id": "HASHI3"}
+    started, _ = _call_event(binding, "call.started", {"mode": "phone"})
+    ended, _ = _call_event(binding, "call.ended", {"mode": "phone", "reason": "hangup"})
     speech, resolved_media = _call_event(
         binding,
         "call.speech",
@@ -188,8 +193,8 @@ async def test_standard_adapter_keeps_call_audio_with_call_frontend(
     assert (await adapter.dispatch(speech, endpoint_id=endpoint_id))["status"] == "skipped"
     assert (await adapter.dispatch(ended, endpoint_id=endpoint_id))["status"] == "accepted"
     assert posted == [
-        ("/v1/call/incoming", {}, "application/json"),
-        ("/v1/call/ended", {}, "application/json"),
+        ("/v1/phone/start", {"call_id": "call-1", "instance_id": "HASHI3"}, "application/json"),
+        ("/v1/phone/end", {"call_id": "call-1", "instance_id": "HASHI3"}, "application/json"),
     ]
 
     disabled = agent_presence_notify.AgentPresenceConnectorAdapter(

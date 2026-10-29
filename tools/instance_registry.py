@@ -150,7 +150,15 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
                 0o600,
             )
             os.write(descriptor, token.encode("ascii"))
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as exc:
+            # Windows can report a create/delete race for an O_EXCL lock file
+            # as EACCES instead of EEXIST, even after the competing owner has
+            # already removed the file.  Treat that transient result as lock
+            # contention, while preserving the original error if access stays
+            # denied for the whole acquisition window.
+            permission_denied = isinstance(exc, PermissionError)
+            if permission_denied and sys.platform != "win32":
+                raise
             try:
                 stale = time.time() - path.stat().st_mtime > REGISTRY_LOCK_STALE_SECONDS
             except OSError:
@@ -162,6 +170,10 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
                     pass
                 continue
             if time.monotonic() >= deadline:
+                if permission_denied and not path.exists():
+                    raise InstanceRegistryError(
+                        f"Cannot acquire instance registry lock {path}: {exc}"
+                    ) from exc
                 raise InstanceRegistryError("Instance registry is busy; try again.")
             time.sleep(0.025)
     try:

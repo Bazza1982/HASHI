@@ -12,10 +12,12 @@ from orchestrator.frontend_contracts import (
     normalize_delivery_intent,
     normalize_delivery_receipt,
     normalize_frontend_ingress_envelope,
+    normalize_frontend_operation,
     normalize_media_group,
     normalize_relay_envelope,
     normalize_tool_interaction,
 )
+from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
 
 
 def _ingress(**overrides):
@@ -303,6 +305,36 @@ def test_commands_are_typed_idempotent_and_authorized_at_admission():
         "authorization": {"decision": "denied", "scope": "owner"},
     }
     assert normalize_command_invocation(denied)["authorization"]["decision"] == "denied"
+
+
+def test_sys_frontend_operation_has_no_word_or_single_argument_4096_limit():
+    prompt = "  ".join(f"word-{index}" for index in range(1000)) + "\nnext line"
+    normalized = normalize_frontend_operation(
+        {"kind": "command", "name": "sys", "arguments": ["2", "save", prompt]}
+    )
+
+    assert normalized["arguments"] == ["2", "save", prompt]
+    assert len(normalized["arguments"]) == 3
+
+
+def test_sys_frontend_operation_reports_one_explicit_prompt_size_limit():
+    with pytest.raises(ValueError) as failure:
+        normalize_frontend_operation(
+            {
+                "kind": "command",
+                "name": "sys",
+                "arguments": ["2", "save", "x" * (MAX_SYS_PROMPT_CHARS + 1)],
+            }
+        )
+
+    assert getattr(failure.value, "error_code", None) == "sys_prompt_too_large"
+
+
+def test_other_commands_keep_the_bounded_generic_argument_contract():
+    with pytest.raises(ValueError, match="at most 64"):
+        normalize_frontend_operation(
+            {"kind": "command", "name": "status", "arguments": ["x"] * 65}
+        )
 
 
 def test_relay_envelope_bounds_hops_and_preserves_typed_payload_reference():
@@ -642,3 +674,22 @@ async def test_t01_t12_dynamic_third_connector_registration_and_reference_adapte
         unregister_connector(custom_id)
         with pytest.raises(ValueError, match="unregistered frontend connector"):
             canonical_connector_id(custom_id)
+
+
+def test_attachment_transport_receipt_rejects_duplicate_or_wrong_proof_type():
+    base = {
+        "type": "hashi.delivery-receipt", "version": 1,
+        "event_id": "event-1", "endpoint_id": "ep-1", "status": "unknown",
+        "proof": {
+            "type": "telegram-api-accepted", "value": "proof-1",
+            "attachment_receipts": [
+                {"attachment_id": "att-1", "transport_message_id": "101"},
+                {"attachment_id": "att-1", "transport_message_id": "102"},
+            ],
+        },
+    }
+    with pytest.raises(ValueError, match="unique"):
+        normalize_delivery_receipt(base)
+    wrong = {**base, "proof": {**base["proof"], "type": "other-connector"}}
+    with pytest.raises(ValueError, match="Telegram"):
+        normalize_delivery_receipt(wrong)

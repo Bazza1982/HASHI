@@ -358,17 +358,20 @@ def _record_standard_telegram_receipt(
     endpoint_id: str,
     status: str,
     message_ids: list[str],
+    attachment_receipts: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Persist one combined receipt for all text/media effects of an Event."""
+    """Persist a combined endpoint outcome and known per-attachment evidence."""
 
     proof = None
-    if status == "delivered":
+    if status == "delivered" or attachment_receipts:
         material = "\n".join(message_ids)
         proof = {
             "type": "telegram-api-accepted",
             "value": "tgmsg_"
             + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32],
         }
+        if attachment_receipts:
+            proof["attachment_receipts"] = list(attachment_receipts)
     return store.record_frontend_delivery_receipt(
         session_id=str(session_id),
         owner_id=str(owner_id),
@@ -509,6 +512,12 @@ async def _send_standard_event_media_to_telegram(
             all_ids = list(outbox_outcome.get("accepted_message_ids") or ())
             if transport_message_id is not None:
                 all_ids.append(str(transport_message_id))
+                receipts = list(outbox_outcome.get("attachment_receipts") or ())
+                receipts.append({
+                    "attachment_id": attachment_id,
+                    "transport_message_id": str(transport_message_id),
+                })
+                outbox_outcome["attachment_receipts"] = receipts
             outbox_outcome["accepted_message_ids"] = all_ids
             outbox_outcome["accepted_effect_count"] = int(
                 outbox_outcome.get("accepted_effect_count") or 0
@@ -772,6 +781,7 @@ async def _send_long_message_transport(
     skip_local_capture: bool = False,
     outbox_outcome: dict[str, Any] | None = None,
     reply_markup: Any = None,
+    frontend_question_id: str | None = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -941,20 +951,30 @@ async def _send_long_message_transport(
                     )
                     if callable(recorder):
                         try:
-                            recorder(
-                                session_id=str(frontend_session_id),
-                                owner_id=str(frontend_owner_id),
-                                connector_id="telegram",
-                                endpoint_id=audit_endpoint_id,
-                                transport_message_id=stable_message_id,
-                                event_id=str(frontend_event_id),
-                            )
+                            if frontend_question_id:
+                                from orchestrator.frontend_run_questions import QuestionRenditions
+                                QuestionRenditions(store).record(
+                                    question_id=frontend_question_id, endpoint_id=audit_endpoint_id,
+                                    chat_id=chat_id, transport_message_id=stable_message_id,
+                                    owner_id=str(frontend_owner_id), agent_id=runtime.name,
+                                    request_id=str(request_id))
+                            else:
+                                recorder(
+                                    session_id=str(frontend_session_id),
+                                    owner_id=str(frontend_owner_id),
+                                    connector_id="telegram",
+                                    endpoint_id=audit_endpoint_id,
+                                    transport_message_id=stable_message_id,
+                                    event_id=str(frontend_event_id),
+                                )
                         except Exception as exc:
                             runtime.logger.warning(
                                 "Telegram reply-reference persistence failed for %s (%s)",
                                 request_id or "<none>",
                                 type(exc).__name__,
                             )
+                            if frontend_question_id:
+                                raise
             if outbox_outcome is not None:
                 outbox_outcome["accepted_effect_count"] = int(
                     outbox_outcome.get("accepted_effect_count") or 0
@@ -1208,6 +1228,8 @@ async def dispatch_claimed_telegram_event(
         standard_event
     )
     canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
+    from orchestrator.frontend_run_questions import question_identity
+    frontend_question_id = question_identity(standard_event)
     if not include_text:
         canonical_text = ""
     media_refs = _standard_event_media_refs(standard_event)
@@ -1240,6 +1262,7 @@ async def dispatch_claimed_telegram_event(
                 skip_local_capture=True,
                 outbox_outcome=outcome,
                 reply_markup=canonical_markup,
+                frontend_question_id=frontend_question_id,
             )
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")
@@ -1361,6 +1384,7 @@ async def dispatch_claimed_telegram_event(
                 endpoint_id=str(claim["endpoint_id"]),
                 status=status,
                 message_ids=message_ids,
+                attachment_receipts=list(outcome.get("attachment_receipts") or ()),
             )
             store.complete_delivery_outbox(
                 outbox_id=str(claim["outbox_id"]),
@@ -1387,6 +1411,7 @@ async def dispatch_claimed_telegram_event(
             endpoint_id=str(claim["endpoint_id"]),
             status=receipt_status,
             message_ids=message_ids,
+            attachment_receipts=list(outcome.get("attachment_receipts") or ()),
         )
         store.complete_delivery_outbox(
             outbox_id=str(claim["outbox_id"]),
@@ -1407,6 +1432,7 @@ async def dispatch_claimed_telegram_event(
                         endpoint_id=str(claim["endpoint_id"]),
                         status="unknown",
                         message_ids=list(outcome.get("accepted_message_ids") or ()),
+                        attachment_receipts=list(outcome.get("attachment_receipts") or ()),
                     )
                 except Exception as receipt_error:
                     runtime.logger.warning(

@@ -7,6 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_delivery_policy import (
+    TELEGRAM_MIRROR_INHERIT,
+    normalize_telegram_mirror_policy,
+)
 from orchestrator.enterprise.profile import (
     parse_profile_context,
     validate_profile_context,
@@ -31,6 +35,10 @@ from orchestrator.runtime_defaults import (
     DEFAULT_WORKBENCH_PORT,
 )
 from orchestrator.timezone_policy import canonical_timezone_name
+from orchestrator.telegram_identity import (
+    resolve_owner_scope_id,
+    resolve_telegram_owner_id,
+)
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -172,6 +180,9 @@ class GlobalConfig:
     desktop_enabled: bool = False
     live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
+    # Stable PAO owner scope.  Telegram account replacement must not fork the
+    # same person's Sessions, Workzones, or owner-scoped preferences.
+    owner_scope_id: str | None = None
 
 @dataclass
 class AgentConfig:
@@ -210,6 +221,7 @@ class FlexibleAgentConfig:
     access_scope: str = "project"
     extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
+    telegram_mirror_policy: str = TELEGRAM_MIRROR_INHERIT
 
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
@@ -510,7 +522,16 @@ class ConfigManager:
                 migrated_names.append(name)
         return migrated_names
 
-    def load(self) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
+    def load(
+        self,
+        *,
+        bootstrap_local_api_credential: bool = False,
+    ) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
+        """Load configuration, with credential maintenance only by explicit owner.
+
+        Function Workers and ordinary readers must remain side-effect free.
+        The shared Function bootstrap opts in once before any Workers start.
+        """
         raw_cfg = read_config_json(self.config_path)
 
         migrated_fixed_agents = self._migrate_legacy_fixed_agents(raw_cfg)
@@ -533,10 +554,13 @@ class ConfigManager:
         code_root = self.code_root
         bridge_home = self.bridge_home
 
-        # authorized_id: secrets.json takes priority (written by Hashiko during
-        # AI-driven onboarding); falls back to agents.json for manual setups.
-        # Value of 0 means Telegram not yet configured (local/API-only mode).
-        _auth_id = int(secrets.get("authorized_telegram_id", 0)) or int(g_raw.get("authorized_id", 0))
+        # ``telegram_owner_id`` is the canonical Telegram actor when present.
+        # Older installs fall back to the private onboarding value and then the
+        # legacy global field.  ``owner_scope_id`` deliberately remains stable
+        # when the Telegram account changes so the same human keeps one PAO
+        # Session/Workzone/preference scope.
+        _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
+        _owner_scope_id = resolve_owner_scope_id(g_raw, _auth_id)
 
         workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
@@ -646,6 +670,7 @@ class ConfigManager:
 
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
+            owner_scope_id=_owner_scope_id,
             deployment_profile=profile_ctx.profile.value,
             organization_id=profile_ctx.organization_id,
             base_logs_dir=resolve_path_value(
@@ -793,6 +818,10 @@ class ConfigManager:
                 )
                 access_scope = "workspace"
 
+            telegram_mirror_policy = normalize_telegram_mirror_policy(
+                a_raw.pop("telegram_mirror_policy", TELEGRAM_MIRROR_INHERIT)
+            )
+
             extra = a_raw.pop("extra", None) or a_raw or None
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
@@ -800,7 +829,11 @@ class ConfigManager:
                 active_backend=active_backend, is_active=is_active, type=agent_type,
                 default_mode=default_mode, access_scope=access_scope, extra=extra,
                 project_root=code_root,
+                telegram_mirror_policy=telegram_mirror_policy,
             )
             agents.append(cfg)
 
+        if bootstrap_local_api_credential:
+            from orchestrator.workbench_auth import ensure_local_api_credential
+            secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
         return global_cfg, agents, secrets

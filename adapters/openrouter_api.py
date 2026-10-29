@@ -336,6 +336,26 @@ _STABLE_MODALITY_UNSUPPORTED_CODES = frozenset(
     }
 )
 
+_STABLE_PROVIDER_CAPACITY_CODES = frozenset(
+    {
+        "model_at_capacity",
+        "overloaded_error",
+        "provider_capacity_unavailable",
+        "server_overloaded",
+    }
+)
+
+_PROVIDER_CAPACITY_MESSAGE_MARKERS = (
+    "selected model is at capacity",
+    "model is at capacity",
+    "capacity unavailable",
+    "server is overloaded",
+    "temporarily overloaded",
+    "overloaded",
+    "no available provider",
+    "temporarily unavailable due to high demand",
+)
+
 _REASONING_DISABLED_VALUES = frozenset({"off", "none", "false", "0", "disabled"})
 _REASONING_EFFORT_VALUES = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
@@ -428,7 +448,38 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
             return "CONTEXT_CAPACITY_REJECTED"
         if normalized in _STABLE_MODALITY_UNSUPPORTED_CODES:
             return "PROVIDER_MODALITY_UNSUPPORTED"
+        if normalized in _STABLE_PROVIDER_CAPACITY_CODES:
+            return "PROVIDER_CAPACITY_UNAVAILABLE"
     return ""
+
+
+def _provider_capacity_message(response: httpx.Response | None) -> bool:
+    if response is None:
+        return False
+    try:
+        payload = response.json()
+    except Exception:
+        return False
+    values: list[Any] = []
+    if isinstance(payload, Mapping):
+        values.extend((payload.get("message"), payload.get("detail")))
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            values.extend((error.get("message"), error.get("detail")))
+            metadata = error.get("metadata")
+            if isinstance(metadata, Mapping):
+                values.extend(
+                    (
+                        metadata.get("message"),
+                        metadata.get("detail"),
+                        metadata.get("raw"),
+                        metadata.get("reason"),
+                    )
+                )
+        elif isinstance(error, str):
+            values.append(error)
+    text = " ".join(str(value or "") for value in values).casefold()
+    return any(marker in text for marker in _PROVIDER_CAPACITY_MESSAGE_MARKERS)
 
 
 def _stream_error_exception(
@@ -1522,6 +1573,12 @@ def _backend_failure_response(
         elif stable_code == "PROVIDER_MODALITY_UNSUPPORTED":
             code = stable_code
             description = "The provider explicitly rejected the requested input modality."
+        elif stable_code == "PROVIDER_CAPACITY_UNAVAILABLE" or (
+            status == 529 or (status == 503 and _provider_capacity_message(response))
+        ):
+            code = "PROVIDER_CAPACITY_UNAVAILABLE"
+            description = "The selected provider or model is temporarily at capacity."
+            retryable = True
         elif status == 400:
             code = "PROVIDER_BAD_REQUEST"
             description = "The provider rejected the request as invalid."
@@ -2078,6 +2135,23 @@ class OpenRouterAdapter(BaseBackend):
     def _run_question_resolution_messages(
         resolution: Mapping[str, Any],
     ) -> list[dict[str, str]]:
+        from orchestrator.run_questions import (
+            QUESTION_CONTINUE_INSTRUCTION,
+            QUESTION_DISABLED_INSTRUCTION,
+            QUESTION_UNANSWERED_INSTRUCTION,
+        )
+        questions = [q for q in (resolution.get("questions") or []) if isinstance(q, Mapping)]
+        instruction = QUESTION_UNANSWERED_INSTRUCTION
+        if any(q.get("resolution_reason") == "question_cards_disabled" for q in questions):
+            instruction = QUESTION_DISABLED_INSTRUCTION
+        elif any(
+            q.get("resolution_reason") == "user_continue"
+            or (q.get("state") == "consumed" and isinstance(q.get("answer"), Mapping)
+                and q["answer"].get("author") == "authenticated_user"
+                and q["answer"].get("system_action") == "continue")
+            for q in questions
+        ):
+            instruction = QUESTION_CONTINUE_INSTRUCTION
         return [
             {
                 "role": "system",
@@ -2085,10 +2159,12 @@ class OpenRouterAdapter(BaseBackend):
                     "HASHI_RUN_QUESTION_TERMINAL_GUARD\n"
                     "The preceding assistant response was withheld because this "
                     "Run still had an outstanding PAO question. Continue the same "
-                    "Run using the following authenticated user-level resolution. "
+                    "Run using the following runtime resolution. Authenticated "
+                    "answer content retains user authority. "
                     "Only a consumed question with an authenticated_user answer is "
                     "an answer. Pending, expired, cancelled, missing, or default "
-                    "values never grant permission or approval."
+                    "values never grant permission or approval. "
+                    + instruction
                 ),
             },
             {
@@ -5206,6 +5282,7 @@ class OpenRouterAdapter(BaseBackend):
                     additional_calls_limit=int(
                         decision.get("additional_calls_limit") or 0
                     ),
+                    estimated_cost_usd=decision.get("estimated_cost_usd"),
                 )
             except Exception as fallback_error:
                 attempt_record["error"] = type(fallback_error).__name__

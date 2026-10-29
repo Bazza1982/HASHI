@@ -412,6 +412,9 @@ class VoiceManager:
         )
 
     def _remember_provider_failure(self, failure: VoiceProviderFailure) -> None:
+        # An absent voice does not establish that the entire service is down.
+        if failure.code == "tts_voice_unavailable":
+            return
         self._provider_cooldowns[failure.provider] = (
             time.monotonic() + self.PROVIDER_FAILURE_COOLDOWN_SECONDS,
             failure,

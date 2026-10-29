@@ -193,6 +193,7 @@ OPERATIONS = {
         "allow_cloud",
         "locale",
         "video_requested",
+        "output_protocol",
     },
     "turn": {
         "generation",
@@ -207,6 +208,9 @@ OPERATIONS = {
     "camera": {"generation", "call_id", "enabled"},
     "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at"},
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
+    "speech_commit": {"generation", "call_id", "turn_id", "segment", "output_protocol"},
+    "speech_status": {"generation", "call_id", "turn_id", "segment"},
+    "interrupt": {"generation", "call_id", "turn_id"},
     "filler": {"generation", "call_id", "slot"},
     "end": {"generation", "call_id"},
 }
@@ -404,20 +408,63 @@ def _speech_duration_units(text: str) -> int:
     )
 
 
+def _duration_bounded_parts(text: str, maximum_duration_units: int | None) -> list[str]:
+    """Split long speech at a natural boundary before a renderer limit."""
+    if maximum_duration_units is None:
+        return [text]
+    if type(maximum_duration_units) is not int or maximum_duration_units < 1:
+        raise ValueError("maximum_duration_units must be a positive integer")
+    value = text.strip()
+    parts: list[str] = []
+    natural_minimum = max(1, maximum_duration_units // 2)
+    while value and _speech_duration_units(value) > maximum_duration_units:
+        cut = 0
+        for index in range(1, len(value) + 1):
+            if _speech_duration_units(value[:index]) > maximum_duration_units:
+                break
+            cut = index
+        cut = max(1, cut)
+        natural_cut = 0
+        for match in re.finditer(r"[\s，,；;：:]+", value[:cut]):
+            if _speech_duration_units(value[: match.end()]) >= natural_minimum:
+                natural_cut = match.end()
+        if natural_cut:
+            cut = natural_cut
+        part = value[:cut].strip()
+        value = value[cut:].strip()
+        if part:
+            parts.append(part)
+    if value:
+        parts.append(value)
+    return parts
+
+
 def _group_speech_parts(
-    parts: list[str], *, include_tail: bool
+    parts: list[str], *, include_tail: bool, maximum_duration_units: int | None = None
 ) -> tuple[list[str], str]:
     """Coalesce short sentences so TTS can prepare the next natural chunk."""
     grouped: list[str] = []
     pending = ""
-    for part in parts:
+    bounded_parts = [
+        bounded
+        for part in parts
+        for bounded in _duration_bounded_parts(part, maximum_duration_units)
+    ]
+    for part in bounded_parts:
         candidate = _join_speech_parts(pending, part)
-        if pending and len(candidate) > MAX_SPEECH_CHARS:
+        duration_exceeded = (
+            maximum_duration_units is not None
+            and _speech_duration_units(candidate) > maximum_duration_units
+        )
+        if pending and (len(candidate) > MAX_SPEECH_CHARS or duration_exceeded):
             grouped.append(pending.strip())
             pending = part.lstrip()
         else:
             pending = candidate
-        if _speech_duration_units(pending) >= MIN_SPEECH_DURATION_UNITS:
+        duration = _speech_duration_units(pending)
+        if duration >= MIN_SPEECH_DURATION_UNITS or (
+            maximum_duration_units is not None and duration >= maximum_duration_units
+        ):
             grouped.append(pending.strip())
             pending = ""
     if include_tail and pending:
@@ -426,7 +473,9 @@ def _group_speech_parts(
     return grouped, pending
 
 
-def _sentence_parts(text: str, *, include_tail: bool) -> tuple[list[str], str]:
+def _sentence_parts(
+    text: str, *, include_tail: bool, maximum_duration_units: int | None = None
+) -> tuple[list[str], str]:
     clean = clean_speech_text(str(text or ""))
     sentences: list[str] = []
     offset = 0
@@ -451,14 +500,22 @@ def _sentence_parts(text: str, *, include_tail: bool) -> tuple[list[str], str]:
             bounded[0] = leading + bounded[0]
         sentences.extend(bounded)
         remainder = ""
-    parts, pending = _group_speech_parts(sentences, include_tail=include_tail)
+    parts, pending = _group_speech_parts(
+        sentences,
+        include_tail=include_tail,
+        maximum_duration_units=maximum_duration_units,
+    )
     remainder = _join_speech_parts(pending, remainder).strip()
     return parts, remainder
 
 
-def complete_speech_segments(text: str):
+def complete_speech_segments(text: str, *, maximum_duration_units: int | None = None):
     """Return stable natural chunks and the still-changing answer tail."""
-    parts, remainder = _sentence_parts(text, include_tail=False)
+    parts, remainder = _sentence_parts(
+        text,
+        include_tail=False,
+        maximum_duration_units=maximum_duration_units,
+    )
     if len(parts) > MAX_SPEECH_SEGMENTS:
         overflow = ""
         for part in parts[MAX_SPEECH_SEGMENTS:]:
@@ -470,7 +527,161 @@ def complete_speech_segments(text: str):
     return parts, remainder
 
 
-def speech_segments(text: str):
+def _video_group_size(value: int, name: str) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_SPEECH_SEGMENTS:
+        raise ValueError(f"{name} must be between 1 and {MAX_SPEECH_SEGMENTS}")
+    return value
+
+
+def _video_sentence_units(
+    text: str, *, include_tail: bool, maximum_chars: int | None
+) -> tuple[list[str], str]:
+    """Keep natural sentences intact unless one exceeds the renderer hard limit."""
+    if maximum_chars is not None and (
+        type(maximum_chars) is not int or maximum_chars < 1
+    ):
+        raise ValueError("maximum_chars must be a positive integer")
+    clean = clean_speech_text(str(text or ""))
+    units: list[str] = []
+    offset = 0
+    for match in _SENTENCE_END.finditer(clean):
+        raw_sentence = clean[offset : match.end()]
+        sentence = raw_sentence.strip()
+        offset = match.end()
+        if sentence:
+            bounded = _bounded_video_sentence(sentence, maximum_chars)
+            leading = raw_sentence[: len(raw_sentence) - len(raw_sentence.lstrip())]
+            trailing = raw_sentence[len(raw_sentence.rstrip()) :]
+            if leading:
+                bounded[0] = leading + bounded[0]
+            if trailing:
+                bounded[-1] += trailing
+            units.extend(bounded)
+    remainder = clean[offset:]
+    if include_tail and remainder.strip():
+        bounded = _bounded_video_sentence(remainder.strip(), maximum_chars)
+        leading = remainder[: len(remainder) - len(remainder.lstrip())]
+        if leading:
+            bounded[0] = leading + bounded[0]
+        units.extend(bounded)
+        remainder = ""
+    return units, remainder.strip()
+
+
+def _bounded_video_sentence(sentence: str, maximum_chars: int | None) -> list[str]:
+    if maximum_chars is None or len(sentence) <= maximum_chars:
+        return [sentence]
+    value = sentence
+    parts: list[str] = []
+    while value:
+        cut = min(maximum_chars, len(value))
+        if cut < len(value):
+            boundary = max(
+                value.rfind(mark, 0, cut + 1)
+                for mark in (" ", "，", ",", "；", ";", "：", ":")
+            )
+            if boundary >= max(1, maximum_chars // 2):
+                cut = boundary + (0 if value[boundary].isspace() else 1)
+        part, value = value[:cut].strip(), value[cut:].strip()
+        if part:
+            parts.append(part)
+    return parts
+
+
+def _group_video_units(
+    units: list[str],
+    *,
+    first_segment_sentences: int,
+    group_sentences: int,
+    complete_only: bool,
+    maximum_chars: int | None,
+) -> tuple[list[str], list[str]]:
+    grouped: list[str] = []
+    offset = 0
+    target = first_segment_sentences
+    while offset < len(units):
+        available = len(units) - offset
+        if complete_only and available < target:
+            break
+        limit = min(target, available)
+        count = 0
+        value = ""
+        while count < limit:
+            candidate = _join_speech_parts(value, units[offset + count])
+            if maximum_chars is not None and value and len(candidate) > maximum_chars:
+                break
+            value = candidate
+            count += 1
+        if not count:
+            break
+        grouped.append(value.strip())
+        offset += count
+        target = group_sentences
+    return grouped, units[offset:]
+
+
+def complete_video_speech_segments(
+    text: str,
+    *,
+    first_segment_sentences: int = 1,
+    group_sentences: int = 4,
+    maximum_chars: int | None = None,
+):
+    """Release stable VideoTTS sentence groups while the answer streams."""
+    first_segment_sentences = _video_group_size(
+        first_segment_sentences, "first_segment_sentences"
+    )
+    group_sentences = _video_group_size(group_sentences, "group_sentences")
+    units, remainder = _video_sentence_units(
+        text, include_tail=False, maximum_chars=maximum_chars
+    )
+    parts, pending = _group_video_units(
+        units,
+        first_segment_sentences=first_segment_sentences,
+        group_sentences=group_sentences,
+        complete_only=True,
+        maximum_chars=maximum_chars,
+    )
+    pending_text = remainder
+    for unit in reversed(pending):
+        pending_text = _join_speech_parts(unit, pending_text)
+    if len(parts) > MAX_SPEECH_SEGMENTS:
+        for part in reversed(parts[MAX_SPEECH_SEGMENTS:]):
+            pending_text = _join_speech_parts(part, pending_text)
+        parts = parts[:MAX_SPEECH_SEGMENTS]
+    return parts, pending_text.strip()
+
+
+def video_speech_segments(
+    text: str,
+    *,
+    first_segment_sentences: int = 1,
+    group_sentences: int = 4,
+    maximum_chars: int | None = None,
+):
+    """Group a final VideoTTS answer by sentence count, preserving order."""
+    first_segment_sentences = _video_group_size(
+        first_segment_sentences, "first_segment_sentences"
+    )
+    group_sentences = _video_group_size(group_sentences, "group_sentences")
+    units, _remainder = _video_sentence_units(
+        text, include_tail=True, maximum_chars=maximum_chars
+    )
+    parts, _pending = _group_video_units(
+        units,
+        first_segment_sentences=first_segment_sentences,
+        group_sentences=group_sentences,
+        complete_only=False,
+        maximum_chars=maximum_chars,
+    )
+    return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS
+
+
+def speech_segments(text: str, *, maximum_duration_units: int | None = None):
     """Queue final TTS in natural, bounded chunks, in original order."""
-    parts, _ = _sentence_parts(text, include_tail=True)
+    parts, _ = _sentence_parts(
+        text,
+        include_tail=True,
+        maximum_duration_units=maximum_duration_units,
+    )
     return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS

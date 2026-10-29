@@ -63,6 +63,49 @@ startup preserves Telegram's pending updates; the accepted-update offset
 advances only after the Worker accepts each update. Source changes on HASHI3
 are not evidence that an already running shared Function has adopted them.
 
+### Telegram credential activation (2026-10-28)
+
+The Frontend Connector owns Bot credential verification and connection facts;
+PAO owns the exact-Agent activation transaction. Saving a verified credential
+for a running Agent requests the existing targeted Worker switch automatically.
+A stopped Agent stays stopped. The save and activation outcomes are separate:
+busy, unavailable or unknown activation retains the committed credential,
+reports `activation_status=pending` with a safe error code, and never replays
+the credential write or widens the request into a shared/all-Agent reboot.
+
+After Worker cutover, shared Functions refresh the configuration through its
+existing owner before reconciling Telegram receivers. A new Bot is not polled
+for a Worker still carrying the previous Bot fingerprint. An in-flight poll
+also rechecks that identity before delivery, leaving mismatched updates
+unacknowledged. Receiver replacement is serialized per Agent; the same Bot
+keeps its accepted-update offset, while a different Bot never inherits that
+receiver's cursor. Normal activation never drops pending updates.
+
+Recovery checkpoints store the Bot fingerprint together with its offset, even
+before the replacement receives its first update. The existing numeric offset
+file remains a rollback-compatible projection; identity-aware generations use
+the paired record and reject a different Bot's cursor. Legacy checkpoints
+without identity retain their existing compatibility behavior until rebound
+by the receiving owner.
+
+Worker application preparation owns outbound readiness. The receiver's
+`worker.telegram_status` RPC updates only its independent inbound observation;
+it must neither enable a failed sender nor disable a healthy sender. The
+Worker publishes explicit `telegram_outbound_connected` evidence only while
+its prepared application is running. The supervisor does not infer that fact
+from an older Worker's ambiguous `telegram_connected` field. Public connection
+projections also require a live Worker and a receiver with the same Bot
+fingerprint; the credential service separately checks the currently saved Bot.
+
+Credential status projects `inbound_connected`, `outbound_connected` and
+`bidirectional_ready` from the live Worker and actual receiver, bound to the
+currently saved Bot fingerprint. Token verification, Worker presence, a saved
+mirror policy, or successful outbound delivery alone cannot assert a two-way
+connection. These transport facts are still distinct from a real user round
+trip. Clients must preserve that distinction, including on older backends
+that do not publish connection facts. Mirror-policy changes remain immediate
+and do not themselves request a Worker switch.
+
 ## 3. External-client boundary
 
 Any compatible desktop, web, mobile, IDE, or operations client may use HASHI
@@ -269,6 +312,36 @@ disable the destination's transport. A Run's destinations are frozen at
 admission, so switching later does not replay or redirect it. Automatic
 WhatsApp mirrors require exactly one configured allowed personal number; the
 transport's ordinary replies still use their original chat endpoint.
+
+Telegram authorization and delivery routing are separate state. Every accepted
+authorized Telegram ingress persists its actual chat endpoint together with the
+authenticated actor and its `owner` or `secondary` role in PAO's
+instance/owner/Agent-scoped `channel_bindings`. Only the configured owner may
+establish the durable proactive destination. A secondary authorized user may
+enter Runs and receive replies through each Run's frozen inbound route, but the
+secondary user's activity never selects or replaces the owner's proactive
+route. On every lookup, including after Worker restart, PAO revalidates the
+persisted owner actor against the current Telegram allowlist and the current
+channel-egress policy. Revocation therefore disables the old route without
+deleting audit evidence. A legacy Session with no actor-bound route first tries
+to recover one by matching the canonical ingress envelope's opaque
+`endpoint_id` against the currently authorized configured owner. If no endpoint
+can be recovered, PAO may bootstrap only that configured owner's direct private
+chat because Telegram defines its chat ID as the same numeric user ID. The same
+authorization and channel-egress checks run before PAO persists the owner
+binding. This fallback never guesses a group chat, chooses an authorization-list
+position, or selects a secondary actor. An unresolved or zero route is omitted
+from the frozen Run destinations and sends nothing.
+
+The PAO owner scope is also distinct from the replaceable Telegram actor. A
+runtime-proven direct Telegram account replacement retains the same explicit
+`owner_scope_id`, changes the canonical Telegram owner, and reduces every Agent
+allowlist to that one actor. If the new actor previously had a direct binding as
+`secondary`, PAO may promote only the binding whose actor ID and private chat ID
+both equal the newly configured owner. It never promotes a group or an
+actor-less legacy endpoint. Old actor bindings remain audit evidence but fail
+authorization and cannot be selected for a future Workbench or other Connector
+mirror.
 
 AgentPresence is an optional local desktop-companion egress Connector. Its
 owner-scoped `/agentpresence on|off` preference defaults off and is shared by
@@ -528,8 +601,15 @@ reloads do not leave visible publications queued.
 The tool reports persistence separately from each endpoint's queued,
 accepted, delivered, failed or unknown state. An accepted receipt is not
 proof that the user saw the file; delivered requires the connector's transport
-proof. Unknown outcomes use the existing evidence-based recovery path and are
-not blindly resent. The terminal Message includes only attachments still
+proof. Telegram's endpoint receipt can also retain each accepted attachment ID
+and its transport message ID. If only part of a group was accepted, the
+endpoint remains unknown and the recorded item evidence does not claim the
+other items were delivered. A Worker crash before the receipt is committed can
+leave item evidence unknown. Unknown outcomes use the existing evidence-based
+recovery path and are not blindly resent. The 2026-10-29 legacy PR audit
+authorized this Function-layer repair on HASHI3; native Windows offline tests
+passed. Live Worker adoption and user acceptance remain unverified. The terminal
+Message includes only attachments still
 bound for final delivery. If prior deliverables are the only visible output,
 the Run may complete successfully without a duplicate final Message. A later
 failure or cancellation does not remove earlier committed deliverables.

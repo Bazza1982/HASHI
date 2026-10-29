@@ -22,6 +22,7 @@ _context = ContextVar("call_diagnostic_context", default={})
 _identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _generation = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
 _code = re.compile(r"call_[a-z][a-z0-9_]{0,119}\Z")
+_provider_code = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 _name = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
 _state = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
 _model = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}\Z")
@@ -38,6 +39,7 @@ _identifiers = {
     "request_id",
     "message_id",
     "provider_request_id",
+    "provider_diagnostic_id",
     "correlation_id",
     "trace_id",
     "span_id",
@@ -52,11 +54,19 @@ _numbers = {
     "duration_ms",
     "call_duration_ms",
     "wait_ms",
+    "wait_budget_ms",
+    "queue_wait_ms",
+    "pre_submit_elapsed_ms",
+    "submission_elapsed_ms",
+    "submit_duration_ms",
+    "job_elapsed_ms",
+    "total_elapsed_ms",
     "frame_age_ms",
     "audio_bytes",
     "image_bytes",
     "response_bytes",
     "http_status",
+    "provider_http_status",
     "error_status",
     "lookup_count",
     "response_duration_ms",
@@ -185,6 +195,8 @@ def receipt_facts(receipt):
     if not isinstance(receipt, dict):
         return {}
     return {
+        "provider_request_id": receipt.get("provider_request_id")
+        or receipt.get("job_id"),
         "provider_generation_id": receipt.get("generation_id"),
         "verification": receipt.get("verification"),
         "gateway": receipt.get("gateway"),
@@ -219,7 +231,17 @@ def _emit(event, **facts):
             and _generation.fullmatch(value)
         ):
             record[key] = value
-        elif key == "error_code" and isinstance(value, str) and _code.fullmatch(value):
+        elif (
+            key in ("error_code", "reason_code")
+            and isinstance(value, str)
+            and _code.fullmatch(value)
+        ):
+            record[key] = value
+        elif (
+            key == "provider_error_code"
+            and isinstance(value, str)
+            and _provider_code.fullmatch(value)
+        ):
             record[key] = value
         elif (
             key in ("exception_type", "cause_type")

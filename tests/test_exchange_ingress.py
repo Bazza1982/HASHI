@@ -418,7 +418,11 @@ def test_exchange_delivery_status_is_display_only_and_correlation_bound(tmp_path
 def test_exchange_message_inside_60_seconds_schedules_without_confirmation(tmp_path):
     _configure(tmp_path)
     now = time.time()
-    delivery = _delivery(now - 59)
+    # Keep enough margin for evidence construction and durable acceptance.  The
+    # freshness age is correctly measured at acceptance, so a wall-clock test
+    # only one second inside the boundary can cross it before the message is
+    # persisted on a busy machine.
+    delivery = _delivery(now - 30)
     delivery["authorization_expires_at"] = utc_timestamp(now + 60)
     prompt, evidence = _evidence(tmp_path, delivery)
     calls = []

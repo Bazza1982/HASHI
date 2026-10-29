@@ -123,6 +123,53 @@ def test_global_timezone_uses_explicit_iana_name(tmp_path):
     assert global_cfg.timezone == "Australia/Sydney"
 
 
+def test_telegram_owner_can_change_without_changing_pao_owner_scope(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    config = read_config_json(config_path)
+    config["global"].update(
+        {
+            "authorized_id": 7666,
+            "telegram_owner_id": 7666,
+            "owner_scope_id": "user:8872",
+        }
+    )
+    write_config_json(config_path, config)
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 8872
+    write_config_json(secrets_path, secrets)
+
+    global_cfg, _, _ = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+    ).load()
+
+    assert global_cfg.authorized_id == 7666
+    assert global_cfg.owner_scope_id == "user:8872"
+
+
+def test_legacy_owner_scope_defaults_to_effective_telegram_owner(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    secrets = read_config_json(secrets_path)
+    secrets["authorized_telegram_id"] = 7666
+    write_config_json(secrets_path, secrets)
+
+    global_cfg, _, _ = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+    ).load()
+
+    assert global_cfg.authorized_id == 7666
+    assert global_cfg.owner_scope_id == "user:7666"
+
+
 def test_invalid_global_timezone_is_rejected(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,
@@ -332,6 +379,34 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert agents[0].type == "flex"
     assert agents[0].default_mode == "flex"
     assert "has no explicit type" not in caplog.text
+
+
+def test_agent_telegram_mirror_policy_is_parsed_and_defaults_to_inherit(tmp_path):
+    configured = _minimal_flex_agent()
+    configured["telegram_mirror_policy"] = "always_off"
+    config_path, secrets_path = _write_base_files(tmp_path, configured)
+
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    assert agents[0].telegram_mirror_policy == "always_off"
+
+    document = read_config_json(config_path)
+    document["agents"][0].pop("telegram_mirror_policy")
+    write_config_json(config_path, document)
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    assert agents[0].telegram_mirror_policy == "inherit"
+
+
+def test_invalid_agent_telegram_mirror_policy_is_rejected(tmp_path):
+    configured = _minimal_flex_agent()
+    configured["telegram_mirror_policy"] = "sometimes"
+    config_path, secrets_path = _write_base_files(tmp_path, configured)
+
+    with pytest.raises(ValueError, match="unsupported Agent Telegram mirror policy"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
 
 @pytest.mark.parametrize("default_mode", ["wrapper", "audit", "dual-brain"])

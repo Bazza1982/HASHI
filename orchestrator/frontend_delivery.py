@@ -60,6 +60,13 @@ def _channel(value: Any, *, fallback: str = "default") -> str:
     return normalized
 
 
+def _telegram_channel(value: Any) -> str | None:
+    """Return a usable Telegram channel, keeping an unresolved zero fail-closed."""
+
+    normalized = _channel(value, fallback="")
+    return normalized if normalized and normalized != "0" else None
+
+
 def _destination(surface: Any, channel_key: Any) -> dict[str, str]:
     return {
         "surface": _surface(surface),
@@ -143,20 +150,27 @@ def freeze_run_delivery_route(
     resolved_surface = _surface(session_surface)
     resolved_channel = _channel(session_channel_key)
     primary_channel = _channel(primary_channel_key, fallback=resolved_channel)
-    telegram_channel = _channel(chat_id)
+    telegram_channel = _telegram_channel(chat_id)
 
     if source_id == "telegram":
-        primary = _destination("telegram", telegram_channel)
+        primary = (
+            _destination("telegram", telegram_channel)
+            if telegram_channel is not None
+            else None
+        )
     elif source_id == "tui":
         primary = _destination("tui", primary_channel)
     elif source_id == "whatsapp":
         primary = _destination("whatsapp", primary_channel)
     elif source_id == "hchat" and terminal_exchange:
-        primary = (
-            _destination("telegram", telegram_channel)
-            if telegram_requested
-            else _destination(resolved_surface, resolved_channel)
-        )
+        if telegram_requested:
+            primary = (
+                _destination("telegram", telegram_channel)
+                if telegram_channel is not None
+                else None
+            )
+        else:
+            primary = _destination(resolved_surface, resolved_channel)
     elif source_id == "hchat":
         # HChat is the message semantic.  The authenticated transport remains
         # its own Connector so Remote and Exchange can use separate adapters,
@@ -170,7 +184,7 @@ def freeze_run_delivery_route(
     elif source_id == "hashi.internal":
         primary = (
             _destination("telegram", telegram_channel)
-            if telegram_requested
+            if telegram_requested and telegram_channel is not None
             else None
         )
     else:
@@ -189,6 +203,7 @@ def freeze_run_delivery_route(
     primary_surface = primary["surface"] if primary is not None else ""
     if (
         telegram_requested
+        and telegram_channel is not None
         and primary_surface != "telegram"
         and not terminal_exchange
     ):
@@ -572,8 +587,10 @@ def telegram_delivery_for_admission(
     source: str,
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None = None,
+    agent_id: Any | None = None,
+    agent_config_path: Any | None = None,
 ) -> bool:
-    """Preserve Telegram primary replies; resolve mirrors from central state."""
+    """Preserve Telegram primaries and freeze the effective Agent mirror policy."""
 
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     from orchestrator.frontend_connector_registry import canonical_connector_id
@@ -585,12 +602,29 @@ def telegram_delivery_for_admission(
     )
     if connector_id == "telegram":
         return True
-    return owner_mirror_for_admission(
+    instance_enabled = owner_mirror_for_admission(
         request_metadata=metadata,
         state_root=state_root,
         connector_id="telegram",
         default=True,
     )
+    if agent_config_path is None or not str(agent_id or "").strip():
+        return instance_enabled
+    try:
+        from orchestrator.agent_delivery_policy import (
+            load_agent_telegram_mirror_policy,
+            resolve_telegram_mirror_policy,
+        )
+
+        policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
+        return resolve_telegram_mirror_policy(
+            policy,
+            instance_enabled=instance_enabled,
+        )
+    except (OSError, TypeError, ValueError):
+        # A missing/corrupt Agent policy must not accidentally enable a mirror.
+        # Telegram-origin traffic was returned above and remains deliverable.
+        return False
 
 
 def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:

@@ -13,6 +13,7 @@ from typing import Any
 
 from orchestrator.command_specs import SENSITIVE_COMMAND_NAMES
 from orchestrator.process_resources import path_lock as process_path_lock
+from orchestrator.sys_command_contract import parse_sys_command_arguments
 
 # `pswd` is provided by an optional local command extension rather than the
 # built-in registry, so it remains an explicit external sensitivity rule.
@@ -260,13 +261,17 @@ def split_slash_command_words(body: str) -> list[str]:
 
 
 def parse_slash_command_text(text: str) -> tuple[str, list[str]]:
-    raw = (text or "").strip()
+    raw = (text or "").lstrip()
     if not raw.startswith("/"):
         return "", []
-    parts = split_slash_command_words(raw[1:])
-    if not parts:
+    match = re.match(r"/([^\s]+)([\s\S]*)$", raw)
+    if match is None:
         return "", []
-    return parts[0].split("@", 1)[0].lower(), parts[1:]
+    command = match.group(1).split("@", 1)[0].lower()
+    remainder = match.group(2)
+    if command == "sys":
+        return command, parse_sys_command_arguments(remainder)
+    return command, split_slash_command_words(remainder)
 
 
 def parse_inline_callback_command(callback_data: str) -> tuple[str, list[str]]:

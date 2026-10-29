@@ -1884,17 +1884,28 @@ class _CognitiveControlToolRegistry:
         if not question_id or state not in {
             "pending",
             "answered",
+            "stopping",
             "consumed",
             "expired",
             "cancelled",
         }:
             return None
-        return {
+        result = {
             "question_id": question_id,
             "state": state,
             "answer": copy.deepcopy(question.get("answer")),
             "expires_at": question.get("expires_at"),
         }
+        if question.get("resolution_reason"):
+            result["resolution_reason"] = question["resolution_reason"]
+            if question["resolution_reason"] == "question_cards_disabled":
+                from orchestrator.run_questions import QUESTION_DISABLED_INSTRUCTION
+                result["instruction"] = QUESTION_DISABLED_INSTRUCTION
+                result["question"] = str(question.get("question") or "")
+            elif question["resolution_reason"] == "user_continue":
+                from orchestrator.run_questions import QUESTION_CONTINUE_INSTRUCTION
+                result["instruction"] = QUESTION_CONTINUE_INSTRUCTION
+        return result
 
     def _observe_run_question_result(self, name: str, result: Any) -> dict[str, Any] | None:
         if name not in {"ask_user", "get_user_answer"} or bool(
@@ -1905,7 +1916,7 @@ class _CognitiveControlToolRegistry:
         if question is None:
             return None
         question_id = question["question_id"]
-        if question["state"] in {"pending", "answered"}:
+        if question["state"] in {"pending", "answered", "stopping"}:
             self._pending_run_questions[question_id] = question
         else:
             self._pending_run_questions.pop(question_id, None)
@@ -1947,9 +1958,31 @@ class _CognitiveControlToolRegistry:
             "run_question_wait_started",
             {"question_ids": list(started_ids)},
         )
+        from orchestrator.run_questions import QUESTION_TTL_SECONDS
         resolved: list[dict[str, Any]] = []
         round_robin = 0
         error_streak = 0
+        loop = asyncio.get_running_loop()
+        budgets = []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).timestamp()
+        for question in self._pending_run_questions.values():
+            try:
+                expiry = datetime.fromisoformat(
+                    str(question.get("expires_at") or "").replace("Z", "+00:00")
+                ).timestamp()
+                budgets.append(max(0.0, expiry - now))
+            except ValueError:
+                budgets.append(float(QUESTION_TTL_SECONDS))
+        remaining_budget = min(float(QUESTION_TTL_SECONDS), max(budgets, default=0.0))
+        deadline = loop.time() + remaining_budget
+
+        def release_unanswered(reason):
+            for question_id, question in tuple(self._pending_run_questions.items()):
+                resolved.append({**question, "state": "unavailable", "answer": None,
+                                 "resolution_reason": reason})
+                self._pending_run_questions.pop(question_id, None)
+
         for question_id in tuple(self._pending_run_questions):
             _valid, question = await self._poll_run_question(
                 question_id,
@@ -1958,20 +1991,26 @@ class _CognitiveControlToolRegistry:
             if question is not None and question["state"] not in {
                 "pending",
                 "answered",
+                "stopping",
             }:
                 resolved.append(question)
 
         while self._pending_run_questions:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                release_unanswered("question_wait_deadline_exceeded")
+                break
             question_ids = tuple(self._pending_run_questions)
             question_id = question_ids[round_robin % len(question_ids)]
             round_robin += 1
             valid, question = await self._poll_run_question(
                 question_id,
-                wait_seconds=30,
+                wait_seconds=min(30, remaining),
             )
             if question is not None and question["state"] not in {
                 "pending",
                 "answered",
+                "stopping",
             }:
                 resolved.append(question)
 
@@ -1979,7 +2018,10 @@ class _CognitiveControlToolRegistry:
                 error_streak = 0
                 continue
             error_streak += 1
-            delay = min(30, 2 ** min(error_streak - 1, 4))
+            if error_streak >= 3:
+                release_unanswered("question_transport_unavailable")
+                break
+            delay = min(max(0, deadline - loop.time()), 2 ** (error_streak - 1))
             self._audit(
                 "run_question_wait_retry",
                 {
@@ -2682,6 +2724,20 @@ class _Herv3ProviderFallbackPort:
             canonical_backend_engine(str(item.get("engine") or "")): item
             for item in options
         }
+        allowed_backends = list(
+            getattr(
+                getattr(self.provider.backend_manager, "config", None),
+                "allowed_backends",
+                (),
+            )
+            or ()
+        )
+        codex_rows = [
+            row
+            for row in allowed_backends
+            if canonical_backend_engine(str(row.get("engine") or ""))
+            == "codex-cli"
+        ]
         required_modalities = {"text"}
         manifest = getattr(self.request, "attachment_manifest", ()) or ()
         if not manifest:
@@ -2707,16 +2763,17 @@ class _Herv3ProviderFallbackPort:
             if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI:
                 option = by_engine.get("codex-cli")
                 credential_ready = bool(
-                    option is not None and option.get("available") is not False
+                    codex_rows
+                    and option is not None
+                    and option.get("available") is not False
                 )
-                # A Codex CLI switch is a clean pre-effect stage selection.
-                # Cross-Provider message continuation stays HERV3-only.
-                capability_ok = bool(
-                    credential_ready and self.purpose == "stage"
-                )
+                # Codex CLI is a separate Engine. This HERV3-internal port can
+                # report that the runtime exists, but must never claim it can
+                # execute Codex as a Stage Provider. PAO performs that
+                # cross-Engine route after HERV3 returns its typed failure.
                 facts[route.key()] = policy_owner.FallbackRouteFacts(
                     credential_ready=credential_ready,
-                    capability_ok=capability_ok,
+                    capability_ok=False,
                     capability_reason=(
                         policy_owner.REASON_MISSING_KEY_OR_RUNTIME
                         if not credential_ready
@@ -2841,6 +2898,7 @@ class _Herv3ProviderFallbackPort:
         visible_partial_answer: bool,
     ) -> Any:
         from orchestrator import model_fallback_policy as policy_owner
+        from orchestrator.flexible_backend_registry import canonical_backend_engine
         from orchestrator.privacy_levels import PrivacyLevel
 
         key = self.provider._fallback_budget_key(self.request)
@@ -2855,6 +2913,29 @@ class _Herv3ProviderFallbackPort:
             # Preserve the invalid state so the policy resolver can block it;
             # silently substituting a valid level could widen its narrowing.
             privacy_level = -1
+        excluded_routes = set(
+            self.provider._fallback_routes_used(key)
+            if callable(
+                getattr(self.provider, "_fallback_routes_used", None)
+            )
+            else ()
+        )
+        source_engine = canonical_backend_engine(source_provider)
+        for route in policy.routes:
+            if route.source != source:
+                continue
+            if (
+                route.target_kind == policy_owner.TARGET_KIND_HERV3_MODEL
+                and canonical_backend_engine(route.provider) == source_engine
+                and route.model == source_model
+            ):
+                excluded_routes.add(route.key())
+            elif (
+                route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI
+                and source_engine == "codex-cli"
+                and (not route.model or route.model == source_model)
+            ):
+                excluded_routes.add(route.key())
         return policy_owner.FallbackRequestFacts(
             source=source,
             source_provider=source_provider,
@@ -2865,6 +2946,13 @@ class _Herv3ProviderFallbackPort:
             visible_partial_answer=bool(visible_partial_answer),
             checkpoint_safe=bool(checkpoint_safe),
             budget_used=self.provider._fallback_budget_used(key),
+            estimated_cost_used_usd=(
+                self.provider._fallback_cost_used(key)
+                if callable(
+                    getattr(self.provider, "_fallback_cost_used", None)
+                )
+                else 0.0
+            ),
             known_extra_cost_usd=None,
             interactive=self._interactive(),
             request_id=key,
@@ -2872,13 +2960,7 @@ class _Herv3ProviderFallbackPort:
                 policy,
                 tool_activity=bool(tool_activity),
             ),
-            excluded_route_keys=(
-                self.provider._fallback_routes_used(key)
-                if callable(
-                    getattr(self.provider, "_fallback_routes_used", None)
-                )
-                else frozenset()
-            ),
+            excluded_route_keys=frozenset(excluded_routes),
         )
 
     @staticmethod
@@ -2887,7 +2969,7 @@ class _Herv3ProviderFallbackPort:
         if route is None:
             return ""
         if route.target_kind == "codex_cli":
-            return "codex-cli"
+            return "codex-cli" + (f"/{route.model}" if route.model else "")
         return f"{route.provider}/{route.model}"
 
     async def evaluate_provider_fallback(
@@ -2933,6 +3015,11 @@ class _Herv3ProviderFallbackPort:
             if confirmation is not None:
                 facts = replace(facts, confirmation=confirmation)
                 decision = policy_owner.resolve_fallback_decision(policy, facts)
+        route_cost = (
+            facts.facts_for(decision.route).known_extra_cost_usd
+            if decision.route is not None
+            else None
+        )
         return {
             "allowed": bool(decision.allowed),
             "disposition": decision.disposition,
@@ -2941,6 +3028,8 @@ class _Herv3ProviderFallbackPort:
             "mode": decision.mode,
             "additional_calls_limit": int(decision.additional_calls_limit),
             "additional_calls_used": int(decision.additional_calls_used),
+            "estimated_cost_usd": route_cost,
+            "estimated_cost_used_usd": decision.estimated_cost_used_usd,
             "route_key": (
                 decision.route.key() if decision.route is not None else None
             ),
@@ -2990,6 +3079,7 @@ class _Herv3ProviderFallbackPort:
                 budget_key,
                 limit=total_limit,
                 route_key=route_key,
+                estimated_cost_usd=kwargs.get("estimated_cost_usd"),
             )
 
             return await backend.continue_generation(
@@ -3094,6 +3184,7 @@ class HashiStageProvider(StageProvider):
         # it never limits the selected Provider's healthy continuation loop.
         self._provider_fallback_calls: dict[str, int] = {}
         self._provider_fallback_routes: dict[str, set[str]] = {}
+        self._provider_fallback_costs: dict[str, float | None] = {}
 
     def _create_provider_backend(self, engine: str, *, target_model: str):
         if int(getattr(self.backend_manager, "privacy_level", 1)) == 2:
@@ -3215,12 +3306,17 @@ class HashiStageProvider(StageProvider):
         with self._active_backend_lock:
             return int(self._provider_fallback_calls.get(str(key), 0))
 
+    def _fallback_cost_used(self, key: str) -> float | None:
+        with self._active_backend_lock:
+            return self._provider_fallback_costs.get(str(key), 0.0)
+
     def _consume_fallback_budget(
         self,
         key: str,
         *,
         limit: int | None = None,
         route_key: str = "",
+        estimated_cost_usd: float | None = None,
     ) -> int:
         with self._active_backend_lock:
             current = int(self._provider_fallback_calls.get(str(key), 0))
@@ -3232,11 +3328,44 @@ class HashiStageProvider(StageProvider):
                 )
             value = current + 1
             self._provider_fallback_calls[str(key)] = value
+            previous_cost = self._provider_fallback_costs.get(str(key), 0.0)
+            try:
+                current_cost = (
+                    None
+                    if estimated_cost_usd is None
+                    or isinstance(estimated_cost_usd, bool)
+                    else float(estimated_cost_usd)
+                )
+                if current_cost is not None and (
+                    not math.isfinite(current_cost) or current_cost < 0
+                ):
+                    current_cost = None
+            except (TypeError, ValueError):
+                current_cost = None
+            self._provider_fallback_costs[str(key)] = (
+                None
+                if previous_cost is None or current_cost is None
+                else float(previous_cost) + current_cost
+            )
             if route_key:
                 self._provider_fallback_routes.setdefault(str(key), set()).add(
                     str(route_key)
                 )
             return value
+
+    def fallback_accounting(self, key: str) -> dict[str, Any]:
+        with self._active_backend_lock:
+            return {
+                "additional_calls_used": int(
+                    self._provider_fallback_calls.get(str(key), 0)
+                ),
+                "estimated_cost_used_usd": self._provider_fallback_costs.get(
+                    str(key), 0.0
+                ),
+                "route_keys": sorted(
+                    self._provider_fallback_routes.get(str(key), set())
+                ),
+            }
 
     def _fallback_routes_used(self, key: str) -> frozenset[str]:
         with self._active_backend_lock:
@@ -3272,11 +3401,11 @@ class HashiStageProvider(StageProvider):
         tool_started: bool,
         visible_partial_answer: bool,
     ) -> Mapping[str, Any] | None:
-        """Resolve one pre-effect stage fallback (HERV3/Codex CLI switch).
+        """Resolve one pre-effect HERV3 Model Provider fallback.
 
         Stage-level switching runs only before any Tool execution or
-        user-visible partial answer, and never restarts the HER Turn or the
-        PAO Run.
+        user-visible partial answer. Cross-Engine Codex fallback belongs to PAO
+        and is therefore deliberately incompatible at this internal boundary.
         """
 
         from orchestrator import model_fallback_policy as policy_owner
@@ -3288,11 +3417,10 @@ class HashiStageProvider(StageProvider):
         policy, _document = policy_owner.read_policy(
             runtime, _fallback_actor(runtime)
         )
-        source = (
-            policy_owner.SOURCE_CODEX_CLI
-            if canonical_backend_engine(selected.engine) == "codex-cli"
-            else policy_owner.SOURCE_HERV3
-        )
+        # This port exists only inside an active HERV3 Turn.  The selected
+        # profile may itself use Codex as a model Provider, but that does not
+        # change the outer Engine or silently substitute Codex's policy.
+        source = policy_owner.SOURCE_HERV3
         port = _Herv3ProviderFallbackPort(
             self, request, selected, purpose="stage"
         )
@@ -3337,6 +3465,12 @@ class HashiStageProvider(StageProvider):
             ),
             "additional_calls_limit": int(decision.additional_calls_limit),
             "additional_calls_used": int(decision.additional_calls_used),
+            "estimated_cost_usd": (
+                facts.facts_for(decision.route).known_extra_cost_usd
+                if decision.route is not None
+                else None
+            ),
+            "estimated_cost_used_usd": decision.estimated_cost_used_usd,
             "tool_started": bool(tool_started),
             "visible_partial_answer": bool(visible_partial_answer),
         }
@@ -3348,8 +3482,58 @@ class HashiStageProvider(StageProvider):
                 route_key=(
                     decision.route.key() if decision.route is not None else ""
                 ),
+                estimated_cost_usd=result["estimated_cost_usd"],
             )
         return result
+
+    async def resolve_stage_capacity_retry(
+        self,
+        *,
+        request: StageRequest,
+        selected: ProviderProfile,
+        failure_code: str,
+        retryable: bool,
+        retry_after_s: float | None,
+        retry_index: int,
+        side_effects_possible: bool,
+    ) -> Mapping[str, Any] | None:
+        """Resolve one long same-target retry inside the active HER Turn.
+
+        HERV3 owns the Turn and can therefore continue its unfinished work
+        without replaying the enclosing PAO Run.  Consent and the per-source
+        A/B side-effect choice remain owned by PAO's fallback policy.
+        """
+
+        from orchestrator import model_fallback_policy as policy_owner
+        runtime = self.runtime_context
+        if runtime is None:
+            return None
+        policy, _document = policy_owner.read_policy(
+            runtime, _fallback_actor(runtime)
+        )
+        source = policy_owner.SOURCE_HERV3
+        modality = _Herv3ProviderFallbackPort(
+            self,
+            request,
+            selected,
+            purpose="capacity_retry",
+        )._modality()
+        decision = policy_owner.resolve_capacity_retry(
+            policy,
+            policy_owner.CapacityRetryFacts(
+                source=source,
+                failure_code=str(failure_code or ""),
+                retryable=bool(retryable),
+                retry_index=int(retry_index),
+                retry_after_s=retry_after_s,
+                side_effects_possible=bool(side_effects_possible),
+                # This call is made only while the durable HER Turn remains
+                # active; option B continues that Turn rather than replaying it.
+                resumable_session=bool(request.turn_id),
+                modality=modality,
+            ),
+        )
+        return decision.to_dict()
 
     def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
         """Interrupt active provider subprocesses from the control thread."""

@@ -7,7 +7,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from orchestrator import frontend_ingress, runtime_session, runtime_transfer
+from orchestrator import (
+    frontend_ingress,
+    message_context,
+    runtime_session,
+    runtime_transfer,
+)
 from orchestrator import runtime_cross_session, runtime_delivery_order
 from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -474,7 +479,11 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
             "default",
         ),
     )
-    monkeypatch.setattr(runtime_session, "ensure_store", lambda _runtime: runtime.session_store)
+    monkeypatch.setattr(
+        runtime_session,
+        "ensure_store",
+        lambda _runtime: runtime.session_store,
+    )
     monkeypatch.setattr(
         runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
     )
@@ -495,8 +504,85 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
 
     item = runtime.queue.get_nowait()
     assert result == "req-live-origin"
+    assert item.request_mode == "phone"
+    assert item.request_metadata["request_mode"] == "phone"
     assert item.request_metadata["message_context_snapshot"]["live_voice"] == origin
     runtime.session_store.resolve_live_voice_origin.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_verified_call_media_sets_authoritative_call_request_mode(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.next_request_id = lambda: "req-call-mode"
+    runtime.session_store = _admission_store(tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(message_context, "_network_secret", lambda _root: "secret")
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-call", "context_generation": 1},
+            _accepted_run(
+                "session-call", "run-call", "message-call", "req-call-mode"
+            ),
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-call", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(runtime_session, "ensure_store", lambda _runtime: runtime.session_store)
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    prompt = "Call transcript text"
+    evidence = message_context.seal_connector_evidence(
+        tmp_path,
+        claims={
+            "call_media": {
+                "version": 2,
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "mode": "voice",
+            }
+        },
+        prompt=prompt,
+    )
+
+    result = await runtime.enqueue_request(
+        123,
+        prompt,
+        "session-api",
+        "call turn",
+        request_metadata={
+            "session_id": "session-call",
+            "owner_id": "user:123",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "request_mode": "text",
+            "_connector_evidence": evidence,
+        },
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == "req-call-mode"
+    assert item.request_mode == "call"
+    assert item.request_metadata["request_mode"] == "call"
 
 
 @pytest.mark.asyncio

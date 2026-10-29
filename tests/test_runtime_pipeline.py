@@ -485,6 +485,7 @@ async def test_call_feedback_keeps_local_activity_without_telegram_progress(back
 def test_begin_queue_item_records_processing_metadata():
     runtime = _runtime()
     item = _item(source="bridge:api")
+    item.request_mode = "call"
 
     start = runtime_pipeline.begin_queue_item(runtime, item)
 
@@ -493,6 +494,7 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.last_prompt is item
     assert runtime.current_request_meta["request_id"] == "req-1"
     assert runtime.current_request_meta["source"] == "bridge:api"
+    assert runtime.current_request_meta["request_mode"] == "call"
     assert runtime.current_request_meta["verbose_at_start"] is False
     assert runtime.current_request_meta["silent"] is False
     assert runtime.current_request_meta["deliver_to_telegram"] is True

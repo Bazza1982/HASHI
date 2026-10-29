@@ -64,9 +64,19 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
 
     canonical = get_summary(workspace_dir, session_id="session-current")
     assert overview["agent"]["status"] == "online"
+    from orchestrator.workzone import workzone_execution_platform, workzone_path_kind
+
+    expected_kind = workzone_path_kind(str(workzone))
+    expected_platform = workzone_execution_platform()
     assert overview["workzone"] == {
         "active": True,
+        "revision": 0,
+        "active_revision": 0,
+        "pending_activation": False,
         "path": str(workzone),
+        "path_kind": expected_kind,
+        "execution_platform": expected_platform,
+        "host_compatible": True,
         "active_count": 1,
         "configured_count": 1,
         "slots": [
@@ -77,6 +87,9 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
                 "label": workzone.name,
                 "enabled": True,
                 "available": True,
+                "path_kind": expected_kind,
+                "execution_platform": expected_platform,
+                "host_compatible": True,
             }
         ],
     }
@@ -142,11 +155,56 @@ def test_overview_projects_runtime_multi_workzones_instead_of_stale_legacy_file(
 
     assert overview["active"] is True
     assert overview["path"] is None
+    assert overview["revision"] == 9
+    assert overview["active_revision"] == 9
+    assert overview["pending_activation"] is False
     assert overview["active_count"] == 1
     assert overview["configured_count"] == 2
     assert [(slot["slot"], slot["enabled"]) for slot in overview["slots"]] == [
         ("main", False),
         ("1", True),
+    ]
+
+
+def test_overview_prefers_newer_authoritative_workzone_to_worker_metadata(tmp_path):
+    workspace = tmp_path / "workspace"
+    active = tmp_path / "active"
+    desired = tmp_path / "desired"
+    attached = tmp_path / "attached"
+    for path in (workspace, active, desired, attached):
+        path.mkdir()
+    runtime = _runtime(workspace)
+    metadata = {
+        "name": "akane",
+        "status": "online",
+        "online": True,
+        "workzone_state": {
+            "revision": 1,
+            "slots": [
+                {"slot_id": "main", "path": str(active), "enabled": True},
+            ],
+        },
+    }
+
+    overview = build_agent_overview(
+        metadata=metadata,
+        workspace_dir=workspace,
+        runtime=runtime,
+        desired_workzone_state={
+            "revision": 2,
+            "slots": [
+                {"slot_id": "main", "path": str(desired), "enabled": True},
+                {"slot_id": "3", "path": str(attached), "enabled": True},
+            ],
+        },
+    )["workzone"]
+
+    assert overview["revision"] == 2
+    assert overview["active_revision"] == 1
+    assert overview["pending_activation"] is True
+    assert [slot["path"] for slot in overview["slots"]] == [
+        str(desired.resolve()),
+        str(attached.resolve()),
     ]
 
 
@@ -164,6 +222,25 @@ async def test_agent_overview_endpoint_is_single_agent_and_no_store(tmp_path):
     server._runtime_map = lambda: {"akane": runtime}
     server._load_agent_rows = lambda: [{"name": "akane"}]
     server._is_governed_profile = lambda: False
+    server._v1_owner_id = lambda _request: "user:77"
+    desired = tmp_path / "desired"
+    desired.mkdir()
+    requested = []
+    server.session_store = SimpleNamespace(
+        get_agent_workzone_set=lambda **kwargs: (
+            requested.append(kwargs)
+            or {
+                "revision": 2,
+                "slots": [
+                    {
+                        "slot_id": "main",
+                        "path": str(desired),
+                        "enabled": True,
+                    }
+                ],
+            }
+        )
+    )
     server._metadata_for_agent = lambda _row, _runtime: {
         "id": "akane",
         "name": "akane",
@@ -171,6 +248,16 @@ async def test_agent_overview_endpoint_is_single_agent_and_no_store(tmp_path):
         "status": "local",
         "online": True,
         "workspace_dir": str(workspace_dir),
+        "workzone_state": {
+            "revision": 1,
+            "slots": [
+                {
+                    "slot_id": "main",
+                    "path": str(workspace_dir),
+                    "enabled": True,
+                }
+            ],
+        },
     }
 
     response = await server.handle_agent_overview(_Request("akane"))
@@ -180,6 +267,11 @@ async def test_agent_overview_endpoint_is_single_agent_and_no_store(tmp_path):
     assert response.headers["Cache-Control"] == "no-store"
     assert payload["ok"] is True
     assert payload["overview"]["agent"]["id"] == "akane"
+    assert payload["overview"]["workzone"]["revision"] == 2
+    assert payload["overview"]["workzone"]["active_revision"] == 1
+    assert payload["overview"]["workzone"]["pending_activation"] is True
+    assert payload["overview"]["workzone"]["path"] == str(desired.resolve())
+    assert requested == [{"owner_id": "user:77", "agent_id": "akane"}]
 
     missing = await server.handle_agent_overview(_Request("missing"))
     assert missing.status == 404

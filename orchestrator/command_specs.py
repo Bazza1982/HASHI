@@ -141,7 +141,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "phone",
         "cmd_phone",
-        "Configure live phone calls",
+        "Configure audio phone calls with companion away",
         "session",
         guide=CommandGuide(
             "/phone <action> [value]",
@@ -162,7 +162,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "call",
         "cmd_call",
-        "Configure voice and video calls",
+        "Configure video calls and companion VideoTTS",
         "session",
         guide=CommandGuide("/call <action>", ("menu", "status", "activate", "deactivate", "stt", "tts", "vision", "voice", "advanced", "option", "reset"), example="/call activate"),
     ),
@@ -360,7 +360,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "fallback",
         "cmd_fallback",
-        "Configure the consented model fallback policy",
+        "Configure model-capacity retry and fallback",
         "models",
         guide=CommandGuide(
             "/fallback [status]",

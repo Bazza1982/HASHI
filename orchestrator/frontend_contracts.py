@@ -11,6 +11,12 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from orchestrator.sys_command_contract import (
+    SYS_SCOPE_ALIASES,
+    SYS_TEXT_ACTIONS,
+    normalize_sys_arguments,
+)
+
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _CONNECTOR = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -98,6 +104,35 @@ def _token(value: Any, name: str, *, maximum: int = 256) -> str:
     normalized = _string(value, name, maximum=maximum)
     if not _TOKEN.fullmatch(normalized):
         raise ValueError(f"{name} is invalid")
+    return normalized
+
+
+def _command_arguments(command: str, value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("command arguments must be a list")
+    if command != "sys":
+        if len(value) > 64:
+            raise ValueError("command arguments must be a list of at most 64 values")
+        return [
+            _string(argument, "command argument", maximum=4096)
+            for argument in value
+        ]
+
+    arguments = normalize_sys_arguments(value)
+    scope_offset = 1 if arguments and arguments[0].casefold() in SYS_SCOPE_ALIASES else 0
+    action_offset = scope_offset + 1
+    body_offset = (
+        action_offset + 1
+        if action_offset < len(arguments)
+        and arguments[action_offset].casefold() in SYS_TEXT_ACTIONS
+        else -1
+    )
+    normalized: list[str] = []
+    for index, argument in enumerate(arguments):
+        if index == body_offset:
+            normalized.append(argument)
+        else:
+            normalized.append(_string(argument, "command argument", maximum=4096))
     return normalized
 
 
@@ -305,19 +340,15 @@ def normalize_frontend_operation(value: Any) -> dict[str, Any]:
 
     if kind == "command":
         arguments = raw.get("arguments", [])
-        if not isinstance(arguments, (list, tuple)) or len(arguments) > 64:
-            raise ValueError("command arguments must be a list of at most 64 values")
+        name = _token(
+            str(raw.get("name") or "").lstrip("/"),
+            "command name",
+            maximum=128,
+        ).casefold()
         return {
             "kind": "command",
-            "name": _token(
-                str(raw.get("name") or "").lstrip("/"),
-                "command name",
-                maximum=128,
-            ).casefold(),
-            "arguments": [
-                _string(argument, "command argument", maximum=4096)
-                for argument in arguments
-            ],
+            "name": name,
+            "arguments": _command_arguments(name, arguments),
         }
 
     if kind == "action":
@@ -471,6 +502,28 @@ def normalize_delivery_receipt(value: Any) -> dict[str, Any]:
             "type": _token(proof_obj.get("type"), "proof type", maximum=64),
             "value": _token(proof_obj.get("value"), "proof value"),
         }
+        media_receipts = proof_obj.get("attachment_receipts")
+        if media_receipts is not None:
+            if proof["type"] != "telegram-api-accepted":
+                raise ValueError("attachment receipts require Telegram transport proof")
+            if not isinstance(media_receipts, (list, tuple)) or not 1 <= len(media_receipts) <= 16:
+                raise ValueError("attachment receipts must contain at most 16 entries")
+            attachments = []
+            seen_attachments: set[str] = set()
+            seen_messages: set[str] = set()
+            for entry in media_receipts:
+                item = _object(entry, "attachment receipt")
+                attachment_id = _token(item.get("attachment_id"), "attachment_id")
+                message_id = _token(item.get("transport_message_id"), "transport_message_id")
+                if attachment_id in seen_attachments or message_id in seen_messages:
+                    raise ValueError("attachment receipt identities must be unique")
+                seen_attachments.add(attachment_id)
+                seen_messages.add(message_id)
+                attachments.append({
+                    "attachment_id": attachment_id,
+                    "transport_message_id": message_id,
+                })
+            proof["attachment_receipts"] = attachments
     if status == "delivered" and proof is None:
         raise ValueError("delivered receipt requires proof")
     return {
@@ -550,8 +603,7 @@ def normalize_command_invocation(value: Any) -> dict[str, Any]:
     raw = _object(value, "command invocation")
     _version(raw, COMMAND_INVOCATION_TYPE, COMMAND_INVOCATION_VERSION)
     arguments = raw.get("arguments", [])
-    if not isinstance(arguments, (list, tuple)) or len(arguments) > 64:
-        raise ValueError("command arguments must be a list of at most 64 values")
+    command = _token(raw.get("command"), "command", maximum=128).casefold()
     authorization_raw = _object(raw.get("authorization"), "authorization")
     decision = str(authorization_raw.get("decision") or "").casefold()
     if decision not in {"allowed", "denied", "pending", "unknown"}:
@@ -578,17 +630,14 @@ def normalize_command_invocation(value: Any) -> dict[str, Any]:
         "endpoint_id": _token(raw.get("endpoint_id"), "endpoint_id"),
         "session_id": _token(raw.get("session_id"), "session_id"),
         "context_generation": context_generation,
-        "command": _token(raw.get("command"), "command", maximum=128).casefold(),
+        "command": command,
         "issued_action_id": (
             _issued_action_id(issued_action_id)
             if issued_action_id is not None
             else None
         ),
         "revision": revision,
-        "arguments": [
-            _string(argument, "command argument", maximum=4096)
-            for argument in arguments
-        ],
+        "arguments": _command_arguments(command, arguments),
         "actor_digest": _digest(raw.get("actor_digest"), "actor_digest"),
         "idempotency_digest": _digest(
             raw.get("idempotency_digest"), "idempotency_digest"

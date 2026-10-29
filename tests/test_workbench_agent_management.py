@@ -1020,6 +1020,57 @@ async def test_agent_command_binds_trusted_owner_not_payload_owner(tmp_path, mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "adapter_id"),
+    [
+        ("handle_admin_command", "backend_api.admin_command"),
+        ("handle_agent_command", "backend_api.agent_command"),
+    ],
+)
+async def test_direct_command_routes_preserve_exact_sys_prompt_text(
+    tmp_path, monkeypatch, handler_name, adapter_id
+):
+    captured = []
+
+    async def execute(_runtime, command, **kwargs):
+        captured.append((command, kwargs["session_metadata"]))
+        return {"ok": True}
+
+    monkeypatch.setattr(workbench_module, "execute_local_command", execute)
+    runtime = SimpleNamespace(name="lily")
+    server = _server(
+        tmp_path,
+        active=True,
+        orchestrator=SimpleNamespace(runtimes=[runtime]),
+    )
+    monkeypatch.setattr(server, "_check_admin_auth", lambda _request: True)
+    monkeypatch.setattr(server, "_v1_owner_id", lambda _request: "user:7")
+    prompt = '  indented first line\n\n"quoted" C:\\Prompt\\rule\t  '
+    command = f"/sys 3 save {prompt}"
+    payload = {"command": command}
+    match_info = {"name": "lily"}
+    if handler_name == "handle_admin_command":
+        payload["agent"] = "lily"
+        match_info = {}
+
+    response = await getattr(server, handler_name)(
+        _Request(match_info=match_info, payload=payload)
+    )
+
+    assert response.status == 200
+    assert captured == [
+        (
+            command,
+            {
+                "connector_id": "backend_api",
+                "fc_compatibility_adapter_id": adapter_id,
+                "_hashi_owner_id": "user:7",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_deletion_routes_preview_commit_and_status_to_pao_owner(tmp_path):
     actions = []
 

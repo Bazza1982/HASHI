@@ -83,6 +83,9 @@ class UniversalOrchestrator:
         self.is_stopping = False
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
+        self._handoff_requests = 0
+        self._handoff_requests_idle = asyncio.Event()
+        self._handoff_requests_idle.set()
         self._restart_request: dict | None = None  # set by request_restart()
         self._shutdown_request = {
             "reason": "external",
@@ -176,10 +179,16 @@ class UniversalOrchestrator:
     async def _send_whatsapp_startup_notification(self, runtime):
         await self.whatsapp_manager.send_startup_notification(runtime)
 
-    def _load_config_bundle(self):
+    def _load_config_bundle(
+        self,
+        *,
+        bootstrap_local_api_credential: bool = False,
+    ):
         from orchestrator.config import ConfigManager
         cfg_mgr = ConfigManager(self.paths.config_path, self.paths.secrets_path, bridge_home=self.paths.bridge_home, code_root=self.paths.code_root)
-        global_cfg, agent_configs, secrets = cfg_mgr.load()
+        global_cfg, agent_configs, secrets = cfg_mgr.load(
+            bootstrap_local_api_credential=bootstrap_local_api_credential,
+        )
         self.global_cfg = global_cfg
         self.secrets = secrets
         self.agent_authority_roots = {

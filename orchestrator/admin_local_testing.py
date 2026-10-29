@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import shlex
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,8 +34,9 @@ from orchestrator.slash_command_audit import (
     looks_like_slash_command,
     parse_slash_command_text,
     resolve_handler_kind,
-    split_slash_command_words,
 )
+from orchestrator.sys_command_contract import normalize_sys_arguments
+from orchestrator.sys_command_contract import SysCommandContractError
 
 
 def _json_safe(value: Any):
@@ -134,6 +134,8 @@ class _FakeUpdate:
             "context_generation"
         )
         self._hashi_ui_locale = metadata.get("ui_locale")
+        # Set only by the Backend API after strict owner/Agent authentication.
+        self._hashi_forget_authenticated = metadata.get("_hashi_forget_authenticated") is True
         # Local command projections have no Telegram update number.  Preserve
         # the typed frontend invocation identity so each command response gets
         # its own stable Session presentation idempotency key.
@@ -179,21 +181,24 @@ def _local_command_session_metadata(
 
 
 def _split_command(command_line: str) -> tuple[str, list[str]]:
-    raw = (command_line or "").strip()
+    raw = (command_line or "").lstrip()
     if not raw:
         return "", []
-    if raw.startswith("/"):
-        raw = raw[1:]
-    parts = split_slash_command_words(raw)
-    if not parts:
-        return "", []
-    return parts[0].split("@", 1)[0].lower(), parts[1:]
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return parse_slash_command_text(raw)
 
 
 def _format_slash_command_line(command_name: str, args: list[str]) -> str:
     line = f"/{command_name}"
     if args:
-        line += " " + " ".join(shlex.quote(arg) for arg in args)
+        if str(command_name).casefold() == "sys":
+            canonical = normalize_sys_arguments(args)
+            line += " " + " ".join(canonical)
+        else:
+            import shlex
+
+            line += " " + " ".join(shlex.quote(arg) for arg in args)
     return line
 
 
@@ -236,6 +241,10 @@ async def try_execute_slash_command_text(
     chat_id: int | str | None = None,
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    from orchestrator.agent_presence_controls import try_dispatch as dispatch_ap_controls
+    controls = await dispatch_ap_controls(runtime, text, source_channel=source_channel)
+    if controls is not None:
+        return controls
     voice_confirmation = await try_dispatch_voice_confirmation_transport(
         runtime, text, source_channel=source_channel,
     )
@@ -250,6 +259,7 @@ async def try_execute_slash_command_text(
         runtime,
         text,
         source_channel=source_channel,
+        session_metadata=session_metadata,
     )
     if interaction is not None:
         return interaction
@@ -302,7 +312,7 @@ async def try_execute_slash_command_text(
 
     return await execute_local_command(
         runtime,
-        _format_slash_command_line(command_name, args),
+        text,
         chat_id=chat_id,
         source_channel=source_channel,
         session_metadata=session_metadata,
@@ -501,6 +511,17 @@ async def execute_local_command(
                 "error_code": "connector_local_command",
                 "error": str(exc),
             }
+        except SysCommandContractError as exc:
+            session.block(exc.error_code)
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "error_code": exc.error_code,
+                "error": exc.error_code,
+                "error_message": exc.error_message,
+                "request_outcome": "rejected",
+            }
         except ValueError as exc:
             session.block("frontend_adapter_rejected")
             return {
@@ -560,6 +581,7 @@ async def execute_local_command(
             source_channel=source_channel,
             frontend_operation=frontend_boundary["operation"],
             frontend_connector_id=frontend_boundary["connector_id"],
+            _hashi_question_stop_id=local_session_metadata.get("_hashi_question_stop_id"),
         )
 
         lock = getattr(runtime, "_local_admin_lock", None)
@@ -602,6 +624,32 @@ async def execute_local_command(
             finally:
                 if original_send_text is not None:
                     runtime._send_text = original_send_text
+
+        if isinstance(handler_result, Mapping) and handler_result.get("ok") is False:
+            error_code = str(
+                handler_result.get("error_code")
+                or handler_result.get("error")
+                or "command_execution_failed"
+            )
+            error_message = str(
+                handler_result.get("error_message")
+                or handler_result.get("message")
+                or ""
+            ).strip()
+            session.fail(error_code)
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "messages": store.messages,
+                "error_code": error_code,
+                "error": error_code,
+                **({"error_message": error_message} if error_message else {}),
+                "request_outcome": handler_result.get(
+                    "request_outcome", "rejected"
+                ),
+                "result": _json_safe(handler_result),
+            }
 
         response = {
             "ok": True,

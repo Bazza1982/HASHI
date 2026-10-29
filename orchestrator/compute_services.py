@@ -851,6 +851,8 @@ def _formal_capabilities(
 
 
 _LEGACY_PROTOCOLS = {
+    "/v1/video/speech": "video.speech.async.v1",
+    "/v1/video/capabilities": "video.speech.capabilities.v1",
     "/v1/chat/completions": "openai.chat.completions",
     "/v1/embeddings": "openai.embeddings",
     "/v1/audio/transcriptions": "openai.audio.transcriptions",
@@ -1003,7 +1005,9 @@ def _hashi_compute_feature(
     return support == "supported"
 
 
-def _hashi_compute_interfaces(value: Any) -> tuple[ComputeInterface, ...]:
+def _hashi_compute_interfaces(
+    value: Any, *, allow_unknown: bool = False
+) -> tuple[ComputeInterface, ...]:
     if not isinstance(value, list) or not value:
         raise ComputeServiceError("manifest_interface_invalid")
     interfaces: list[ComputeInterface] = []
@@ -1037,6 +1041,8 @@ def _hashi_compute_interfaces(value: Any) -> tuple[ComputeInterface, ...]:
         )
         if support == "unsupported":
             streaming = ("none",)
+        elif support == "unknown" and allow_unknown:
+            streaming = ()
         elif support != "supported":
             raise ComputeServiceError("manifest_interface_invalid")
         interfaces.append(
@@ -1133,8 +1139,13 @@ def _parse_hashi_compute_manifest(
             if type(in_flight_raw) is int and in_flight_raw >= 0
             else None
         ),
-        busy=bool(
-            gateway.get("busy") is True or gateway.get("at_capacity") is True
+        # Hashi Compute's busy flag reports activity, including camera requests.
+        # Its explicit capacity flag owns admission; older manifests retain the
+        # conservative busy fallback. Numeric limits still fence saturation.
+        busy=(
+            gateway["at_capacity"]
+            if type(gateway.get("at_capacity")) is bool
+            else gateway.get("busy") is True
         ),
     )
 
@@ -1261,7 +1272,9 @@ def _parse_hashi_compute_manifest(
                 status=status,
                 input_modalities=inputs,
                 output_modalities=outputs,
-                interfaces=_hashi_compute_interfaces(model.get("interfaces")),
+                interfaces=_hashi_compute_interfaces(
+                    model.get("interfaces"), allow_unknown=not available
+                ),
                 image=image_limits,
                 audio=audio_formats,
                 tools=tools,

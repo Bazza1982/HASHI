@@ -84,7 +84,9 @@ class RuntimeAppHost:
             enable_api_gateway=bool(args.get("api_gateway")),
         )
         # Candidate config validation does not initialize providers or bind ports.
-        self.app._load_config_bundle()
+        self.app._load_config_bundle(
+            bootstrap_local_api_credential=True,
+        )
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.shared_generation_id = manifest["generation_id"]
         self.app.function_release_adoption = dict(
@@ -170,6 +172,7 @@ class RuntimeAppHost:
             self.app._allow_empty_start = not handoff["agents"]
             self.app.selected_agents = set(handoff["agents"])
         self.app._handoff_offsets = handoff.get("telegram_offsets", {})
+        self.app._handoff_bot_offsets = handoff.get("telegram_bot_offsets", {})
         if self.bootstrap.get("recovery"):
             for name in handoff["agents"]:
                 self.app._handoff_offsets.setdefault(name, None)
@@ -293,6 +296,35 @@ class RuntimeAppHost:
             "connector_errors": errors,
         }
 
+    @staticmethod
+    def _shared_drain_blockers(app):
+        gateway = getattr(app, "api_gateway", None)
+        monitor_tasks = getattr(
+            getattr(app, "background_job_manager", None),
+            "_monitor_tasks",
+            {},
+        )
+        return {
+            "backend_requests": max(
+                0, int(getattr(app, "_handoff_requests", 0) or 0)
+            ),
+            "gateway_requests": len(
+                getattr(gateway, "_active_requests", {}) or {}
+            ),
+            "background_jobs": sum(
+                1 for task in monitor_tasks.values() if not task.done()
+            ),
+        }
+
+    @classmethod
+    def _require_shared_drain_idle(cls, app):
+        blockers = cls._shared_drain_blockers(app)
+        if any(blockers.values()):
+            detail = ", ".join(
+                f"{name}={count}" for name, count in blockers.items() if count
+            )
+            raise RuntimeError(f"shared Functions are busy ({detail})")
+
     async def quiesce(self):
         app = self.app
         if (
@@ -303,6 +335,7 @@ class RuntimeAppHost:
             or any(not task.done() for task in app._startup_tasks.values())
         ):
             raise RuntimeError("shared Functions cannot drain in this lifecycle phase")
+        self._require_shared_drain_idle(app)
         app._handoff_draining = True
         if self.connector_task is not None:
             self.connector_task.cancel()
@@ -324,35 +357,15 @@ class RuntimeAppHost:
             failures = [item for item in pauses if isinstance(item, BaseException)]
             if failures:
                 raise RuntimeError(f"Telegram intake did not drain: {failures[0]}")
-            # Both background jobs and API generations own real side effects;
-            # never cancel them just to make a rollout appear successful.
+            # Side-effecting requests and background jobs are an admission
+            # condition, not work to wait on after external intake is closed.
+            self._require_shared_drain_idle(app)
             async with asyncio.timeout(120):
-                while (
-                    getattr(app, "_handoff_requests", 0)
-                    or (gateway and gateway._active_requests)
-                    or any(
-                        not task.done()
-                        for task in getattr(
-                            getattr(app, "background_job_manager", None),
-                            "_monitor_tasks",
-                            {},
-                        ).values()
-                    )
-                ):
-                    await asyncio.sleep(0.1)
                 for handle in app.runtimes:
                     old = await handle.begin_cutover()
                     self.quiesced.append((handle, old))
                     await old.call("worker.quiesce", {"timeout": 120}, timeout=130)
-                while any(
-                    not task.done()
-                    for task in getattr(
-                        getattr(app, "background_job_manager", None),
-                        "_monitor_tasks",
-                        {},
-                    ).values()
-                ):
-                    await asyncio.sleep(0.1)
+                self._require_shared_drain_idle(app)
             return runtime_handoff.snapshot(app)
         except BaseException:
             await self.resume()

@@ -127,6 +127,312 @@ def owner_id(runtime: Any, explicit: str | None = None) -> str:
     return SessionStore.owner_id_for(runtime.global_config, explicit)
 
 
+def _telegram_owner_actor_id(runtime: Any) -> int | None:
+    """Return the configured owner identity, never an allowlist fallback."""
+
+    try:
+        actor_id = int(getattr(runtime.global_config, "authorized_id", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return actor_id or None
+
+
+def _telegram_actor_authorized(runtime: Any, actor_id: int) -> bool:
+    """Re-evaluate the current Telegram actor allowlist on every use."""
+
+    checker = getattr(runtime, "_is_authorized_user", None)
+    if callable(checker):
+        try:
+            return bool(checker(actor_id))
+        except Exception:
+            return False
+    for raw in getattr(runtime, "_authorized_telegram_ids", ()):
+        try:
+            if int(raw) == actor_id:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _telegram_egress_allowed(runtime: Any, *, actor_id: int, chat_id: int) -> bool:
+    """Re-evaluate current channel governance before proactive delivery."""
+
+    try:
+        gate = getattr(runtime, "_channel_gate", None)
+        if gate is None:
+            getter = getattr(runtime, "_get_channel_gate", None)
+            if callable(getter):
+                gate = getter()
+            else:
+                from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+
+                gate = EnterpriseChannelGate.from_global_config(runtime.global_config)
+        result = gate.check_egress(
+            "telegram",
+            actor_id=actor_id,
+            user_id=str(actor_id),
+            agent_id=getattr(runtime, "name", None),
+            audit_context={
+                "chat_id": chat_id,
+                "source_channel": "durable_proactive_route",
+            },
+        )
+    except Exception:
+        logger.warning("Could not revalidate Telegram proactive egress", exc_info=True)
+        return False
+    if not result.allowed:
+        logger.warning(
+            "Denied Telegram proactive egress after route revalidation: "
+            "agent=%s actor=%s chat=%s reason=%s",
+            getattr(runtime, "name", None),
+            actor_id,
+            chat_id,
+            result.reason,
+        )
+        return False
+    return True
+
+
+def _publish_route_metadata(runtime: Any) -> None:
+    publisher = getattr(runtime, "_publish_worker_metadata", None)
+    if not callable(publisher):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        result = publisher()
+        if inspect.isawaitable(result):
+            loop.create_task(result)
+    except RuntimeError:
+        # Runtime construction and isolated tests may not have an active loop.
+        return
+    except Exception:
+        logger.warning("Could not publish updated Telegram route metadata", exc_info=True)
+
+
+def record_telegram_route(
+    runtime: Any,
+    *,
+    chat_id: Any,
+    explicit_owner_id: str | None = None,
+    session_id: str | None = None,
+    actor_id: Any | None = None,
+) -> int:
+    """Persist an observed authorized Telegram endpoint in PAO Session state."""
+
+    try:
+        resolved_chat_id = int(str(chat_id).strip())
+    except (TypeError, ValueError) as exc:
+        raise SessionConflict("Telegram channel key must be a non-zero integer") from exc
+    if resolved_chat_id == 0:
+        raise SessionConflict("Telegram channel key must be a non-zero integer")
+    resolved_actor_id: int | None = None
+    actor_role: str | None = None
+    if actor_id is not None:
+        try:
+            resolved_actor_id = int(str(actor_id).strip())
+        except (TypeError, ValueError) as exc:
+            raise SessionConflict("Telegram actor must be a non-zero integer") from exc
+        if resolved_actor_id == 0:
+            raise SessionConflict("Telegram actor must be a non-zero integer")
+        if not _telegram_actor_authorized(runtime, resolved_actor_id):
+            raise SessionConflict("Telegram actor is no longer authorized")
+        actor_role = (
+            "owner"
+            if resolved_actor_id == _telegram_owner_actor_id(runtime)
+            else "secondary"
+        )
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    selected = (
+        store.get_session(
+            session_id,
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            include_deleted=False,
+        )
+        if session_id is not None
+        else store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(resolved_chat_id),
+        session_id=selected["session_id"],
+        actor_id=resolved_actor_id,
+        actor_role=actor_role,
+    )
+    _publish_route_metadata(runtime)
+    return resolved_chat_id
+
+
+def _restore_telegram_chat_from_ingress(
+    runtime: Any,
+    *,
+    store: SessionStore,
+    resolved_owner: str,
+) -> int | None:
+    """Migrate a pre-binding route by matching its opaque FC endpoint."""
+
+    ingress = store.latest_frontend_ingress(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        connector_id="telegram",
+    )
+    if ingress is None:
+        return None
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+
+    owner_actor_id = _telegram_owner_actor_id(runtime)
+    if owner_actor_id is None or not _telegram_actor_authorized(
+        runtime, owner_actor_id
+    ):
+        return None
+    candidates = [owner_actor_id]
+    matches = [
+        candidate
+        for candidate in candidates
+        if endpoint_id_for(
+            ingress["connector_id"],
+            ingress_transport=ingress["ingress_transport"],
+            channel_key=str(candidate),
+        )
+        == ingress["endpoint_id"]
+    ]
+    if len(matches) != 1:
+        return None
+    selected = store.resolve_primary_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        establish=True,
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(matches[0]),
+        session_id=selected["session_id"],
+        actor_id=owner_actor_id,
+        actor_role="owner",
+    )
+    return matches[0]
+
+
+def _bind_owner_direct_telegram_chat(
+    runtime: Any,
+    *,
+    store: SessionStore,
+    resolved_owner: str,
+    owner_actor_id: int,
+) -> int:
+    """Persist the configured owner's unambiguous private Telegram route."""
+
+    selected = store.resolve_primary_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        establish=True,
+    )
+    store.bind_channel(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key=str(owner_actor_id),
+        session_id=selected["session_id"],
+        actor_id=owner_actor_id,
+        actor_role="owner",
+    )
+    return owner_actor_id
+
+
+def primary_telegram_chat_id(runtime: Any) -> int | None:
+    """Return a currently authorized owner route for proactive Telegram work.
+
+    The configured owner may establish the proactive destination. Secondary
+    authorized users may converse through their frozen inbound Run routes, but
+    their activity never selects or replaces this destination.
+    """
+
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime)
+    owner_actor_id = _telegram_owner_actor_id(runtime)
+    if owner_actor_id is None or not _telegram_actor_authorized(
+        runtime, owner_actor_id
+    ):
+        return None
+    binding = store.latest_channel_binding(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        actor_id=owner_actor_id,
+        channel_key=owner_actor_id,
+    )
+    if binding is not None:
+        try:
+            chat_id = int(str(binding["channel_key"]).strip())
+        except (KeyError, TypeError, ValueError):
+            chat_id = 0
+        if not chat_id:
+            return None
+        if binding.get("actor_role") != "owner":
+            # A replacement Telegram account can already have a durable direct
+            # route recorded as ``secondary`` under the same stable PAO owner
+            # scope.  Promote only the newly configured owner's unambiguous
+            # private chat; never promote a group, a legacy actor-less route,
+            # or an allowlist position.
+            if (
+                str(binding.get("actor_id") or "") != str(owner_actor_id)
+                or chat_id != owner_actor_id
+            ):
+                return None
+            store.bind_channel(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                surface="telegram",
+                channel_key=str(chat_id),
+                session_id=str(binding["session_id"]),
+                actor_id=owner_actor_id,
+                actor_role="owner",
+            )
+        if _telegram_egress_allowed(
+            runtime, actor_id=owner_actor_id, chat_id=chat_id
+        ):
+            return chat_id
+        return None
+    restored = _restore_telegram_chat_from_ingress(
+        runtime,
+        store=store,
+        resolved_owner=resolved_owner,
+    )
+    if restored and _telegram_egress_allowed(
+        runtime, actor_id=owner_actor_id, chat_id=restored
+    ):
+        return restored
+    if restored:
+        return None
+
+    # A Telegram private chat uses the same numeric identity as its user.  If
+    # no durable or legacy endpoint exists after a Worker restart, bootstrap
+    # only the explicitly configured owner -- never an allowlist position or
+    # secondary actor -- and re-run both authorization and channel governance.
+    if owner_actor_id <= 0:
+        return None
+    if not _telegram_egress_allowed(
+        runtime, actor_id=owner_actor_id, chat_id=owner_actor_id
+    ):
+        return None
+    return _bind_owner_direct_telegram_chat(
+        runtime,
+        store=store,
+        resolved_owner=resolved_owner,
+        owner_actor_id=owner_actor_id,
+    )
+
+
 def initialize_runtime_sessions(runtime: Any) -> dict[str, Any]:
     store = ensure_store(runtime)
     default = store.ensure_default_session(owner_id=owner_id(runtime), agent_id=runtime.name)
@@ -237,6 +543,13 @@ def resolve_request_session(
             channel_key=channel_key,
             explicit_session_id=explicit_session_id,
             default_only=default_only,
+        )
+    if surface == "telegram":
+        record_telegram_route(
+            runtime,
+            chat_id=channel_key,
+            explicit_owner_id=resolved_owner,
+            session_id=session["session_id"],
         )
     return session, resolved_owner, surface, channel_key
 
@@ -1162,6 +1475,13 @@ def session_memory_store(runtime: Any, item: Any) -> Any:
     if store is None:
         store = BridgeMemoryStore(workspace)
         stores[key] = store
+    from orchestrator.pcm_forget_audit import audit_scope
+    from orchestrator.pcm_forget_memory import inherit_forget_fences
+
+    agent_home = getattr(runtime, "workspace_dir", None)
+    if agent_home is not None:
+        with audit_scope(getattr(runtime, "canonical_audit", None)):
+            inherit_forget_fences(Path(agent_home), store)
     return store
 
 
@@ -1369,6 +1689,7 @@ def _canonical_terminal_payload(
         "public_failure",
         "interrupted",
         "interrupt_reason",
+        "termination_reason",
     ):
         resolved.pop(key, None)
     if state == "completed":
@@ -1409,6 +1730,21 @@ def _canonical_terminal_payload(
                     "incremental_only": True,
                 }
             )
+        return resolved
+    if state == "stopped" and store.request_terminal_reason(
+        str(run["request_id"]), owner_id=owner, agent_id=agent_id
+    ) == "safe_voice_discarded":
+        resolved.update(
+            {
+                "success": False,
+                "text": None,
+                "content": [],
+                "final_message_id": None,
+                "interrupted": True,
+                "interrupt_reason": "safe_voice_discarded",
+                "termination_reason": "safe_voice_discarded",
+            }
+        )
         return resolved
     resolved.update(
         {
@@ -1479,8 +1815,11 @@ def finish_request_from_listener(
     if fencing_token is not None and fencing_token <= 0:
         fencing_token = None
     success = bool(payload.get("success"))
+    interrupt_reason = str(payload.get("interrupt_reason") or "")
+    interrupted = not success and payload.get("interrupted") is True
+    normal_discard = interrupted and interrupt_reason == "safe_voice_discarded"
     failure_context = None
-    if not success:
+    if not success and not normal_discard:
         failure_context = {
             key: payload[key]
             for key in (
@@ -1495,10 +1834,8 @@ def finish_request_from_listener(
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
-    interrupt_reason = str(payload.get("interrupt_reason") or "")
-    interrupted = not success and payload.get("interrupted") is True
     failure_state = "failed"
-    if interrupted and interrupt_reason == "user_stop":
+    if interrupted and interrupt_reason in {"user_stop", "safe_voice_discarded"}:
         failure_state = "stopped"
     elif interrupted and interrupt_reason in {"user_steer", "user_focus"}:
         # A typed course correction replaces this Run with its linked
@@ -1522,6 +1859,7 @@ def finish_request_from_listener(
             error_text=str(payload.get("error") or "") or None,
             error_context=failure_context,
             failure_state=failure_state,
+            termination_reason="safe_voice_discarded" if normal_discard else "",
             fencing_token=fencing_token,
         )
     except Exception as exc:
@@ -1936,6 +2274,14 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
             agent_id=runtime.name,
             session_id=session_id,
         )
+        if surface == "telegram":
+            record_telegram_route(
+                runtime,
+                chat_id=channel_key,
+                explicit_owner_id=resolved_owner,
+                session_id=session_id,
+                actor_id=getattr(getattr(update, "effective_user", None), "id", None),
+            )
     else:
         store.bind_channel(
             owner_id=resolved_owner,

@@ -595,6 +595,8 @@ async def test_verbose_stream_display_drains_review_event_during_stop(tmp_path):
     assert edits
     assert "Review passed" in edits[-1]["text"]
     assert "Completed" in edits[-1]["text"]
+    assert "her-v3" in edits[-1]["text"]
+    assert "her-v2" not in edits[-1]["text"]
 
 
 @pytest.mark.asyncio

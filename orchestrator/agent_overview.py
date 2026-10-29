@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator.bridge_memory import SysPromptManager
+from orchestrator.bridge_memory import SysPromptManager, sys_prompt_deletion_revision
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.workzone import load_workzone
 from tools.token_tracker import get_summary
@@ -49,7 +49,7 @@ def _usage_overview(workspace_dir: Path, session_id: str | None) -> dict[str, An
     }
 
 
-def _system_prompt_overview(manager: Any) -> dict[str, Any]:
+def _system_prompt_overview(manager: Any, *, agent_name: str = '') -> dict[str, Any]:
     slots = []
     for item in manager.list_slots():
         text = str(item.get("text") or "")
@@ -65,6 +65,9 @@ def _system_prompt_overview(manager: Any) -> dict[str, Any]:
                 "state": "on" if active else ("off" if text else "empty"),
                 "preview": preview,
                 "characters": len(text),
+                "deletion_revision": sys_prompt_deletion_revision(
+                    str(item.get("slot") or ""), item, agent_name=agent_name,
+                ) if text else None,
             }
         )
     return {
@@ -95,30 +98,63 @@ def _parked_topics_overview(store: Any) -> dict[str, Any]:
     return {"count": len(topics), "topics": topics}
 
 
-def _workzone_overview(runtime: Any | None, workspace_dir: Path) -> dict[str, Any]:
+def _workzone_overview(
+    runtime: Any | None,
+    workspace_dir: Path,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+    desired_workzone_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     # Keep the new helper lookup lazy so the first hot reboot from the legacy
     # single-Workzone module can reload this consumer before its provider.
     from orchestrator import workzone as workzone_module
 
-    raw_state = getattr(runtime, "_workzone_state", None)
-    if isinstance(raw_state, Mapping):
-        state = workzone_module.normalize_workzone_state(raw_state)
+    raw_active_state = getattr(runtime, "_workzone_state", None)
+    if not isinstance(raw_active_state, Mapping) and isinstance(metadata, Mapping):
+        raw_active_state = metadata.get("workzone_state")
+    if isinstance(raw_active_state, Mapping):
+        active_state = workzone_module.normalize_workzone_state(raw_active_state)
     else:
         legacy = load_workzone(workspace_dir)
-        state = workzone_module.normalize_workzone_state(
+        legacy_path = str(legacy) if legacy is not None else None
+        if legacy_path is None and workzone_module.workzone_execution_platform() == "windows":
+            raw_legacy = workzone_module.load_workzone_path_text(workspace_dir)
+            if raw_legacy and workzone_module.workzone_path_kind(raw_legacy) == "posix":
+                legacy_path = raw_legacy
+        active_state = workzone_module.normalize_workzone_state(
             {
                 "slots": (
-                    [{"slot_id": "main", "path": str(legacy), "enabled": True}]
-                    if legacy is not None
+                    [{"slot_id": "main", "path": legacy_path, "enabled": True}]
+                    if legacy_path is not None
                     else []
                 )
             }
         )
+    desired_state = (
+        workzone_module.normalize_workzone_state(desired_workzone_state)
+        if isinstance(desired_workzone_state, Mapping)
+        else None
+    )
+    active_revision = int(active_state.get("revision") or 0)
+    desired_revision = int((desired_state or {}).get("revision") or 0)
+    state = (
+        desired_state
+        if desired_state is not None and desired_revision >= active_revision
+        else active_state
+    )
+    revision = int(state.get("revision") or 0)
     active = workzone_module.active_workzone_slots(state)
     primary = workzone_module.primary_workzone_path(state)
+    primary_item = next((item for item in state["slots"] if item["slot_id"] == "main"), None)
     return {
         "active": bool(active),
+        "revision": revision,
+        "active_revision": active_revision,
+        "pending_activation": revision > active_revision,
         "path": str(primary) if primary is not None else None,
+        "path_kind": primary_item.get("path_kind") if primary_item else None,
+        "execution_platform": primary_item.get("execution_platform") if primary_item else None,
+        "host_compatible": primary_item.get("host_compatible") if primary_item else None,
         "active_count": len(active),
         "configured_count": len(state["slots"]),
         "slots": [
@@ -129,6 +165,9 @@ def _workzone_overview(runtime: Any | None, workspace_dir: Path) -> dict[str, An
                 "label": item.get("label") or Path(item["path"]).name,
                 "enabled": bool(item["enabled"]),
                 "available": bool(item["available"]),
+                "path_kind": item["path_kind"],
+                "execution_platform": item["execution_platform"],
+                "host_compatible": item["host_compatible"],
             }
             for item in state["slots"]
         ],
@@ -140,6 +179,7 @@ def build_agent_overview(
     metadata: dict[str, Any],
     workspace_dir: Path,
     runtime: Any | None = None,
+    desired_workzone_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project existing HASHI state for one read-only Workbench panel."""
     workspace_dir = Path(workspace_dir)
@@ -154,9 +194,16 @@ def build_agent_overview(
             "status": str(metadata.get("status") or "offline"),
             "online": bool(metadata.get("online")),
         },
-        "workzone": _workzone_overview(runtime, workspace_dir),
+        "workzone": _workzone_overview(
+            runtime,
+            workspace_dir,
+            metadata=metadata,
+            desired_workzone_state=desired_workzone_state,
+        ),
         "usage": _usage_overview(workspace_dir, session_id),
-        "system_prompts": _system_prompt_overview(prompt_manager),
+        "system_prompts": _system_prompt_overview(
+            prompt_manager, agent_name=str(metadata.get("id") or metadata.get("name") or ""),
+        ),
         "parked_topics": _parked_topics_overview(parked_store),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -47,6 +47,7 @@ async def _wait_for_monotonic_deadline(deadline: float, *, clock=monotonic, slee
 ACTIVE_PHASES = {"connecting", "active", "ending", "recovering"}
 PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
 PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
+MAX_CONSECUTIVE_RESUME_ATTEMPTS = 5
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 TERMINAL_PROVIDER_CLOSE_ERRORS = {
@@ -54,6 +55,7 @@ TERMINAL_PROVIDER_CLOSE_ERRORS = {
 }
 TERMINAL_ERROR_REASONS = {
     "live_provider_content_filtered": "provider_content_filtered",
+    "live_recovery_attempts_exhausted": "recovery_attempts_exhausted",
 }
 TERMINATION_REASON_ERRORS = {reason: code for code, reason in TERMINAL_ERROR_REASONS.items()}
 
@@ -249,6 +251,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     ):
         self.session_store = session_store
         self.external_call_busy = lambda owner_id: False
+        self.frontend_call_state = None  # Optional Connector port; media stays with /phone.
         self.global_config = global_config
         self.secrets = dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
@@ -900,6 +903,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                      AND c.phase IN ('connecting', 'active', 'recovering')
                      AND NOT (c.termination_initiator = 'user' AND c.termination_reason = 'user_hangup')"""
             ).fetchall()
+        for row in active_rows:
+            self._publish_frontend_call_state(self._binding_from_row(row), "started")
         self._requeue_pending_provider_events()
         user_hangup_ids = {str(row["call_id"]) for row in user_hangups}
         for row in user_hangups:
@@ -1021,9 +1026,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         with self.session_store._lock, self.session_store._connection() as connection:
             rows = connection.execute(
                 """SELECT * FROM live_calls
-                   WHERE foreground = 1 AND phase IN ('connecting', 'active')
-                     AND (lease_expiry <= ? OR max_ends_at <= ?)""",
-                (now, rollover_before),
+                   WHERE foreground = 1
+                     AND (
+                         (phase = 'connecting' AND lease_expiry <= ?)
+                         OR (
+                             phase = 'active'
+                             AND (lease_expiry <= ? OR max_ends_at <= ?)
+                         )
+                     )""",
+                (now, now, rollover_before),
             ).fetchall()
         for row in rows:
             binding = self._binding_from_row(row)
@@ -1088,6 +1099,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if epoch != binding.call_epoch:
                 raise LiveVoiceError("live_transport_epoch_changed", 409)
         return binding, row
+
+    def _publish_frontend_call_state(self, binding: CallBinding, phase: str) -> None:
+        # Call only after the corresponding transaction has committed.
+        if callable(self.frontend_call_state):
+            try:
+                self.frontend_call_state(binding, phase)
+            except Exception as exc:
+                self.audit.record(binding, "frontend.lifecycle_failed",
+                                  phase=phase, error_type=type(exc).__name__)
 
     def _append_call_state(self, connection: Any, binding: CallBinding, phase: str, summary: str, **detail: Any) -> Mapping[str, Any]:
         event = self.session_store._append_event(
@@ -3182,6 +3202,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise LiveVoiceError(error_code, 409) from exc
             raise
         if not cancelled:
+            self._publish_frontend_call_state(binding, "started")
             self.audit.record(
                 binding,
                 "call.created",
@@ -3251,6 +3272,34 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         )
         return {**outcome, "sdp_answer": answer}
 
+    @staticmethod
+    def _consecutive_resume_attempts(
+        connection: sqlite3.Connection, binding: CallBinding
+    ) -> int:
+        rows = connection.execute(
+            """SELECT detail_json FROM run_events
+               WHERE session_id = ? AND kind = 'voice.live.call.state'
+               ORDER BY sequence DESC""",
+            (binding.session_id,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                detail = json.loads(row["detail_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            scope = detail.get("scope") if isinstance(detail, Mapping) else None
+            if (
+                not isinstance(scope, Mapping)
+                or str(scope.get("call_id") or "") != binding.call_id
+            ):
+                continue
+            if str(detail.get("phase") or "") == "active":
+                break
+            if detail.get("reason") == "transport_resume_requested":
+                count += 1
+        return count
+
     async def _op_resume(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Replace only the provider/browser transport while preserving one logical call."""
         binding, _current = self._call_binding(owner_id, payload)
@@ -3280,6 +3329,20 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         binding, current = self._call_binding(owner_id, payload, require_current_transport=True)
         if str(current["phase"]) != "recovering":
             raise LiveVoiceError("live_call_not_recovering", 409)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            resume_attempts = self._consecutive_resume_attempts(connection, binding)
+        if resume_attempts >= MAX_CONSECUTIVE_RESUME_ATTEMPTS:
+            self._mark_terminal(
+                binding,
+                "failed",
+                provider_close_state=str(
+                    current["provider_close_state"] or "unconfirmed"
+                ),
+                summary="Phone recovery stopped after repeated failed attempts",
+                error_code="live_recovery_attempts_exhausted",
+            )
+            raise LiveVoiceError("live_recovery_attempts_exhausted", 409)
+
         frozen_public = self._stored_phone_public(current)
         stored_selection = json.loads(current["phone_config_json"] or "{}").get("selection")
         if not stored_selection and frozen_public:
@@ -4121,6 +4184,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._append_call_state(connection, binding, phase, summary, **state_detail)
             became_terminal = True
         if became_terminal:
+            self._publish_frontend_call_state(binding, "ended")
             if settled_attempts:
                 self.audit.record(
                     binding,

@@ -97,6 +97,19 @@ def _json_request(
         return None
 
 
+async def call_video_output(bridge_home, owner_id, binding, *, instance_id, generation):
+    """Negotiate the scoped AV port using this Connector's credential owner."""
+    if not mirror_enabled(bridge_home, owner_id) or not _token():
+        return None
+    from orchestrator.agent_presence_call_video import AgentPresenceCallVideo
+    import hashlib
+
+    material = "\n".join((str(instance_id), str(generation), str(binding["call_id"])))
+    call_id = "hashi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    port = AgentPresenceCallVideo(_base_url(), _token(), str(instance_id), call_id)
+    return port if await port.probe() else None
+
+
 def get_hashi_instance_binding() -> dict[str, Any] | None:
     """Read the singular HASHI instance selected in AP."""
     return _json_request("GET", "/v1/hashi")
@@ -180,6 +193,14 @@ def voice_bytes(bridge_home: Any, owner_id: Any, data: bytes, mime_type: str) ->
     return _post("/v1/voice/speak", data=bytes(data), content_type=content_type)
 
 
+def message_received(instance_id: str, request_id: str) -> bool:
+    """Notify AP of one validated, owner-routed user admission without its body."""
+    return _post_json(
+        "/v1/hashi/message-received",
+        {"instance_id": instance_id, "request_id": request_id},
+    )
+
+
 def _receipt(
     event: Mapping[str, Any],
     endpoint_id: str,
@@ -233,11 +254,22 @@ class AgentPresenceConnectorAdapter:
             return _receipt(event, endpoint_id, "skipped")
 
         semantic_kind = str(event.get("semantic_kind") or "").strip().casefold()
-        if semantic_kind == "call.started":
-            accepted = await asyncio.to_thread(_post_json, "/v1/call/incoming", {})
-            return _receipt(event, endpoint_id, "accepted" if accepted else "unknown")
-        if semantic_kind == "call.ended":
-            accepted = await asyncio.to_thread(_post_json, "/v1/call/ended", {})
+        if semantic_kind in {"call.started", "call.ended"}:
+            facts = {
+                str(item.get("key")): item.get("value")
+                for block in event.get("content_blocks") or ()
+                if isinstance(block, Mapping) and block.get("type") == "key_value"
+                for item in block.get("items") or ()
+                if isinstance(item, Mapping)
+            }
+            # Only /phone owns departure. /call negotiates its scoped AV sink.
+            if facts.get("mode") != "phone" or not facts.get("call_id") or not facts.get("instance_id"):
+                return _receipt(event, endpoint_id, "skipped")
+            path = "/v1/phone/start" if semantic_kind == "call.started" else "/v1/phone/end"
+            accepted = await asyncio.to_thread(
+                _post_json, path,
+                {"call_id": facts["call_id"], "instance_id": facts["instance_id"]},
+            )
             return _receipt(event, endpoint_id, "accepted" if accepted else "unknown")
 
         # The active call Connector owns call audio.  AgentPresence consumes
@@ -317,6 +349,7 @@ __all__ = [
     "call_started",
     "get_hashi_instance_binding",
     "mirror_enabled",
+    "message_received",
     "token_matches",
     "voice_bytes",
 ]

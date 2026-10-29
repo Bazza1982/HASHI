@@ -609,6 +609,51 @@ async def test_workbench_max_publishes_shared_handoff_without_browser_ack(
     ) == {"acknowledged": False, "reason": "not_required"}
     assert manager.receipts.get(operation_id)["phase"] == "shared_replacement_requested"
 
+@pytest.mark.asyncio
+async def test_workbench_max_waits_for_its_control_request_to_exit_before_handoff(
+    tmp_path,
+    monkeypatch,
+):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request.update(
+        mode="max",
+        origin={
+            "surface": "workbench",
+            "owner_id": "owner:operator",
+            "actor_id": "operator",
+            "chat_id": "session-1",
+            "thread_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        lambda *_args, **_kwargs: {"message_id": "reboot-progress-1"},
+    )
+    kernel._handoff_requests = 1
+    kernel._handoff_requests_idle = asyncio.Event()
+    accepted = manager.submit(request)
+    operation_id = accepted["record"]["id"]
+    request_path = (
+        tmp_path
+        / "state"
+        / "instance"
+        / "kernel-requests"
+        / f"{operation_id}.json"
+    )
+
+    task = asyncio.create_task(manager.hot_restart(kernel._restart_request))
+    for _ in range(20):
+        if manager.receipts.get(operation_id)["phase"] == "shared_replacement_requested":
+            break
+        await asyncio.sleep(0)
+    assert manager.receipts.get(operation_id)["phase"] == "shared_replacement_requested"
+    assert not request_path.exists()
+
+    kernel._handoff_requests = 0
+    kernel._handoff_requests_idle.set()
+    assert await asyncio.wait_for(task, 1)
+    assert request_path.exists()
+
 
 @pytest.mark.asyncio
 async def test_legacy_pending_presentation_does_not_block_shared_handoff(

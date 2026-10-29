@@ -43,6 +43,7 @@ from orchestrator.session_titles import (
     is_system_session_title,
 )
 from orchestrator.storage_profile import removable_storage_profile
+from orchestrator import pcm_forget_preview, pcm_forget_session
 
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
@@ -66,6 +67,59 @@ MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
 HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE = HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
 HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
 HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
+
+
+def _conversation_timestamp(
+    started_at: Any,
+    start_ms: int,
+    *,
+    fallback: Any = "",
+) -> str:
+    try:
+        parsed = datetime.fromisoformat(
+            str(started_at or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return str(fallback or "")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        + timedelta(milliseconds=max(0, int(start_ms)))
+    ).isoformat()
+
+
+def _live_epoch_starts(
+    connection: sqlite3.Connection,
+    session_id: str,
+    call_ids: set[str],
+) -> dict[tuple[str, int], str]:
+    """Return durable Provider replacement times for the requested calls."""
+    if not call_ids:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT json_extract(detail_json, '$.scope.call_id') AS call_id,
+               json_extract(detail_json, '$.scope.call_epoch') AS call_epoch,
+               created_at
+        FROM run_events
+        WHERE session_id=? AND kind='voice.live.call.state'
+          AND json_valid(detail_json)
+          AND json_extract(detail_json, '$.reason')='provider_replaced'
+        ORDER BY sequence
+        """,
+        (str(session_id),),
+    ).fetchall()
+    result: dict[tuple[str, int], str] = {}
+    for row in rows:
+        call_id = str(row["call_id"] or "")
+        if call_id in call_ids:
+            try:
+                epoch = int(row["call_epoch"])
+            except (TypeError, ValueError):
+                continue
+            result[(call_id, epoch)] = str(row["created_at"] or "")
+    return result
 
 
 def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
@@ -415,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 26
+    SCHEMA_VERSION = 30
 
     def __init__(
         self,
@@ -728,6 +782,8 @@ class SessionStore:
                     agent_id TEXT NOT NULL,
                     surface TEXT NOT NULL,
                     channel_key TEXT NOT NULL,
+                    actor_id TEXT,
+                    actor_role TEXT,
                     session_id TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(instance_id, owner_id, agent_id, surface, channel_key),
@@ -1409,67 +1465,6 @@ class SessionStore:
                 stored_schema_version = int(schema_version_row["value"]) if schema_version_row else 0
             except (TypeError, ValueError):
                 stored_schema_version = 0
-            if stored_schema_version < self.SCHEMA_VERSION:
-                legacy_terminal_rows = connection.execute(
-                    """SELECT rowid, * FROM live_calls
-                       WHERE phase IN ('ended', 'failed', 'interrupted')"""
-                ).fetchall()
-                for row in legacy_terminal_rows:
-                    explicit_user_hangup = (
-                        str(row["termination_initiator"] or "") == "user"
-                        and str(row["termination_reason"] or "") == "user_hangup"
-                    )
-                    if not explicit_user_hangup:
-                        event_rows = connection.execute(
-                            "SELECT detail_json FROM run_events WHERE session_id = ? "
-                            "AND kind = 'voice.live.call.state'",
-                            (str(row["session_id"]),),
-                        ).fetchall()
-                        for event_row in event_rows:
-                            try:
-                                detail = json.loads(event_row["detail_json"] or "{}")
-                            except (TypeError, ValueError):
-                                continue
-                            call_scope = detail.get("scope") if isinstance(detail, Mapping) else None
-                            if not isinstance(call_scope, Mapping) or str(call_scope.get("call_id") or "") != str(row["call_id"]):
-                                continue
-                            if ((detail.get("termination_initiator") == "user"
-                                 and detail.get("termination_reason") == "user_hangup")
-                                    or detail.get("reason") == "user_hangup"):
-                                explicit_user_hangup = True
-                                break
-                    if explicit_user_hangup:
-                        continue
-                    legacy_phase = str(row["phase"])
-                    prior_close_state = str(row["provider_close_state"] or "unconfirmed")
-                    connection.execute(
-                        """UPDATE live_calls
-                           SET phase = 'recovering', ended_at = NULL,
-                               provider_close_state = CASE WHEN provider_close_state = 'confirmed'
-                                                           THEN 'confirmed' ELSE 'unconfirmed' END
-                           WHERE rowid = ?""",
-                        (int(row["rowid"]),),
-                    )
-                    self._append_event(
-                        connection, session_id=str(row["session_id"]), run_id=None,
-                        kind="voice.live.call.state",
-                        summary="Legacy call retained for explicit recovery",
-                        detail={
-                            "scope": {
-                                "instance_id": str(row["instance_id"]),
-                                "instance_generation": str(row["instance_generation"]),
-                                "agent_id": str(row["agent_id"]),
-                                "session_id": str(row["session_id"]),
-                                "context_generation": int(row["context_generation"]),
-                                "call_id": str(row["call_id"]),
-                                "call_epoch": int(row["call_epoch"]),
-                            },
-                            "phase": "recovering",
-                            "reason": "legacy_terminal_recovery",
-                            "legacy_phase": legacy_phase,
-                            "provider_close_state": prior_close_state,
-                        },
-                    )
             # A pre-qualified prototype could leave multiple live calls per owner.
             # Keep one foreground call and preserve every other call as recoverable
             # background state before installing the owner-level foreground invariant.
@@ -1567,6 +1562,17 @@ class SessionStore:
                 "CREATE INDEX IF NOT EXISTS delivery_outbox_claimable "
                 "ON delivery_outbox(session_id, state, created_at)"
             )
+            channel_binding_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_bindings)"
+                ).fetchall()
+            }
+            for column in ("actor_id", "actor_role"):
+                if column not in channel_binding_columns:
+                    connection.execute(
+                        f"ALTER TABLE channel_bindings ADD COLUMN {column} TEXT"
+                    )
             attachment_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -1694,11 +1700,201 @@ class SessionStore:
             )
             if stored_schema_version < 26:
                 self._reconcile_legacy_output_audio(connection)
+            if stored_schema_version < 27:
+                self._promote_legacy_session_workzones(connection)
+            if stored_schema_version < 29:
+                self._revert_legacy_terminal_recovery(connection)
+            pcm_forget_session.install_schema(connection)
+            pcm_forget_preview.install_schema(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
         self._repair_pending_audio_projections()
+
+    def _revert_legacy_terminal_recovery(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Undo schema 27's accidental reopening of already terminal calls."""
+
+        rows = connection.execute(
+            "SELECT rowid, * FROM live_calls WHERE phase = 'recovering'"
+        ).fetchall()
+        terminal_phases = {"ended", "failed", "interrupted"}
+        for row in rows:
+            events = connection.execute(
+                """SELECT event_id, created_at, detail_json
+                   FROM run_events
+                   WHERE session_id = ? AND kind = 'voice.live.call.state'
+                   ORDER BY sequence DESC""",
+                (str(row["session_id"]),),
+            ).fetchall()
+            match: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None
+            for event in events:
+                try:
+                    detail = json.loads(event["detail_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                scope = detail.get("scope") if isinstance(detail, Mapping) else None
+                if (
+                    detail.get("reason") != "legacy_terminal_recovery"
+                    or str(detail.get("legacy_phase") or "") not in terminal_phases
+                    or not isinstance(scope, Mapping)
+                    or str(scope.get("call_id") or "") != str(row["call_id"])
+                    or str(scope.get("call_epoch") or "") != str(int(row["call_epoch"]))
+                ):
+                    continue
+                match = (event, detail)
+                break
+            if match is None:
+                continue
+            event, detail = match
+            legacy_phase = str(detail["legacy_phase"])
+            close_state = str(
+                detail.get("provider_close_state")
+                or row["provider_close_state"]
+                or "unconfirmed"
+            )
+            ended_at = str(
+                event["created_at"]
+                or datetime.now(timezone.utc).isoformat()
+            )
+            updated = connection.execute(
+                """UPDATE live_calls
+                   SET phase = ?, ended_at = ?, foreground = 0,
+                       provider_close_state = ?
+                   WHERE rowid = ? AND phase = 'recovering' AND call_epoch = ?""",
+                (
+                    legacy_phase,
+                    ended_at,
+                    close_state,
+                    int(row["rowid"]),
+                    int(row["call_epoch"]),
+                ),
+            )
+            if updated.rowcount != 1:
+                continue
+            self._append_event(
+                connection,
+                session_id=str(row["session_id"]),
+                run_id=None,
+                kind="voice.live.call.state",
+                summary="Accidentally reopened legacy call restored to terminal state",
+                detail={
+                    "scope": {
+                        "instance_id": str(row["instance_id"]),
+                        "instance_generation": str(row["instance_generation"]),
+                        "agent_id": str(row["agent_id"]),
+                        "session_id": str(row["session_id"]),
+                        "context_generation": int(row["context_generation"]),
+                        "call_id": str(row["call_id"]),
+                        "call_epoch": int(row["call_epoch"]),
+                    },
+                    "phase": legacy_phase,
+                    "reason": "legacy_terminal_recovery_reverted",
+                    "provider_close_state": close_state,
+                    "repaired_event_id": str(event["event_id"]),
+                },
+            )
+
+    def _promote_legacy_session_workzones(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Promote one retained Session snapshot into an empty Agent profile.
+
+        Existing Agent profiles are authoritative and are never overwritten.
+        For an Agent that has only legacy Session state, the default Session is
+        preferred, then an active Session, then the most recently updated one.
+        The selected slot collection is copied as one snapshot; legacy rows stay
+        in place as audit evidence.
+        """
+
+        candidates = connection.execute(
+            """
+            SELECT s.session_id, s.owner_id, LOWER(s.agent_id) AS agent_id,
+                   s.workzone_revision, s.is_default, s.status, s.updated_at
+            FROM sessions AS s
+            WHERE s.instance_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM session_workzones AS legacy
+                  WHERE legacy.session_id = s.session_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_workzone_profiles AS profile
+                  WHERE profile.instance_id = s.instance_id
+                    AND profile.owner_id = s.owner_id
+                    AND profile.agent_id = LOWER(s.agent_id)
+              )
+            ORDER BY s.owner_id, LOWER(s.agent_id), s.is_default DESC,
+                     CASE WHEN s.status = 'active' THEN 0 ELSE 1 END,
+                     s.updated_at DESC, s.session_id DESC
+            """,
+            (self.instance_id,),
+        ).fetchall()
+        selected: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in candidates:
+            key = (str(row["owner_id"]), str(row["agent_id"]))
+            selected.setdefault(key, row)
+
+        for (owner_id, agent_id), session in selected.items():
+            legacy_slots = connection.execute(
+                """
+                SELECT slot_id, path, enabled, label, created_at, updated_at
+                FROM session_workzones
+                WHERE session_id = ?
+                ORDER BY CASE WHEN slot_id = 'main' THEN 0 ELSE 1 END,
+                         CAST(slot_id AS INTEGER)
+                """,
+                (str(session["session_id"]),),
+            ).fetchall()
+            if not legacy_slots:
+                continue
+            now = _utc_now()
+            revision = max(1, int(session["workzone_revision"] or 0) + 1)
+            inserted = connection.execute(
+                """
+                INSERT OR IGNORE INTO agent_workzone_profiles(
+                    instance_id, owner_id, agent_id, revision, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (self.instance_id, owner_id, agent_id, revision, now, now),
+            )
+            if not inserted.rowcount:
+                continue
+            for slot in legacy_slots:
+                connection.execute(
+                    """
+                    INSERT INTO agent_workzones(
+                        instance_id, owner_id, agent_id, slot_id, path,
+                        enabled, label, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.instance_id,
+                        owner_id,
+                        agent_id,
+                        str(slot["slot_id"]),
+                        str(slot["path"]),
+                        int(slot["enabled"]),
+                        str(slot["label"] or ""),
+                        str(slot["created_at"]),
+                        str(slot["updated_at"]),
+                    ),
+                )
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner_id,
+                agent_id=agent_id,
+                revision=revision,
+                kind="agent.workzones_promoted_from_session",
+                source="schema_27_migration",
+                detail={
+                    "session_id": str(session["session_id"]),
+                    "legacy_revision": int(session["workzone_revision"] or 0),
+                    "slots": [str(slot["slot_id"]) for slot in legacy_slots],
+                },
+                created_at=now,
+            )
 
     @staticmethod
     def _legacy_audio_part_matches(
@@ -1945,6 +2141,11 @@ class SessionStore:
     def owner_id_for(global_config: Any, explicit: str | None = None) -> str:
         if explicit and str(explicit).strip():
             return str(explicit).strip()
+        configured = str(
+            getattr(global_config, "owner_scope_id", None) or ""
+        ).strip()
+        if configured:
+            return configured
         return f"user:{int(getattr(global_config, 'authorized_id', 0) or 0)}"
 
     @staticmethod
@@ -3057,6 +3258,195 @@ class SessionStore:
             ).fetchall()
         return [self._run_dict(row) for row in rows]
 
+    def preview_pcm_forget(
+        self, *, owner_id: str, agent_id: str, session_id: str,
+        duration: timedelta, naive_timezone: str | None = None, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_preview.create(
+                    connection, instance_id=self.instance_id, owner_id=owner_id, agent_id=agent_id,
+                    session_id=session_id, duration=duration, naive_timezone=naive_timezone,
+                    now=now or datetime.now(timezone.utc),
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def confirm_pcm_forget(
+        self, *, owner_id: str, agent_id: str, session_id: str, token: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_preview.confirm(
+                    connection, instance_id=self.instance_id, owner_id=owner_id, agent_id=agent_id,
+                    session_id=session_id, token=token, now=now or datetime.now(timezone.utc),
+                    now_text=_utc_now(),
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def forget_pcm_window(
+        self, *, owner_id: str, agent_id: str, start: datetime, end: datetime,
+        naive_timezone: str | None = None, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Redact one Agent's local Session projections, retaining audit rows."""
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return pcm_forget_session.forget_window(
+                    connection, instance_id=self.instance_id, owner_id=owner_id,
+                    agent_id=agent_id, start=start, end=end, now=_utc_now(),
+                    naive_timezone=naive_timezone, operation_id=operation_id,
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
+
+    def pending_pcm_forget(
+        self, *, owner_id: str, agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return recovery metadata without exposing retained content."""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations
+                   WHERE instance_id=? AND owner_id=? AND agent_id=? AND state='pending'""",
+                (self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "operation_id": str(row["operation_id"]),
+            "start_epoch": float(row["start_epoch"]), "end_epoch": float(row["end_epoch"]),
+            "steps": json.loads(str(row["steps_json"])),
+            "result": json.loads(str(row["result_json"])),
+        }
+
+    def audit_pcm_forget_artifact(
+        self, *, owner_id: str, agent_id: str, operation_id: str,
+        identity: str, content: str,
+    ) -> None:
+        """Persist an immutable recovery copy before changing an opaque artifact."""
+        key = str(operation_id) + ":" + str(identity)
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = connection.execute(
+                """SELECT 1 FROM pcm_forget_operations
+                   WHERE instance_id=? AND owner_id=? AND agent_id=?
+                     AND operation_id=? AND state='pending'""",
+                (self.instance_id, str(owner_id), str(agent_id).lower(), str(operation_id)),
+            ).fetchone()
+            if operation is None:
+                raise SessionConflict("forget operation unavailable")
+            scope = (self.instance_id, str(owner_id), str(agent_id).lower(), "artifact", key)
+            row = connection.execute(
+                """SELECT payload_json FROM pcm_forget_audit
+                   WHERE instance_id=? AND owner_id=? AND agent_id=?
+                     AND source_kind=? AND source_id=?""", scope,
+            ).fetchone()
+            from orchestrator.pcm_forget_audit import payload_digest, protect
+
+            evidence = {"content": content}
+            if row is not None:
+                stored = json.loads(str(row["payload_json"]))
+                if (isinstance(stored, dict) and "canonical_audit_ref" in stored):
+                    unchanged = stored.get("sha256") == payload_digest(evidence)
+                else:
+                    unchanged = stored == evidence
+                if not unchanged:
+                    raise SessionConflict("forget artifact changed since its audit copy")
+            else:
+                payload = _json(protect("artifact", key, evidence))
+                connection.execute(
+                    """INSERT INTO pcm_forget_audit(instance_id, owner_id, agent_id,
+                       source_kind, source_id, payload_json) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (*scope, payload),
+                )
+
+    def record_pcm_forget_step(
+        self, *, owner_id: str, agent_id: str, operation_id: str, step: str,
+    ) -> None:
+        if step not in {"local_memory", "continuity"}:
+            raise ValueError("unknown forget step")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE operation_id=?
+                   AND instance_id=? AND owner_id=? AND agent_id=?""",
+                (str(operation_id), self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+            if row is None or str(row["state"]) != "pending":
+                raise SessionConflict("forget operation unavailable")
+            steps = set(json.loads(str(row["steps_json"])))
+            steps.add(step)
+            connection.execute(
+                "UPDATE pcm_forget_operations SET steps_json=?, updated_at=? WHERE operation_id=?",
+                (_json(sorted(steps)), _utc_now(), str(operation_id)),
+            )
+
+    def record_pcm_forget_new_session(
+        self, *, owner_id: str, agent_id: str, operation_id: str, session_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            scope = (self.instance_id, str(owner_id), str(agent_id).lower())
+            session = connection.execute(
+                """SELECT 1 FROM sessions WHERE instance_id=? AND owner_id=?
+                   AND agent_id=? AND session_id=? AND status!='deleted'""", (*scope, str(session_id)),
+            ).fetchone()
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE instance_id=? AND owner_id=?
+                   AND agent_id=? AND operation_id=? AND state='pending'""", (*scope, str(operation_id)),
+            ).fetchone()
+            if session is None or row is None:
+                raise SessionConflict("forget new session unavailable")
+            result = json.loads(str(row["result_json"]))
+            if result.get("new_session_id") not in (None, str(session_id)):
+                raise SessionConflict("forget already activated a different session")
+            result["new_session_id"] = str(session_id)
+            steps = set(json.loads(str(row["steps_json"])))
+            steps.add("backend")
+            connection.execute(
+                """UPDATE pcm_forget_operations SET result_json=?, steps_json=?, updated_at=?
+                   WHERE operation_id=?""",
+                (_json(result), _json(sorted(steps)), _utc_now(), str(operation_id)),
+            )
+
+    def complete_pcm_forget(
+        self, *, owner_id: str, agent_id: str, operation_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM pcm_forget_operations WHERE operation_id=?
+                   AND instance_id=? AND owner_id=? AND agent_id=?""",
+                (str(operation_id), self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+            if row is None:
+                raise SessionConflict("forget operation unavailable")
+            if str(row["state"]) == "completed":
+                return
+            steps = set(json.loads(str(row["steps_json"])))
+            result = json.loads(str(row["result_json"]))
+            if (not {"session", "local_memory", "continuity", "backend"}.issubset(steps)
+                    or not result.get("new_session_id")):
+                raise SessionConflict("forget operation is incomplete")
+            connection.execute(
+                """UPDATE pcm_forget_operations SET state='completed', updated_at=?
+                   WHERE operation_id=?""", (_utc_now(), str(operation_id)),
+            )
+
+    def pcm_forget_projection_policy(
+        self, session_id: str, *, owner_id: str,
+    ) -> dict[str, Any]:
+        session = self.get_session(session_id, owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            return pcm_forget_session.projection_policy(
+                connection, instance_id=self.instance_id, owner_id=owner_id,
+                agent_id=str(session["agent_id"]), session_id=session_id,
+            )
+
     def purge_owner(
         self,
         *,
@@ -3234,6 +3624,8 @@ class SessionStore:
         surface: str,
         channel_key: str,
         session_id: str,
+        actor_id: str | int | None = None,
+        actor_role: str | None = None,
     ) -> dict[str, Any]:
         session = self.get_session(
             session_id,
@@ -3243,16 +3635,50 @@ class SessionStore:
         )
         if session["status"] != "active":
             raise SessionConflict("only active Sessions can be selected")
+        normalized_actor_id = (
+            str(actor_id).strip() if actor_id is not None else None
+        )
+        normalized_actor_role = (
+            str(actor_role).strip().lower() if actor_role is not None else None
+        )
+        if bool(normalized_actor_id) != bool(normalized_actor_role):
+            raise ValueError("channel binding actor_id and actor_role must be provided together")
+        if normalized_actor_role not in {None, "owner", "secondary"}:
+            raise ValueError("channel binding actor_role must be owner or secondary")
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO channel_bindings(
                     instance_id, owner_id, agent_id, surface, channel_key,
-                    session_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    actor_id, actor_role, session_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instance_id, owner_id, agent_id, surface, channel_key)
-                DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at
+                DO UPDATE SET
+                    actor_id = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.actor_id
+                        ELSE COALESCE(excluded.actor_id, channel_bindings.actor_id)
+                    END,
+                    actor_role = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.actor_role
+                        ELSE COALESCE(excluded.actor_role, channel_bindings.actor_role)
+                    END,
+                    session_id = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.session_id
+                        ELSE excluded.session_id
+                    END,
+                    updated_at = CASE
+                        WHEN channel_bindings.actor_role = 'owner'
+                             AND excluded.actor_role = 'secondary'
+                        THEN channel_bindings.updated_at
+                        ELSE excluded.updated_at
+                    END
                 """,
                 (
                     self.instance_id,
@@ -3260,11 +3686,104 @@ class SessionStore:
                     str(agent_id).lower(),
                     str(surface).lower(),
                     str(channel_key),
+                    normalized_actor_id,
+                    normalized_actor_role,
                     str(session_id),
                     now,
                 ),
             )
         return session
+
+    def latest_channel_binding(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        surface: str,
+        actor_id: str | int | None = None,
+        channel_key: str | int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the latest persisted endpoint for one owner/Agent surface."""
+
+        normalized_surface = str(surface or "").strip().lower()
+        if not normalized_surface:
+            raise ValueError("channel binding surface is required")
+        actor_clause = ""
+        channel_clause = ""
+        args: list[Any] = [
+            self.instance_id,
+            str(owner_id),
+            str(agent_id).lower(),
+            normalized_surface,
+        ]
+        if actor_id is not None:
+            actor_clause = " AND actor_id = ?"
+            args.append(str(actor_id).strip())
+        if channel_key is not None:
+            channel_clause = " AND channel_key = ?"
+            args.append(str(channel_key).strip())
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT surface, channel_key, actor_id, actor_role,
+                       session_id, updated_at
+                FROM channel_bindings
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                  AND surface = ?{actor_clause}{channel_clause}
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                args,
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_frontend_ingress(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        connector_id: str,
+    ) -> dict[str, str] | None:
+        """Return bounded routing facts from the newest canonical user ingress."""
+
+        connector = str(connector_id or "").strip().casefold()
+        if not connector:
+            raise ValueError("connector id is required")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.message_context_json
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND m.role = 'user' AND m.message_context_json != '{}'
+                ORDER BY m.created_at DESC, m.ordinal DESC
+                LIMIT 4096
+                """,
+                (
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                ),
+            ).fetchall()
+        for row in rows:
+            context = _json_object(row["message_context_json"])
+            ingress = context.get("frontend_ingress")
+            if not isinstance(ingress, Mapping):
+                continue
+            endpoint = ingress.get("connector")
+            if not isinstance(endpoint, Mapping):
+                continue
+            observed_connector = str(endpoint.get("id") or "").strip().casefold()
+            endpoint_id = str(endpoint.get("endpoint_id") or "").strip()
+            transport = str(context.get("ingress_transport") or "").strip().casefold()
+            if observed_connector == connector and endpoint_id and transport:
+                return {
+                    "connector_id": observed_connector,
+                    "endpoint_id": endpoint_id,
+                    "ingress_transport": transport,
+                }
+        return None
 
     def bind_primary_session(
         self,
@@ -3603,6 +4122,12 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(session_id)
+            if connection.execute(
+                """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
+                   AND agent_id=? AND state='pending'""",
+                (self.instance_id, str(agent_id).lower()),
+            ).fetchone():
+                raise SessionConflict("pcm_forget_in_progress")
             if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
                 raise SessionConflict("session_context_generation_changed")
             audio_rows: list[sqlite3.Row] = []
@@ -4664,9 +5189,15 @@ class SessionStore:
         error_text: str | None = None,
         error_context: Mapping[str, Any] | None = None,
         failure_state: str = "failed",
+        termination_reason: str = "",
         fencing_token: int | None = None,
         _unsubmitted_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        reason = str(termination_reason or "")
+        if reason not in {"", "safe_voice_discarded"} or (
+            reason and (success or failure_state != "stopped")
+        ):
+            raise ValueError("invalid normal termination reason")
         now = _utc_now()
         public_error_context: dict[str, Any] = {}
         if isinstance(error_context, Mapping):
@@ -4780,6 +5311,15 @@ class SessionStore:
             ):
                 raise StaleFencingToken("executor fencing token is stale")
             session_id = str(run["session_id"])
+            if reason == "safe_voice_discarded":
+                discarded = connection.execute(
+                    """SELECT 1 FROM voice_transcripts
+                       WHERE run_id=? AND session_id=? AND message_id=?
+                         AND safe_voice_state='discarded' LIMIT 1""",
+                    (str(run["run_id"]), session_id, str(run["user_message_id"])),
+                ).fetchone()
+                if discarded is None:
+                    raise SessionConflict("Safe Voice discard has not been persisted")
             unpublished_rows = connection.execute(
                 """SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
                    FROM run_output_attachments AS o
@@ -4890,7 +5430,8 @@ class SessionStore:
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
-            error_code = None if success else (
+            normal_discard = reason == "safe_voice_discarded"
+            error_code = None if success or normal_discard else (
                 "run_superseded" if state == "superseded" else "run_failed"
             )
             connection.execute(
@@ -4903,7 +5444,7 @@ class SessionStore:
                     state,
                     final_message_id,
                     error_code,
-                    None if success else str(error_text or "run failed"),
+                    None if success or normal_discard else str(error_text or "run failed"),
                     now,
                     now,
                     run["run_id"],
@@ -4925,9 +5466,13 @@ class SessionStore:
                 phase="terminal",
                 summary="Assistant response completed"
                 if success
+                else "Safe Voice transcript discarded"
+                if normal_discard
                 else str(error_text or "Run failed"),
                 detail={"message_id": final_message_id}
                 if success
+                else {"reason": reason}
+                if normal_discard
                 else {
                     "error": str(error_text or "run failed"),
                     "error_context": public_error_context,
@@ -4947,7 +5492,7 @@ class SessionStore:
                 "state": state,
                 "user_message_id": str(run["user_message_id"]),
                 "final_message_id": final_message_id,
-                "error": None if success else str(error_text or "run failed"),
+                "error": None if success or normal_discard else str(error_text or "run failed"),
                 "latest_event_sequence": event["sequence"],
             }
             connection.execute(
@@ -8334,6 +8879,10 @@ class SessionStore:
                 """SELECT request_id, run_id, session_id, agent_id, context_generation,
                           state, created_at, completed_at, final_message_id
                    FROM runs WHERE session_id = ? AND context_generation = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM messages m WHERE m.message_id=runs.user_message_id
+                           AND m.visibility='forgotten'
+                     )
                    ORDER BY (state IN ('queued', 'running', 'awaiting_approval')) DESC,
                             created_at DESC, run_id DESC LIMIT ?""",
                 (session_id, context_generation if context_generation is not None else session["context_generation"], max(1, min(int(limit), 64))),
@@ -8367,6 +8916,23 @@ class SessionStore:
         if row is None:
             raise SessionNotFound(str(request_id))
         return self._run_dict(row)
+
+    def request_terminal_reason(
+        self, request_id: str, *, owner_id: str, agent_id: str
+    ) -> str:
+        """Read the reason from the canonical stopped Run event."""
+        run = self.get_run_by_request(request_id, owner_id=owner_id, agent_id=agent_id)
+        if run.get("state") != "stopped":
+            return ""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT detail_json FROM run_events
+                   WHERE run_id=? AND kind='run.stopped'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (run["run_id"],),
+            ).fetchone()
+        detail = _json_object(row["detail_json"]) if row is not None else {}
+        return str(detail.get("reason") or "")
 
     def request_failure_detail(
         self,
@@ -8519,6 +9085,23 @@ class SessionStore:
             raise SessionNotFound(str(message_id))
         return self._message_dict(row)
 
+    def _visible_history_generations(self, session_id: str, generation: int) -> tuple[int, ...]:
+        """Bridge forget-only generations without crossing a prior /fresh boundary."""
+        target = int(generation)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT generation, reason FROM session_context_generations
+                   WHERE session_id=? AND generation<=? ORDER BY generation DESC""",
+                (str(session_id), target),
+            ).fetchall()
+        reasons = {int(row["generation"]): str(row["reason"]) for row in rows}
+        result = [target]
+        current = target
+        while reasons.get(current) == "forget" and current - 1 in reasons:
+            current -= 1
+            result.append(current)
+        return tuple(result)
+
     def recent_messages(
         self,
         session_id: str,
@@ -8536,15 +9119,17 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM messages
-                WHERE session_id=? AND context_generation=?
+                WHERE session_id=? AND context_generation IN ({placeholders})
                   AND visibility='visible' AND history_eligible=1
                 ORDER BY ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, bounded),
+                (str(session_id), *generations, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
@@ -8565,15 +9150,18 @@ class SessionStore:
             if context_generation is not None
             else session["context_generation"]
         )
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         clauses = [
             "f.session_id = ?",
             "f.owner_id = ?",
-            "c.context_generation = ?",
+            f"c.context_generation IN ({placeholders})",
+            "NOT EXISTS (SELECT 1 FROM pcm_forget_live_calls forgotten WHERE forgotten.call_id=f.call_id)",
         ]
         params: list[Any] = [
             str(session_id),
             str(session["owner_id"]),
-            generation,
+            *generations,
         ]
         if call_id is not None:
             clauses.append("f.call_id = ?")
@@ -8596,6 +9184,11 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            epoch_starts = _live_epoch_starts(
+                connection,
+                session_id,
+                {str(row["call_id"]) for row in rows if int(row["call_epoch"]) > 1},
+            )
 
         segments: list[dict[str, Any]] = []
         latest_by_speaker: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -8645,7 +9238,12 @@ class SessionStore:
                     "end_ms": end_ms,
                     "sequence": int(row["sequence"]),
                     "last_sequence": int(row["sequence"]),
-                    "created_at": str(row["created_at"] or row["started_at"] or ""),
+                    "created_at": _conversation_timestamp(
+                        row["started_at"] if call_key[1] == 1
+                        else epoch_starts.get(call_key),
+                        start_ms,
+                        fallback=row["created_at"],
+                    ),
                     "provider_event_ids": [str(row["provider_event_id"])],
                 }
             segments.append(segment)
@@ -8726,19 +9324,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1000))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.* FROM messages AS m
                 JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible' AND m.history_eligible=1
                   AND r.state='completed'
                   AND (m.message_id=r.user_message_id OR m.message_id=r.final_message_id)
                 ORDER BY m.created_at DESC, m.ordinal DESC
                 LIMIT ?
                 """,
-                (str(session_id), generation, bounded * 2),
+                (str(session_id), *generations, bounded * 2),
             ).fetchall()
         normal: list[dict[str, Any]] = []
         for row in reversed(rows):
@@ -8904,19 +9504,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
                        r.final_message_id AS run_final_message_id
                 FROM messages AS m
                 LEFT JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible'
                 ORDER BY m.ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, bounded),
+                (str(session_id), *generations, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
@@ -9228,19 +9830,21 @@ class SessionStore:
             else session["context_generation"]
         )
         bounded = max(1, min(int(limit), 1001))
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
                        r.final_message_id AS run_final_message_id
                 FROM messages AS m
                 LEFT JOIN runs AS r ON r.run_id = m.run_id
-                WHERE m.session_id=? AND m.context_generation=?
+                WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible' AND m.ordinal>?
                 ORDER BY m.ordinal ASC LIMIT ?
                 """,
-                (str(session_id), generation, max(0, int(after_ordinal)), bounded),
+                (str(session_id), *generations, max(0, int(after_ordinal)), bounded),
             ).fetchall()
         return [self._message_dict(row) for row in rows]
 
@@ -9452,6 +10056,13 @@ class SessionStore:
 
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            try:
+                pcm_forget_session.assert_continuity_safe(
+                    connection, instance_id=self.instance_id, owner_id=owner,
+                    agent_id=agent, sessions=normalized_sessions,
+                )
+            except (pcm_forget_session.ForgetBusy, pcm_forget_session.ForgetUnsupported) as exc:
+                raise SessionConflict(str(exc)) from exc
             existing_batch = connection.execute(
                 "SELECT * FROM conversation_continuity_batches WHERE transfer_id = ?",
                 (transfer,),
@@ -10332,9 +10943,11 @@ class SessionStore:
         high_water = (
             None if max_user_ordinal is None else max(0, int(max_user_ordinal))
         )
+        generations = self._visible_history_generations(session_id, generation)
+        placeholders = ",".join("?" for _ in generations)
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT r.run_id, u.ordinal AS sequence, u.message_id AS user_message_id,
                        a.message_id AS assistant_message_id,
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
@@ -10351,7 +10964,7 @@ class SessionStore:
                 FROM runs AS r
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
-                WHERE r.session_id = ? AND r.context_generation = ?
+                WHERE r.session_id = ? AND r.context_generation IN ({placeholders})
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
                   AND u.history_eligible = 1 AND a.history_eligible = 1
@@ -10360,7 +10973,7 @@ class SessionStore:
                 """,
                 (
                     str(session_id),
-                    generation,
+                    *generations,
                     high_water,
                     high_water,
                     max(1, min(int(limit), 100)),
@@ -11561,9 +12174,14 @@ class SessionStore:
             connection.execute("BEGIN IMMEDIATE")
             event = connection.execute(
                 """
-                SELECT e.event_id
+                SELECT e.event_id, e.detail_json,
+                       fme.message_id AS presentation_message_id, r.final_message_id
                 FROM run_events AS e
                 JOIN sessions AS s ON s.session_id = e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id = e.event_id AND fme.session_id = e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id = e.run_id AND r.session_id = e.session_id
                 WHERE e.event_id = ? AND e.session_id = ?
                   AND s.owner_id = ? AND s.instance_id = ?
                 """,
@@ -11571,6 +12189,35 @@ class SessionStore:
             ).fetchone()
             if event is None:
                 raise SessionNotFound("frontend event not found")
+            proof = normalized.get("proof") or {}
+            attachment_receipts = proof.get("attachment_receipts") or ()
+            if attachment_receipts:
+                detail = _json_object(event["detail_json"] or "{}")
+                message_id = str(
+                    event["presentation_message_id"] or event["final_message_id"]
+                    or detail.get("message_id") or ""
+                ).strip()
+                message = connection.execute(
+                    "SELECT role, visibility, content_json FROM messages "
+                    "WHERE session_id = ? AND message_id = ?",
+                    (resolved_session_id, message_id),
+                ).fetchone()
+                if (
+                    message is None or message["role"] != "assistant"
+                    or message["visibility"] != "visible"
+                ):
+                    raise SessionConflict("attachment receipt has no visible assistant message")
+                try:
+                    content = json.loads(str(message["content_json"] or "[]"))
+                except (TypeError, ValueError):
+                    content = []
+                valid_ids = {
+                    str(part.get("attachment_id") or part.get("asset_id") or "")
+                    for part in content if isinstance(part, Mapping)
+                    and part.get("type") in {"attachment", "media", "audio"}
+                } if isinstance(content, list) else set()
+                if any(item["attachment_id"] not in valid_ids for item in attachment_receipts):
+                    raise SessionConflict("attachment receipt does not belong to this message")
             existing = connection.execute(
                 """
                 SELECT * FROM connector_delivery_receipts
@@ -12727,6 +13374,8 @@ class SessionStore:
             "r.state = 'completed'",
             "p.run_id IS NULL",
             "s.session_kind = 'conversation'",
+            "u.visibility = 'visible' AND a.visibility = 'visible'",
+            "u.history_eligible = 1 AND a.history_eligible = 1",
         ]
         params: list[Any] = [str(agent_id).lower()]
         selected = [str(item) for item in (session_ids or ()) if str(item)]

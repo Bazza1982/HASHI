@@ -1975,7 +1975,7 @@ class ToolRegistry:
             if global_config is None:
                 return "Error: memory_search is unavailable without HASHI global context"
             service = MemorySearchService(
-                workspace_dir=self.workspace_dir,
+                workspace_dir=Path(self._read_scope()[1].get("agent_home") or self.workspace_dir),
                 global_config=global_config,
                 agent_id=str(context.get("agent_name") or self.workspace_dir.name),
                 trusted_authorization=context.get("memory_search_authorization"),

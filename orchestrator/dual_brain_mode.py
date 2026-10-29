@@ -381,8 +381,12 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         wiki_candidates: list[dict[str, str]] = []
 
         if bool(fyi.get("wiki_needed")):
+            wiki_candidates = _wiki_candidates(
+                self._wiki_roots(), cfg.wiki_candidate_limit,
+                query=wiki_query,
+            )
+        if bool(fyi.get("wiki_needed")):
             wiki_used = True
-            wiki_candidates = _wiki_candidates(self._wiki_roots(), cfg.wiki_candidate_limit, query=wiki_query)
             wiki_schema = {
                 "useful": True,
                 "wiki_used": True,
@@ -784,7 +788,9 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
             _unlock_file(f)
 
 
-def _wiki_candidates(wiki_roots: list[Path], limit: int, *, query: str = "") -> list[dict[str, str]]:
+def _wiki_candidates(
+    wiki_roots: list[Path], limit: int, *, query: str = "", safe_before: float | None = None,
+) -> list[dict[str, str]]:
     query_terms = {
         term.lower()
         for term in re.findall(r"[\w\u4e00-\u9fff]{2,}", query)
@@ -796,7 +802,14 @@ def _wiki_candidates(wiki_roots: list[Path], limit: int, *, query: str = "") -> 
             continue
         for path in root.rglob("*.md"):
             try:
+                if safe_before is not None:
+                    from orchestrator.pcm_forget_artifacts import _unchanged_before
+
+                    if not _unchanged_before(path, safe_before):
+                        continue
                 content = path.read_text(encoding="utf-8")
+                if safe_before is not None and not _unchanged_before(path, safe_before):
+                    continue
             except Exception:
                 continue
             haystack = f"{path.stem}\n{content}".lower()

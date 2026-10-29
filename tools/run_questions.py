@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import aiohttp
-from orchestrator.run_questions import issue_tool_token, QuestionError
+from orchestrator.run_questions import issue_tool_token, QuestionError, QUESTION_DISABLED_INSTRUCTION
 from tools.workbench_client import workbench_endpoint
 
 async def execute_run_question_tool(tool_name, arguments, *, audit_context, secrets, tool_call_id=''):
@@ -41,9 +41,12 @@ async def execute_run_question_tool(tool_name, arguments, *, audit_context, secr
                         headers={'X-Hashi-Run-Question-Token':token},json={**payload,'operation':operation}) as response:
                     data=await response.json()
                     if response.status>=400 or data.get('ok') is False:
-                        return 'Error: '+str(data.get('error_code') or 'question_request_failed')
+                        code = str(data.get('error_code') or 'question_request_failed')
+                        if code == 'question_cards_disabled':
+                            return 'Error: ' + code + ': ' + QUESTION_DISABLED_INSTRUCTION
+                        return 'Error: '+code
                 q=data.get('question',{})
-                if operation=='create' or q.get('state')!='pending' or asyncio.get_running_loop().time()>=deadline:
+                if operation=='create' or q.get('state') not in {'pending', 'stopping'} or asyncio.get_running_loop().time()>=deadline:
                     return json.dumps(data,ensure_ascii=False)
                 await asyncio.sleep(min(.5,max(0,deadline-asyncio.get_running_loop().time())))
     except (QuestionError,ValueError) as exc:

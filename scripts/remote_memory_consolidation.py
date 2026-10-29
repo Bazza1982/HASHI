@@ -206,37 +206,162 @@ def print_header(mode: str, cfg: RemoteConfig, args: argparse.Namespace) -> None
     print(f"[remote-memory] logs_root={cfg.logs_root}")
 
 
+def _forget_export_quarantined(workspace: Path) -> bool:
+    """Standalone fail-closed guard for audit transcripts after /forget."""
+    database = workspace / "bridge_memory.sqlite"
+    if not database.exists():
+        return False
+    if database.is_symlink():
+        raise RuntimeError("memory export boundary is a link")
+    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        tables = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pcm_forgotten_%'"
+        )}
+        if not tables:
+            return False
+        if not {"pcm_forgotten_ranges", "pcm_forgotten_origins"}.issubset(tables):
+            raise RuntimeError("memory export boundary is incomplete")
+        return connection.execute("SELECT 1 FROM pcm_forgotten_ranges LIMIT 1").fetchone() is not None
+
+
+def _safe_forget_lines(workspace: Path, source_path: Path, source_kind: str):
+    """Export only intact old rounds and records appended after cleanup."""
+    database = workspace / "bridge_memory.sqlite"
+    relative = source_path.relative_to(workspace).as_posix()
+    if source_path.is_symlink() or source_path.parent.is_symlink() or not source_path.is_file():
+        return []
+    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        tables = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        if "pcm_forget_export_checkpoints" not in tables:
+            return []
+        checkpoint = connection.execute(
+            """SELECT prefix_size, prefix_sha256, recorded_at
+               FROM pcm_forget_export_checkpoints WHERE source_path=?""", (relative,),
+        ).fetchone()
+        history = []
+        if "pcm_forget_export_checkpoint_history" in tables:
+            history = list(connection.execute(
+                """SELECT prefix_size, prefix_sha256, recorded_at
+                   FROM pcm_forget_export_checkpoint_history WHERE source_path=?""",
+                (relative,),
+            ))
+        windows = list(connection.execute(
+            "SELECT start_epoch, end_epoch FROM pcm_forgotten_ranges"
+        ))
+    if checkpoint is None or not windows:
+        return []
+    offset, expected_hash, recorded_at = checkpoint
+    try:
+        checkpoint_time = datetime.fromisoformat(str(recorded_at).replace("Z", "+00:00"))
+        if checkpoint_time.tzinfo is None or checkpoint_time.utcoffset() is None:
+            return []
+        checkpoint_epoch = checkpoint_time.timestamp()
+        first_start = min(float(row[0]) for row in windows)
+        before = source_path.stat()
+        if offset < 0 or before.st_size < offset:
+            return []
+        candidates = []
+        for old_offset, old_hash, old_time in history + [checkpoint]:
+            try:
+                instant = datetime.fromisoformat(str(old_time).replace("Z", "+00:00"))
+                if instant.tzinfo is None or instant.utcoffset() is None:
+                    continue
+                if 0 <= int(old_offset) <= int(offset) and instant.timestamp() <= checkpoint_epoch:
+                    candidates.append((int(old_offset), str(old_hash), str(old_time), instant.timestamp()))
+            except (TypeError, ValueError):
+                continue
+        valid_checkpoints = []
+        digest = hashlib.sha256()
+        with source_path.open("rb") as stream:
+            position = 0
+            for old_offset, old_hash, old_time, old_epoch in sorted(candidates):
+                remaining = old_offset - position
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        return []
+                    digest.update(chunk)
+                    position += len(chunk)
+                    remaining -= len(chunk)
+                if digest.hexdigest() == old_hash:
+                    valid_checkpoints.append((old_offset, old_hash, old_time, old_epoch))
+            if not any(item[:3] == (int(offset), str(expected_hash), str(recorded_at))
+                       for item in valid_checkpoints):
+                return []
+            stream.seek(0)
+            parsed = []
+            position = 0
+            line_no = 0
+            while raw := stream.readline():
+                start = position
+                position += len(raw)
+                line_no += 1
+                if not raw.endswith(b"\n"):
+                    continue
+                text, role, timestamp, metadata = parse_source_line(raw.decode("utf-8", errors="strict").strip())
+                try:
+                    instant = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                    if instant.tzinfo is None or instant.utcoffset() is None:
+                        instant = None
+                except (TypeError, ValueError):
+                    instant = None
+                parsed.append((start, position, line_no, text, role, timestamp, metadata, instant))
+        after = source_path.stat()
+        if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            return []
+    except (OSError, ValueError, UnicodeError):
+        return []
+
+    if source_kind != "transcript":
+        # Summary content is not attributable to a precise time.
+        return [row[2:7] for row in parsed]
+    return [
+        row[2:7] for row in parsed
+        if row[7] is None or not any(
+            float(lower) <= row[7].timestamp() <= float(upper)
+            for lower, upper in windows
+        )
+    ]
+
+
 def iter_source_records(root: Path, instance_id: str, agent_ids: Iterable[str]) -> Iterable[dict[str, Any]]:
     for agent_id in agent_ids:
         workspace = root / "workspaces" / agent_id
+        guarded = _forget_export_quarantined(workspace)
         sources = (
             ("transcript", workspace / "transcript.jsonl"),
             ("left_brain_notepad", workspace / "memory" / "left_brain_continuity.jsonl"),
         )
+
+        def ordinary_lines(source_path):
+            with source_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_no, line in enumerate(handle, start=1):
+                    if line.strip():
+                        yield (line_no, *parse_source_line(line.strip()))
+
         for source_kind, source_path in sources:
             if not source_path.exists():
                 continue
-            with source_path.open("r", encoding="utf-8", errors="replace") as handle:
-                for line_no, line in enumerate(handle, start=1):
-                    raw_line = line.strip()
-                    if not raw_line:
-                        continue
-                    text, role, source_ts, metadata = parse_source_line(raw_line)
-                    if not text.strip():
-                        continue
-                    yield {
-                        "schema_version": SCHEMA_VERSION,
-                        "source_instance": instance_id,
-                        "source_agent": agent_id,
-                        "source_kind": source_kind,
-                        "source_path": str(source_path.relative_to(root)),
-                        "source_record_id": str(metadata.get("id") or line_no),
-                        "source_ts": source_ts or utc_now(),
-                        "role": role,
-                        "text": text,
-                        "content_hash": f"sha256:{sha256_text(text)}",
-                        "metadata": metadata,
-                    }
+            lines = (_safe_forget_lines(workspace, source_path, source_kind)
+                     if guarded else ordinary_lines(source_path))
+            for line_no, text, role, source_ts, metadata in lines:
+                if not text.strip():
+                    continue
+                yield {
+                    "schema_version": SCHEMA_VERSION,
+                    "source_instance": instance_id,
+                    "source_agent": agent_id,
+                    "source_kind": source_kind,
+                    "source_path": str(source_path.relative_to(root)),
+                    "source_record_id": str(metadata.get("id") or line_no),
+                    "source_ts": source_ts or utc_now(),
+                    "role": role,
+                    "text": text,
+                    "content_hash": f"sha256:{sha256_text(text)}",
+                    "metadata": metadata,
+                }
 
 
 def parse_source_line(raw_line: str) -> tuple[str, str, str | None, dict[str, Any]]:

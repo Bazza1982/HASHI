@@ -6,7 +6,7 @@ charset-normalizer==3.5.1
 colorama==0.4.6
 ctranslate2==4.7.1
 faster-whisper==1.2.1
-filelock==3.25.2
+filelock==4.2.1
 flatbuffers==25.12.19
 fsspec==2026.2.0
 hf-xet==1.4.2
@@ -19,7 +19,7 @@ packaging==26.3
 protobuf==7.34.1
 pyyaml==6.0.3
 requests==2.34.2
-setuptools==84.0.0
+setuptools==84.1.0
 sympy==1.14.0
 tokenizers==0.22.2
 tqdm==4.67.3

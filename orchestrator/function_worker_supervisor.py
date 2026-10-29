@@ -44,6 +44,7 @@ from orchestrator.runtime_fingerprint_cache import cached_current_runtime_finger
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -81,6 +82,24 @@ def generation_from_dict(value: Mapping[str, Any]) -> VerifiedFunctionGeneration
         manifest=SourceManifest.from_mapping(value["manifest"]),
         receipt=_manifest_receipt_from_dict(value["receipt"]),
     )
+
+
+def _generation_receipt_source_commit(value: Any) -> str:
+    commit = str(
+        getattr(getattr(value, "receipt", None), "source_commit", "") or ""
+    ).strip().casefold()
+    if len(commit) not in {40, 64}:
+        return ""
+    if any(character not in "0123456789abcdef" for character in commit):
+        return ""
+    return commit
+
+
+def _kernel_startup_source_commit(kernel: Any) -> str:
+    pinned = getattr(kernel, "_startup_artifact", None)
+    if isinstance(pinned, (tuple, list)) and pinned:
+        return _generation_receipt_source_commit(pinned[0])
+    return ""
 
 
 def _file_sha256(path: Path) -> str:
@@ -620,7 +639,11 @@ class AgentRuntimeHandle:
 
     @property
     def telegram_connected(self) -> bool:
-        return bool(self.metadata.get("telegram_connected", False))
+        # Retain a conservative legacy signal for lifecycle rollback guards.
+        # Public readiness below requires explicit application-owned evidence.
+        return bool(self.metadata.get(
+            "telegram_outbound_connected", self.metadata.get("telegram_connected", False)
+        ))
 
     @property
     def workspace_dir(self) -> Path:
@@ -703,11 +726,17 @@ class AgentRuntimeHandle:
         workers = getattr(self.kernel, "function_workers", None)
         snapshot = getattr(workers, "telegram_ingress_snapshot", None)
         ingress = dict(snapshot(self.name) or {}) if callable(snapshot) else {}
-        outbound = self.telegram_connected
-        inbound = bool(ingress.get("running") and ingress.get("connected"))
+        # Older Workers coupled telegram_connected to ingress. Do not use the
+        # lifecycle compatibility flag as proof of outbound application readiness.
+        outbound = bool(metadata.get("telegram_outbound_connected", False))
+        bot = metadata.get("telegram_bot_fingerprint")
+        inbound = bool(
+            bot and ingress.get("bot_fingerprint") == bot
+            and ingress.get("running") and ingress.get("connected")
+        )
         metadata["telegram_outbound_connected"] = outbound
         metadata["telegram_ingress"] = ingress
-        metadata["telegram_connected"] = bool(outbound and inbound)
+        metadata["telegram_connected"] = bool(metadata["online"] and outbound and inbound)
         channels = dict(metadata.get("channels") or {})
         channels["telegram"] = metadata["telegram_connected"]
         metadata["channels"] = channels
@@ -1272,6 +1301,7 @@ class FunctionWorkerSupervisor:
         self.last_materialization_stats: dict[str, Any] = {}
         self.candidate_prepare_timings_ms: dict[str, float] = {}
         self._telegram_ingress: dict[str, CoreTelegramIngress] = {}
+        self._telegram_ingress_locks: dict[str, asyncio.Lock] = {}
         self._telegram_ingress_diagnostics: dict[str, TelegramIngressDiagnostics] = {}
         self._telegram_status_failures: dict[str, tuple[str, str]] = {}
         self._telegram_status_warning_task: asyncio.Task[Any] | None = None
@@ -1472,6 +1502,9 @@ class FunctionWorkerSupervisor:
         per_agent = {
             handle.name: {
                 "generation_id": handle.generation_id,
+                "source_commit": _generation_receipt_source_commit(
+                    handle.client.generation
+                ),
                 "worker_pid": handle.worker_pid,
                 "module_count": int(
                     handle.metadata.get("generation_module_count") or 0
@@ -1485,6 +1518,16 @@ class FunctionWorkerSupervisor:
             if isinstance(handle, AgentRuntimeHandle)
         }
         generations = {value["generation_id"] for value in per_agent.values()}
+        source_commits = {
+            value["source_commit"]
+            for value in per_agent.values()
+            if value["source_commit"]
+        }
+        aggregate_source_commit = (
+            next(iter(source_commits))
+            if len(source_commits) == 1
+            else "mixed" if source_commits else None
+        )
         aggregate = (
             next(iter(generations))
             if len(generations) == 1
@@ -1494,6 +1537,7 @@ class FunctionWorkerSupervisor:
         )
         self.kernel.function_generation = {
             "generation_id": aggregate,
+            "source_commit": aggregate_source_commit,
             "worker_model": "per-agent-process",
             "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
             "per_agent": per_agent,
@@ -1536,6 +1580,7 @@ class FunctionWorkerSupervisor:
             "shared_functions": {
                 "pid": os.getpid(),
                 "generation_id": getattr(self.kernel, "shared_generation_id", None),
+                "source_commit": _kernel_startup_source_commit(self.kernel) or None,
                 "adopted_at": getattr(self.kernel, "shared_adopted_at", None),
             },
             "function_workers": [
@@ -1543,6 +1588,9 @@ class FunctionWorkerSupervisor:
                     "agent": handle.name,
                     "pid": handle.worker_pid,
                     "generation_id": handle.generation_id,
+                    "source_commit": _generation_receipt_source_commit(
+                        handle.client.generation
+                    ),
                     "adopted_at": handle.metadata.get("worker_adopted_at"),
                     "phase": handle.metadata.get("worker_phase"),
                     "accepting": bool(handle.metadata.get("worker_accepting", False)),
@@ -1566,12 +1614,23 @@ class FunctionWorkerSupervisor:
         *,
         drop_pending_updates: bool,
     ) -> bool:
+        lock = self._telegram_ingress_locks.setdefault(str(agent_name), asyncio.Lock())
+        async with lock:
+            return await self._start_telegram_ingress(
+                agent_name, token, drop_pending_updates=drop_pending_updates
+            )
+
+    async def _start_telegram_ingress(
+        self, agent_name: str, token: str, *, drop_pending_updates: bool
+    ) -> bool:
         name = str(agent_name)
         if not str(token or "").strip():
             return False
         existing = self._telegram_ingress.get(name)
         if existing is not None and existing.is_running and existing.token == str(token):
             return True
+        same_bot = existing is not None and existing.token == str(token)
+        previous_offset = existing.offset if same_bot else None
         if existing is not None:
             await existing.stop()
 
@@ -1584,32 +1643,52 @@ class FunctionWorkerSupervisor:
             token=str(token),
             handle_lookup=lambda target: self.kernel._runtime_map().get(target),
             status_callback=lambda connected: self.set_worker_telegram_status(name, connected),
-            checkpoint_callback=lambda offset: self._checkpoint_telegram_offset(name, offset),
+            checkpoint_callback=lambda offset: self._checkpoint_telegram_offset(
+                name, offset, bot_fingerprint=telegram_bot_fingerprint(token)
+            ),
             diagnostics=diagnostics,
             diagnostic_home=self.kernel.paths.bridge_home,
             instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),
             generation_id=str(getattr(self.kernel, "shared_generation_id", "unknown")),
         )
         offsets = getattr(self.kernel, "_handoff_offsets", {})
-        if name in offsets:
+        bot_offsets = getattr(self.kernel, "_handoff_bot_offsets", {})
+        if same_bot:
+            ingress.offset = previous_offset
+            drop_pending_updates = False
+        elif existing is None and name in bot_offsets:
+            saved = bot_offsets[name]
+            if saved.get("bot_fingerprint") == telegram_bot_fingerprint(token):
+                ingress.offset = saved.get("offset")
+            drop_pending_updates = False
+        elif existing is None and name in offsets:
             ingress.offset = offsets[name]
             drop_pending_updates = False
         ingress.drop_pending_on_start = drop_pending_updates
         # Register before start so a failed initialization remains queryable.
         self._telegram_ingress[name] = ingress
+        self._checkpoint_telegram_offset(
+            name, ingress.offset, bot_fingerprint=telegram_bot_fingerprint(token)
+        )
         if not getattr(self.kernel, "_handoff_draining", False):
             await ingress.start(drop_pending_updates=drop_pending_updates)
         return True
 
-    def _checkpoint_telegram_offset(self, name: str, offset: int) -> None:
+    def _checkpoint_telegram_offset(
+        self, name: str, offset: int | None, *, bot_fingerprint: str | None = None
+    ) -> None:
         if getattr(self.kernel, "_shared_committed", False):
             from orchestrator.runtime_handoff import checkpoint_offset
-            checkpoint_offset(self.kernel.paths.bridge_home, name, offset)
+            checkpoint_offset(
+                self.kernel.paths.bridge_home, name, offset, bot_fingerprint=bot_fingerprint
+            )
 
     async def stop_telegram_ingress(self, agent_name: str) -> None:
-        ingress = self._telegram_ingress.pop(str(agent_name), None)
-        if ingress is not None:
-            await ingress.stop(notify_status=False)
+        lock = self._telegram_ingress_locks.setdefault(str(agent_name), asyncio.Lock())
+        async with lock:
+            ingress = self._telegram_ingress.pop(str(agent_name), None)
+            if ingress is not None:
+                await ingress.stop(notify_status=False)
 
     def telegram_ingress_running(self, agent_name: str) -> bool:
         ingress = self._telegram_ingress.get(str(agent_name))
@@ -1618,10 +1697,15 @@ class FunctionWorkerSupervisor:
     def telegram_ingress_snapshot(self, agent_name: str) -> dict[str, Any]:
         ingress = self._telegram_ingress.get(str(agent_name))
         diagnostics = self._telegram_ingress_diagnostics.get(str(agent_name))
+        fingerprint = telegram_bot_fingerprint(ingress.token) if ingress is not None else None
+        handle = self.kernel._runtime_map().get(str(agent_name))
+        expected = getattr(handle, "metadata", {}).get("telegram_bot_fingerprint")
         return {
             "configured": ingress is not None or diagnostics is not None or bool(self._telegram_token(agent_name)),
             "running": bool(ingress is not None and ingress.is_running),
-            "connected": bool(ingress is not None and ingress.connected),
+            "connected": bool(ingress is not None and ingress.connected
+                              and (not expected or fingerprint == expected)),
+            "bot_fingerprint": fingerprint,
             "offset": None if ingress is None else ingress.offset,
             "diagnostics": None if diagnostics is None else diagnostics.snapshot(),
         }
@@ -1630,7 +1714,17 @@ class FunctionWorkerSupervisor:
         handle = self.kernel._runtime_map().get(str(agent_name))
         config = getattr(handle, "config", None)
         key = getattr(config, "telegram_token_key", str(agent_name))
-        return str(getattr(self.kernel, "secrets", {}).get(key) or "").strip()
+        token = str(getattr(self.kernel, "secrets", {}).get(key) or "").strip()
+        fingerprint = getattr(handle, "metadata", {}).get("telegram_bot_fingerprint")
+        if fingerprint and telegram_bot_fingerprint(token) != fingerprint:
+            # A save is not adoption. Keep the previous Bot's transport until
+            # its Worker has switched; never feed new-Bot updates to an old Bot.
+            existing = self._telegram_ingress.get(str(agent_name))
+            if existing is not None and telegram_bot_fingerprint(existing.token) == fingerprint:
+                return existing.token
+            return ""
+        return token
+
     def telegram_ingress_diagnostics(self, agent_name: str, *, limit: int = 20) -> dict[str, Any]:
         diagnostics = self._telegram_ingress_diagnostics.get(str(agent_name))
         if diagnostics is None:
@@ -1713,7 +1807,7 @@ class FunctionWorkerSupervisor:
         if not isinstance(handle, AgentRuntimeHandle):
             return
         if self._shutting_down or bool(getattr(self.kernel, "is_stopping", False)):
-            handle.metadata["telegram_connected"] = bool(connected)
+            handle.metadata["telegram_ingress_connected"] = bool(connected)
             bridge_logger.debug(
                 "Skipped Function Worker Telegram status propagation during shutdown: agent=%s connected=%s",
                 name,
@@ -1941,11 +2035,25 @@ class FunctionWorkerSupervisor:
                 condition.release()
 
     async def broadcast_topology(self) -> None:
+        # Candidate Workers load current credentials independently. Refresh the
+        # shared Functions snapshot through its owner after their pointer swap,
+        # rather than retaining the secrets captured at shared-process startup.
+        credentials_current = True
+        reload_configuration = getattr(self.kernel, "_load_config_bundle", None)
+        if callable(reload_configuration):
+            try:
+                reload_configuration()
+            except Exception as exc:
+                credentials_current = False
+                bridge_logger.warning(
+                    "Telegram configuration refresh failed: error_type=%s",
+                    type(exc).__name__,
+                )
         calls = []
         for handle in list(self.kernel.runtimes):
             if not isinstance(handle, AgentRuntimeHandle):
                 continue
-            token = self._telegram_token(handle.name)
+            token = self._telegram_token(handle.name) if credentials_current else ""
             if token:
                 await self.start_telegram_ingress(
                     handle.name, token, drop_pending_updates=False

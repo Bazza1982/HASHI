@@ -520,6 +520,26 @@ This transport addition does not itself change the workspace size/mode contract.
   were untouched by this work. Branch adoption, the HASHI4 20-Agent dry-run and
   backfill, and a real browser Workbench refresh remain separate operations.
 
+## Legacy discovery and Move acceptance audit — 2026-10-29
+
+The user requested a current-main audit of the older acceptance PR. PAO
+Functions remain the owner. The HASHI3 candidate adds the missing regression
+checks; it does not assert new live adoption.
+
+| Requirement | Current evidence |
+|---|---|
+| Discovery and trusted peer identity | \`test_remote_discovery_contract.py\` covers trust invalidation and token rotation; \`test_runtime_remote.py\` covers destination projection. |
+| Same-host routes and collision | \`test_remote_routing.py\` covers fallback and occupied ports. |
+| Accepted versus completed | \`test_agent_move_manager.py\` covers background completion and idempotent confirmation. |
+| Target verification and source retirement | \`test_agent_move_coordinator.py\` and \`test_agent_move_service.py\` cover cleanup ordering and source retirement. |
+| Imported history and stale routes | \`test_agent_move_service.py\` now reopens the imported SessionStore and verifies a recreated local Agent suppresses the old tombstone. |
+| Later moves | \`test_agent_move_service.py\` tests re-transfer of a previously imported Agent and rejects unproven ownership. |
+
+On the HASHI3 candidate, the Windows Move/Remote audit suite passed 106 tests;
+four tests were skipped, including the cross-platform zero-seed live canary.
+The earlier PR's reported live canary was not independently repeated here.
+Neither that historical report nor offline tests prove current live acceptance.
+
 ## Existing-target history backfill operator — 2026-10-03
 
 The one-time operator for already-moved Agents reuses PAO's schema-5

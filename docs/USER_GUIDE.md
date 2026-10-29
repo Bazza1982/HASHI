@@ -182,6 +182,14 @@ hashi opens the selected instance's TUI. hashi tui --attach-only connects
 without starting an instance. hashi status, hashi doctor, and hashi logs
 provide inspection; hashi help shows detailed subcommand help.
 
+For a registered Git source instance, `hashi --instance <name> update
+--confirm <name>` performs the complete source-release lifecycle. It
+fast-forwards from `origin/main`, restarts Core through the independently
+supervised Remote, reloads Remote itself, and succeeds only after every running
+component reports the same target commit. It refuses dirty, busy,
+non-fast-forward, packaged, or partially adopted instances. See the
+[source release decision](HASHI_SOURCE_RELEASE_CLOSURE.md).
+
 In the TUI, /to selects an agent and /instance selects an eligible trusted
 peer. Peer switching requires the Remote handshake and advertised TUI proxy
 capability. The TUI is a reference client; it does not yet implement the full

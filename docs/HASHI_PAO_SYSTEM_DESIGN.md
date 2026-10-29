@@ -59,6 +59,59 @@ HERV3. PAO may store or forward a Model Provider preference through a typed
 Engine contract, but it must not absorb provider-specific request, thread, or
 reasoning semantics.
 
+### 1.1 User-controlled model-capacity recovery (2026-10-27)
+
+PAO owns the cross-Engine policy and Codex outer execution boundary; HERV3
+consumes the same policy inside its existing Engine Turn. The user approved
+implementation on the current HASHI3 branch with these decisions:
+
+- the persisted `/fallback` modes are `OFF`, `RETRY`, `ASK`, and `AUTO`; the
+  compatible default remains `OFF`, so existing users acquire no new calls,
+  spend, or data destination merely by adopting the source;
+- only the typed `PROVIDER_CAPACITY_UNAVAILABLE` failure enters the long retry
+  path. Engine-local short recovery runs first, then PAO permits at most three
+  same-target retries after 60, 180, and 300 seconds. A valid Provider
+  `Retry-After` value can lengthen, but never shorten, the applicable wait;
+- Live Phone, Call, and Voice requests never enter that long retry path and
+  never select a model fallback. PAO admission derives and freezes the
+  authoritative request mode from validated phone/call origin or admitted
+  voice-origin facts, and HERV3 receives the same mode on every Stage request;
+- after those retries, `RETRY` stops. `ASK` requires a one-time confirmation
+  bound to the failed request and fails closed when no interactive confirmation
+  channel exists. `AUTO` may follow only the user's ordered, exact routes and
+  call/cost/privacy limits. Routes may select another allowed model on the same
+  Codex backend, an exact HERV3 Provider/model, or Codex from HERV3. Candidate
+  models derive from instance `allowed_backends` and runtime capability views;
+- HERV3 remains the sole owner of its internal Model Provider loop. A HERV3
+  route to Codex is never materialized as a Stage Provider: the terminal typed
+  HERV3 capacity failure returns to PAO, which may run one request-local Codex
+  Engine candidate. An exact HERV3 fallback is checked again against the
+  initialized adapter's effective Provider/model before the request is sent;
+- fallback candidates are request-local. They neither change nor persist the
+  Agent's default backend/model. A required progress event announces each
+  selected fallback target;
+- possible effects are controlled independently for Codex and HERV3. Mode A,
+  `pause`, is the default and stops with a user-visible notice. Mode B,
+  `resume`, is explicitly high risk and may send only a fixed “continue
+  unfinished work” instruction into the same resumable Engine Session. It does
+  not resend the original prompt or attachments. Once any effect was observed,
+  no model, Provider, or Engine switch is allowed even if continuation retries
+  later exhaust. If that original Session disappears, recovery stops rather
+  than replaying the original prompt or attachments;
+- additional-call and estimated-cost use is cumulative across the complete
+  ordered fallback chain, including HERV3 attempts handed back to PAO. A route
+  is blocked when its estimate exceeds the remaining ceiling; any unknown
+  cumulative estimate continues to follow the configured fail-closed rule; and
+- one admitted Run remains active during a scheduled wait; cancellation and
+  normal Run fencing still apply. A log/audit receipt records the decision and
+  delay. A process interruption is not evidence that the retry occurred and
+  remains subject to the existing Run/Turn recovery contract.
+
+Approval, implementation, and adoption are separate facts. The 2026-10-27
+approval covers HASHI3 source work on its current branch. Source and focused
+offline validation are implemented in that checkout. No Worker reboot or live
+capacity event has been authorised or claimed, and HASHI4 is unchanged.
+
 ## 2. Responsibilities
 
 PAO owns the following product domains.
@@ -72,6 +125,14 @@ PAO owns the following product domains.
 - startup, stop, restart, hot-reload coordination, and runtime health; and
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
+
+Native Windows rejects POSIX absolute Workzone input. Previously saved POSIX
+paths keep their original spelling, are marked incompatible and unavailable,
+and never become Tool roots. The read-only Agent overview derives path kind,
+execution platform and compatibility from this PAO-owned Workzone state; Windows
+and WSL UNC paths retain their existing handling. The 2026-10-29 legacy PR
+audit authorized this Function-layer repair on HASHI3; native Windows offline
+tests passed. Live Worker adoption and user acceptance remain unverified.
 
 Reboot admission and outcome belong to PAO Functions. Persisted operation
 progress, exact target scope, qualified source, Worker readiness and transaction
@@ -432,6 +493,24 @@ wire commands from the selected Connector adapter. The same logical call
 retains this record across transport replacement, and never repeats an opening
 merely because a provider emitted ready again.
 
+A Phone provider/browser connection is a replaceable transport for one logical
+call. A terminal logical-call phase is never reopened by schema migration.
+During replacement, `connecting` observes only its fresh controller lease;
+the old provider deadline applies after the replacement becomes `active`.
+PAO stops recovery after five consecutive replacement attempts since the last
+verified active state and settles the call as failed. Schema 29 repairs only
+rows carrying schema 27's matching same-epoch
+`legacy_terminal_recovery` evidence; a later real recovery epoch is preserved.
+
+Phone speech remains ordinary PCM history rather than a separate context lane.
+Typed fixed PCM migrates exact legacy raw Phone sections from their durable
+SessionStore source into semantic user/assistant history, including when the
+first upgraded turn is an action. The protected action snapshot does not
+consume that call's ordinary-history watermark; after hang-up the complete call
+is projected through normal PCM budgeting and compaction before the temporary
+action section is removed. Transport metadata remains audit-only.
+See [Phone Session context and action handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
+
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI
 instances, including:
 
@@ -458,6 +537,24 @@ an unknown legacy timezone defaults to UTC, never the scheduler host timezone.
 New and edited declarations use the revision-aware Scheduler writer and retain
 unrelated fields. Merely reading a legacy declaration does not publish a
 migration.
+
+#### Confirmed Scheduler deletion (2026-10-28)
+
+A frontend confirms an exact Agent-owned task definition and passes its opaque
+deletion revision to the distinct conditional-delete operation. PAO compares
+the full current definition, owner and (when requested) disabled state, then
+publishes the deletion using the revision of the same persisted document.
+Changed or ambiguous tasks are not deleted. A stale document is a conflict;
+a committed durability error is outcome-unknown and must not be blindly
+retried. Older backends lack this operation and must not be treated as guarded.
+The Backend API requires authenticated owner credentials, Agent visibility,
+and, in Governed mode, management authority. Its legacy DELETE route uses the
+same confirmation and revision checks. Read projections omit deletion revisions
+without an authenticated, visible owner. The current Agent Scheduler tool does
+not yet supply those credentials, so its deletion request is rejected.
+The user authorized a small HASHI Function change for Workbench on 2026-10-28.
+Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
+running adoption and external-frontend verification remain separate and pending.
 
 #### Scheduler recovery conversation contract (2026-09-30)
 
@@ -768,8 +865,12 @@ strict-debug Skill behavior.
 request's fail-open terminal projection with the existing Tool audit/Smart Tool
 ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
-evidence is present, absent, or unknown. It never retries work, changes HERV3
-control flow, or makes diagnostic persistence a completion condition.
+evidence is present, absent, or unknown. At query time it reconciles the latest
+Tool and BackgroundJob evidence with the terminal summary, preserving already
+confirmed effects from other workspaces. Missing or partial evidence remains
+unknown; a later effect cannot upgrade safe-retry evidence. It never retries
+work, changes HERV3 control flow, or makes diagnostic persistence a completion
+condition.
 
 `/stop` persists an Agent-wide stop epoch through the existing
 `agent_stop_fence` owner. It cancels foreground and detached work admitted

@@ -273,6 +273,7 @@ def _search(
     root: Path,
     zones: Sequence[Path],
     arguments: Mapping[str, Any],
+    safe_before: float | None = None,
 ) -> str:
     query = " ".join(str(arguments.get("query") or "").split()).strip()
     if not query:
@@ -305,7 +306,7 @@ def _search(
     exact = terms[0]
     ranked: list[tuple[int, str, str]] = []
 
-    if shutil.which("rg"):
+    if safe_before is None and shutil.which("rg"):
         rg_candidates = _rg_candidates(root, zones, max_files=max_files)
         ranked = _rank_rg_results(
             rg_candidates,
@@ -331,7 +332,14 @@ def _search(
             try:
                 if path.stat().st_size > max_file_bytes:
                     continue
+                if safe_before is not None:
+                    from orchestrator.pcm_forget_artifacts import _unchanged_before
+
+                    if not _unchanged_before(path, safe_before):
+                        continue
                 text = path.read_text(encoding="utf-8", errors="replace")[:scan_chars]
+                if safe_before is not None and not _unchanged_before(path, safe_before):
+                    continue
             except OSError:
                 continue
             relative = path.relative_to(root).as_posix()
@@ -383,8 +391,14 @@ def _read(
     root: Path,
     zones: Sequence[Path],
     arguments: Mapping[str, Any],
+    safe_before: float | None = None,
 ) -> str:
     path = _safe_markdown_path(root, zones, arguments.get("path"))
+    if safe_before is not None:
+        from orchestrator.pcm_forget_artifacts import _unchanged_before
+
+        if not _unchanged_before(path, safe_before):
+            raise ValueError("Wiki source is unavailable until its provenance is verified")
     max_chars = _bounded_int(
         arguments.get("max_chars"),
         default=DEFAULT_OUTPUT_CHARS,
@@ -392,6 +406,8 @@ def _read(
         maximum=24_000,
     )
     text = path.read_text(encoding="utf-8", errors="replace")
+    if safe_before is not None and not _unchanged_before(path, safe_before):
+        raise ValueError("Wiki source changed during retrieval")
     content = text[:max_chars]
     return json.dumps(
         {
@@ -406,7 +422,7 @@ def _read(
     )
 
 
-def _execute(arguments: Mapping[str, Any], global_config: Any) -> str:
+def _execute(arguments: Mapping[str, Any], global_config: Any, safe_before: float | None = None) -> str:
     provider = _provider_config(global_config)
     provider_id = str(provider.get("id") or "").strip()
     capability = str(provider.get("capability") or "").strip()
@@ -421,6 +437,7 @@ def _execute(arguments: Mapping[str, Any], global_config: Any) -> str:
             root=root,
             zones=zones,
             arguments=arguments,
+            safe_before=safe_before,
         )
     if operation == "read":
         return _read(
@@ -428,14 +445,17 @@ def _execute(arguments: Mapping[str, Any], global_config: Any) -> str:
             root=root,
             zones=zones,
             arguments=arguments,
+            safe_before=safe_before,
         )
     raise ValueError("wiki_search operation must be 'search' or 'read'")
 
 
-async def execute_wiki_search(arguments: Mapping[str, Any], *, global_config: Any) -> str:
+async def execute_wiki_search(
+    arguments: Mapping[str, Any], *, global_config: Any, safe_before: float | None = None,
+) -> str:
     """Search or read the configured curated Wiki without exposing its root."""
 
     try:
-        return await asyncio.to_thread(_execute, arguments, global_config)
+        return await asyncio.to_thread(_execute, arguments, global_config, safe_before)
     except (OSError, ValueError) as exc:
         return f"Error: {exc}"

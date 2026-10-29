@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -88,6 +89,36 @@ def test_v3_target_replaces_old_route_matrix_with_one_main_model():
     assert "route_targets" not in effective
     assert "slot_models" not in effective
     assert effective["routing_mode"] == "single"
+
+
+def test_request_local_herv3_target_reaches_effective_adapter_config(
+    tmp_path,
+    monkeypatch,
+):
+    manager = _manager(tmp_path)
+    backend_cfg = manager.config.allowed_backends[0]
+    backend_cfg["her_v2"]["auxiliary"] = {
+        "provider": "hashi-api",
+        "model": "unauthorised-auxiliary-model",
+    }
+    monkeypatch.setattr(
+        manager,
+        "get_her_v3_target",
+        Mock(side_effect=ValueError("stale persisted target")),
+    )
+
+    adapter_cfg = manager._build_adapter_config(
+        "her-v2",
+        backend_cfg,
+        target_provider="deepseek-api",
+        target_model="deepseek-flash",
+    )
+
+    effective = HERv2Config.from_mapping(adapter_cfg.extra["her_v2"])
+    assert {
+        (profile.engine, profile.model)
+        for profile in effective.all_provider_profiles()
+    } == {("deepseek-api", "deepseek-flash")}
 
 
 def test_v3_deepseek_allowlist_overrides_legacy_openai_profiles(tmp_path):

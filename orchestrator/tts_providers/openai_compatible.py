@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -99,9 +100,22 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
                             code, retryable = "tts_provider_unavailable", True
                         else:
                             code, retryable = "tts_protocol_rejected", False
+                        detail = f"{self.service_id} TTS rejected the request (HTTP {status})."
+                        if status in {400, 404, 422}:
+                            # Read only a bounded, typed code; never relay arbitrary
+                            # provider response prose into logs or user notices.
+                            raw = await response.content.read(4097)
+                            try:
+                                error = json.loads(raw) if len(raw) <= 4096 else {}
+                            except (ValueError, UnicodeError):
+                                error = {}
+                            error = error.get("error") if isinstance(error, dict) else None
+                            if isinstance(error, dict) and error.get("code") == "voice_not_found":
+                                code, retryable = "tts_voice_unavailable", False
+                                detail = f"{self.service_id} cannot find the configured voice."
                         raise OpenAICompatibleTTSError(
                             code,
-                            f"{self.service_id} TTS rejected the request (HTTP {status}).",
+                            detail,
                             status=status,
                             retryable=retryable,
                         )

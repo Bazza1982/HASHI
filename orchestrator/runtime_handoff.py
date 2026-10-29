@@ -7,6 +7,7 @@ from pathlib import Path
 
 from orchestrator.kernel_process import instance_runtime_dir, write_record
 from orchestrator.runtime_contract import compare_runtime_fingerprints
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 def snapshot(app) -> dict:
@@ -30,6 +31,11 @@ def snapshot(app) -> dict:
         "telegram_offsets": {
             name: ingress.offset
             for name, ingress in app.function_workers._telegram_ingress.items()
+        },
+        "telegram_bot_offsets": {
+            name: {"offset": ingress.offset, "bot_fingerprint": fingerprint}
+            for name, ingress in app.function_workers._telegram_ingress.items()
+            if (fingerprint := telegram_bot_fingerprint(getattr(ingress, "token", None)))
         },
         "services": [
             name
@@ -56,11 +62,21 @@ def persist(app) -> None:
     )
 
 
-def checkpoint_offset(bridge_home, agent: str, offset: int) -> None:
+def checkpoint_offset(
+    bridge_home, agent: str, offset: int | None, *, bot_fingerprint: str | None = None
+) -> None:
     path = instance_runtime_dir(bridge_home) / "telegram-offsets.json"
     offsets = json.loads(path.read_text()) if path.exists() else {}
     offsets[agent] = offset
     write_record(path, offsets)
+    if bot_fingerprint:
+        # Keep the legacy numeric projection readable by rollback generations.
+        # New generations restore this atomic identity/offset pair instead of
+        # interpreting a cursor from a different Bot as an acknowledgement.
+        identities_path = path.with_name("telegram-bot-offsets.json")
+        identities = json.loads(identities_path.read_text()) if identities_path.exists() else {}
+        identities[agent] = {"offset": offset, "bot_fingerprint": bot_fingerprint}
+        write_record(identities_path, identities)
 
 
 def load(app) -> dict:
@@ -77,6 +93,11 @@ def load(app) -> dict:
     offset_path = root / "telegram-offsets.json"
     if offset_path.exists():
         handoff["telegram_offsets"].update(json.loads(offset_path.read_text()))
+    identities_path = root / "telegram-bot-offsets.json"
+    if identities_path.exists():
+        handoff.setdefault("telegram_bot_offsets", {}).update(
+            json.loads(identities_path.read_text())
+        )
     return handoff
 
 

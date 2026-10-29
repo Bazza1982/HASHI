@@ -114,7 +114,9 @@ class HandoffBuilder:
             if not assistant_entries:
                 continue
             completed.append([entries[user_index], assistant_entries[-1]])
-        return completed
+        from orchestrator.pcm_forget_memory import filter_transcript_rounds
+
+        return filter_transcript_rounds(self.workspace_dir, completed)
 
     @staticmethod
     def _word_count(text: str) -> int:
@@ -128,6 +130,14 @@ class HandoffBuilder:
         except Exception as e:
             logger.error(f"Failed to read handoff context from {path}: {e}")
             return ""
+
+    def _read_pre_forget_text(self, path: Path, cutoff: float) -> str:
+        from orchestrator.pcm_forget_artifacts import _unchanged_before
+
+        if not path.is_file() or not _unchanged_before(path, cutoff):
+            return ""
+        text = self._read_optional_text(path)
+        return text if _unchanged_before(path, cutoff) else ""
 
     def _bounded_recent_rounds(
         self,
@@ -323,12 +333,12 @@ class HandoffBuilder:
             if rendered_entries:
                 rendered_rounds.append({"index": round_index, "entries": rendered_entries})
 
+        memory_files = {}
         handoff_summary = self._read_optional_text(self.handoff_path)
         if not handoff_summary:
             self.build_handoff()
             handoff_summary = self._read_optional_text(self.handoff_path)
 
-        memory_files = {}
         for name in ("project.md", "decisions.md", "tasks.md"):
             text = self._read_optional_text(self.memory_dir / name)
             if text:
@@ -436,6 +446,20 @@ class HandoffBuilder:
 
     def build_handoff(self):
         """Synthesizes handoff.md from memory files and recent context."""
+        from orchestrator.pcm_forget_memory import oldest_forget_start
+
+        cutoff = oldest_forget_start(self.workspace_dir)
+        if cutoff is not None:
+            safe_context, _, _ = self.build_recent_context_block()
+            parts = ["# Handoff Summary\n\n"]
+            for name in ("project.md", "decisions.md", "tasks.md"):
+                text = self._read_optional_text(self.memory_dir / name)
+                if text:
+                    parts.append(f"## {name.removesuffix('.md').capitalize()}\n{text}\n\n")
+            parts.append(safe_context)
+            self.handoff_path.write_text("".join(parts), encoding="utf-8")
+            return
+
         handoff_content = ["# Handoff Summary\n\n"]
         
         # Read key memory files if they exist
