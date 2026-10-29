@@ -25,6 +25,7 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
+from orchestrator.telegram_configuration_lock import telegram_configuration_lock
 from orchestrator.telegram_identity import resolve_owner_scope_id, resolve_telegram_owner_id
 
 MAX_TELEGRAM_USER_ID = (1 << 52) - 1
@@ -215,7 +216,7 @@ class TelegramAccessService:
         # Existing config writers are revision checked; lock contention is a
         # bounded failure, never a reason to replay a committed mutation.
         try:
-            with file_write_lock(self.secrets_path):
+            with telegram_configuration_lock(self.secrets_path), file_write_lock(self.secrets_path):
                 config, _, snapshot, current_revision = self._context(agent_id)
                 if not hmac.compare_digest(current_revision, expected_revision):
                     raise TelegramAccessError("telegram_access_changed", 409)

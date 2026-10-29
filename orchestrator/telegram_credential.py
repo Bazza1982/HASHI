@@ -34,6 +34,7 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
+from orchestrator.telegram_configuration_lock import telegram_configuration_lock
 from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
@@ -506,7 +507,7 @@ class TelegramCredentialService:
         try:
             # Freeze the Agent-to-secret mapping while the credential document
             # performs its own optimistic, serialized publication.
-            with file_write_lock(self.config_path):
+            with telegram_configuration_lock(self.secrets_path), file_write_lock(self.config_path):
                 latest_config = read_config_json(self.config_path)
                 if latest_config.revision != context.config_revision:
                     raise TelegramCredentialError(

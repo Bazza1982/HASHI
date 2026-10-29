@@ -32,6 +32,8 @@ new grant fields; if one returns, management closes and its new-user access is
 unavailable until a compatible Worker is running. Existing legacy allowlists
 must be handled separately because older Workers can cache their previous grants.
 Agent grants preserve both flattened and nested instance configuration layouts.
+Telegram user and Bot credential transactions share an outer lock before their
+revision-checked configuration writes, avoiding opposing lock order.
 
 Scoped admission, Session ownership, Workzones and delivery have offline tests;
 live cross-generation adoption and real Telegram acceptance remain unverified.
