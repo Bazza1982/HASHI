@@ -120,3 +120,52 @@ async def test_global_user_path_reply_uses_current_grant_and_agent_workzone(
         assert added == []
     else:
         assert added[0]["path"] == str(directory.resolve())
+
+
+@pytest.mark.asyncio
+async def test_scoped_updates_create_distinct_real_sessions_and_honor_revocation(tmp_path, monkeypatch):
+    from telegram import Update
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.telegram_access import TelegramAccessService
+    from tests.test_telegram_actor_scope import update
+    from unittest.mock import AsyncMock
+
+    runtime, config_path, global_owner, local_owner = setup_scoped_workzone(tmp_path)
+    runtime._authorized_telegram_ids = (42,)
+    service = TelegramAccessService(config_path=config_path,
+                                    secrets_path=runtime.global_config.secrets_path)
+    state = service.status("lily")
+    service.change("lily", expected_revision=state["revision"],
+                   scope="agent", action="add", user_id="201")
+    observations = {}
+
+    async def process(telegram_update):
+        session, owner, surface, channel = runtime_session.resolve_request_session(
+            runtime, source="telegram", chat_id=telegram_update.effective_chat.id,
+        )
+        observations[telegram_update.effective_user.id] = (session["session_id"], owner)
+
+    runtime.app = SimpleNamespace(bot=object(), process_update=process)
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = runtime
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.emit_metadata = AsyncMock()
+    selected = [update(42)]
+    monkeypatch.setattr(Update, "de_json", lambda payload, bot: selected[0])
+
+    for actor in (42, 100, 200):
+        selected[0] = update(actor)
+        assert await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert observations[42][1] == "user:42"
+    assert observations[100][1] == global_owner
+    assert observations[200][1] == local_owner
+    assert len({entry[0] for entry in observations.values()}) == 3
+
+    state = service.status("lily")
+    service.change("lily", expected_revision=state["revision"],
+                   scope="global", action="remove", user_id="100")
+    selected[0] = update(100)
+    assert await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert len(observations) == 3
+    assert runtime_session.agent_workzone_state(runtime, owner=global_owner)["slots"] == []
