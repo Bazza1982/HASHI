@@ -56,7 +56,8 @@ class TestFileSupervisor:
 
     __test__ = False
 
-    def __init__(self, authority, root):
+    def __init__(self, authority, root, *, confirm_stopped=None):
+        self._confirm_stopped = confirm_stopped
         self.authority = authority
         self.root = root
         self.resource = asyncio.Lock()
@@ -78,7 +79,8 @@ class TestFileSupervisor:
             digest = sha256(b"written").hexdigest()
             self.authority.finish(context, claim.claim_id, outcome="succeeded", result_digest=digest)
             if getattr(self, "confirm_stop", True):
-                self.authority._verifier.confirm_stopped(self.authority, context, claim.claim_id)
+                observer = self._confirm_stopped or self.authority._verifier.confirm_stopped
+                observer(self.authority, context, claim.claim_id)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, "written")
 
 

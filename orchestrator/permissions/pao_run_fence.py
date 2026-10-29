@@ -60,3 +60,53 @@ class PaoRunFence:
                 yield
         except SessionConflict as exc:
             raise PermissionDenied("PAO Run is no longer current") from exc
+
+
+class PaoTerminalRunFence:
+    """Short canonical terminal barrier, including a stop-advanced PAO fence."""
+
+    def __init__(self, store, binding):
+        if not isinstance(store, SessionStore) or not isinstance(binding, RuntimeExecutionBinding):
+            raise ValueError("canonical PAO terminal binding is required")
+        self.store, self.binding = store, binding
+
+    @contextmanager
+    def __call__(self, context):
+        import hashlib
+        import json
+        from dataclasses import asdict
+        from orchestrator.session_store import TERMINAL_RUN_STATES
+
+        binding = self.binding
+        if context != binding.context:
+            raise PermissionDenied("terminal binding changed")
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT r.*,s.owner_id FROM runs r JOIN sessions s ON s.session_id=r.session_id WHERE r.run_id=?",
+                (context.run_id,),
+            ).fetchone()
+            if (run is None or run["state"] not in TERMINAL_RUN_STATES
+                    or run["owner_id"] != context.owner_id or run["agent_id"] != context.agent_id
+                    or run["session_id"] != context.session_id or run["request_id"] != binding.request_id
+                    or str(run["context_generation"]) != context.context_generation):
+                raise PermissionDenied("the canonical Run is not terminal for this binding")
+            route = connection.execute(
+                "SELECT * FROM permission_run_routes WHERE run_id=?", (context.run_id,),
+            ).fetchone()
+            raw = json.dumps(asdict(binding), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if (route is None or route["task_id"] != context.task_id
+                    or route["execution_binding_json"] != raw
+                    or route["binding_digest"] != hashlib.sha256(raw.encode()).hexdigest()):
+                raise PermissionDenied("a newer execution owns this terminal Run")
+            active = connection.execute(
+                "SELECT 1 FROM permission_run_routes p JOIN runs r ON r.run_id=p.run_id "
+                "WHERE p.task_id=? AND r.state IN ('queued','running') "
+                "UNION ALL SELECT 1 FROM runs child WHERE child.parent_run_id IN "
+                "(SELECT run_id FROM permission_run_routes WHERE task_id=?) "
+                "AND child.state IN ('queued','running') AND child.session_id=? "
+                "AND child.agent_id=? AND child.context_generation=? LIMIT 1",
+                (context.task_id, context.task_id, context.session_id, context.agent_id,
+                 int(context.context_generation)),
+            ).fetchone()
+            yield {"run": dict(run), "task_has_active_work": active is not None}

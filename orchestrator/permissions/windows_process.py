@@ -12,6 +12,7 @@ from hashlib import sha256
 import os
 from pathlib import Path
 import subprocess
+import threading
 from ctypes import wintypes
 
 from orchestrator.permissions.windows_jobs import WindowsJob
@@ -141,6 +142,7 @@ class OwnedWindowsProcess:
     def __init__(self, process, job, observation, kernel):
         self._process, self._job, self.observation, self._kernel = process, job, observation, kernel
         self._started, self._stopped = False, False
+        self._stop_lock = threading.Lock()
 
     @property
     def process_handle(self):
@@ -171,14 +173,15 @@ class OwnedWindowsProcess:
         return int(value.value)
 
     def stop(self, *, timeout_ms=4500):
-        if self._stopped:
-            return
-        # This proves the whole Job empty, not merely the root PID exited.
-        # On failure retain handles for later cleanup and report unknown.
-        self._job.stop(timeout_ms=timeout_ms)
-        self._kernel.CloseHandle(self._process.thread)
-        self._kernel.CloseHandle(self._process.process)
-        self._stopped = True
+        with self._stop_lock:
+            if self._stopped:
+                return
+            # This proves the whole Job empty, not merely the root PID exited.
+            # On failure retain handles for later cleanup and report unknown.
+            self._job.stop(timeout_ms=timeout_ms)
+            self._kernel.CloseHandle(self._process.thread)
+            self._kernel.CloseHandle(self._process.process)
+            self._stopped = True
 
 
 def inheritable_handle_copy(handle):

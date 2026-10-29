@@ -1407,6 +1407,7 @@ class FlexibleBackendManager:
         target_model: str | None = None,
         target_provider: str | None = None,
         apply_persisted_timeout: bool = True,
+        _permission_provider: bool = False,
     ) -> AgentConfig:
         settings, agent_extra = self._agent_permission_settings()
         if "permission_settings" in backend_cfg_raw:
@@ -1416,7 +1417,9 @@ class FlexibleBackendManager:
         # requested level until their trusted executor is installed.
         if (settings is not None and settings.requested_level.value != "L0"
                 and not is_cli_backend(engine)):
-            raise ValueError("requested permission controls are not yet available")
+            owner = getattr(getattr(self, "runtime", None), "permission_service_client", None)
+            if owner is None or not owner.permits_native(engine, provider=_permission_provider):
+                raise ValueError("requested permission controls are not yet available")
         backend_extra = dict(backend_cfg_raw)
         backend_extra.pop("engine", None)
         backend_extra.pop("model", None)
@@ -1670,6 +1673,7 @@ class FlexibleBackendManager:
             backend_cfg_raw,
             target_model=target_model,
             apply_persisted_timeout=False,
+            _permission_provider=herv3_provider,
         )
         if engine == "her-v2":
             # One-shot internal sidecars are not agent runs. Keep globally
@@ -2035,7 +2039,14 @@ class FlexibleBackendManager:
             if self.global_config and self.global_config.authorized_id:
                 enriched_secrets["_authorized_telegram_id"] = str(self.global_config.authorized_id)
 
-            registry = ToolRegistry(
+            registry_class = ToolRegistry
+            permission_settings, _ = self._agent_permission_settings()
+            if permission_settings is not None and permission_settings.requested_level.value != "L0":
+                from orchestrator.permissions.registry import ManagedCatalogueRegistry
+
+                registry_class = ManagedCatalogueRegistry
+                enriched_secrets = {}
+            registry = registry_class(
                 allowed_tools=allowed,
                 access_root=access_roots[0],
                 workspace_dir=workspace_dir,

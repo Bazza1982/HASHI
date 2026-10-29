@@ -453,6 +453,10 @@ class WorkbenchApiServer:
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self._device_capability_topology_task: asyncio.Task | None = None
         self.identity_service = self._build_identity_service()
+        if getattr(self.global_config, "permission_service", None) is not None:
+            from orchestrator.permissions.bootstrap import bind_frontend
+
+            bind_frontend(self)
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
@@ -2123,6 +2127,11 @@ class WorkbenchApiServer:
         return getattr(wa, "_client", None) is not None
 
     async def start(self):
+        if getattr(self.global_config, "permission_frontend", None) is not None:
+            from orchestrator.permissions.frontend_transition import build_frontend_transition
+
+            self._permission_transition_endpoint = build_frontend_transition(self)
+            await self._permission_transition_endpoint.start()
         await asyncio.to_thread(self.session_store.cleanup_attachments)
         await asyncio.to_thread(self.session_store.cleanup_audio_assets)
         await self.live_voice_manager.start()
@@ -2445,6 +2454,9 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        permission_endpoint = getattr(self, "_permission_transition_endpoint", None)
+        if permission_endpoint is not None:
+            await permission_endpoint.close()
         if self._device_capability_topology_task is not None:
             self._device_capability_topology_task.cancel()
             await asyncio.gather(
@@ -2486,6 +2498,10 @@ class WorkbenchApiServer:
             await asyncio.to_thread(close_transfer_store)
 
     async def handle_auth_login(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "login")
         if not self._is_governed_profile():
             return web.json_response(
                 {
@@ -2551,6 +2567,10 @@ class WorkbenchApiServer:
         )
 
     async def handle_auth_logout(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "logout")
         if not self._is_governed_profile():
             return web.json_response({"ok": True})
         if self.identity_service is None:
@@ -2569,6 +2589,10 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, "revoked": revoked})
 
     async def handle_auth_me(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "me")
         if not self._is_governed_profile():
             return web.json_response(
                 {"ok": True, "profile": "personal", "user": {"role": "owner"}}

@@ -13,6 +13,7 @@ from orchestrator.permissions.continuation import PermissionPark
 from orchestrator.permissions.models import RuntimeExecutionBinding
 from orchestrator.permissions.parking import PermissionParkingStore
 from orchestrator.permissions.run_service import binding_from_route
+from orchestrator.permissions.start_wait import PermissionStartWait, PermissionStartStore
 from orchestrator.session_store import TERMINAL_RUN_STATES
 
 
@@ -22,14 +23,22 @@ class ManagedHerTurn:
     binding: RuntimeExecutionBinding
     executor: object
     recovery: dict | None = None
+    adapter: object | None = None
+    accepted: object | None = None
+    resumed_unstarted: bool = False
 
     def bind_provider(self, provider):
-        provider.tool_registry = getattr(self.executor, "registry", self.executor)
+        binder = getattr(self.executor, "bind_provider", None)
+        if callable(binder):
+            binder(provider)
+        else:
+            provider.tool_registry = getattr(self.executor, "registry", self.executor)
 
     async def run(self, runtime, prompt, request_id, **arguments):
         delegated = getattr(self.executor, "run_her", None)
         if callable(delegated):
-            return await delegated(runtime, prompt, request_id, binding=self.binding, **arguments)
+            return await delegated(runtime, prompt, request_id, binding=self.binding,
+                                   permission_recovery=self.recovery, **arguments)
         return await runtime.run_turn(prompt, request_id, turn_id=self.binding.context.turn_id, **arguments)
 
 
@@ -41,9 +50,12 @@ class PermissionAgentController:
             raise ValueError("a qualified PAO permission service is required")
         self.runtime, self.service = runtime, service
         self.parking = PermissionParkingStore(service.store)
+        self.start_waits = PermissionStartStore(service.store)
+        self._unstarted = {}
         self._turns, self._signals, self._wake_task = {}, {}, None
         self._queued, self._closing = set(), False
         self._owned_bindings = {}
+        self._callback_endpoint, self._callback_descriptor = None, None
 
     async def open_turn(self, adapter, accepted, request_id):
         meta = adapter._runtime_request_meta(request_id)
@@ -56,18 +68,42 @@ class PermissionAgentController:
                 or run["session_id"] != meta.get("hashi_session_id")
                 or run["fencing_token"] != meta.get("hashi_fencing_token")):
             raise PermissionDenied("the managed Worker claim is unavailable")
-        binding = await self.service.open_execution(
-            request_id=request_id, run_id=run_id, owner_id=owner, agent_id=self.runtime.name,
-            session_id=run["session_id"], context_generation=run["context_generation"],
-            fencing_token=run["fencing_token"], worker_id=run["worker_id"],
-            worker_generation=generation, turn_id=accepted.turn_id, backend_id="her-v2",
-        )
-        execution = ManagedHerTurn(self, binding, self.service.execution_registry(binding))
-        if accepted.duplicate and not accepted.duplicate_text:
-            ticket = self.parking.resume_ticket(binding)
-            execution.recovery = adapter._session_coordinator.store.adopt_permission_turn(
-                ticket, execution_owner=adapter._session_coordinator.execution_owner,
+        self._queued.discard(request_id)
+        try:
+            binding = await self.service.open_execution(
+                request_id=request_id, run_id=run_id, owner_id=owner, agent_id=self.runtime.name,
+                session_id=run["session_id"], context_generation=run["context_generation"],
+                fencing_token=run["fencing_token"], worker_id=run["worker_id"],
+                worker_generation=generation, turn_id=accepted.turn_id, backend_id="her-v2",
+                callbacks=self._callback_descriptor,
             )
+        except OSError as error:
+            from orchestrator.permissions.wire import PermissionRemoteError
+
+            if isinstance(error, PermissionRemoteError) and error.code != "permission_service_unavailable":
+                raise
+            claim = dict(request_id=request_id, run_id=run_id, owner_id=owner, agent_id=self.runtime.name,
+                         session_id=run["session_id"], context_generation=run["context_generation"],
+                         fencing_token=run["fencing_token"], worker_id=run["worker_id"])
+            self._unstarted[request_id] = (claim, adapter._session_coordinator, accepted)
+            raise PermissionStartWait(request_id) from error
+        execution = ManagedHerTurn(self, binding, self.service.execution_registry(binding),
+                                   adapter=adapter, accepted=accepted)
+        if accepted.duplicate and not accepted.duplicate_text:
+            pending = [payload for payload in self.start_waits.list_waiting(self.runtime.name)
+                       if payload["claim"]["run_id"] == run_id and payload["_state"] == "resuming"]
+            if pending:
+                ticket = self.start_waits.ticket(binding)
+                adapter._session_coordinator.store.adopt_unstarted_permission_turn(
+                    ticket, execution_owner=adapter._session_coordinator.execution_owner,
+                )
+                ticket.finish()
+                execution.resumed_unstarted = True
+            else:
+                ticket = self.parking.resume_ticket(binding)
+                execution.recovery = adapter._session_coordinator.store.adopt_permission_turn(
+                    ticket, execution_owner=adapter._session_coordinator.execution_owner,
+                )
         self._turns[request_id] = execution
         self._owned_bindings[binding.context.execution_epoch] = binding
         self._queued.discard(request_id)
@@ -75,7 +111,7 @@ class PermissionAgentController:
 
     @staticmethod
     def is_park(signal):
-        return isinstance(signal, PermissionPark)
+        return isinstance(signal, (PermissionPark, PermissionStartWait))
 
     def capture(self, request_id, signal, coordinator, accepted):
         execution = self._turns.get(request_id)
@@ -83,7 +119,10 @@ class PermissionAgentController:
             raise PermissionDenied("a current managed continuation is required")
         recovery = coordinator.store.active_turn_recovery(accepted.session_id, accepted.turn_id)
         checkpoint = coordinator.store.provider_context_for_turn(accepted.session_id, accepted.turn_id)
-        if (not recovery or not checkpoint or checkpoint.get("boundary") != "pending_tool_batch"
+        if (not recovery or not checkpoint or checkpoint.get("boundary") not in {
+                    "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
+                    "completed_provider_response",
+                }
                 or not recovery.get("provider_context_digest") or not recovery.get("provider_context_producer_claim")):
             raise PermissionDenied("no durable pending Tool boundary was committed")
         reference = {
@@ -94,6 +133,16 @@ class PermissionAgentController:
         self._signals[request_id] = (signal, execution.binding, reference, coordinator, accepted)
 
     async def park(self, item, signal):
+        if isinstance(signal, PermissionStartWait):
+            saved_start = self._unstarted.pop(item.request_id, None)
+            if saved_start is None or signal.request_id != item.request_id:
+                return False
+            claim, coordinator, accepted = saved_start
+            self.start_waits.park(claim, item, {
+                "her_session_id": accepted.session_id, "turn_id": accepted.turn_id,
+                "execution_owner_id": coordinator.execution_owner["owner_id"],
+            })
+            return True
         saved = self._signals.pop(item.request_id, None)
         if saved is None or saved[0] is not signal:
             return False
@@ -129,6 +178,12 @@ class PermissionAgentController:
     async def start(self):
         if self._wake_task is not None or self._closing:
             raise RuntimeError("permission wakeup owner is already started")
+        installation = getattr(self.runtime.global_config, "permission_service", None) or {}
+        safety_sid = installation.get("service_sid")
+        if safety_sid:
+            from orchestrator.permissions.her_callbacks import start_callbacks
+
+            self._callback_endpoint, self._callback_descriptor = await start_callbacks(self, safety_sid)
         self._wake_task = asyncio.create_task(self._watch())
 
     async def _watch(self):
@@ -142,6 +197,35 @@ class PermissionAgentController:
             await asyncio.sleep(.5)
 
     async def wake_ready(self):
+        from orchestrator.flexible_backend_registry import canonical_backend_engine
+
+        if canonical_backend_engine(self.runtime.config.active_backend) != "her-v2":
+            # Selection never wakes a checkpoint into a different engine. The
+            # same Task and completed facts remain available for explicit PAO
+            # continuation; the old executor is not silently resurrected.
+            return
+        pending_starts = self.start_waits.list_waiting(self.runtime.name)
+        if pending_starts:
+            qualify = getattr(self.service, "qualify", None)
+            if callable(qualify):
+                await qualify()
+            for payload in pending_starts:
+                request_id = payload["claim"]["request_id"]
+                if request_id in self._queued:
+                    continue
+                run = self.service.store.get_run(payload["claim"]["run_id"], owner_id=payload["claim"]["owner_id"])
+                if run["state"] == "queued":
+                    item = self.start_waits.recover_queued(payload)
+                elif payload["_state"] == "parked" and run["state"] == "running":
+                    item = self.start_waits.claim_resume(payload)
+                else:
+                    continue
+                self._queued.add(request_id)
+                try:
+                    await self.runtime.queue.put(item)
+                except BaseException:
+                    self._queued.discard(request_id)
+                    raise
         for payload in self.parking.list_parked(agent_id=self.runtime.name):
             binding = binding_from_route(payload["binding"])
             if binding.request_id in self._queued:
@@ -153,7 +237,10 @@ class PermissionAgentController:
             if run["state"] == "queued":
                 item = self.parking.recover_queued(binding)
             else:
-                ready = status.binding_state == "fenced"
+                if run["state"] != "running" or payload.get("_park_state") == "resuming":
+                    continue
+                ready = (status.binding_state == "fenced"
+                         or payload["reason"] in {"unavailable", "permission_changed", "fenced"})
                 if not ready and payload["request_id"]:
                     request = self.service.authority.get_request(binding.context, payload["request_id"])
                     ready = request.state in {"denied", "withdrawn", "expired", "decided", "granted_existing"}
@@ -177,5 +264,8 @@ class PermissionAgentController:
             self._wake_task = None
         for binding in tuple(self._owned_bindings.values()):
             await self.service.close_execution(binding=binding)
+        if self._callback_endpoint is not None:
+            await self._callback_endpoint.close()
+            self._callback_endpoint = None
         self._turns.clear()
         self._owned_bindings.clear()

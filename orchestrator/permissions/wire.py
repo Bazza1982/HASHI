@@ -26,13 +26,15 @@ _TYPES = {
 _TAG = "__hashi_permission_dto_v1__"
 
 
-class PermissionRemoteError(RuntimeError):
+class PermissionRemoteError(OSError):
     def __init__(self, code):
         self.code = str(code)
         super().__init__("permission service: " + self.code)
 
 
 def encode(value):
+    if isinstance(value, models.PermissionLevel):
+        return value.value
     if is_dataclass(value) and not isinstance(value, type):
         if type(value).__name__ not in _TYPES or _TYPES[type(value).__name__] is not type(value):
             raise ValueError("unregistered permission wire type")

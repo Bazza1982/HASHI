@@ -158,6 +158,37 @@ async def safety_command(runtime: Any, update: Any, context: Any):
     if not _authorized(runtime, update):
         return
     args = [str(item).strip() for item in (getattr(context, "args", None) or [])]
+    if args and args[0].casefold() in {"narrow", "revoke", "revoke-task", "set-level"}:
+        if getattr(runtime, "permission_authority", None) is None:
+            await runtime._reply_text(update, ui_language.tr("safety.action_unavailable"))
+            return {"ok": False, "error_code": "permission_service_unavailable"}
+        from orchestrator.permissions.frontend_control import current_permission_ingress
+        from orchestrator.permissions.presentation import management_card
+
+        try:
+            _, subject = _subject_for_update(runtime, update)
+            outcome = await current_permission_ingress().manage(
+                subject, args, invocation_id=str(update.update_id),
+            )
+            text = management_card(outcome)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            text = ui_language.tr("safety.management_failed")
+            await runtime._reply_text(update, text)
+            return {"ok": False, "error_code": "permission_management_rejected"}
+        await runtime._reply_text(update, text, parse_mode="HTML")
+        return {"ok": True}
+    if args and args[0].casefold() in {"tasks", "leases"}:
+        from orchestrator.permissions.presentation import session_summary_card
+
+        try:
+            authority, subject = _subject_for_update(runtime, update)
+            summary = await asyncio.to_thread(authority.session_summary, subject=subject)
+            text = session_summary_card(summary)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            await runtime._reply_text(update, ui_language.tr("safety.requests_unavailable"))
+            return
+        await runtime._reply_text(update, text, parse_mode="HTML")
+        return
     if args and args[0].casefold() in {"approve", "deny"}:
         from orchestrator.permissions.frontend_control import current_permission_ingress
 

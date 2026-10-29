@@ -57,7 +57,16 @@ class BrokeredProviderFactory:
         client = self._client
 
         async def invoke(adapter, payload, headers, callback, *, use_stream):
-            del adapter, headers
+            del headers
+            # Preserve the exact outbound model context before crossing a
+            # fallible service boundary. This is a ready request, not a claim
+            # that a Provider answered or that any Tool completed.
+            from adapters.openrouter_api import _APIResult
+
+            adapter._observe_provider_context(
+                boundary="ready_provider_request", messages=payload["messages"],
+                request_id="", result=_APIResult("", None, ""), provider_request_id="",
+            )
             try:
                 result = await client.call_async(
                     "provider_call", {"engine": engine, "model": model, "payload": payload, "use_stream": use_stream},
@@ -67,6 +76,8 @@ class BrokeredProviderFactory:
                 if exc.code in {"PermissionDenied", "StaleFencingToken", "permission_service_unavailable"}:
                     raise PermissionPark(GateResult("permission_changed", "")) from exc
                 raise
+            except (OSError, EOFError, TimeoutError) as exc:
+                raise PermissionPark(GateResult("unavailable", "")) from exc
             return api_result_from_wire(result)
 
         async def once(adapter, payload, headers, callback):

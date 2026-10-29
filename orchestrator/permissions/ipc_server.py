@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 
 from orchestrator.permissions.ipc_rpc import serve_request, welcome
@@ -20,17 +21,29 @@ class PermissionEndpoint:
         self._closing = False
         self._accept_task = None
         self._connections, self._tasks = set(), set()
+        self._ownership = threading.Lock()
 
     async def start(self):
         if self._closing or self._accept_task is not None:
             raise RuntimeError("permission endpoint cannot be started twice")
+        self._listener.reserve()
         self._accept_task = asyncio.create_task(self._accept())
+
+    def _accept_owned(self):
+        result = self._listener.accept(timeout_s=.25)
+        if result is not None:
+            with self._ownership:
+                if self._closing:
+                    result[0].close()
+                    return None
+                self._connections.add(result[0])
+        return result
 
     async def _accept(self):
         while not self._closing:
             await self._slots.acquire()
             try:
-                accepted = await asyncio.to_thread(self._listener.accept, timeout_s=.25)
+                accepted = await asyncio.to_thread(self._accept_owned)
             except (OSError, PermissionError, ValueError, TimeoutError):
                 self._slots.release()
                 if self._closing:
@@ -39,13 +52,12 @@ class PermissionEndpoint:
             if accepted is None:
                 self._slots.release()
                 continue
-            pipe, _, hello = accepted
-            self._connections.add(pipe)
-            task = asyncio.create_task(self._connection(pipe, hello))
+            pipe, peer, hello = accepted
+            task = asyncio.create_task(self._connection(pipe, peer, hello))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-    async def _connection(self, pipe, hello):
+    async def _connection(self, pipe, peer, hello):
         dispatch = monitor = None
         try:
             await asyncio.to_thread(pipe.send, welcome(
@@ -64,7 +76,7 @@ class PermissionEndpoint:
                     # is not a role change, continuation capability or retry.
                     return
 
-            dispatch = asyncio.create_task(serve_request(pipe, self._router, frame))
+            dispatch = asyncio.create_task(serve_request(pipe, self._router, frame, peer=peer))
             monitor = asyncio.create_task(disconnected())
             done, _ = await asyncio.wait((dispatch, monitor), return_when=asyncio.FIRST_COMPLETED)
             if monitor in done and not dispatch.done():
@@ -81,13 +93,16 @@ class PermissionEndpoint:
                 if task is not None:
                     with suppress(BaseException):
                         await task
-            self._connections.discard(pipe)
+            with self._ownership:
+                self._connections.discard(pipe)
             self._slots.release()
 
     async def close(self):
-        self._closing = True
+        with self._ownership:
+            self._closing = True
+            owned = tuple(self._connections)
         self._listener.close()
-        for pipe in tuple(self._connections):
+        for pipe in owned:
             pipe.close()
         tasks = tuple(self._tasks) + ((self._accept_task,) if self._accept_task is not None else ())
         for task in tasks:

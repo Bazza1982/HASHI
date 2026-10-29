@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import fields
+from uuid import uuid4
 import json
 
 from adapters.openrouter_api import _APIResult
@@ -47,6 +48,7 @@ class SelectedModelBroker:
         self._capacity = asyncio.Semaphore(max_parallel_calls)
         self._event_sink = event_sink
         self._active = set()
+        self._receipts = []
 
     def _current(self):
         status = self._authority.execution_status(self._binding.context)
@@ -77,17 +79,66 @@ class SelectedModelBroker:
             with self._run_guard(self._binding.context):
                 self._current()
                 self._active.add(task)
+            request = monitor = None
+            receipt = {"id": uuid4().hex, "engine": engine, "model": model, "status": "unknown",
+                       "token_source": "unknown", "input_tokens": 0, "output_tokens": 0,
+                       "thinking_tokens": 0, "cost_usd": None, "provider_ids": [], "tool_batch": False,
+                       "prompt_cache_hit_tokens": None, "prompt_cache_miss_tokens": None}
+            self._receipts.append(receipt)
             try:
                 headers = driver._request_headers()
-                if use_stream:
-                    result = await driver._stream_api_once(frozen, headers, self._event_sink)
-                else:
-                    result = await driver._call_api_once(frozen, headers, None)
+                request = asyncio.create_task(
+                    driver._stream_api_once(frozen, headers, self._event_sink) if use_stream
+                    else driver._call_api_once(frozen, headers, None)
+                )
+
+                async def watch():
+                    while True:
+                        await asyncio.sleep(.1)
+                        with self._run_guard(self._binding.context):
+                            self._current()
+
+                monitor = asyncio.create_task(watch())
+                done, _ = await asyncio.wait((request, monitor), return_when=asyncio.FIRST_COMPLETED)
+                if monitor in done:
+                    await monitor
+                result = await request
+                from tools.token_tracker import estimate_tokens
+
+                reported = bool(result.prompt_tokens or result.completion_tokens or result.thinking_tokens)
+                receipt.update(
+                    status="completed", token_source="provider" if reported else "estimated",
+                    input_tokens=int(result.prompt_tokens) if reported else estimate_tokens(json.dumps(frozen)),
+                    output_tokens=int(result.completion_tokens) if reported else estimate_tokens(
+                        result.text + json.dumps(result.tool_calls or [])),
+                    thinking_tokens=int(result.thinking_tokens) if reported else estimate_tokens(result.reasoning_content),
+                    cost_usd=result.cost_usd,
+                    provider_ids=[value for value in (result.provider_response_id, result.transport_request_id) if value],
+                    tool_batch=bool(result.tool_calls),
+                    prompt_cache_hit_tokens=result.prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens=result.prompt_cache_miss_tokens,
+                )
                 with self._run_guard(self._binding.context):
                     self._current()
                 return api_result_to_wire(result)
             finally:
+                owned = tuple(item for item in (request, monitor) if item is not None)
+                for item in owned:
+                    if not item.done():
+                        item.cancel()
+                if owned:
+                    done, pending = await asyncio.wait(owned, timeout=5)
+                    for item in done:
+                        try:
+                            item.result()
+                        except BaseException:
+                            pass
+                    if pending:
+                        raise OSError("selected model request stop is unverified")
                 self._active.discard(task)
+
+    def usage_receipts(self):
+        return json.loads(json.dumps(self._receipts, allow_nan=False))
 
     async def close(self):
         tasks = tuple(task for task in self._active if task is not asyncio.current_task())

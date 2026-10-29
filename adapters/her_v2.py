@@ -1975,7 +1975,7 @@ class HERv2Adapter(BaseBackend):
             permission_owner = getattr(self._runtime_context(), "permission_runs", None)
             if permission_owner is not None and not fixed_turn.duplicate_text:
                 permission_execution = await permission_owner.open_turn(self, fixed_turn, request_id)
-                if permission_execution.recovery is not None:
+                if permission_execution.recovery is not None or permission_execution.resumed_unstarted:
                     private_provider_context = permission_execution.recovery
                     fixed_turn = replace(self._session_coordinator.accept(prompt), duplicate=False)
             if fixed_turn.duplicate:

@@ -60,8 +60,10 @@ async def dispatch_permission_operation(api, request, runtime, operation, metada
         api.session_store.instance_id, session["owner_id"], runtime.name,
         session["session_id"], str(session["context_generation"]),
     )
+    from orchestrator.permissions.frontend_auth import session_token
+
     ingress = PermissionIngress(
-        subject, api.permission_control, api._bearer_token_from_request(request),
+        subject, api.permission_control, session_token(request),
         metadata["connection_binding"],
     )
     with bind_permission_ingress(ingress):

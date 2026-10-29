@@ -90,3 +90,20 @@ async def test_new_worker_reuses_task_only_after_exact_old_executor_cleanup(tmp_
     assert authority.execution_status(second.context).binding_state == "active"
     assert service.execution_registry(second) is not None
     assert factory.retired[-1].context.execution_epoch == first.context.execution_epoch
+
+
+
+@pytest.mark.asyncio
+async def test_terminal_settlement_after_service_restart_uses_canonical_pao_evidence(tmp_path):
+    store, authority, factory, service, arguments, accepted = setup(tmp_path)
+    binding = await service.open_execution(**arguments)
+    # Real authority restart fences the old epoch. Cancellation independently
+    # advances the PAO fence. Neither fact should strand the task's final state.
+    restarted = PermissionAuthority(tmp_path / "permissions.db", verifier=NoApprovals())
+    assert restarted.execution_status(binding.context).binding_state == "fenced"
+    store.cancel_run(accepted.run_id, owner_id=binding.context.owner_id, reason="user stop")
+    replacement = PermissionRunService(
+        restarted, store, policy_resolver=service._policy, executor_factory=ExecutorFactory(restarted),
+    )
+    assert await replacement.settle_run(binding=binding) == "settled"
+    assert restarted.execution_status(binding.context).task_state == "cancelled"

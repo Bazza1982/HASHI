@@ -1297,6 +1297,7 @@ class HerSessionStore:
             "completed_tool_batch",
             "completed_provider_response",
             "pending_tool_batch",
+            "ready_provider_request",
         }:
             raise HerSessionStoreError(
                 "invalid_provider_context",
@@ -1514,12 +1515,58 @@ class HerSessionStore:
             self._assert_execution_owner(dict(turn), execution_owner_id)
             if (turn["status"] not in {"active", "waiting_permission"} or recovery is None
                     or recovery["provider_context_digest"] != expected_digest
-                    or _object(recovery["provider_context_json"]).get("boundary") != "pending_tool_batch"):
+                    or _object(recovery["provider_context_json"]).get("boundary") not in {
+                        "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
+                        "completed_provider_response",
+                    }):
                 raise HerSessionStoreError("permission_park_conflict", "Pending Tool context changed.")
             connection.execute(
                 "UPDATE her_turns SET status='waiting_permission',execution_lease_updated_at=? "
                 "WHERE session_id=? AND turn_id=?", (_utc_now(), session_id, turn_id),
             )
+
+    def adopt_unstarted_permission_turn(self, ticket, *, execution_owner):
+        """Adopt an accepted Turn that has no Provider or business boundary."""
+        from orchestrator.permissions.start_wait import PermissionStartTicket
+
+        if not isinstance(ticket, PermissionStartTicket):
+            raise HerSessionStoreError("permission_resume_untrusted", "Canonical PAO start continuation is required.")
+        owner_id, pid = str(execution_owner.get("owner_id") or ""), execution_owner.get("pid")
+        if not owner_id or type(pid) is not int or pid <= 0:
+            raise HerSessionStoreError("execution_owner_conflict", "Current execution owner is required.")
+        with ticket.hold() as proof:
+            reference = proof["reference"]
+            session_id, turn_id = reference["her_session_id"], reference["turn_id"]
+            with self._transaction() as connection:
+                turn = connection.execute(
+                    "SELECT * FROM her_turns WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+                ).fetchone()
+                recovery = connection.execute(
+                    "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+                ).fetchone()
+                if (turn is None or turn["request_id"] != ticket.binding.request_id
+                        or turn["status"] not in {"active", "failed", "waiting_permission"}
+                        or turn["execution_owner_id"] not in {reference["execution_owner_id"], owner_id}
+                        or (recovery is not None and (
+                            recovery["provider_context_digest"]
+                            or _array(recovery["tool_receipts_json"]) or _array(recovery["side_effects_json"])
+                        ))):
+                    raise HerSessionStoreError("permission_resume_conflict", "The accepted Turn is no longer unstarted.")
+                connection.execute(
+                    "UPDATE her_turns SET status='active',execution_owner_id=?,execution_owner_pid=?,"
+                    "execution_owner_started_at=?,execution_lease_updated_at=?,completed_at=NULL,error_text='' "
+                    "WHERE session_id=? AND turn_id=?",
+                    (owner_id, pid, str(execution_owner.get("started_at") or ""), _utc_now(), session_id, turn_id),
+                )
+                self._next_event(
+                    connection, session_id=session_id,
+                    event_id=f"{turn_id}:permission-start:{ticket.binding.fencing_token}",
+                    kind="permission_start_adopted", payload={
+                        "turn_id": turn_id, "run_id": ticket.binding.context.run_id,
+                        "producer_fence": proof["claim"]["fencing_token"],
+                        "resume_fence": ticket.binding.fencing_token,
+                    },
+                )
 
     def adopt_permission_turn(self, ticket, *, execution_owner: Mapping[str, Any]):
         """Adopt one exact parked batch through the canonical PAO resume fence."""
@@ -1549,13 +1596,17 @@ class HerSessionStore:
                         or reference["digest"] != recovery["provider_context_digest"]):
                     raise HerSessionStoreError("permission_resume_conflict", "Parked provider context changed.")
                 metadata = _object(recovery["provider_context_json"])
-                if metadata.get("boundary") != "pending_tool_batch":
-                    raise HerSessionStoreError("permission_resume_conflict", "A pending Tool boundary is required.")
+                if metadata.get("boundary") not in {
+                    "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
+                    "completed_provider_response",
+                }:
+                    raise HerSessionStoreError("permission_resume_conflict", "A complete provider boundary is required.")
                 context = self._read_segmented_provider_context(
                     connection, session_id=session_id, turn_id=turn_id, metadata=metadata,
                     expected_digest=reference["digest"],
                 )
-                pending_tool_calls(context["messages"])
+                if metadata["boundary"] == "pending_tool_batch":
+                    pending_tool_calls(context["messages"])
                 source = self._normalise_run_claim(reference.get("producer_run_claim"))
                 stored = _object(recovery["provider_context_producer_claim_json"])
                 current = self._normalise_run_claim(proof["_current_run_claim"])

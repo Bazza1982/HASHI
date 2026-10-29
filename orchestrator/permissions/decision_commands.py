@@ -138,8 +138,14 @@ class PermissionDecisionController:
             raise ValueError("the trusted runtime binding port is required")
         self._authority, self._gateway = authority, gateway
         self._settings = settings or PermissionSettings()
-        if not isinstance(self._settings, PermissionSettings):
+        if not isinstance(self._settings, PermissionSettings) and not callable(self._settings):
             raise ValueError("canonical permission settings are required")
+
+    def _settings_for(self, subject):
+        value = self._settings(subject.agent_id) if callable(self._settings) else self._settings
+        if not isinstance(value, PermissionSettings):
+            raise ValueError("current Agent permission settings are unavailable")
+        return value
 
     def submit_session_decision(self, subject, arguments, *, session_token,
                                 invocation_id, connection_binding):
@@ -151,8 +157,10 @@ class PermissionDecisionController:
         for value in (invocation_id, connection_binding):
             if not isinstance(value, str) or not 1 <= len(value) <= 512:
                 raise ValueError("a server-bound frontend invocation is required")
-        intent = parse_decision_intent(arguments, default_seconds=self._settings.task_default_seconds)
-        if intent.duration_seconds > self._authority.max_lease_seconds:
+        settings = self._settings_for(subject)
+        intent = parse_decision_intent(arguments, default_seconds=settings.task_default_seconds)
+        limit = settings.task_default_seconds if callable(self._settings) else self._authority.max_lease_seconds
+        if intent.duration_seconds > limit:
             raise ValueError("decision duration exceeds the instance policy")
         binding = self._authority.get_request_runtime_binding(subject, intent.request_id)
         view = self._authority.get_session_request(subject, intent.request_id)
@@ -192,8 +200,8 @@ class PermissionDecisionController:
         request = self._authority.get_session_request(subject, request_id).request
         if request.revision != revision:
             raise RevisionConflict("request revision changed")
-        duration = self._settings.task_default_seconds
-        if duration > self._authority.max_lease_seconds:
+        duration = self._settings_for(subject).task_default_seconds
+        if not callable(self._settings) and duration > self._authority.max_lease_seconds:
             raise ValueError("the default duration exceeds instance policy")
         presentation = "ui_" + hashlib.sha256(json.dumps(
             [subject.instance_id, subject.owner_id, subject.agent_id, subject.session_id,

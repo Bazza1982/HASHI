@@ -82,15 +82,19 @@ class WindowsFileProcessSupervisor:
             if self._closed:
                 raise PermissionDenied("file supervisor is closed")
             bound = copy_kernel = copy_handle = owned = claim = None
-            started, stopped, stop_recorded = False, False, False
+            started = False
             task = asyncio.current_task()
             self._tasks.add(task)
             # Input and result artifacts belong to the protected service, not
             # the business filesystem. They never enter diagnostics or URLs.
             folder = Path(tempfile.mkdtemp(prefix="file-", dir=self._private))
+            resource = {"lock": asyncio.Lock(), "context": context, "descriptor": descriptor}
+            self._active[operation_id] = resource
             try:
                 bound = open_bound_read(scope) if data is None else open_bound_write(scope)
+                resource["bound"] = bound
                 copy_kernel, copy_handle = inheritable_handle_copy(bound._handles[-1])
+                resource.update(transfer_kernel=copy_kernel, transfer=copy_handle)
                 action = "read" if isinstance(bound, BoundWindowsRead) else (
                     "create" if isinstance(bound, BoundWindowsCreate) else "write")
                 result_path = folder / "result.json"
@@ -113,13 +117,14 @@ class WindowsFileProcessSupervisor:
                     cwd=folder, environment=self._environment, expected_user_sid=self._sid,
                     executable_digest=self._executable_digest, inherited_handles=(copy_handle,),
                 )
-                self._active[operation_id] = owned
+                resource.update(process=owned, bound=bound, transfer_kernel=copy_kernel, transfer=copy_handle)
                 with self._guard(context):
                     if self._closed or self._validate(context, scope) is not True:
                         raise PermissionDenied("file execution policy changed before start")
                     claim = self._authority.prepare(
                         context, operation_id, descriptor.arguments_digest, descriptor.scopes,
                     )
+                    resource["claim"] = claim
                     # ResumeThread is the only effect inside the SQL barrier.
                     # File I/O and the process wait occur after both locks close.
                     self._authority.dispatch_guarded(
@@ -132,8 +137,7 @@ class WindowsFileProcessSupervisor:
                     self._authorized(context, claim, operation_id, descriptor)
                     await asyncio.sleep(.1)
                 exit_code = owned.exit_code()
-                owned.stop(timeout_ms=4500)
-                stopped = True
+                await asyncio.to_thread(owned.stop, timeout_ms=4500)
                 if exit_code or not result_path.is_file() or result_path.stat().st_size > 24 * 1024 * 1024:
                     raise OSError("trusted file result is unavailable")
                 result = json.loads(result_path.read_bytes())
@@ -147,12 +151,7 @@ class WindowsFileProcessSupervisor:
                 receipt = self._store.put(context, operation_id, descriptor, outcome="succeeded", payload=payload)
                 self._authority.finish(context, claim.claim_id, outcome=receipt.outcome,
                                         result_digest=receipt.result_digest)
-                stop = self._stop_receipt(context, claim.claim_id, {
-                    "process": owned.observation.process_id, "arguments_digest": descriptor.arguments_digest,
-                    "plan_digest": sha256(encoded).hexdigest(), "job_stopped": True,
-                })
-                self._authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=stop)
-                stop_recorded = True
+                resource["plan_digest"] = sha256(encoded).hexdigest()
                 return receipt
             except BaseException:
                 # A failed ResumeThread may already have started. Inspect the
@@ -165,21 +164,10 @@ class WindowsFileProcessSupervisor:
                         self._authority.cancel_prepared(context, claim.claim_id)
                 raise
             finally:
-                if owned is not None and not stopped:
-                    owned.stop(timeout_ms=4500)
-                    stopped = True
-                if bound is not None:
-                    bound.close()
-                if copy_handle is not None and not copy_kernel.CloseHandle(copy_handle):
-                    raise OSError("file transfer handle cleanup is unverified")
-                if claim is not None and stopped and not stop_recorded:
-                    stop = self._stop_receipt(context, claim.claim_id, {
-                        "process": owned.observation.process_id, "job_stopped": True,
-                        "arguments_digest": descriptor.arguments_digest,
-                    })
-                    self._authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=stop)
-                self._active.pop(operation_id, None)
-                self._tasks.discard(task)
+                try:
+                    await self._cleanup(operation_id, resource)
+                finally:
+                    self._tasks.discard(task)
                 # Preserve failed plans/results for reconciliation; cleanup is
                 # not evidence that a business write did or did not happen.
                 if started and self._authority.operation_state(operation_id) == "succeeded":
@@ -191,15 +179,62 @@ class WindowsFileProcessSupervisor:
         with self._guard(context):
             return self._store.get(context, operation_id, descriptor)
 
+    async def _cleanup(self, operation_id, resource):
+        # The active record retains every owned handle on an unverified stop.
+        # Native waits run off the service loop so revocation/other Jobs remain
+        # responsive. Concurrent shutdown and Tool completion share this owner.
+        async with resource["lock"]:
+            owned = resource.get("process")
+            if owned is not None:
+                stop = asyncio.create_task(asyncio.to_thread(owned.stop, timeout_ms=4500))
+                try:
+                    await asyncio.shield(stop)
+                except asyncio.CancelledError:
+                    done, _ = await asyncio.wait({stop}, timeout=5)
+                    if stop not in done:
+                        raise OSError("native file stop remains unverified") from None
+                    stop.result()
+                    raise
+            bound = resource.get("bound")
+            if bound is not None:
+                bound.close()
+                resource["bound"] = None
+            transfer = resource.get("transfer")
+            if transfer is not None:
+                if not resource["transfer_kernel"].CloseHandle(transfer):
+                    raise OSError("file transfer handle cleanup is unverified")
+                resource["transfer"] = None
+            claim = resource.get("claim")
+            if claim is not None and not resource.get("stop_recorded"):
+                receipt = self._stop_receipt(resource["context"], claim.claim_id, {
+                    "process": owned.observation.process_id, "job_stopped": True,
+                    "arguments_digest": resource["descriptor"].arguments_digest,
+                })
+                self._authority.confirm_resource_stopped(
+                    resource["context"], claim.claim_id, receipt_reference=receipt,
+                )
+                resource["stop_recorded"] = True
+            if self._active.get(operation_id) is resource:
+                self._active.pop(operation_id)
+
     async def close(self):
         self._closed = True
-        for owned in tuple(self._active.values()):
-            owned.stop(timeout_ms=4500)
         tasks = tuple(task for task in self._tasks if task is not asyncio.current_task())
         for task in tasks:
             task.cancel()
-        if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=5)
-            if pending:
+        cleanup = [asyncio.create_task(self._cleanup(op, resource))
+                   for op, resource in tuple(self._active.items())]
+        all_tasks = tasks + tuple(cleanup)
+        if all_tasks:
+            done, pending = await asyncio.wait(all_tasks, timeout=5)
+            errors = []
+            for task in done:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as error:
+                    errors.append(error)
+            if pending or errors or self._active:
                 raise OSError("file supervisor settlement remains unverified")
         return not self._active

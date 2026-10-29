@@ -158,7 +158,9 @@ class PermissionParkingStore:
             "SELECT * FROM permission_run_parks WHERE run_id=?", (run["run_id"],),
         ).fetchone()
         if row is None or row["state"] == "finished":
-            return False
+            from orchestrator.permissions.start_wait import PermissionStartStore
+
+            return PermissionStartStore.recoverable(connection, run)
         payload = cls._payload(row)
         context = payload["binding"]["context"]
         expected_fence = row["producer_fence"] if row["state"] == "parked" else row["resume_fence"]
@@ -186,9 +188,14 @@ class PermissionParkingStore:
                 "WHERE r.agent_id=? AND p.state IN ('parked','resuming') AND r.state IN ('running','queued')",
                 (agent_id,),
             ).fetchall()
-            return tuple(self._payload(connection.execute(
-                "SELECT * FROM permission_run_parks WHERE run_id=?", (row["run_id"],),
-            ).fetchone()) for row in rows if self.recoverable(connection, row))
+            result = []
+            for run in rows:
+                if self.recoverable(connection, run):
+                    park = connection.execute(
+                        "SELECT * FROM permission_run_parks WHERE run_id=?", (run["run_id"],),
+                    ).fetchone()
+                    result.append({**self._payload(park), "_park_state": park["state"]})
+            return tuple(result)
 
     def claim_resume(self, binding):
         from orchestrator.runtime_common import QueuedRequest
@@ -286,9 +293,21 @@ class PermissionParkingStore:
     def finish(self, binding):
         with self.store._lock, self.store._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            run = connection.execute("SELECT fencing_token FROM runs WHERE run_id=?", (binding.context.run_id,)).fetchone()
-            if run is None or run["fencing_token"] != binding.fencing_token:
+            from orchestrator.session_store import TERMINAL_RUN_STATES
+
+            run = connection.execute("SELECT * FROM runs WHERE run_id=?", (binding.context.run_id,)).fetchone()
+            if run is None:
                 return False
+            if run["fencing_token"] != binding.fencing_token:
+                route = connection.execute(
+                    "SELECT execution_binding_json,binding_digest FROM permission_run_routes WHERE run_id=?",
+                    (binding.context.run_id,),
+                ).fetchone()
+                encoded = _json(asdict(binding))
+                if (run["state"] not in TERMINAL_RUN_STATES or route is None
+                        or route["execution_binding_json"] != encoded
+                        or route["binding_digest"] != _digest(asdict(binding))):
+                    return False
             if connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='permission_run_parks' AND type='table'",
             ).fetchone() is not None:

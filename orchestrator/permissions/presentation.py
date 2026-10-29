@@ -22,6 +22,52 @@ def _state(view: SessionRequestView) -> str:
     return request_state
 
 
+def management_card(outcome: dict) -> str:
+    kind = outcome.get("kind")
+    if kind == "narrowed":
+        return request_detail_card(outcome["request"])
+    if kind == "revoked":
+        key = "revocation_pending" if outcome.get("cleanup_pending") else "revocation_done"
+        return _label(key) + "\n<code>" + escape(outcome["task_id"]) + "</code>"
+    if kind == "level_review":
+        preview = outcome["preview"]
+        lines = [card_title("🛡️", ui_language.tr("safety.level_review")),
+                 _label("level_review_explanation"), "", _label("resources")]
+        for scope in preview["baseline_scopes"]:
+            lines.append("• <code>" + escape(scope["resource"]) + "</code> · "
+                         + escape(", ".join(scope["actions"])))
+        lines.extend(("", _label("level_review_tools"),
+                      escape(", ".join(preview["native_tools"])), "", _label("level_review_restart"),
+                      "<code>" + escape("/safety set-level " + outcome["level"]
+                                        + " --revision " + outcome["revision"]) + "</code>"))
+        return "\n".join(lines)
+    if kind == "level_changed":
+        key = "level_changed" if outcome.get("adopted") is True else "level_pending"
+        return _label(key) + " · <code>" + escape(outcome["level"]) + "</code>"
+    raise ValueError("unknown permission management outcome")
+
+
+def session_summary_card(summary: dict) -> str:
+    lines = [card_title("🛡️", ui_language.tr("safety.summary")), ""]
+    for task in summary["tasks"]:
+        lines.append("<b>" + escape(task["task_id"]) + "</b> · " + escape(task["state"]))
+        for lease in task["leases"]:
+            expiry = datetime.fromtimestamp(lease.expires_at, timezone.utc).isoformat(timespec="seconds")
+            lines.append("• <code>" + escape(lease.lease_id) + "</code> · " + escape(lease.status)
+                         + " · " + escape(lease.lifetime) + " · " + escape(expiry))
+            for scope in lease.scopes:
+                lines.append("  " + escape(scope.resource) + " · " + escape(", ".join(scope.actions)))
+            if lease.status in {"active", "reserved"}:
+                lines.append("<code>" + escape("/safety revoke " + lease.lease_id) + "</code>")
+        lines.append("<code>" + escape("/safety revoke-task " + task["task_id"]) + "</code>")
+        lines.append("")
+    if not summary["tasks"]:
+        lines.append(_label("no_tasks"))
+    if summary.get("truncated") or any(task.get("leases_truncated") for task in summary["tasks"]):
+        lines.append(_label("summary_truncated"))
+    return "\n".join(lines)
+
+
 def request_list_card(page: SessionRequestPage) -> str:
     lines = [card_title("🛡️", ui_language.tr("safety.requests")), ""]
     if not page.requests:

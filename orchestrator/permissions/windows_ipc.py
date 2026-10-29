@@ -195,6 +195,15 @@ class WindowsPipeListener:
         self._first = True
         self._spare = None
 
+    def reserve(self):
+        """Claim the first instance before any authoritative service startup."""
+        with self._lock:
+            if self._closed.is_set():
+                raise OSError("permission listener is closed")
+            if self._spare is None and self._pending is None:
+                self._spare = self._create()
+        return self
+
     def _create(self):
         ctypes, wintypes, kernel, security = _windows()
         convert = security.ConvertStringSecurityDescriptorToSecurityDescriptorW

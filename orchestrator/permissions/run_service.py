@@ -64,7 +64,7 @@ class PermissionRunService:
 
     async def open_execution(self, *, request_id, run_id, owner_id, agent_id, session_id,
                              context_generation, fencing_token, worker_id, worker_generation,
-                             turn_id, backend_id):
+                             turn_id, backend_id, callbacks=None):
         lock = self._locks.setdefault(run_id, asyncio.Lock())
         async with lock:
             run = self.store.get_run(run_id, owner_id=owner_id)
@@ -101,6 +101,8 @@ class PermissionRunService:
                     if route is not None:
                         candidate = binding_from_route(route)
                         status = self.authority.execution_status(candidate.context)
+                        if status.task_state == "recovering":
+                            raise PermissionDenied("parent task has an unresolved operation outcome")
                         if (candidate.context.agent_id == agent_id and candidate.context.session_id == session_id
                                 and candidate.context.context_generation == str(context_generation)
                                 and status.task_state in {"active", "paused"}):
@@ -152,34 +154,17 @@ class PermissionRunService:
         if not isinstance(binding, RuntimeExecutionBinding):
             raise PermissionDenied("an exact execution binding is required")
         run = self.store.get_run(binding.context.run_id, owner_id=binding.context.owner_id)
-        if run["fencing_token"] != binding.fencing_token:
-            route = self.parking.route(binding.context.run_id, owner_id=binding.context.owner_id)
-            # User stop/terminal resolution also advances the PAO fence. Only
-            # the last recorded executor may settle that terminal Run. A late
-            # older Worker must never settle a replacement execution.
-            if run["state"] not in TERMINAL_RUN_STATES or route != asdict(binding):
-                await self.close_execution(binding=binding)
-                return "superseded"
+        route = self.parking.route(binding.context.run_id, owner_id=binding.context.owner_id)
+        if route != asdict(binding):
+            await self.close_execution(binding=binding)
+            return "superseded"
         if run["state"] not in TERMINAL_RUN_STATES:
             raise PermissionDenied("the PAO Run is not terminal")
-        with self.store._connection() as connection:
-            active = connection.execute(
-                "SELECT 1 FROM permission_run_routes p JOIN runs r ON r.run_id=p.run_id "
-                "WHERE p.task_id=? AND r.state IN ('queued','running') "
-                "UNION ALL SELECT 1 FROM runs child WHERE child.parent_run_id IN "
-                "(SELECT run_id FROM permission_run_routes WHERE task_id=?) "
-                "AND child.state IN ('queued','running') AND child.session_id=? "
-                "AND child.agent_id=? AND child.context_generation=? LIMIT 1",
-                (binding.context.task_id, binding.context.task_id, binding.context.session_id,
-                 binding.context.agent_id, int(binding.context.context_generation)),
-            ).fetchone()
-        if active is None:
-            terminal = "completed" if run["state"] == "completed" else (
-                "cancelled" if run["state"] in {"cancelled", "stopped"} else "failed_terminal"
-            )
-            self.authority.end_task(binding.context, outcome=terminal)
-        else:
-            self.authority.end_run(binding.context)
+        from orchestrator.permissions.pao_run_fence import PaoTerminalRunFence
+
+        self.authority.settle_canonical_run(
+            binding.context, terminal_guard=PaoTerminalRunFence(self.store, binding),
+        )
         self.parking.finish(binding)
         await self.close_execution(binding=binding)
         return "settled"

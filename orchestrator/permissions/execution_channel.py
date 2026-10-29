@@ -25,6 +25,7 @@ class PermissionExecutionChannel:
         self.registry, self._models = registry, model_broker
         self._checkpoint, self._audit = checkpoint_writer, audit_writer
         self._closed, self._parked = False, False
+        self._completed_tool_calls = set()
 
     def _current(self):
         if self._closed or self._parked:
@@ -45,30 +46,37 @@ class PermissionExecutionChannel:
         except PermissionPark as park:
             result = park.result
         self._current()
+        from tools.registry import ToolResult
+
+        if isinstance(result, ToolResult):
+            self._completed_tool_calls.add((tool_name, tool_call_id))
         return result
 
     async def provider_call(self, *, engine, model, payload, use_stream):
         self._current()
         return await self._models.provider_call(engine=engine, model=model, payload=payload, use_stream=use_stream)
 
-    def provider_checkpoint(self, *, checkpoint):
+    async def provider_checkpoint(self, *, checkpoint):
         # The producer is derived from the canonical Run, never from host input.
         self._current()
         if not isinstance(checkpoint, dict) or "producer_run_claim" in checkpoint:
             raise PermissionDenied("invalid host checkpoint")
-        with self._guard(self.binding.context):
-            result = self._checkpoint(self.binding, checkpoint)
-            if inspect.isawaitable(result):
-                raise TypeError("checkpoint writer must commit synchronously")
-            return result
+        result = self._checkpoint(self.binding, checkpoint)
+        if inspect.isawaitable(result):
+            result = await result
+        self._current()
+        return result
 
-    def audit_record(self, *, record):
+    async def audit_record(self, *, record):
         self._current()
         if (not isinstance(record, dict) or record.get("turn_id") != self.binding.context.turn_id
                 or record.get("request_ref") != "hashi-request:" + self.binding.request_id):
             raise PermissionDenied("audit record is outside this Run")
-        with self._guard(self.binding.context):
-            return self._audit(record)
+        result = self._audit(record)
+        if inspect.isawaitable(result):
+            result = await result
+        self._current()
+        return result
 
     async def park(self):
         # Human decisions still target this live canonical Run. Stop execution

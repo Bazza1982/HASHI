@@ -50,7 +50,7 @@ class BrokeredToolRegistry(ToolRegistry):
             result = await self._broker.call_async("tool_execute", {
                 "tool_name": tool_name, "arguments": arguments, "tool_call_id": tool_call_id,
             })
-        except PermissionRemoteError as exc:
+        except (PermissionRemoteError, OSError, EOFError, TimeoutError) as exc:
             raise PermissionPark(GateResult("unavailable", "")) from exc
         if isinstance(result, GateResult):
             raise PermissionPark(result)

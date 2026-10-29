@@ -264,7 +264,24 @@ async def test_governed_session_resumes_the_same_managed_registry_operation(gove
                       execution_epoch="integration-epoch")
     authority.open_task(context)
     ceiling = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
-    supervisor = TestFileSupervisor(authority, tmp_path)
+    from orchestrator.permissions.receipt_issuer import SupervisorReceiptIssuer
+
+    stop_issuer = SupervisorReceiptIssuer(key_id=context.executor_id,
+                                          signing_key=Ed25519PrivateKey.generate())
+    approval_public = gateway._key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+    )
+    authority._verifier = SignedReceiptVerifier(
+        {"approval": approval_public}, trusted_supervisor_keys={context.executor_id: stop_issuer.public_key},
+    )
+
+    def file_handles_closed(authority, ctx, claim_id):
+        # This fixture uses synchronous write_text, whose file is closed before
+        # this callback. It attests only the in-process test resource, not L2.
+        reference = stop_issuer.issue_stop(ctx, claim_id, {"kind": "test-file", "handles_closed": True})
+        authority.confirm_resource_stopped(ctx, claim_id, receipt_reference=reference)
+
+    supervisor = TestFileSupervisor(authority, tmp_path, confirm_stopped=file_handles_closed)
     registry = ManagedToolRegistry(
         allowed_tools=["file_write"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
         audit_context={"agent_name": "agent", "workspace_dir": str(tmp_path), "safety_mode": "read_write"},

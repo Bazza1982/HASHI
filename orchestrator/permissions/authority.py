@@ -487,6 +487,7 @@ class PermissionAuthority:
         request_ttl_seconds: int = 24 * 60 * 60,
         max_lease_seconds: int = 4 * 60 * 60,
         baseline_resolver: Callable[[ExecutionContext], Iterable[Scope]] | None = None,
+        settings_resolver: Callable | None = None,
     ) -> None:
         if not callable(getattr(verifier, "verify", None)):
             raise ValueError("trusted receipt verifier is required")
@@ -498,6 +499,9 @@ class PermissionAuthority:
         if baseline_resolver is not None and (not callable(baseline_resolver) or inspect.iscoroutinefunction(baseline_resolver)):
             raise ValueError("a synchronous trusted baseline policy resolver is required")
         self._baseline_resolver = baseline_resolver
+        if settings_resolver is not None and not callable(settings_resolver):
+            raise ValueError("a trusted settings resolver is required")
+        self._settings_resolver = settings_resolver
         self._verifier = verifier
         self._clock = clock
         self._monotonic = monotonic
@@ -1180,6 +1184,16 @@ class PermissionAuthority:
                  "request" if request_id is not None else "granted_existing"),
             )
 
+    def _limits(self, subject):
+        if self._settings_resolver is None:
+            return self._max_lease, self._request_ttl
+        from orchestrator.permissions.models import PermissionSettings
+
+        settings = self._settings_resolver(subject)
+        if not isinstance(settings, PermissionSettings) or settings.requested_level.value == "L0":
+            raise PermissionDenied("managed Agent settings are unavailable")
+        return settings.task_default_seconds, settings.request_ttl_seconds
+
     def request_access(
         self,
         context: ExecutionContext,
@@ -1199,9 +1213,10 @@ class PermissionAuthority:
         purpose = _nonempty(purpose, "purpose", limit=2000)
         if not isinstance(suggested_lifetime, str) or suggested_lifetime not in {"once", "run", "task", "ttl"}:
             raise ValueError("invalid suggested lifetime")
+        lease_max, request_ttl = self._limits(context)
         if suggested_seconds is None:
-            suggested_seconds = self._max_lease
-        if type(suggested_seconds) is not int or not 1 <= suggested_seconds <= self._max_lease:
+            suggested_seconds = lease_max
+        if type(suggested_seconds) is not int or not 1 <= suggested_seconds <= lease_max:
             raise ValueError("invalid suggested duration")
         if suggested_lifetime == "once" and operation_id is None:
             raise ValueError("once suggestion requires a bound operation")
@@ -1423,7 +1438,7 @@ class PermissionAuthority:
                 (request_id, context.task_id, context.run_id, context.session_id,
                  context.context_generation, context.execution_epoch, context.policy_revision,
                  op_key, arguments_digest, _scope_json(normalized), digest, purpose, 1, "pending",
-                 now, now + self._request_ttl, suggested_lifetime, suggested_seconds, request_key),
+                 now, now + request_ttl, suggested_lifetime, suggested_seconds, request_key),
             )
             self._snapshot_request(connection, request_id, now)
             self._record_request_key(connection, context.task_id, request_key, fingerprint, request_id)
@@ -1565,6 +1580,163 @@ class PermissionAuthority:
             views = tuple(self._session_request_view(row, now) for row in rows[:limit])
             next_before = views[-1].request.request_id if len(rows) > limit else None
             return SessionRequestPage(views, next_before)
+
+    def agent_bindings(self, *, instance_id, owner_id, agent_id) -> tuple[RuntimeExecutionBinding, ...]:
+        """Private migration inventory, never a model or public FC lookup."""
+        for value in (instance_id, owner_id, agent_id):
+            _nonempty(value, "Agent migration binding")
+        with self._transaction() as connection:
+            self._now(connection)
+            rows = connection.execute(
+                "SELECT t.instance_id,t.owner_id,t.agent_id,t.session_id,b.*,m.turn_id,"
+                "m.pao_request_id,m.fencing_token,m.worker_id FROM permission_tasks t "
+                "JOIN execution_bindings b ON b.task_id=t.task_id "
+                "JOIN execution_runtime_metadata m ON m.execution_epoch=b.execution_epoch "
+                "WHERE t.instance_id=? AND t.owner_id=? AND t.agent_id=? AND ("
+                "b.state='active' OR (t.state IN ('active','paused') AND b.rowid IN "
+                "(SELECT MAX(latest.rowid) FROM execution_bindings latest GROUP BY latest.task_id)) "
+                "OR EXISTS(SELECT 1 FROM execution_claims c JOIN execution_resources r "
+                "ON r.claim_id=c.claim_id WHERE c.execution_epoch=b.execution_epoch AND r.state!='stopped')) "
+                "ORDER BY b.rowid",
+                (instance_id, owner_id, agent_id),
+            ).fetchall()
+            result = []
+            for row in rows:
+                context = ExecutionContext(**{name: row[name] for name in ExecutionContext.__dataclass_fields__})
+                self._context(connection, context, active=False)
+                result.append(RuntimeExecutionBinding(
+                    context, row["pao_request_id"], row["fencing_token"], row["worker_id"],
+                ))
+            return tuple(result)
+
+    def session_summary(self, subject: PermissionSubject) -> dict:
+        """Bounded current-Session facts; this projection grants no authority."""
+        values = self._frontend_subject(subject)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            rows = connection.execute(
+                "SELECT DISTINCT t.task_id,t.state,t.revision FROM permission_tasks t "
+                "JOIN execution_bindings b ON b.task_id=t.task_id "
+                "WHERE t.instance_id=? AND t.owner_id=? AND t.agent_id=? "
+                "AND t.session_id=? AND b.context_generation=? ORDER BY t.rowid DESC LIMIT 101",
+                values,
+            ).fetchall()
+            tasks = []
+            for row in rows[:100]:
+                leases = connection.execute(
+                    "SELECT * FROM permission_leases WHERE task_id=? ORDER BY rowid DESC LIMIT 101",
+                    (row["task_id"],),
+                ).fetchall()
+                visible = []
+                for item in leases[:100]:
+                    lease = _lease_from(item)
+                    if lease.status in {"active", "reserved"} and lease.expires_at <= now:
+                        lease = replace(lease, status="expired")
+                    visible.append(lease)
+                unresolved = connection.execute(
+                    "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                    (row["task_id"],),
+                ).fetchone() is not None
+                cleanup = connection.execute(
+                    "SELECT 1 FROM execution_claims c JOIN execution_resources r ON r.claim_id=c.claim_id "
+                    "WHERE c.task_id=? AND r.state!='stopped' LIMIT 1", (row["task_id"],),
+                ).fetchone() is not None
+                tasks.append({"task_id": row["task_id"], "state": row["state"],
+                              "reconciliation_pending": unresolved, "cleanup_pending": cleanup,
+                              "revision": row["revision"], "leases": tuple(visible),
+                              "leases_truncated": len(leases) > 100})
+            return {"tasks": tasks, "truncated": len(rows) > 100}
+
+    def revoke_session_access(self, subject: PermissionSubject, target: str, *, whole_task=False) -> dict:
+        """Trusted UI revocation, scoped even after an execution was fenced."""
+        _nonempty(target, "revocation target")
+        values = self._frontend_subject(subject)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            if whole_task:
+                task_id = target
+            else:
+                found = connection.execute(
+                    "SELECT task_id FROM permission_leases WHERE lease_id=?", (target,),
+                ).fetchone()
+                if found is None:
+                    raise PermissionDenied("lease is unavailable in this Session")
+                task_id = found["task_id"]
+            task = connection.execute(
+                "SELECT t.* FROM permission_tasks t WHERE t.instance_id=? AND t.owner_id=? "
+                "AND t.agent_id=? AND t.session_id=? AND EXISTS(SELECT 1 FROM execution_bindings b "
+                "WHERE b.task_id=t.task_id AND b.context_generation=?) AND t.task_id=?",
+                (*values, task_id),
+            ).fetchone()
+            if task is None:
+                raise PermissionDenied("task is unavailable in this Session")
+            if whole_task:
+                affected = connection.execute(
+                    "SELECT lease_id FROM permission_leases WHERE task_id=? AND status!='revoked'",
+                    (task_id,),
+                ).fetchall()
+            else:
+                affected = connection.execute(
+                    "SELECT lease_id FROM permission_leases WHERE task_id=? AND lease_id=? AND status!='revoked'",
+                    (task_id, target),
+                ).fetchall()
+            ids = {row["lease_id"] for row in affected}
+            for lease_id in ids:
+                connection.execute("UPDATE permission_leases SET status='revoked' WHERE lease_id=?", (lease_id,))
+            if whole_task:
+                connection.execute(
+                    "UPDATE access_requests SET state='withdrawn' WHERE task_id=? AND state='pending'", (task_id,),
+                )
+            # Revocation is independent of a late Worker, so no active epoch
+            # can prevent the human owner from stopping an already-issued lease.
+            for claim in connection.execute(
+                "SELECT claim_id,lease_ids_json,state FROM execution_claims WHERE task_id=? "
+                "AND state IN ('prepared','started','unknown')", (task_id,),
+            ).fetchall():
+                if whole_task or ids.intersection(json.loads(claim["lease_ids_json"])):
+                    connection.execute(
+                        "UPDATE execution_resources SET state='stopping' WHERE claim_id=? AND state!='stopped'",
+                        (claim["claim_id"],),
+                    )
+                    if claim["state"] == "prepared":
+                        connection.execute(
+                            "UPDATE execution_claims SET state='cancelled' WHERE claim_id=?", (claim["claim_id"],),
+                        )
+            if ids or whole_task:
+                connection.execute("UPDATE permission_tasks SET revision=revision+1 WHERE task_id=?", (task_id,))
+                self._event(connection, task_id, "task_access_revoked" if whole_task else "lease_revoked", target, now)
+            pending = connection.execute(
+                "SELECT 1 FROM execution_resources r JOIN execution_claims c ON c.claim_id=r.claim_id "
+                "WHERE c.task_id=? AND r.state!='stopped' LIMIT 1", (task_id,),
+            ).fetchone() is not None
+            return {"task_id": task_id, "revoked": len(ids), "cleanup_pending": pending}
+
+    def session_task_context(self, subject: PermissionSubject, task_id: str) -> ExecutionContext:
+        """Resolve recorded facts for an authenticated management owner."""
+        _nonempty(task_id, "task_id")
+        values = self._frontend_subject(subject)
+        with self._transaction() as connection:
+            self._now(connection)
+            row = connection.execute(
+                "SELECT b.*,m.turn_id FROM permission_tasks t "
+                "JOIN execution_bindings b ON b.task_id=t.task_id "
+                "JOIN execution_runtime_metadata m ON m.execution_epoch=b.execution_epoch "
+                "WHERE t.instance_id=? AND t.owner_id=? AND t.agent_id=? "
+                "AND t.session_id=? AND b.context_generation=? AND t.task_id=? "
+                "ORDER BY b.rowid DESC LIMIT 1", (*values, task_id),
+            ).fetchone()
+            if row is None:
+                raise PermissionDenied("task is unavailable in this Session")
+            context = ExecutionContext(
+                instance_id=subject.instance_id, owner_id=subject.owner_id, agent_id=subject.agent_id,
+                task_id=task_id, run_id=row["run_id"], session_id=subject.session_id,
+                turn_id=row["turn_id"], worker_generation=row["worker_generation"],
+                context_generation=subject.context_generation, execution_epoch=row["execution_epoch"],
+                backend_id=row["backend_id"], executor_id=row["executor_id"],
+                policy_revision=row["policy_revision"],
+            )
+            self._context(connection, context, active=False)
+            return context
 
     def get_request_version(
         self, context: ExecutionContext, request_id: str, revision: int
@@ -1725,7 +1897,7 @@ class PermissionAuthority:
             raise ValueError("invalid decision choice")
         if not isinstance(lifetime, str) or lifetime not in {"once", "run", "task", "ttl"}:
             raise ValueError("invalid decision lifetime")
-        if type(duration_seconds) is not int or not 1 <= duration_seconds <= self._max_lease:
+        if type(duration_seconds) is not int or not 1 <= duration_seconds <= self._limits(context)[0]:
             raise ValueError("invalid decision duration")
         if type(action_ttl_seconds) is not int or not 1 <= action_ttl_seconds <= 15 * 60:
             raise ValueError("invalid action lifetime")
@@ -1975,7 +2147,7 @@ class PermissionAuthority:
             type(proof.request_revision) is not int or proof.request_revision < 1
             or type(proof.policy_revision) is not int or proof.policy_revision < 0
             or type(proof.duration_seconds) is not int or proof.duration_seconds <= 0
-            or proof.duration_seconds > self._max_lease
+            or proof.duration_seconds > self._limits(proof)[0]
             or proof.choice not in {"approve", "deny"}
             or proof.lifetime not in {"once", "run", "task", "ttl"}
             or isinstance(proof.expires_at, bool)
@@ -2591,6 +2763,50 @@ class PermissionAuthority:
                             )
                 self._event(connection, context.task_id, "lease_revoked", lease_id, now)
 
+    def settle_canonical_run(self, context: ExecutionContext, *, terminal_guard) -> str:
+        """Settle under PAO's terminal lock, also after service/Worker fencing."""
+        from orchestrator.permissions.pao_run_fence import PaoTerminalRunFence
+
+        if not isinstance(terminal_guard, PaoTerminalRunFence) or terminal_guard.binding.context != context:
+            raise PermissionDenied("a canonical terminal Run guard is required")
+        with terminal_guard(context) as canonical:
+            with self._transaction() as connection:
+                now = self._now(connection)
+                task = self._task(connection, context, active=False)
+                self._binding(connection, context, active=False)
+                if task["state"] not in {"active", "paused"}:
+                    return "settled"
+                if not canonical["task_has_active_work"]:
+                    state = canonical["run"]["state"]
+                    outcome = "completed" if state == "completed" else (
+                        "cancelled" if state == "stopped" else "failed_terminal"
+                    )
+                    self._end_task_state(connection, context.task_id, outcome, now)
+                else:
+                    for row in connection.execute(
+                        "SELECT execution_epoch FROM execution_bindings WHERE task_id=? AND run_id=?",
+                        (context.task_id, context.run_id),
+                    ).fetchall():
+                        self._stop_epoch_resources(connection, row["execution_epoch"])
+                    connection.execute(
+                        "UPDATE execution_bindings SET state='fenced' WHERE task_id=? AND run_id=?",
+                        (context.task_id, context.run_id),
+                    )
+                    connection.execute(
+                        "UPDATE permission_leases SET status='revoked' WHERE task_id=? AND run_id=? "
+                        "AND lifetime IN ('once','run') AND status!='revoked'", (context.task_id, context.run_id),
+                    )
+                    connection.execute(
+                        "UPDATE access_requests SET state='withdrawn' WHERE task_id=? AND run_id=? AND state='pending'",
+                        (context.task_id, context.run_id),
+                    )
+                    connection.execute(
+                        "UPDATE pending_operations SET state='cancelled' WHERE task_id=? AND run_id=? "
+                        "AND state IN ('waiting','prepared')", (context.task_id, context.run_id),
+                    )
+                    self._event(connection, context.task_id, "run_ended", context.run_id, now)
+                return "settled"
+
     def end_task(self, context: ExecutionContext, *, outcome: str) -> None:
         if outcome not in {"completed", "cancelled", "failed_terminal"}:
             raise ValueError("invalid task outcome")
@@ -2600,41 +2816,45 @@ class PermissionAuthority:
             binding = self._binding(connection, context, active=False)
             if task["state"] not in {"active", "paused"} or binding["state"] != "active":
                 raise PermissionDenied("task cannot be ended from this execution")
-            connection.execute(
-                "UPDATE permission_tasks SET state=?,revision=revision+1,ended_at=? WHERE task_id=?",
-                (outcome, now, context.task_id),
-            )
-            connection.execute(
-                "UPDATE execution_bindings SET state='fenced' WHERE task_id=?", (context.task_id,)
-            )
-            connection.execute(
-                "UPDATE permission_leases SET status='revoked' WHERE task_id=? AND status!='revoked'",
-                (context.task_id,),
-            )
-            connection.execute(
-                "UPDATE access_requests SET state='withdrawn' WHERE task_id=? AND state='pending'",
-                (context.task_id,),
-            )
-            connection.execute(
-                "UPDATE execution_resources SET state='stopping' WHERE claim_id IN "
-                "(SELECT claim_id FROM execution_claims WHERE task_id=? AND state='prepared') "
-                "AND state!='stopped'", (context.task_id,),
-            )
-            connection.execute(
-                "UPDATE execution_claims SET state='cancelled' WHERE task_id=? AND state='prepared'",
-                (context.task_id,),
-            )
-            connection.execute(
-                "UPDATE pending_operations SET state='cancelled' WHERE task_id=? AND state IN ('waiting','prepared')",
-                (context.task_id,),
-            )
-            connection.execute(
-                "UPDATE execution_resources SET state='stopping' WHERE claim_id IN "
-                "(SELECT claim_id FROM execution_claims WHERE task_id=? AND state='started') "
-                "AND state!='stopped'",
-                (context.task_id,),
-            )
-            self._event(connection, context.task_id, "task_" + outcome, context.task_id, now)
+            self._end_task_state(connection, context.task_id, outcome, now)
+
+    @classmethod
+    def _end_task_state(cls, connection, task_id, outcome, now):
+        connection.execute(
+            "UPDATE permission_tasks SET state=?,revision=revision+1,ended_at=? WHERE task_id=?",
+            (outcome, now, task_id),
+        )
+        connection.execute(
+            "UPDATE execution_bindings SET state='fenced' WHERE task_id=?", (task_id,)
+        )
+        connection.execute(
+            "UPDATE permission_leases SET status='revoked' WHERE task_id=? AND status!='revoked'",
+            (task_id,),
+        )
+        connection.execute(
+            "UPDATE access_requests SET state='withdrawn' WHERE task_id=? AND state='pending'",
+            (task_id,),
+        )
+        connection.execute(
+            "UPDATE execution_resources SET state='stopping' WHERE claim_id IN "
+            "(SELECT claim_id FROM execution_claims WHERE task_id=? AND state='prepared') "
+            "AND state!='stopped'", (task_id,),
+        )
+        connection.execute(
+            "UPDATE execution_claims SET state='cancelled' WHERE task_id=? AND state='prepared'",
+            (task_id,),
+        )
+        connection.execute(
+            "UPDATE pending_operations SET state='cancelled' WHERE task_id=? AND state IN ('waiting','prepared')",
+            (task_id,),
+        )
+        connection.execute(
+            "UPDATE execution_resources SET state='stopping' WHERE claim_id IN "
+            "(SELECT claim_id FROM execution_claims WHERE task_id=? AND state='started') "
+            "AND state!='stopped'",
+            (task_id,),
+        )
+        cls._event(connection, task_id, "task_" + outcome, task_id, now)
 
     def confirm_resource_stopped(
         self, context: ExecutionContext, claim_id: str, *, receipt_reference: str
@@ -2709,6 +2929,18 @@ class PermissionAuthority:
                 )
             self._event(connection, context.task_id, "resource_stopped", claim_id, now)
 
+    def unsettled_resources(self, context: ExecutionContext) -> tuple[str, ...]:
+        """A retirement check, never an inferred stop receipt."""
+        with self._transaction() as connection:
+            self._now(connection)
+            self._context(connection, context, active=False)
+            rows = connection.execute(
+                "SELECT r.claim_id FROM execution_resources r JOIN execution_claims c "
+                "ON c.claim_id=r.claim_id WHERE c.execution_epoch=? AND r.state!='stopped'",
+                (context.execution_epoch,),
+            ).fetchall()
+            return tuple(row["claim_id"] for row in rows)
+
     def resource_state(self, claim_id: str) -> str | None:
         with self._transaction() as connection:
             row = connection.execute(
@@ -2782,7 +3014,7 @@ class PermissionAuthority:
             task = self._task(connection, context, active=False)
             binding = self._binding(connection, context, active=False)
             task_state = task["state"]
-            if task_state in {"active", "paused"} and connection.execute(
+            if connection.execute(
                 "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
                 (context.task_id,),
             ).fetchone() is not None:

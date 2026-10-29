@@ -172,3 +172,25 @@ class ManagedToolRegistry(ToolRegistry):
             },
         )
         return self._finish_result(tool_name, arguments, result, started)
+
+
+
+class ManagedCatalogueRegistry(ToolRegistry):
+    """Derive menus/schema before a Run without retaining a legacy executor."""
+
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("secrets"):
+            raise ValueError("a managed catalogue cannot retain credentials")
+        super().__init__(*args, **kwargs)
+
+    def get_tool_definitions(self, tiers=None):
+        definitions = super().get_tool_definitions(tiers)
+        definitions.extend(permission_tool_definitions())
+        return definitions
+
+    async def execute(self, tool_name, arguments, tool_call_id=""):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="Managed tools require a current canonical PAO Run and its assigned execution channel.",
+            is_error=False, details={"control_disposition": "denied"},
+        )

@@ -47,6 +47,18 @@ class PermissionIngress:
             subject, action_id, session_token=self.session_token,
         )
 
+    async def manage(self, subject, arguments, *, invocation_id):
+        import asyncio
+        import inspect
+
+        if subject != self.subject:
+            raise SessionDecisionDenied("the command Session changed")
+        result = await asyncio.to_thread(
+            self.controller.manage_session, subject=subject, arguments=arguments,
+            session_token=self.session_token, invocation_id=invocation_id,
+        )
+        return await result if inspect.isawaitable(result) else result
+
     def decide(self, subject, arguments, *, invocation_id):
         if subject != self.subject:
             raise SessionDecisionDenied("the command no longer targets the authenticated Session")

@@ -155,6 +155,8 @@ class GlobalConfig:
     xai_oauth: dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     her_providers: dict[str, Any] = field(default_factory=dict)
+    permission_service: dict[str, Any] | None = None
+    permission_frontend: dict[str, Any] | None = None
     enterprise_auth_providers: list[dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
     enterprise_scheduler_lease_enabled: bool = False
@@ -730,6 +732,8 @@ class ConfigManager:
             xai_oauth=dict(g_raw.get("xai_oauth") or {}),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
             her_providers=dict(g_raw.get("her_providers") or {}),
+            permission_service=g_raw.get("permission_service"),
+            permission_frontend=g_raw.get("permission_frontend"),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
             enterprise_database_url=enterprise_database_url,
             enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,

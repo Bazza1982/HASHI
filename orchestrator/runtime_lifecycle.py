@@ -139,6 +139,13 @@ async def _run_shutdown_step(
 
 async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
+    permission_settings = getattr(runtime.backend_manager, "_agent_permission_settings", None)
+    if callable(permission_settings):
+        settings, _ = permission_settings()
+        if settings is not None and settings.requested_level.value != "L0":
+            from orchestrator.permissions.bootstrap import bind_agent
+
+            await bind_agent(runtime)
     result = await runtime.backend_manager.initialize_active_backend()
     if result:
         if str(getattr(runtime.config, "active_backend", "")) == "her-v2":

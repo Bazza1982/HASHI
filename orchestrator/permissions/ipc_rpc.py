@@ -19,6 +19,11 @@ from orchestrator.permissions.windows_ipc import connect_pipe
 
 _DOMAIN = b"hashi.permissions.ipc-server.v1\0"
 _SINK = ContextVar("hashi_permission_private_stream_sink", default=None)
+_PEER = ContextVar("hashi_permission_private_peer", default=None)
+
+
+def current_peer():
+    return _PEER.get()
 
 
 def _canonical(value):
@@ -61,13 +66,14 @@ async def emit_private_event(event):
     await sink(event)
 
 
-async def serve_request(pipe, router, frame):
+async def serve_request(pipe, router, frame, *, peer=None):
     identity = frame.get("id") if isinstance(frame, dict) else None
 
     async def emit(event):
         await asyncio.to_thread(pipe.send, {"type": "hashi.permission-event.v1", "id": identity, "event": encode(event)})
 
     token = _SINK.set(emit)
+    peer_token = _PEER.set(peer)
     try:
         result = await router.dispatch_async(frame)
         await asyncio.to_thread(pipe.send, result)
@@ -85,6 +91,7 @@ async def serve_request(pipe, router, frame):
         await asyncio.to_thread(pipe.send, {"type": "hashi.permission-error.v1", "id": identity, "code": code})
     finally:
         _SINK.reset(token)
+        _PEER.reset(peer_token)
 
 
 class PermissionPipeClient:

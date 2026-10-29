@@ -177,6 +177,13 @@ jobs:
           tests/test_permission_provider_park.py
           tests/test_permission_restricted_her.py
           tests/test_permission_run_service.py
+          tests/test_permission_service_application.py
+          tests/test_permission_resource_cleanup.py
+          tests/test_permission_configured_models.py
+          tests/test_permission_level_transition.py
+          tests/test_permission_capsule.py
+          tests/test_permission_installed_boundaries.py
+          tests/test_permission_start_wait.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py
           tests/test_permission_windows_ipc.py
@@ -237,6 +244,13 @@ jobs:
           tests/test_permission_provider_park.py
           tests/test_permission_restricted_her.py
           tests/test_permission_run_service.py
+          tests/test_permission_service_application.py
+          tests/test_permission_resource_cleanup.py
+          tests/test_permission_configured_models.py
+          tests/test_permission_level_transition.py
+          tests/test_permission_capsule.py
+          tests/test_permission_installed_boundaries.py
+          tests/test_permission_start_wait.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py
           tests/test_permission_windows_ipc.py

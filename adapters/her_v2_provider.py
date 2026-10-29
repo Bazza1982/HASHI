@@ -3295,11 +3295,11 @@ class HashiStageProvider(StageProvider):
             and str(context.get("stage") or "").casefold()
             == request.stage.value.casefold()
             and str(context.get("boundary") or "")
-            in {"completed_tool_batch", "completed_provider_response", "pending_tool_batch"}
+            in {"completed_tool_batch", "completed_provider_response", "pending_tool_batch", "ready_provider_request"}
         )
         raw_messages = context.get("messages")
         if not matches or not isinstance(raw_messages, list) or not raw_messages:
-            if context.get("boundary") == "pending_tool_batch":
+            if context.get("boundary") in {"pending_tool_batch", "ready_provider_request"}:
                 raise ProviderContextObserverError("pending Tool continuation cannot change provider, model, or stage")
             return None
         if any(not isinstance(item, Mapping) for item in raw_messages):
@@ -3311,7 +3311,7 @@ class HashiStageProvider(StageProvider):
             from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
             pending_tool_calls(continuation)
-        else:
+        elif context.get("boundary") != "ready_provider_request":
             continuation.append({"role": "user", "content": stage_prompt})
         self._provider_context_recovery_consumed = True
         return continuation
@@ -5935,7 +5935,7 @@ class HashiStageProvider(StageProvider):
                 parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             )
-            if (provider_request_content is None or self._provider_context_recovery.get("boundary") == "pending_tool_batch") and (
+            if (provider_request_content is None or self._provider_context_recovery.get("boundary") in {"pending_tool_batch", "ready_provider_request"}) and (
                 "continuation_messages" in parameters or accepts_extra_keywords
             ):
                 continuation_messages = self._provider_recovery_messages(

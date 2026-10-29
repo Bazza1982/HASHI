@@ -105,6 +105,55 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     assert audits and events
 
 
+
+@pytest.mark.asyncio
+async def test_service_loss_before_first_model_answer_retains_the_exact_ready_request(environment, tmp_path):
+    authority, _, context, _, base = environment
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    registry = durable_registry(base, authority, context, supervisor, tmp_path)
+    coordinator = HerBackendSessionCoordinator(tmp_path / "private-her")
+    encoded, _ = coordinator.prepare_transport(
+        session_id="her-session", sections=[], resources=[], user_message="Answer safely",
+        request_id="request", message_id="message", instance_id="i", agent_id="agent",
+        owner_id="owner", hashi_conversation_id="session", context_generation=1,
+        workzone_identity="workspace",
+    )
+    turn = coordinator.accept(encoded)
+    checkpoints, messages = [], []
+
+    class Connection:
+        def call(self, method, arguments):
+            if method == "provider_checkpoint":
+                result = coordinator.record_provider_context_checkpoint(turn, arguments["checkpoint"])
+                checkpoints.append(coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id))
+                return result
+            assert method == "audit_record"
+            return "audit"
+
+        async def call_async(self, method, arguments, *, on_event=None):
+            assert method == "provider_call"
+            messages.append(copy.deepcopy(arguments["payload"]["messages"]))
+            if len(messages) == 1:
+                raise OSError("private service connection lost")
+            return api_result_to_wire(_APIResult("Continued safely.", None, "stop"))
+
+    async def emit(event):
+        pass
+    root = tmp_path / "host"
+    root.mkdir()
+    payload = command(registry)
+    first = await run_command(payload, client=Connection(), scratch_root=root, emit=emit)
+    assert first["state"] == "parked"
+    assert checkpoints[-1]["boundary"] == "ready_provider_request"
+    assert supervisor.execute_calls == 0
+    payload["recovery"] = checkpoints[-1]
+    second = await run_command(payload, client=Connection(), scratch_root=root, emit=emit)
+    assert second["state"] == "completed"
+    assert unpack(second["result"]).text == "Continued safely."
+    assert messages[0] == messages[1]
+    assert supervisor.execute_calls == 0
+
+
 def test_host_codec_rejects_unregistered_classes_and_changed_config_fields():
     with pytest.raises(ValueError):
         unpack(["dto", "PermissionAuthority", []])
