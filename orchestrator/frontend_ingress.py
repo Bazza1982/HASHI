@@ -403,6 +403,7 @@ def admit_frontend_ingress(
                     context_generation=int(session["context_generation"]),
                     payload={"action": "cancel"},
                     invocation=invocation,
+                    record_input=control_action is None,
                 )
             except IdempotencyConflict as exc:
                 return normalize_admission_receipt(
@@ -545,6 +546,7 @@ def admit_frontend_ingress(
                 context_generation=int(session["context_generation"]),
                 payload={"command": cmd, "args": args},
                 invocation=invocation,
+                record_input=True,
             )
         except IdempotencyConflict as exc:
             return normalize_admission_receipt(

@@ -2796,6 +2796,7 @@ class SessionStore:
         request_digest: str,
         context_generation: int,
         invocation: Mapping[str, Any],
+        record_input: bool = False,
     ) -> dict[str, Any]:
         """Durably fence one command before any command handler can mutate state."""
 
@@ -2859,10 +2860,12 @@ class SessionStore:
                     encoded_invocation, now, now,
                 ),
             )
-            # The typed invocation already contains centrally redacted args.
+            # A trusted ingress opts in only for actual user slash commands,
+            # not synthetic control/audit reservations. The typed invocation
+            # already contains centrally redacted args.
             # Native Telegram ingress records its own visible input. Actions
             # edit an existing card and must not invent another user command.
-            if (invocation.get("connector_id") != "telegram"
+            if (record_input and invocation.get("connector_id") != "telegram"
                     and not invocation.get("issued_action_id")
                     and (invocation.get("authorization") or {}).get("decision") == "allowed"):
                 from orchestrator.frontend_projection import build_frontend_presentation_context

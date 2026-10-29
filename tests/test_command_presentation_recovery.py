@@ -442,6 +442,7 @@ def test_command_input_is_redacted_and_atomic_with_reservation(
         context_generation=1,
         payload=payload,
         invocation=invocation,
+        record_input=True,
     )
     original = runtime.session_store.append_presentation_message
 
@@ -459,6 +460,34 @@ def test_command_input_is_redacted_and_atomic_with_reservation(
     rows = runtime.session_store.messages(metadata["session_id"], owner_id="user:7")
     assert [m["text"] for m in rows] == ["/status token=[redacted]"]
     assert "sensitive-fixture" not in str(rows)
+
+
+def test_control_reservation_does_not_invent_user_input(command_runtime):
+    from orchestrator.frontend_command_admission import (
+        reserve_frontend_command_in_store,
+    )
+
+    runtime, metadata, _ = command_runtime
+    payload = operation("/transfer-redirect", record_input=True)
+    invocation = bridge.build_frontend_command_invocation(
+        payload, metadata, actor=7, command_name="transfer-redirect", arguments=[]
+    )
+    invocation["record_input"] = True
+    reserve = dict(
+        session_id=metadata["session_id"],
+        owner_id="user:7",
+        client_id=payload["client_id"],
+        request_id=payload["request_id"],
+        context_generation=1,
+        payload=payload,
+        invocation=invocation,
+    )
+    ticket = reserve_frontend_command_in_store(runtime.session_store, **reserve)
+    assert ticket.state == "reserved"
+    assert not runtime.session_store.messages(metadata["session_id"], owner_id="user:7")
+    replay = reserve_frontend_command_in_store(runtime.session_store, **reserve)
+    assert replay.state == "pending" and replay.replayed
+    assert not runtime.session_store.messages(metadata["session_id"], owner_id="user:7")
 
 
 def test_legacy_menu_update_rebuilds_typed_actions_and_text_not_raw_html(

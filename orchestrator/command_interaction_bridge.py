@@ -484,6 +484,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                     context_generation=generation,
                     payload=payload,
                     invocation=durable_invocation,
+                    record_input=op == "open",
                 )
             except IdempotencyConflict as exc:
                 raise InteractionError("command_menu_request_conflict", 409) from exc

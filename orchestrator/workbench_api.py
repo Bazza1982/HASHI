@@ -9139,6 +9139,7 @@ class WorkbenchApiServer:
                 request_digest=request_digest,
                 context_generation=context_generation,
                 invocation=command_invocation,
+                record_input=True,
             )
             if reservation["state"] == "completed":
                 replay = dict(reservation["response"])
