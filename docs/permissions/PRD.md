@@ -2,9 +2,9 @@
 
 基本概念及 L1 L2 实现要求
 
-版本 1.1 · 2026 年 10 月 23 日 · 已确定的产品设计，尚未实施
+版本 1.1 · 2026 年 10 月 23 日 · 已确定的产品设计，实施尚未完成
 
-本文完整替代 v1.0 对本功能的描述。配套施工顺序见 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md)，源码落点见 [CODE_MAP](CODE_MAP.md)，交付事实见 [IMPLEMENTATION_STATUS](IMPLEMENTATION_STATUS.md)。**本分支当前交付文档，不表示权限代码已经上线。**
+本文完整替代 v1.0 对本功能的描述。配套施工顺序见 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md)，源码落点见 [CODE_MAP](CODE_MAP.md)，交付事实见 [IMPLEMENTATION_STATUS](IMPLEMENTATION_STATUS.md)。**本分支正在实施，具体进度以实施状态为准；不表示权限功能已经上线。**
 
 本次功能 owner 为 **PAO**，工程层为 **Functions / 平台独立服务**；HERV3 负责单循环内等待与续跑，FC 负责现有协议的投影和可信入口接线。FC 在本文始终指 **Frontend Connector**。验证重点为 L0 行为等价、FC 契约不变、授权生命周期和 Windows 执行边界。
 

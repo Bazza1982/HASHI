@@ -1,6 +1,6 @@
 # HASHI 权限系统详细实施计划
 
-版本 **1.1** · **2026-10-23** · **设计与施工计划，尚未实施应用代码**
+版本 **1.1** · **2026-10-23** · **设计与施工计划；实际实施进度见实施状态文件**
 
 - 仓库：`Bazza1982/HASHI`；目标分支：`feature-permission-sys`。
 - 冻结参考提交：`d6b6513973bfc8f9f22c40ddd8f72802f907baa0`。
@@ -69,10 +69,10 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只�
 | 模块 | 唯一职责 |
 | --- | --- |
 | `orchestrator/permissions/models.py` | 不可变领域类型、状态、稳定错误/结果分类 |
-| `normalization.py` | 资源规范化、subset、scope digest、版本化参数摘要 |
+| 规范化 | 当前由 `models.py` 实现；如需拆分则迁移唯一实现，不复制状态 |
 | `interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 |
-| `store.py`、`migrations/` | 账本、事务、迁移、outbox、schema version |
-| `service.py` | 决策、期限、claim/start、撤权与派生授权 |
+| 账本与迁移 | 当前 `authority.py` 有基础事务和 outbox；持久迁移及恢复待实现 |
+| 权限服务 | 当前 `authority.py` 有部分决定与 claim/start；派生授权及真实入口待实现 |
 | `task_binding.py`、`lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 |
 | `continuation.py` | PendingOperation、等待、恢复计划、回执消费 |
 | `trusted_decisions.py`、`fc_bridge.py` | Principal、receipt、标准 FC 投影和统一权限写门 |

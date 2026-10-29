@@ -4,8 +4,8 @@
 |---|---|
 | 文档版本 / 日期 | 1.1 / 2026-10-23 |
 | 代码基线 | `d6b6513973bfc8f9f22c40ddd8f72802f907baa0` |
-| 文档与功能状态 | **设计待实施；全部行为 CASE 待执行** |
-| 本次范围 | docs-only；只做静态护栏，不实现代码、不运行下列行为测试、不部署、不自动重启 |
+| 文档与功能状态 | **内部基础实施中；完整功能与平台 CASE 待执行** |
+| 本次范围 | 历史设计交付曾为 docs-only；当前实施与证据见状态文件，不自动部署或重启 |
 | 权威与边界 | [PRD](PRD.md)、[施工计划](IMPLEMENTATION_PLAN.md)、[代码接入图](CODE_MAP.md)、[FC 契约](FC_CONTRACT.md)、[Windows L2](L2_WINDOWS.md) |
 
 本文件是一份可执行的验收目录，不是通过报告。下面的现有测试确实存在于基线，供未来按改动范围选择；拟新增测试明确标为 **proposed**。现有测试通过只能证明原合同未回归，不能代替新权限行为或真实平台证据。所有实现状态与证据最终登记到 [IMPLEMENTATION_STATUS](IMPLEMENTATION_STATUS.md)。
@@ -14,7 +14,7 @@
 
 遵守 [TESTING_POLICY](../TESTING_POLICY.md)：测试可观察行为、持久化、权限与恢复边界；新增/重写测试必须有可信 red/green 原因。mocks 可安排输入或观察调用，不能把 mock 自身或文档字符串当被测功能。
 
-- 当前文档交付只做 link/schema/diff/保护清单检查，不跑 pytest。
+- 原始文档交付只做 link/schema/diff/保护清单检查；当前实现测试与尚未覆盖的范围见状态文件。
 - 实施后先跑 owning node/module；仅在跨合同边界时加入直接消费者。共享 registry、配置、Worker、生命周期、gateway/central runtime 改动再跑 curated core gate。
 - 不默认跑全库 `python -m pytest -q tests` 或 offline product suite。下面的 `python -m pytest -q` 专指仓库 `pyproject.toml` 定义的 curated core gate，不是全库扫描。
 - 不并发启动共享默认 pytest 临时根的多个进程；需要并行时为每进程指定独立 `--basetemp`。
@@ -67,11 +67,11 @@ python scripts/check_protected_core_changes.py --cached
 git diff --cached --name-status
 ```
 
-本次暂存内容只能是约定的设计/施工/测试/接手文档；不得有实现、配置、测试行为或受保护 Core 变化。校验同目录链接以及 `../../` 源码链接存在，固定源码链接使用基线 SHA；proposed 模块保持代码文字而非假装已经存在的可点击文件。核对全部 CASE 仍是待执行，没有把源码审查或文档静态检查写成实现验收。
+原始 docs-only 交付的暂存内容限定为设计/施工/测试/接手文档，不含实现、配置、测试行为或受保护 Core 变化。校验同目录链接以及 `../../` 源码链接存在，固定源码链接使用基线 SHA；proposed 模块保持代码文字而非假装已经存在的可点击文件。核对全部 CASE 仍是待执行，没有把源码审查或文档静态检查写成实现验收。
 
 ## 4. 实施后可运行的现有测试
 
-以下命令只引用基线真实存在的文件/节点。**当前不执行。** 依据改动选择一个或几个直接相关组，不能把整表当作每次提交的测试菜单。
+以下命令只引用原始基线真实存在的文件/节点。 依据改动选择一个或几个直接相关组，不能把整表当作每次提交的测试菜单。
 
 ### EX-CORE — 架构与保护边界
 

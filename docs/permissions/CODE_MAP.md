@@ -5,9 +5,9 @@
 | 文档版本 | 1.1 |
 | 日期 | 2026-10-23 |
 | 源码核查基线 | `d6b6513973bfc8f9f22c40ddd8f72802f907baa0` |
-| 状态 | **设计待实施；下述新模块、钩子、状态与行为均未实施、未验收** |
+| 状态 | **实现中；领域与账本基础已编写，真实接线、功能验收与 L2 均未完成** |
 | 功能 owner / 工程层 | **PAO / Functions**；HERV3、公共 Frontend Connector、平台执行器为明确边界内的协作者 |
-| 本次交付 | 文档；不实现代码、不部署、不重启 |
+| 本次交付 | 设计与未接入的领域／账本基础；不部署、不重启 |
 
 本文是 [PRD](PRD.md) 与 [施工计划](IMPLEMENTATION_PLAN.md) 的源码证据索引。验收见 [ACCEPTANCE](ACCEPTANCE.md)，公共 FC 边界见 [FC_CONTRACT](FC_CONTRACT.md)，Windows 实体隔离见 [L2_WINDOWS](L2_WINDOWS.md)。所有现状只针对上述 SHA；后续接手者须在目标分支重新核对符号及调用链，不能把本表当成长期不变的接口。
 
@@ -190,15 +190,16 @@
 
 ## MAP-11 — 拟新增模块与边界
 
-以下均为**建议新增、尚不存在**，路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
+除已新增但未接入的 `models.py` 与 `authority.py` 外，以下其余路径均为**建议新增、尚不存在**。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
 
 | 建议路径 | 唯一职责 | 消费者 / 验收主题 |
 |---|---|---|
-| `orchestrator/permissions/models.py` | 不可变领域类型、状态、稳定错误与结果分类 | service、registry、FC；SCOPE/LEASE |
-| `orchestrator/permissions/normalization.py` | 资源规范化、subset、scope digest、版本化参数摘要 | authority、执行绑定；SCOPE |
+| `orchestrator/permissions/models.py` | 不可变领域类型、设置、范围规范化与摘要 | 已新增；尚未接入运行路径 |
+| `orchestrator/permissions/authority.py` | SQLite 单一事务账本与权限生命周期基础 | 已新增；可信 ingress、执行器与平台隔离尚未接线 |
+| 规范化与 subset | 当前由 `models.py` 唯一实现；如后续拆出则迁移而不复制 | authority、执行绑定；SCOPE |
 | `orchestrator/permissions/interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 | L1/L2 实现与消费者；单一权威 |
-| `orchestrator/permissions/store.py`、`orchestrator/permissions/migrations/` | CAS、幂等、期限、撤销、receipt、outbox 及 schema 迁移 | service；并发/恢复/迁移 |
-| `orchestrator/permissions/service.py` | request/PermissionLease 决策、claim/start、撤权与派生授权单一 owner | 工具申请、/safety、执行器；L1/APPROVAL |
+| 账本与迁移 | 基础事务目前由 `authority.py` 承担；后续迁移和恢复待实现 | service；并发/恢复/迁移 |
+| 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
 | `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
 | `orchestrator/permissions/continuation.py` | PendingOperation、PermissionWait、park、恢复计划与回执消费 | HERV3、PAO lifecycle；CASE-LIFE |
 | `orchestrator/permissions/enforcement.py` | L1/L2 执行 adapter、dispatch 前验票 | ToolRegistry/runner；CASE-L1/L2 |
