@@ -39,7 +39,7 @@
 | M09 | L2 撤销、故障、恢复、Windows 验收 | M08 | OS 对抗和故障证据、能力发布矩阵 |
 | M10 | 发布、采用、回退与移交 | 对应发布级别全部退出条件 | 合格构建、升级/回退、部署证据与遗留项 |
 
-M03 的渲染、M04 的声明目录可在 M02 接口确定后并行；L2 平台 spike 可以提前独立验证 Windows 能力，但不得反向改变 L1 产品语义。L1 允许先完成一次 M10 发布；L2 随后独立完成 M07–M10。不因第三方 CLI 不可完全管理而拖延原生 HERV3，也不以“后续再补”省略本次要求的 L2 施工。
+M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只读研究可并行，实际源码、测试与文档修改必须保持单一写入者；L2 平台 spike 可以提前独立验证 Windows 能力，但不得反向改变 L1 产品语义。L1 允许先完成一次 M10 发布；L2 随后独立完成 M07–M10。不因第三方 CLI 不可完全管理而拖延原生 HERV3，也不以“后续再补”省略本次要求的 L2 施工。
 
 每个里程碑建议独立提交，包含相关实现、必要行为测试、拥有该决策的文档与状态记录。不得把 L0/Core/FC 不变量推迟到最后检查。
 
@@ -47,7 +47,7 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后并行；L2 平台 
 
 ### 3.1 执行步骤
 
-1. 阅读仓库根 `AGENTS.md`、`ARCHITECTURE.md`、分层边界、测试政策、命令 UI 风格；读完本目录全部文档。确认 checkout、当前 branch、HEAD、工作区改动。保留已有用户工作，必要时独立 worktree，不能 reset 覆盖。
+1. 阅读仓库根 `AGENTS.md`、`ARCHITECTURE.md`、分层边界、测试政策、命令 UI 风格；读完本目录全部文档。确认 checkout、当前 branch、HEAD、工作区改动。保留已有用户工作，仅在指定的 HASHI3 及获准分支施工；创建新分支或额外 worktree 须有当前用户明确授权，不得通过脱离分支提交绕过，不能 reset 覆盖；同一仓库保持单一写入者。
 2. 从目标 branch 开始；若 HEAD 已有后续提交，先记录 drift，重新核对下面代码落点。不要自动把设计固定 SHA 当必须 reset 的目标。
 3. 执行 `python3 scripts/check_protected_core_changes.py`，并保存保护集合来源和结果；不在实现代码中复制清单。
 4. 核对活动调用链：`adapters/her_v2.py` → `HERv2Runtime._run_turn / _run_direct` → `HashiStageProvider.invoke` → 实际 provider loop → `ToolRegistry.execute`。证明不是仅修改已退居兼容的 coordinator / `Stage.EXECUTION` wrapper。

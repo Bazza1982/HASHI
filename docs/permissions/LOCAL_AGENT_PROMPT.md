@@ -5,9 +5,9 @@
 ```text
 请接手 Bazza1982/HASHI 的权限系统开发。目标分支 feature-permission-sys；设计包在 docs/permissions/。本次任务是按设计完成实现与验证，不是再写一份计划或做一个演示。
 
-先检查当前 checkout、HEAD、分支及已有修改，保留其他工作；必要时用独立 worktree。读取根 AGENTS.md、ARCHITECTURE.md、分层边界、TESTING_POLICY、COMMAND_UI_STYLE_GUIDE，以及 docs/permissions 下的 README、PRD、IMPLEMENTATION_PLAN、CODE_MAP、FC_CONTRACT、L2_WINDOWS、ACCEPTANCE、IMPLEMENTATION_STATUS。设计参考基线是 d6b6513973bfc8f9f22c40ddd8f72802f907baa0；若当前分支已有新提交，先核对差异，不 reset 回旧基线。
+先检查当前 checkout、HEAD、分支及已有修改，保留其他工作；仅在指定的 HASHI3 及获准分支施工，新分支或额外 worktree 须有当前用户明确授权，不得通过脱离分支提交绕过限制；同一仓库保持单一写入者。读取根 AGENTS.md、ARCHITECTURE.md、分层边界、TESTING_POLICY、COMMAND_UI_STYLE_GUIDE，以及 docs/permissions 下的 README、PRD、IMPLEMENTATION_PLAN、CODE_MAP、FC_CONTRACT、L2_WINDOWS、ACCEPTANCE、IMPLEMENTATION_STATUS。设计参考基线是 d6b6513973bfc8f9f22c40ddd8f72802f907baa0；若当前分支已有新提交，先核对差异，不 reset 回旧基线。
 
-按 IMPLEMENTATION_PLAN 的 M00–M10 持续完成工作；每批写清 owner、工程层、行为变化和针对性验证，分阶段提交，并更新 IMPLEMENTATION_STATUS。可以并行推进已解耦的工作。不要在完成骨架、文档或单个 happy path 后就结束；遇到平台验证缺口，继续完成其余可实施部分并准确记录待验证项。
+按 IMPLEMENTATION_PLAN 的 M00–M10 持续完成工作；每批写清 owner、工程层、行为变化和针对性验证，分阶段提交，并更新 IMPLEMENTATION_STATUS。独立的只读核对可以并行；实际源码、测试和文档修改必须保持单一写入者。不要在完成骨架、文档或单个 happy path 后就结束；遇到平台验证缺口，继续完成其余可实施部分并准确记录待验证项。
 
 不可变约束：
 1. 改动只在 HASHI。外部 Workbench、Telegram 专用 connector/adapter、其他外部客户端均不改；FC 指 Frontend Connector。审批使用已有 command/action/text/event/snapshot，不新增公开 FC schema、字段、action kind 或专用审批控件。历史命名 workbench_api.py 属 HASHI Backend API Functions，允许必要的公共认证接线。

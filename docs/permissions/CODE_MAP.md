@@ -11,6 +11,13 @@
 
 本文是 [PRD](PRD.md) 与 [施工计划](IMPLEMENTATION_PLAN.md) 的源码证据索引。验收见 [ACCEPTANCE](ACCEPTANCE.md)，公共 FC 边界见 [FC_CONTRACT](FC_CONTRACT.md)，Windows 实体隔离见 [L2_WINDOWS](L2_WINDOWS.md)。所有现状只针对上述 SHA；后续接手者须在目标分支重新核对符号及调用链，不能把本表当成长期不变的接口。
 
+### 2026-10-29 新基线接手提示
+
+- 权限分支已合入当时的 main `d2a6f36d4597181800c2eb671381a1079a872bae`。下文固定链接保留原始设计基线，不声称其行号适用于新基线。
+- 相对原始基线，`adapters/her_v2.py`、`adapters/her_v2_provider.py`、`orchestrator/command_interactions.py`、`orchestrator/her_v2/runtime.py`、`orchestrator/run_questions.py`、`orchestrator/workbench_api.py` 与 `tools/registry.py` 均已有变化；施工前须重新核对完整调用链及所有相关入口。
+- 有限复核确认普通 RunQuestion 仍不授予权限，工具资源存在排队等待；后续实现须在排队后实际执行前重新验权，不能假定排队前审批仍有效。
+- 本提示不是完整 M00 复核，也不是 L0 行为比较或权限功能测试；M00 的剩余要求与状态见 [IMPLEMENTATION_STATUS](IMPLEMENTATION_STATUS.md)。
+
 **状态用语：**“已存在”指可在基线源码定位；“建议接入”指后续允许实现的窄位置；“新增”指基线尚无该能力。源码存在或已有测试名称均不表示新权限功能已经通过验收。
 
 ## MAP-01 — 单一 owner 与不可改边界
