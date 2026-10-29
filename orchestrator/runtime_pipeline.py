@@ -4257,6 +4257,33 @@ async def recover_typed_context_capacity_rejection(
     return retry_response, retry_prompt
 
 
+def is_safe_voice_discard(response: Any) -> bool:
+    return (
+        not bool(getattr(response, "is_success", False))
+        and getattr(response, "stop_reason", None) == "safe_voice_discarded"
+        and not getattr(response, "error", None)
+        and not getattr(response, "error_code", None)
+    )
+
+
+async def handle_safe_voice_discard(runtime: Any, item: Any) -> None:
+    """Commit the already recorded decision without producing an error reply."""
+    await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
+    await runtime._notify_request_listeners(
+        item.request_id,
+        {
+            "request_id": item.request_id,
+            "success": False,
+            "text": None,
+            "source": item.source,
+            "summary": item.summary,
+            "interrupted": True,
+            "interrupt_reason": "safe_voice_discarded",
+        },
+    )
+    runtime._log_maintenance(item, "safe_voice_discarded")
+
+
 async def handle_backend_error(
     runtime,
     item,

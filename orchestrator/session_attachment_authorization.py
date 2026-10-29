@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+class VoiceTranscriptDiscarded(Exception):
+    """The user declined the transcript-dependent path before model execution."""
+
+
 @dataclass(frozen=True)
 class AttachmentReadGrant:
     attachment_id: str
@@ -329,6 +333,26 @@ route and Safe Voice stage decisions. Ordinary audio files retain routing.
     # after a potentially long confirmation wait. The fd fence remains active.
     validate_authorized_media_references(normalized, authorized_roots=manager.current_backend.authorized_media_roots())
     _, status = await await_authorized_transcript(state, require_confirmation=True)
+    if status == "discarded":
+        # A memory-only or stale gate result is not an authenticated decision.
+        # Confirm the same Run has a durably discarded input before treating
+        # this as a normal user decision.
+        store = runtime.session_store
+        run = store.get_run_by_request(request_id, agent_id=manager.config.name)
+        with store._lock, store._connection() as connection:
+            rows = connection.execute(
+                "SELECT attachment_id FROM voice_transcripts "
+                "WHERE run_id=? AND session_id=? AND message_id=? "
+                "AND safe_voice_state='discarded'",
+                (run["run_id"], run["session_id"], run["user_message_id"]),
+            ).fetchall()
+        if not any(str(row["attachment_id"]) in attachment_ids for row in rows):
+            raise MultimodalContractError(
+                "Voice discard decision was not persisted",
+                code="MEDIA_FALLBACK_UNAVAILABLE",
+                attachment_id=str(voice[0]["attachment_id"]),
+            )
+        raise VoiceTranscriptDiscarded()
     if status != "released":
         raise MultimodalContractError(
             f"Voice transcript is {status}; no Codex model was invoked",

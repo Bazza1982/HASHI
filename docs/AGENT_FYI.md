@@ -85,9 +85,9 @@ history is rebuildable. Preserve order; stage attachments atomically per Message
 never leak failed/cancelled assets. Telegram item proofs keep partial uncertainty.
 Diagnostics join Tool/job evidence.
 
-Accepted non-voice attachments commit atomically to the target Agent's ignored
-`.attachments/{session}/{message}/`; only its home scope may read them and
-Session retention removes them. Safe Voice has its own lifecycle.
+Non-voice attachments commit atomically to the Agent's ignored
+`.attachments/{session}/{message}/`; only its home can read them.
+Session retention deletes them.
 
 Telegram proactive routes are owner-only; actor/egress revalidate after restart.
 Only the owner's same-ID private chat may bind. `/askme` controls instance and
@@ -156,10 +156,10 @@ retains periodic definitions, and durably records `stopped` before cleanup.
 Never retry uncertain saves; HERV3 releases its Turn first. See
 [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
-Media bind one draft/instance/Agent/Run; Remote grants no wider authority. Safe
-Voice uses typed, idempotent confirm/discard. Workbench keeps `voice_message`
-audio durable while hiding its duplicate generic player/bubble; ordinary audio
-stays visible. Telegram uses its renderer.
+Media bind draft/instance/Agent/Run; Remote grants no wider authority. Safe
+Voice confirm/discard is typed/idempotent. Codex Session discard ends the Run
+without a model call or error. Workbench retains `voice_message` audio but hides
+its duplicate player/bubble; ordinary audio stays visible. Telegram uses its renderer.
 
 Phone binds the owner's foreground Conversation. Use dialogue-round HCC without
 raw metadata and bounded PCM/Conversation/job evidence, not scheduled prompts;

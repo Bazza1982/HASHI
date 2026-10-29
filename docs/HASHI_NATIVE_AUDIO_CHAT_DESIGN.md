@@ -847,12 +847,15 @@ decision control. If Safe Voice is enabled but a terminal cannot present the
 challenge, the transcript-dependent path fails closed; HASHI does not silently
 bypass confirmation.
 
-Workbench's press-to-talk control is always a transcript-first route, even when
-the selected Agent also supports native audio. With Safe Voice enabled it shows
-the local transcript and requires an explicit confirm or discard decision
-before ordinary Session admission. With Safe Voice disabled it admits that
-transcript automatically. Expiry, terminal navigation, Session/context change,
-or disabling Safe Voice cannot release an already pending Workbench transcript.
+For the Session attachment route, a voice Run can be admitted before the
+transcript is confirmed. For Codex's transcript-first route, a persisted Safe
+Voice discard stops that Run without calling the model, creating an assistant
+response, or reporting a backend failure. Its stopped event carries the
+distinct reason `safe_voice_discarded`; the discarded transcript is not
+released. A failed transcription, missing authorization, or a decision not
+durably recorded still fails closed. Ordinary Telegram transcript-first
+ingress may discard before admitting a Run. See the
+[Session connector decision](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#workbench-safe-voice-through-canonical-session-runs-2026-09-25).
 
 ### 13.5 Transcript persistence
 
