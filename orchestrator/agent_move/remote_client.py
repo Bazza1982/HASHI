@@ -6,7 +6,7 @@ import base64
 import json
 import ssl
 import tempfile
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,9 +20,12 @@ from remote.security.shared_token import HEADER_NONCE, verify_response_auth
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
+    PACKAGE_SCHEMA_MIN_VERSION,
+    PACKAGE_SCHEMA_VERSION,
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
+    CloneImportPreflightError,
     package_sha256,
     read_agent_move_package,
 )
@@ -135,7 +138,9 @@ class AgentMoveRemoteClient:
                 try:
                     with urllib_request.urlopen(request, **kwargs) as response:
                         raw = response.read(4 * 1024 * 1024 + 1)
-                except (HTTPError, URLError, OSError) as exc:
+                except HTTPError as exc:
+                    _raise_receiver_http_error(exc, self.shared_token, headers[HEADER_NONCE], allow_preflight_rejection=True)
+                except (URLError, OSError) as exc:
                     raise AgentMoveRemoteError(f"streaming receiver request failed: {exc}") from exc
             if len(raw) > 4 * 1024 * 1024:
                 raise AgentMoveRemoteError("receiver response exceeds the control limit")
@@ -331,8 +336,12 @@ def connect_agent_move_receiver(
             except (TypeError, ValueError):
                 errors.append(f"{base_url}: receiver limits are invalid")
                 continue
-            if schema_min > 1 or schema_max < 1:
-                errors.append(f"{base_url}: agent-move-v1 schema is not accepted")
+            if (
+                schema_min < 1 or schema_min > schema_max
+                or schema_min > PACKAGE_SCHEMA_VERSION
+                or schema_max < PACKAGE_SCHEMA_MIN_VERSION
+            ):
+                errors.append(f"{base_url}: receiver schema range {schema_min}..{schema_max} has no valid overlap")
                 continue
             if package_limit <= 0:
                 errors.append(f"{base_url}: receiver package limit is invalid")
@@ -348,7 +357,7 @@ def connect_agent_move_receiver(
             errors.append(f"{base_url}: {exc}")
     detail = "; ".join(errors[-4:]) or "no usable Remote address"
     raise AgentMoveRemoteError(
-        f"{target} does not expose {AGENT_MOVE_CAPABILITY}; update/reboot the target receiver first ({detail})"
+        f"could not reach a compatible authenticated Agent transfer receiver on {target} ({detail})"
     )
 
 
@@ -389,18 +398,10 @@ def _request_json(
         with urllib_request.urlopen(request, **kwargs) as response:
             raw = response.read()
     except HTTPError as exc:
-        try:
-            body = json.loads(exc.read().decode("utf-8"))
-            detail = (
-                body.get("error") or body.get("detail") or str(body)
-                if isinstance(body, dict)
-                else str(body)
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            detail = str(exc)
-        raise AgentMoveRemoteError(
-            f"receiver returned HTTP {exc.code}: {detail}"
-        ) from exc
+        _raise_receiver_http_error(
+            exc, shared_token, request_nonce,
+            allow_preflight_rejection=method == "POST" and urlsplit(url).path == "/agent-move/v1/stage",
+        )
     except (URLError, TimeoutError, OSError) as exc:
         raise AgentMoveRemoteError(f"receiver request failed: {exc}") from exc
     try:
@@ -425,6 +426,31 @@ def _request_json(
     if result.get("ok") is False:
         raise AgentMoveRemoteError(str(result.get("error") or result))
     return result
+
+
+def _raise_receiver_http_error(
+    error: HTTPError, shared_token: str | None, request_nonce: str, *,
+    allow_preflight_rejection: bool,
+) -> None:
+    body = None
+    try:
+        body = json.loads(error.read(4 * 1024 * 1024 + 1).decode("utf-8"))
+        detail = (body.get("error") or body.get("detail") or str(body)) if isinstance(body, dict) else str(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        detail = str(error)
+    # Only a signed rejection proves no target was staged. An unauthenticated
+    # HTTP error must never authorize abandoning/rebuilding an uncertain upload.
+    if (
+        allow_preflight_rejection and shared_token and isinstance(body, dict)
+        and body.get("code") == CloneImportPreflightError.code
+        and verify_response_auth(
+            shared_token=shared_token, request_nonce=request_nonce,
+            payload={key: value for key, value in body.items() if key != "response_auth"},
+            response_auth=body.get("response_auth"),
+        )
+    ):
+        raise CloneImportPreflightError(str(detail)) from error
+    raise AgentMoveRemoteError(f"receiver returned HTTP {error.code}: {detail}") from error
 
 
 def request_authenticated_json(

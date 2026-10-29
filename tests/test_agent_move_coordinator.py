@@ -11,6 +11,7 @@ from orchestrator.agent_move import coordinator
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.agent_move.source_guard import source_move_guard_state
 from orchestrator.pcm import render_pcm_document
+from orchestrator.session_store import SessionStore
 
 
 def _write_json(path: Path, value) -> None:
@@ -651,6 +652,82 @@ async def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchange
     assert clone_tasks[0]["enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_local_clone_copies_stable_history_without_activating_inactive_source(
+    tmp_path, monkeypatch
+):
+    root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["global"].update(
+        owner_scope_id="user:7", authorized_id=99, telegram_owner_id=99
+    )
+    config["agents"][0]["is_active"] = False
+    _write_json(root / "agents.json", config)
+    running = _install_local_lifecycle(monkeypatch)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    source_session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.ensure_default_session(owner_id="user:99", agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=source_session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="stable-history",
+        text="same human",
+        source="workbench",
+        idempotency_key="stable-history",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="retained answer",
+        assistant_source="fixture",
+    )
+    prepared = coordinator.prepare_outbound_clone(
+        root,
+        {},
+        "zelda",
+        "HASHI1",
+        source_instance="HASHI1",
+        history_mode="copy",
+    )
+    from types import SimpleNamespace
+    from orchestrator.agent_move.manager import AgentMoveManager
+
+    manager = AgentMoveManager(SimpleNamespace(paths=SimpleNamespace(bridge_home=root)))
+    await manager.start()
+    try:
+        manager.submit(prepared["package_id"], {})
+        receipt = await manager.wait(prepared["package_id"])
+    finally:
+        await manager.stop()
+    assert receipt["status"] == "completed"
+    target_session = store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda_1",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert target_session["session_id"] != source_session["session_id"]
+    assert [
+        m["text"]
+        for m in store.messages(target_session["session_id"], owner_id="user:7")
+    ] == [
+        "same human",
+        "retained answer",
+    ]
+    assert len(store.messages(source_session["session_id"], owner_id="user:7")) == 2
+    assert store.list_sessions(owner_id="user:99", agent_id="zelda_1") == []
+    agents = {
+        row["name"]: row
+        for row in json.loads((root / "agents.json").read_text())["agents"]
+    }
+    assert agents["zelda"]["is_active"] is False
+    assert agents["zelda_1"]["is_active"] is True
+    assert "zelda_1" in running and "zelda" not in running
+    assert "zelda_1" not in json.loads((root / "secrets.json").read_text())
+
+
 def test_remote_clone_runs_full_lifecycle_without_disabling_source(
     tmp_path,
     monkeypatch,
@@ -686,6 +763,265 @@ def test_remote_clone_runs_full_lifecycle_without_disabling_source(
     source = json.loads((root / "agents.json").read_text())["agents"][0]
     assert source["is_active"] is True
     assert "transfer_package_id" not in source
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_repeating_clone_reopens_same_prepared_transaction(tmp_path, explicit):
+    root = _source(tmp_path)
+    options = {"target_agent_id": "sheik"} if explicit else {}
+    first = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1", **options,
+    )
+    second = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "hashi1", source_instance="hashi1", **options,
+    )
+    assert second["package_id"] == first["package_id"]
+    assert second["target_agent_id"] == first["target_agent_id"]
+    assert second["status"] == "staged_remote"
+    assert second["reused"] is True
+    assert len(list((root / "state/agent_moves/incoming").glob("*/state.json"))) == 1
+
+
+def test_independent_clones_and_move_do_not_serialize_source_snapshots(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    first = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+    )
+    second = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1", target_agent_id="sheik",
+    )
+    assert first["package_id"] != second["package_id"]
+    assert second["target_agent_id"] == "sheik"
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+    move = coordinator.prepare_outbound_move(
+        root, {"hashi2": {}}, "zelda", "HASHI2", source_instance="HASHI1",
+    )
+    assert move["status"] == "staged_remote"
+
+
+def test_rolled_back_clone_does_not_block_new_clone(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    first = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+    )
+    coordinator.cancel_outbound_move(root, {}, first["package_id"])
+    directory, state = coordinator._load_outbound(root, first["package_id"])
+    state.update(status="clone_failed", rollback_completed=True)
+    _write_json(directory / "state.json", state)
+    second = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+    )
+    assert second["package_id"] != first["package_id"]
+    assert second["target_agent_id"] == first["target_agent_id"]
+
+
+def test_clone_auto_id_is_allocated_atomically_at_staging(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    build = coordinator.create_agent_move_package
+
+    def build_then_occupy(*args, **kwargs):
+        package = build(*args, **kwargs)
+        config = json.loads((root / "agents.json").read_text())
+        config["agents"].append({"name": "zelda_1", "is_active": False})
+        _write_json(root / "agents.json", config)
+        return package
+
+    monkeypatch.setattr(coordinator, "create_agent_move_package", build_then_occupy)
+    prepared = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+    )
+    assert prepared["target_agent_id"] == "zelda_2"
+    assert prepared["status"] == "staged_remote"
+
+
+def test_clone_lost_stage_ack_reuses_identical_package_and_reservation(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    stage = coordinator._LocalAgentTransferClient.stage
+    failed_once = False
+
+    def stage_then_lose_ack(client, package_path, *, operation, target_agent_id=None):
+        nonlocal failed_once
+        result = stage(client, package_path, operation=operation, target_agent_id=target_agent_id)
+        if not failed_once:
+            failed_once = True
+            raise OSError("stage acknowledgement lost")
+        return result
+
+    monkeypatch.setattr(coordinator._LocalAgentTransferClient, "stage", stage_then_lose_ack)
+    with pytest.raises(coordinator.ClonePreparationError, match="acknowledgement lost"):
+        coordinator.prepare_outbound_clone(
+            root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+        )
+    receipts = list((root / "state/agent_moves/outbound").glob("*/state.json"))
+    first = json.loads(receipts[0].read_text())
+    resumed = coordinator.prepare_outbound_clone(
+        root, {}, "zelda", "HASHI1", source_instance="HASHI1",
+    )
+    assert resumed["package_id"] == first["package_id"]
+    assert resumed["sha256"] == first["sha256"]
+    assert resumed["target_agent_id"] == "zelda_1"
+    assert len(list((root / "state/agent_moves/incoming").glob("*/state.json"))) == 1
+
+
+def test_clone_lost_start_ack_is_resumable_not_rolled_back(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+    original = receiver.start
+
+    def lose_ack(package_id):
+        receiver.start = original
+        receiver.calls.append(("start", package_id))
+        raise AgentMoveError("start acknowledgement lost")
+
+    receiver.start = lose_ack
+    prepared = coordinator.prepare_outbound_clone(
+        root, {"hashi2": {}}, "zelda", "HASHI2", source_instance="HASHI1",
+    )
+    with pytest.raises(AgentMoveError, match="retry"):
+        coordinator.confirm_outbound_move(root, {"hashi2": {}}, prepared["package_id"])
+    pending = coordinator.get_outbound_move(root, prepared["package_id"])
+    assert pending["status"] == "clone_activating"
+    assert not pending.get("rollback_completed")
+    assert {"stop", "rollback"}.isdisjoint(call[0] for call in receiver.calls)
+    completed = coordinator.confirm_outbound_move(root, {"hashi2": {}}, prepared["package_id"])
+    assert completed["status"] == "completed"
+    assert json.loads((root / "agents.json").read_text())["agents"][0]["is_active"]
+
+
+def test_duplicate_clone_during_preparation_does_not_stage_another_copy(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    root = _source(tmp_path)
+    entered, release = Event(), Event()
+    original = coordinator.create_agent_move_package
+
+    def pause(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "create_agent_move_package", pause)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(coordinator.prepare_outbound_clone, root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+        try:
+            assert entered.wait(5)
+            duplicate = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+            assert duplicate["status"] == "packaging"
+            assert duplicate["reused"]
+        finally:
+            release.set()
+        completed = first.result(timeout=10)
+    assert duplicate["package_id"] == completed["package_id"]
+    assert len(list((root / "state/agent_moves/incoming").glob("*/state.json"))) == 1
+
+
+def test_legacy_staged_clone_reopens_and_new_history_policy_is_independent(tmp_path):
+    root = _source(tmp_path)
+    data = json.loads((root / "agents.json").read_text())
+    data["global"]["owner_scope_id"] = "user:7"
+    _write_json(root / "agents.json", data)
+    first = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    directory, state = coordinator._load_outbound(root, first["package_id"])
+    state.pop("requested_target_agent_id", None)  # Journal written by the deployed version.
+    _write_json(directory / "state.json", state)
+    reopened = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    assert reopened["package_id"] == first["package_id"]
+    second = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1", history_mode="copy")
+    assert second["package_id"] != first["package_id"]
+    assert second["target_agent_id"] == "zelda_2"
+    assert second["history_mode"] == "copy"
+
+
+@pytest.mark.parametrize("phase", ["packaging", "uploading"])
+def test_abandoned_clone_preparation_is_recovered_without_pid_guessing(tmp_path, phase):
+    root = _source(tmp_path)
+    first = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    directory, state = coordinator._load_outbound(root, first["package_id"])
+    state.update(status=phase, preparing_pid=os.getpid())  # Process survived; its old task did not.
+    if phase == "packaging":
+        state.pop("sha256")
+        (directory / "zelda.hashi-agent").unlink()
+        # A packaging task cannot already have uploaded a package. Reproduce
+        # the interrupted pre-upload state in this disposable instance.
+        coordinator.rollback_agent_move(root, first["package_id"])
+        incoming = root / "state/agent_moves/incoming" / first["package_id"]
+        import shutil
+        shutil.rmtree(incoming)
+    _write_json(directory / "state.json", state)
+    resumed = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    assert resumed["package_id"] == first["package_id"]
+    assert resumed["status"] == "staged_remote"
+
+
+def test_old_empty_lock_files_do_not_disable_clone(tmp_path):
+    root = _source(tmp_path)
+    directory = root / "state/agent_moves"
+    directory.mkdir(parents=True)
+    (directory / ".outbound.lock").touch()
+    (directory / ".mutation.lock").touch()
+    result = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    assert result["status"] == "staged_remote"
+
+
+def test_clone_preparation_does_not_require_source_identity_write(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    before = (root / "agents.json").read_bytes()
+
+    def source_write(*args):
+        pytest.fail("clone must not upgrade or write the source Agent configuration")
+
+    monkeypatch.setattr(coordinator, "ensure_agent_lifecycle_id", source_write)
+    prepared = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    assert prepared["status"] == "staged_remote"
+    assert (root / "agents.json").read_bytes() == before
+
+
+def test_rejected_clone_snapshot_is_rebuilt_after_source_configuration_fix(tmp_path):
+    root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["agents"][0]["active_backend"] = "invalid-backend"
+    _write_json(root / "agents.json", config)
+    with pytest.raises(coordinator.ClonePreparationError) as failed:
+        coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    config["agents"][0]["active_backend"] = "codex-cli"
+    _write_json(root / "agents.json", config)
+    prepared = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+    assert prepared["package_id"] != failed.value.package_id
+    assert prepared["target_agent_id"] == "zelda_1"
+    assert prepared["status"] == "staged_remote"
+
+
+def test_slow_remote_name_resolution_does_not_hold_instance_clone_lock(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    root = _source(tmp_path)
+    receiver = _Receiver()
+    resolve = receiver.resolve_target_id
+    entered, release = Event(), Event()
+
+    def slow_resolve(*args, **kwargs):
+        entered.set()
+        assert release.wait(15)
+        return resolve(*args, **kwargs)
+
+    receiver.resolve_target_id = slow_resolve
+    _install_receiver(monkeypatch, receiver)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        remote = pool.submit(
+            coordinator.prepare_outbound_clone, root, {"hashi2": {}}, "zelda", "HASHI2",
+            source_instance="HASHI1", target_agent_id="sheik",
+        )
+        try:
+            assert entered.wait(5)
+            local = coordinator.prepare_outbound_clone(root, {}, "zelda", "HASHI1", source_instance="HASHI1")
+            assert local["status"] == "staged_remote"
+        finally:
+            release.set()
+        assert remote.result(timeout=15)["status"] == "staged_remote"
 
 
 def test_successful_move_cleans_source_only_after_target_verification(

@@ -16,8 +16,9 @@
 - HERV3 has no artificial whole-run size/time/call ceiling. Preserve state and
   evidence; cancellation, safety, transport, Provider and single-Tool limits
   remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-- Agent Move checks mutable state at staging; after confirmation it is
-  forward-only and never rolls the target back. [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
+  snapshots, resumable retries, no Move-only gates/source lifecycle writes.
+  [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback: selected model, same-Provider visual model, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
@@ -203,7 +204,7 @@ Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keep
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-[Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
+[Records](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.

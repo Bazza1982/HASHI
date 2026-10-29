@@ -4861,7 +4861,7 @@ def create_app(
                 return _agent_move_response(request, result)
         except (AgentMoveError, OSError, ValueError) as exc:
             return _agent_move_response(request, status_code=400,
-                                        content={"ok": False, "error": str(exc)})
+                                        content={"ok": False, "error": str(exc), "code": getattr(exc, "code", None)})
 
     @app.post("/agent-move/v1/stage")
     async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
@@ -4939,7 +4939,7 @@ def create_app(
             return _agent_move_response(
                 request,
                 status_code=status_code,
-                content={"ok": False, "error": str(exc)},
+                content={"ok": False, "error": str(exc), "code": getattr(exc, "code", None)},
             )
 
     @app.post("/agent-move/v1/resolve")

@@ -18,6 +18,7 @@ from orchestrator.agent_move.package import (
     archive_snapshot_fingerprint,
     create_agent_move_package,
     decrypt_agent_secrets,
+    configured_conversation_owner_id,
     extract_agent_workspace,
     read_agent_move_package,
 )
@@ -194,7 +195,6 @@ def test_clone_package_carries_capabilities_and_safe_secrets_but_never_telegram(
         source_instance="HASHI1",
         operation="clone",
         include_agent_secrets=True,
-        include_telegram_secret=False,
         secret_passphrase="shared-secret",
     )
 
@@ -426,6 +426,140 @@ def test_schema5_history_rejects_source_instance_mismatch(tmp_path):
         )
 
 
+def _owner_history(store, owner_id, *, request_id="owned"):
+    session = store.ensure_default_session(owner_id=owner_id, agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="zelda",
+        request_id=request_id,
+        text=request_id,
+        source="workbench",
+        idempotency_key=request_id,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text=request_id + " answer",
+        assistant_source="fixture",
+    )
+    return session
+
+
+@pytest.mark.parametrize(
+    "configuration", ["account_replaced", "no_telegram", "canonical_telegram"]
+)
+def test_schema5_clone_uses_canonical_stable_owner(configuration, tmp_path):
+    root = _source_root(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    secrets = json.loads((root / "secrets.json").read_text())
+    if configuration == "account_replaced":
+        config["global"].update(
+            owner_scope_id="user:7", authorized_id=9, telegram_owner_id=11
+        )
+        secrets["authorized_telegram_id"] = 10
+        expected_owner = "user:7"
+    elif configuration == "no_telegram":
+        config["global"].pop("authorized_id")
+        config["global"]["owner_scope_id"] = "enterprise:sole-owner"
+        expected_owner = "enterprise:sole-owner"
+    else:
+        config["global"].update(telegram_owner_id=11)
+        secrets["authorized_telegram_id"] = 10
+        expected_owner = "user:11"
+    _write_json(root / "agents.json", config)
+    _write_json(root / "secrets.json", secrets)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    _owner_history(store, expected_owner)
+    # The replacement transport account can have a technical empty Session.
+    store.ensure_default_session(owner_id="user:9", agent_id="zelda")
+    _owner_history(store, "user:999", request_id="foreign-private")
+
+    assert configured_conversation_owner_id(root) == expected_owner
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "stable-clone.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        transfer_mode="workspace",
+        history_mode="copy",
+        include_telegram_secret=False,
+    )
+
+    capsule = package.conversation_continuity
+    assert capsule["owner_id"] == expected_owner
+    assert capsule["summary"]["eligible_message_count"] == 2
+    assert [m["text"] for s in capsule["sessions"] for m in s["messages"]] == [
+        "owned",
+        "owned answer",
+    ]
+    assert "foreign-private" not in json.dumps(capsule)
+
+
+@pytest.mark.parametrize("explicit_owner", [None, "user:7"])
+@pytest.mark.parametrize("has_owned_history", [False, True])
+def test_schema5_clone_other_scopes_neither_block_nor_leak_history(
+    tmp_path,
+    explicit_owner,
+    has_owned_history,
+):
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    _owner_history(store, "user:999", request_id="foreign-private")
+    if has_owned_history:
+        _owner_history(store, "user:7")
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "scoped-clone.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        transfer_mode="workspace",
+        history_mode="copy",
+        include_telegram_secret=False,
+        conversation_owner_id=explicit_owner,
+    )
+    assert package.conversation_continuity["owner_id"] == "user:7"
+    assert package.conversation_continuity["summary"]["eligible_message_count"] == (
+        2 if has_owned_history else 0
+    )
+    assert "foreign-private" not in json.dumps(package.conversation_continuity)
+    with pytest.raises(AgentMoveError, match="configured authorized owner"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "foreign-clone.hashi-agent",
+            source_instance="HASHI1",
+            operation="clone",
+            transfer_mode="workspace",
+            history_mode="copy",
+            include_telegram_secret=False,
+            conversation_owner_id="user:999",
+        )
+
+
+def test_inactive_agent_can_be_cloned_without_changing_source(tmp_path):
+    root = _source_root(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["agents"][0]["is_active"] = False
+    _write_json(root / "agents.json", config)
+    before = (root / "agents.json").read_bytes()
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "inactive-clone.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        include_telegram_secret=False,
+        transfer_mode="workspace",
+    )
+    assert package.manifest["operation"] == "clone"
+    assert package.agent_config["is_active"] is False
+    assert (root / "agents.json").read_bytes() == before
+
+
 def test_schema5_clone_defaults_empty_and_offers_explicit_read_only_history(tmp_path):
     root = _source_root(tmp_path)
     store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
@@ -600,6 +734,75 @@ def test_packaging_fences_eligible_history_not_presentation_counts(
             transfer_id=package.package_id, history_mode="move",
         )
         assert current["summary"]["excluded_message_count"] == 1
+
+
+@pytest.mark.parametrize("change", ["history", "workspace"])
+def test_clone_is_a_frozen_snapshot_not_a_source_freshness_fence(tmp_path, monkeypatch, change):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Before snapshot", source="fixture",
+        idempotency_key="before", history_eligible=True,
+    )
+    write = owner._write_bytes
+    memory = root / "workspaces/zelda/memory/continuity.md"
+
+    def write_then_continue_source(archive, name, content, checksums):
+        write(archive, name, content, checksums)
+        if name == CONVERSATION_CONTINUITY_ARCHIVE_PATH:
+            if change == "history":
+                store.append_presentation_message(
+                    session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+                    role="assistant", text="After snapshot", source="fixture",
+                    idempotency_key="after", history_eligible=True,
+                )
+            else:
+                memory.write_text("After snapshot", encoding="utf-8")
+                (memory.parent / "new-file.md").write_text("new live work", encoding="utf-8")
+
+    monkeypatch.setattr(owner, "_write_bytes", write_then_continue_source)
+    result = create_agent_move_package(
+        root, "zelda", tmp_path / "frozen.hashi-agent", operation="clone",
+        transfer_mode="workspace", history_mode="copy",
+    )
+    assert [m["text"] for s in result.conversation_continuity["sessions"] for m in s["messages"]] == [
+        "Before snapshot",
+    ]
+    with zipfile.ZipFile(tmp_path / "frozen.hashi-agent") as archive:
+        assert archive.read("workspace/memory/continuity.md") == b"durable memory"
+        assert "workspace/memory/new-file.md" not in archive.namelist()
+
+
+@pytest.mark.parametrize("excluded", ["large_software", "many_cache_files"])
+def test_clone_limits_measure_payload_not_excluded_software(tmp_path, monkeypatch, excluded):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces/zelda"
+    cache = workspace / ".venv"
+    cache.mkdir()
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 64 * 1024)
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 64)
+    if excluded == "large_software":
+        (cache / "old-software.bin").write_bytes(b"x" * 128 * 1024)
+    else:
+        for i in range(128):
+            (cache / f"cache-{i}").write_bytes(b"cache")
+    output = tmp_path / "without-software.hashi-agent"
+    result = create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    assert result.workspace_metadata["inventory_scope"] == "portable_clone_payload"
+    assert result.workspace_metadata["total_workspace_bytes"] < 64 * 1024
+    assert not any(".venv" in name for name in result.names)
+    assert cache.is_dir()
+    valid = output.read_bytes()
+    (workspace / "real-work.bin").write_bytes(b"x" * 128 * 1024)
+    with pytest.raises(AgentMoveError, match="limit"):
+        create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    assert output.read_bytes() == valid
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):
@@ -932,8 +1135,8 @@ def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path, tra
         prepare = package_module._prepare_workspace_entries
         shm = root / "workspaces" / "zelda" / "bridge_memory.sqlite-shm"
 
-        def prepare_with_reader_bookkeeping(entries, temp_dir):
-            result = prepare(entries, temp_dir)
+        def prepare_with_reader_bookkeeping(entries, temp_dir, **kwargs):
+            result = prepare(entries, temp_dir, **kwargs)
             stat = shm.stat()
             os.utime(shm, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
             return result
