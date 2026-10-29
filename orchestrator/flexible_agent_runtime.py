@@ -509,7 +509,9 @@ class FlexibleAgentRuntime:
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None or isinstance(user_id, bool):
             return False
-        if getattr(self, "_telegram_scoped_access_enabled", False):
+        from orchestrator.telegram_actor_scope import scoped_access_enabled
+
+        if scoped_access_enabled(self):
             from orchestrator.telegram_actor_scope import runtime_snapshot
 
             try:

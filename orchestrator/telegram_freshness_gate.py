@@ -417,7 +417,9 @@ async def _replay_persisted_update(runtime: Any, record: Mapping[str, Any]) -> N
     }
     token = _CONFIRMED_RELEASE.set(release)
     try:
-        if getattr(runtime, "_telegram_scoped_access_enabled", False):
+        from orchestrator.telegram_actor_scope import scoped_access_enabled
+
+        if scoped_access_enabled(runtime):
             from orchestrator.telegram_actor_scope import process_telegram_update
 
             if not await process_telegram_update(

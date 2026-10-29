@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 from orchestrator.config_json import read_config_json
-from orchestrator.telegram_access import TelegramAccessSnapshot, access_snapshot
+from orchestrator.telegram_access import (
+    POLICY_VERSION_KEY, TelegramAccessSnapshot, access_snapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,25 @@ _current_actor: ContextVar[TelegramActorScope | None] = ContextVar(
 def current_actor(runtime: Any) -> TelegramActorScope | None:
     actor = _current_actor.get()
     return actor if actor is not None and actor.runtime is runtime else None
+
+
+def scoped_access_enabled(runtime: Any) -> bool:
+    """Use the persisted policy marker; unreadable configuration fails closed."""
+    override = getattr(runtime, "_telegram_scoped_access_enabled", None)
+    if override is not None:
+        return bool(override)
+    config = getattr(runtime, "global_config", None)
+    path = getattr(config, "config_path", None)
+    if not path:
+        return False
+    try:
+        document = read_config_json(path)
+        global_config = document.get("global")
+        if not isinstance(global_config, Mapping):
+            return True
+        return POLICY_VERSION_KEY in global_config
+    except (OSError, ValueError, TypeError):
+        return True
 
 
 def _delegated_owner(snapshot: TelegramAccessSnapshot, user_id: int) -> str:

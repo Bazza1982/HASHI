@@ -77,6 +77,55 @@ async def test_worker_scope_is_guarded_until_enabled(tmp_path, monkeypatch):
     assert observed[-1][1].startswith("telegram-user:100:")
     assert runtime_session.owner_id(runtime) == "user:42"
 
+
+@pytest.mark.asyncio
+async def test_saved_policy_activates_worker_scope_without_a_restart(tmp_path, monkeypatch):
+    from telegram import Update
+    from orchestrator.telegram_access import TelegramAccessService
+
+    runtime, observations, config_path = instance(tmp_path)
+    runtime._authorized_telegram_ids = (42,)
+    runtime.app.bot = object()
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = runtime
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.emit_metadata = AsyncMock()
+    selected = [update(201)]
+    monkeypatch.setattr(Update, "de_json", lambda payload, bot: selected[0])
+
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 201)
+    service = TelegramAccessService(config_path=config_path,
+                                    secrets_path=runtime.global_config.secrets_path)
+    status = service.status("lily")
+    service.change("lily", expected_revision=status["revision"],
+                   scope="agent", action="add", user_id="201")
+
+    assert FlexibleAgentRuntime._is_authorized_user(runtime, 201)
+    assert await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert observations[-1][0] == 201
+    assert observations[-1][1].startswith("telegram-user:201:")
+
+    status = service.status("lily")
+    service.change("lily", expected_revision=status["revision"],
+                   scope="agent", action="remove", user_id="201")
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 201)
+    assert await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert len(observations) == 1
+
+
+@pytest.mark.parametrize("invalid_version", [None, True, "1", 2])
+def test_runtime_fails_closed_for_unknown_or_unreadable_policy(tmp_path, invalid_version):
+    runtime, _observations, config_path = instance(tmp_path)
+    runtime._authorized_telegram_ids = (42,)
+    config = read_config_json(config_path)
+    config["global"]["telegram_scoped_access_version"] = invalid_version
+    write_config_json(config_path, config)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+    config_path.write_text("{broken", encoding="utf-8")
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+
+
 @pytest.mark.asyncio
 async def test_replayed_telegram_input_keeps_actor_scope_and_checks_persisted_owner(tmp_path, monkeypatch):
     from telegram import Update

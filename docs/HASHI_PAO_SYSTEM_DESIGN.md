@@ -20,8 +20,10 @@ actor's direct private Telegram chat must use its own Session owner scope; the
 existing primary owner scope and Workbench conversation remain unchanged.
 
 The candidate contains a configuration service, actor-scope helpers, and initial
-delivery checks. Worker ingress is behind an unset internal gate; the management
-API returns unavailable. Command routing, all streaming/audio
+delivery checks. New Workers use a revisioned policy marker to adopt saved grants
+without a restart and reject unreadable or unsupported policies. The management
+API remains unavailable while generation compatibility is incomplete. Command
+routing, all streaming/audio
 and explicit-tool delivery paths, mixed Worker generations, and live Telegram
 acceptance remain unverified. New Agent-only grants use a separate configuration
 field so older Workers do not treat them as legacy users. Existing legacy grants

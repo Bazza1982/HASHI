@@ -30,6 +30,8 @@ from orchestrator.telegram_identity import resolve_owner_scope_id, resolve_teleg
 MAX_TELEGRAM_USER_ID = (1 << 52) - 1
 MAX_TELEGRAM_USERS_PER_SCOPE = 500
 GLOBAL_USERS_KEY = "authorized_telegram_user_ids"
+POLICY_VERSION_KEY = "telegram_scoped_access_version"
+POLICY_VERSION = 1
 LEGACY_AGENT_USERS_KEY = "authorized_telegram_ids"
 AGENT_USERS_KEY = "scoped_telegram_user_ids"
 _REVISION = re.compile(r"^[0-9a-f]{64}$")
@@ -95,6 +97,11 @@ def access_snapshot(
     requested = str(agent_id or "").strip().casefold()
     if not isinstance(global_config, Mapping) or not isinstance(agents, list):
         raise ValueError("invalid Telegram access configuration")
+    if POLICY_VERSION_KEY in global_config and (
+        type(global_config[POLICY_VERSION_KEY]) is not int
+        or global_config[POLICY_VERSION_KEY] != POLICY_VERSION
+    ):
+        raise ValueError("unsupported Telegram access policy")
     if not requested or len(requested) > 160:
         raise ValueError("invalid Agent ID")
     matches = [
@@ -229,6 +236,8 @@ class TelegramAccessService:
                     target.remove(actor)
 
                 global_config = config["global"]
+                # Persist activation with the first grant in the same atomic write.
+                global_config[POLICY_VERSION_KEY] = POLICY_VERSION
                 if scope == "global":
                     if snapshot.primary_user_id is None:
                         global_config["owner_scope_id"] = snapshot.owner_scope_id

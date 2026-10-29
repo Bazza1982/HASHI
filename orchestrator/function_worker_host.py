@@ -1488,7 +1488,8 @@ class FunctionWorkerHost:
                     "runtime.telegram_update requires an update object"
                 )
             update = Update.de_json(dict(update_payload), runtime.app.bot)
-            if getattr(runtime, "_telegram_scoped_access_enabled", False):
+            from orchestrator.telegram_actor_scope import scoped_access_enabled
+            if scoped_access_enabled(runtime):
                 from orchestrator.telegram_actor_scope import process_telegram_update
 
                 await process_telegram_update(runtime, update)
