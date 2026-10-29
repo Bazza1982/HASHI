@@ -18,6 +18,8 @@ import tempfile
 import uuid
 from ctypes import wintypes
 
+from orchestrator.permissions.windows_jobs import WindowsJob
+
 if os.name != "nt":
     raise SystemExit("This opt-in probe requires native Windows.")
 
@@ -228,17 +230,26 @@ def _run_restricted(sid: LPVOID, executable: Path, arguments: list[str]) -> dict
     attributes = None
     attributes_initialized = False
     process_done = False
+    job = WindowsJob()
     try:
         size = SIZE_T()
-        KERNEL.InitializeProcThreadAttributeList(None, 2, 0, ctypes.byref(size))
+        KERNEL.InitializeProcThreadAttributeList(None, 3, 0, ctypes.byref(size))
         if not size.value:
             raise OSError(ctypes.get_last_error(), "attribute-list size")
         attributes = ctypes.create_string_buffer(size.value)
         _checked(
-            KERNEL.InitializeProcThreadAttributeList(attributes, 2, 0, ctypes.byref(size)),
+            KERNEL.InitializeProcThreadAttributeList(attributes, 3, 0, ctypes.byref(size)),
             "InitializeProcThreadAttributeList",
         )
         attributes_initialized = True
+        job_handles = job.creation_attribute()
+        _checked(
+            KERNEL.UpdateProcThreadAttribute(
+                attributes, 0, 0x0002000D, ctypes.byref(job_handles),
+                ctypes.sizeof(job_handles), None, None,
+            ),
+            "bind Job before process creation",
+        )
         caps = SECURITY_CAPABILITIES(sid, None, 0, 0)
         _checked(
             KERNEL.UpdateProcThreadAttribute(
@@ -289,7 +300,8 @@ def _run_restricted(sid: LPVOID, executable: Path, arguments: list[str]) -> dict
         matches = bool(ADVAPI.EqualSid(sid, actual))
         cap_buffer = _token_data(token, 30)
         capability_count = ctypes.cast(cap_buffer, ctypes.POINTER(DWORD)).contents.value
-        if not is_container or not matches or capability_count:
+        job_matches = job.contains(process.hProcess)
+        if not is_container or not matches or capability_count or not job_matches:
             raise RuntimeError("suspended process token differs from the restricted test profile")
         if KERNEL.ResumeThread(process.hThread) == 0xFFFFFFFF:
             raise OSError(ctypes.get_last_error(), "ResumeThread")
@@ -302,6 +314,7 @@ def _run_restricted(sid: LPVOID, executable: Path, arguments: list[str]) -> dict
         return {
             "token_is_appcontainer": is_container,
             "token_sid_matches_profile": matches,
+            "atomic_job_binding_verified": job_matches,
             "capability_count": capability_count,
             "process_exit_code": exit_code.value,
         }
@@ -313,6 +326,10 @@ def _run_restricted(sid: LPVOID, executable: Path, arguments: list[str]) -> dict
                     cleanup_error = "could not terminate the disposable test process"
                 if KERNEL.WaitForSingleObject(process.hProcess, 5_000) != 0:
                     cleanup_error = "disposable test process did not stop"
+        try:
+            job.stop()
+        except Exception:
+            cleanup_error = "execution tree cleanup is unverified"
         if token:
             KERNEL.CloseHandle(token)
         if process.hThread:

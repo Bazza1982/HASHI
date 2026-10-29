@@ -229,6 +229,8 @@ Job Object 用于进程组、限制和清理，**不提供文件／网络／身�
 
 **2026-10-29 后续记录：**`CreateProcessWithTokenW` 搭配同样的 suspended／原子 Job 要求也返回 87，尚未定位具体无效参数或接口组合。当前 token 的 `SeImpersonatePrivilege` 存在且启用，`SeIncreaseQuotaPrivilege` 存在但未启用；未调整任何 privilege。账户和临时目录再次确认已删除。为遵守用户安全继续、不过度测试的要求，后续开发不再反复尝试启动，也不通过降低 containment 或扩大系统权限获取绿灯。独立服务安装及 W01/WAC 继续未完成。
 
+**2026-10-29 独立身份后续通过：**主拓扑按本文 3.1 节落实为 supervisor 在自身非管理员身份下调用 `CreateProcessW` 创建受限子进程。用于测试的受信 bootstrap 经普通 secondary-logon 启动，执行前已绑定外层 Job；业务子进程通过 `STARTUPINFOEX` 原子获得独立 kill-on-close Job 和零 capabilities 的 AppContainer token。新测试账户首次缺少已加载用户配置时 profile 创建返回 `0x80070002`；为该新账户单独准备并登记配置后验证通过，随后使用 Windows 的按 SID 删除 API 清理，未删除或接管任何既存 profile。原生文件允许／拒绝／精确增权三项及子进程真实 token、Job 绑定均通过；账户、用户配置与临时目录均核实清理。完整 W01 的 IPC／LPAC／HERV3 与 WAC 仍须在实际发布 host 上验证。
+
 ### W02 — 独立服务、测试安装和最小账户
 
 **输入：**W01 的平台组合与身份矩阵。
