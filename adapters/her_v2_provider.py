@@ -1172,6 +1172,22 @@ class _EvidenceRecordingToolRegistry:
                 )
             else:
                 result = await self._base.execute(tool_name, arguments, tool_call_id)
+            from orchestrator.permissions.execution_gate import GateResult
+
+            if isinstance(result, GateResult):
+                # A managed operation may be waiting, denied, or have an
+                # uncertain outcome. Never turn this control state into a
+                # successful evidence receipt or a model-retryable result.
+                raise StageInvocationError(
+                    "A permission-controlled operation did not complete.",
+                    retryable=False,
+                    code="PERMISSION_CONTROL_INCOMPLETE",
+                    side_effects_possible=result.state in {"unknown", "prepared", "started"},
+                    details={
+                        "permission_state": result.state,
+                        "permission_operation_id": result.operation_id,
+                    },
+                )
         except asyncio.CancelledError:
             receipt = self._receipt(
                 tool_name=tool_name,

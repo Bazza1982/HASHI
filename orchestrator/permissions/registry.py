@@ -1,0 +1,144 @@
+"""Explicit managed registry prototype; it is never selected by legacy L0.
+
+The supplied supervisor must independently enforce resource binding, start,
+revoke and cleanup. This class has not yet been installed in the production
+backend or paired with a real security service.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import time
+from typing import Any
+
+from orchestrator.permissions.execution_gate import GateResult, PermissionExecutionGate
+from orchestrator.permissions.models import ExecutionContext, Scope
+from orchestrator.permissions.waiting import PermissionWaiter
+from tools.registry import ToolRegistry, ToolResult, resolve_tiers
+from tools.request_access import PermissionAgentTools, PermissionToolError, permission_tool_definitions
+
+
+_PERMISSION_NAMES = frozenset({"request_access", "get_access_status", "release_access"})
+_ORDINARY_QUESTION_NAMES = frozenset({"ask_user", "get_user_answer"})
+
+
+class ManagedToolRegistry(ToolRegistry):
+    """A testable integration seam, not a claim of L1/L2 completeness."""
+
+    def __init__(
+        self,
+        *,
+        allowed_tools: list[str],
+        access_root: Path,
+        workspace_dir: Path,
+        secrets: dict,
+        permission_authority: Any,
+        permission_context: ExecutionContext,
+        permission_supervisor: Any,
+        requestable_scopes: tuple[Scope, ...],
+        **legacy_options: Any,
+    ) -> None:
+        if secrets:
+            raise ValueError("managed tool registry cannot hold shared credentials")
+        super().__init__(
+            allowed_tools=allowed_tools, access_root=access_root,
+            workspace_dir=workspace_dir, secrets={}, **legacy_options,
+        )
+        self._permission_context = permission_context
+        self._permission_cwd = Path(workspace_dir).resolve(strict=False)
+        self._permission_roots = tuple(Path(root).resolve(strict=False) for root in self.read_access_roots)
+        self._permission_waiter = PermissionWaiter(permission_authority)
+        self._permission_tools = PermissionAgentTools(
+            permission_authority, permission_context, cwd=self._permission_cwd,
+            requestable_scopes=requestable_scopes,
+        )
+        self._permission_gate = PermissionExecutionGate(
+            permission_authority, self._permission_waiter, permission_supervisor,
+            context=permission_context, cwd=self._permission_cwd,
+            read_roots=self._permission_roots, requestable_scopes=requestable_scopes,
+        )
+
+    def is_allowed(self, tool_name: str) -> bool:
+        return tool_name in _PERMISSION_NAMES or super().is_allowed(tool_name)
+
+    def allowed_tool_names(self) -> tuple[str, ...]:
+        return tuple(sorted(set(super().allowed_tool_names()) | _PERMISSION_NAMES))
+
+    def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
+        definitions = super().get_tool_definitions(tiers)
+        if tiers is not None and "ask_user" not in resolve_tiers(tiers):
+            return definitions
+        request_allowlist = self._effective_audit_context().get("request_tool_allowlist")
+        allowed = (
+            {str(name) for name in request_allowlist}
+            if isinstance(request_allowlist, list)
+            else None
+        )
+        definitions.extend(
+            definition for definition in permission_tool_definitions()
+            if allowed is None or definition["function"]["name"] in allowed
+        )
+        return definitions
+
+    def _operation_id(self, tool_call_id: str) -> str:
+        raw = json.dumps(
+            [self._permission_context.instance_id, self._permission_context.task_id,
+             self._permission_context.run_id, tool_call_id],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        return "op_" + hashlib.sha256(raw).hexdigest()
+
+    def _finish_result(
+        self, name: str, arguments: dict, result: ToolResult, started: float
+    ) -> ToolResult:
+        finalized = self._finalize_tool_result(name, arguments, result, started)
+        self._record_tool_audit(name, arguments, finalized, started)
+        return finalized
+
+    async def execute(
+        self, tool_name: str, arguments: dict, tool_call_id: str = ""
+    ) -> ToolResult | GateResult:
+        # Ordinary questions remain ordinary questions and never grant access.
+        if tool_name in _ORDINARY_QUESTION_NAMES:
+            return await super().execute(tool_name, arguments, tool_call_id)
+        started = time.monotonic()
+        call_id = str(tool_call_id or "")
+        admission = self.evaluate_admission(tool_name, arguments, call_id)
+        if admission is not None:
+            return self._finish_result(tool_name, arguments, admission, started)
+        if tool_name in _PERMISSION_NAMES:
+            try:
+                response = await self._permission_tools.execute(tool_name, arguments)
+                result = ToolResult(
+                    tool_call_id=call_id, output=json.dumps(response, ensure_ascii=False),
+                    details={"control_disposition": "allowed"},
+                )
+            except (PermissionToolError, ValueError):
+                result = ToolResult(
+                    tool_call_id=call_id, output="Permission request unavailable or invalid.",
+                    is_error=True, details={"control_disposition": "denied"},
+                )
+            return self._finish_result(tool_name, arguments, result, started)
+        if not call_id:
+            return GateResult("unavailable", "")
+        roots, _, cwd = self._read_scope()
+        if (Path(cwd).resolve(strict=False) != self._permission_cwd
+                or tuple(Path(root).resolve(strict=False) for root in roots) != self._permission_roots):
+            return GateResult("unavailable", self._operation_id(call_id))
+        operation_id = self._operation_id(call_id)
+        outcome = await self._permission_gate.execute(
+            operation_id, tool_name, arguments, reason=f"Use {tool_name}",
+        )
+        if outcome.state not in {"succeeded", "failed"}:
+            # This typed control state must be handled by HERV3, not converted
+            # to a provider failure or a model-retryable ordinary tool error.
+            return outcome
+        if not isinstance(outcome.payload, str):
+            return GateResult("unknown", operation_id, outcome.request_id)
+        result = ToolResult(
+            tool_call_id=call_id, output=outcome.payload,
+            is_error=outcome.state == "failed",
+            details={"control_disposition": "allowed", "permission_operation": operation_id},
+        )
+        return self._finish_result(tool_name, arguments, result, started)

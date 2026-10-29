@@ -138,6 +138,21 @@ class ExecutionClaim:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionStatus:
+    task_state: str
+    binding_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperationStatus:
+    state: str
+    arguments_digest: str
+    scope_digest: str
+    execution_epoch: str
+    result_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PermissionEvent:
     sequence: int
     task_id: str
@@ -1635,6 +1650,34 @@ class PermissionAuthority:
             if row is None:
                 raise PermissionDenied("lease not found")
             return _lease_from(row)
+
+    def execution_status(self, context: ExecutionContext) -> ExecutionStatus:
+        with self._transaction() as connection:
+            self._now(connection)
+            task = self._task(connection, context, active=False)
+            binding = self._binding(connection, context, active=False)
+            return ExecutionStatus(task["state"], binding["state"])
+
+    def operation_status_for_task(
+        self, context: ExecutionContext, operation_id: str
+    ) -> OperationStatus:
+        _nonempty(operation_id, "operation_id")
+        with self._transaction() as connection:
+            self._now(connection)
+            self._context(connection, context, active=False)
+            row = connection.execute(
+                "SELECT p.state,p.arguments_digest,p.scope_digest,p.execution_epoch,"
+                "(SELECT c.result_digest FROM execution_claims c WHERE c.operation_id=p.operation_id "
+                "AND c.state=p.state ORDER BY c.rowid DESC LIMIT 1) AS result_digest "
+                "FROM pending_operations p WHERE p.operation_id=? AND p.task_id=? AND p.run_id=?",
+                (operation_id, context.task_id, context.run_id),
+            ).fetchone()
+            if row is None:
+                raise PermissionDenied("operation not found for this task and run")
+            return OperationStatus(
+                row["state"], row["arguments_digest"], row["scope_digest"],
+                row["execution_epoch"], row["result_digest"],
+            )
 
     def get_lease_for_task(
         self, context: ExecutionContext, lease_id: str

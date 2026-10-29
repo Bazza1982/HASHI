@@ -202,8 +202,9 @@
 | 账本与迁移 | `authority.py` 有内部事务及 v1/v2→v3 申请迁移；service epoch、备份恢复及资源对账待实现 | service；并发/恢复/迁移 |
 | 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
 | `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
-| `orchestrator/permissions/continuation.py` | PendingOperation、PermissionWait、park、恢复计划与回执消费 | HERV3、PAO lifecycle；CASE-LIFE |
-| `orchestrator/permissions/enforcement.py` | L1/L2 执行 adapter、dispatch 前验票 | ToolRegistry/runner；CASE-L1/L2 |
+| `orchestrator/permissions/waiting.py` | 本地异步等待、权威状态重查、同 operation 与部分批准续等 | 已新增；尚未接入 HERV3，也不提供持久 continuation 或 park |
+| `orchestrator/permissions/execution_gate.py` | 内部受管执行协调、范围检查、等待与监督回执匹配 | 已新增；通过独立 registry 原型与测试 supervisor 联调，不构成实际执行隔离 |
+| `orchestrator/permissions/registry.py` | 受管 ToolRegistry 原型，保留旧 admission 并调用执行协调 | 仅隔离测试构造；未安装到实际后端，尚无可信执行服务 |
 | `orchestrator/permissions/backend_capabilities.py` | 从实际 backend/通道证据派生有效覆盖 | /safety、切后端；BACKEND |
 | `orchestrator/permissions/fc_bridge.py` | 私有 principal/receipt 与命令输入到权限服务的桥接 | 公共 FC Functions；CASE-FC |
 | `orchestrator/permissions/trusted_decisions.py` | 验证 VerifiedPrincipal 和一次 DecisionReceipt；与执行票据分离 | 公共 FC ingress/service；APPROVAL |
