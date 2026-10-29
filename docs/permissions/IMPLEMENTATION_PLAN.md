@@ -69,6 +69,7 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只�
 | 模块 | 唯一职责 |
 | --- | --- |
 | `orchestrator/permissions/models.py` | 不可变领域类型、状态、稳定错误/结果分类 |
+| `orchestrator/permissions/descriptors.py` | 部分工具的范围、参数摘要与实际覆盖说明；未知工具拒绝 |
 | 规范化 | 当前由 `models.py` 实现；如需拆分则迁移唯一实现，不复制状态 |
 | `interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 |
 | 账本与迁移 | 当前 `authority.py` 有基础事务和 outbox；持久迁移及恢复待实现 |

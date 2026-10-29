@@ -112,6 +112,64 @@ class ConfigAdmin:
         # change raises ConfigConflictError rather than losing another update.
         return write_config_json(self.paths.config_path, raw_cfg)
 
+    @staticmethod
+    def _permission_agent_row(raw: dict, agent_name: str) -> dict:
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise ValueError("agent name is required")
+        normalize = str.casefold if os.name == "nt" else lambda value: value
+        matches = [
+            row for row in _agent_rows(raw)
+            if normalize(row["name"]) == normalize(agent_name)
+        ]
+        if not matches:
+            raise KeyError("agent not found")
+        if len(matches) != 1:
+            raise ValueError("ambiguous agent name in configuration")
+        return matches[0]
+
+    def read_agent_permission_settings(self, agent_name: str):
+        """Read without rewriting old configuration or enabling an authority."""
+        from orchestrator.permissions.models import PermissionSettings, PermissionSettingsSnapshot
+
+        raw = self.load_raw_config()
+        row = self._permission_agent_row(raw, agent_name)
+        if "permission_settings" in row and row["permission_settings"] is None:
+            raise ValueError("explicit permission settings cannot be null")
+        settings = PermissionSettings.from_mapping(row.get("permission_settings"))
+        return PermissionSettingsSnapshot(row["name"], settings, raw.revision)
+
+    def write_agent_permission_settings(
+        self, agent_name: str, settings, *, expected_revision: str
+    ):
+        """Publish a previously authorized decision through the existing CAS writer.
+
+        This persistence method does not authenticate users; the trusted
+        permission-management ingress must authorize the exact change before
+        invoking it. It is not exposed to model tools or generic worker RPC.
+        """
+        from orchestrator.permissions.models import PermissionSettings, PermissionSettingsSnapshot
+
+        if not isinstance(settings, PermissionSettings):
+            raise ValueError("validated permission settings are required")
+        if not isinstance(expected_revision, str) or len(expected_revision) != 64:
+            raise ValueError("a configuration revision is required")
+        raw = self.load_raw_config()
+        if raw.revision != expected_revision:
+            raise ConfigConflictError("agents configuration changed")
+        row = self._permission_agent_row(raw, agent_name)
+        if "permission_settings" in row:
+            if row["permission_settings"] is None:
+                raise ValueError("explicit permission settings cannot be null")
+            PermissionSettings.from_mapping(row["permission_settings"])
+        row["permission_settings"] = {
+            "requested_level": settings.requested_level.value,
+            "task_default_seconds": settings.task_default_seconds,
+            "request_ttl_seconds": settings.request_ttl_seconds,
+            "audit_retention_seconds": settings.audit_retention_seconds,
+        }
+        revision = self.write_raw_config(raw)
+        return PermissionSettingsSnapshot(row["name"], settings, revision)
+
     def get_all_agents_raw(self) -> list[dict]:
         raw = self.load_raw_config()
         return raw.get("agents", [])

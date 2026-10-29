@@ -190,12 +190,13 @@
 
 ## MAP-11 — 拟新增模块与边界
 
-除已新增但未接入的 `models.py` 与 `authority.py` 外，以下其余路径均为**建议新增、尚不存在**。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
+除已新增但未接入的 `models.py`、`authority.py` 与 `descriptors.py` 外，以下其余路径均为**建议新增、尚不存在**。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
 
 | 建议路径 | 唯一职责 | 消费者 / 验收主题 |
 |---|---|---|
 | `orchestrator/permissions/models.py` | 不可变领域类型、设置、范围规范化与摘要 | 已新增；尚未接入运行路径 |
 | `orchestrator/permissions/authority.py` | SQLite 单一事务账本与权限生命周期基础 | 已新增；可信 ingress、执行器与平台隔离尚未接线 |
+| `orchestrator/permissions/descriptors.py` | 部分已知工具的范围和参数摘要；未知工具拒绝 | 已新增；未接入执行器，不宣称 OS 强制 |
 | 规范化与 subset | 当前由 `models.py` 唯一实现；如后续拆出则迁移而不复制 | authority、执行绑定；SCOPE |
 | `orchestrator/permissions/interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 | L1/L2 实现与消费者；单一权威 |
 | 账本与迁移 | 基础事务目前由 `authority.py` 承担；后续迁移和恢复待实现 | service；并发/恢复/迁移 |

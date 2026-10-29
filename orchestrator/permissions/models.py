@@ -66,6 +66,13 @@ class PermissionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionSettingsSnapshot:
+    agent_name: str
+    settings: PermissionSettings
+    revision: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionContext:
     """Trusted runtime binding; creating one is not proof of caller identity."""
 
