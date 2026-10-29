@@ -13,7 +13,8 @@ from tests.test_telegram_actor_scope import instance
 
 
 @pytest.mark.asyncio
-async def test_each_text_chunk_checks_the_current_grant(tmp_path, monkeypatch):
+@pytest.mark.parametrize("chat_id, purpose", [(100, "response"), (101, "explicit-notification")])
+async def test_each_text_chunk_checks_the_current_grant(tmp_path, monkeypatch, chat_id, purpose):
     runtime, _observations, config_path = instance(tmp_path)
     owner = _delegated_owner(runtime_snapshot(runtime), 100)
     sent = []
@@ -36,12 +37,41 @@ async def test_each_text_chunk_checks_the_current_grant(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_delivery.telegram_delivery_failover, "handle_blocked_send", AsyncMock(return_value=False))
     outcome = {}
     _, count = await runtime_delivery._send_long_message_transport(
-        runtime, chat_id=100, text="a" * 9000, frontend_owner_id=owner,
+        runtime, chat_id=chat_id, text="a" * 9000, purpose=purpose, frontend_owner_id=owner,
         skip_local_capture=True, outbox_outcome=outcome,
     )
     assert len(sent) == 1
     assert count == 1
     assert outcome["status"] == "unknown"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor, purpose, permitted", [
+    (100, "explicit-notification:call", True),
+    (100, "response", False),
+    (200, "explicit-notification:call", False),
+])
+async def test_only_global_users_can_explicitly_send_text_elsewhere(
+    tmp_path, monkeypatch, actor, purpose, permitted
+):
+    runtime, _observations, _config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), actor)
+    runtime.app.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    runtime.telegram_connected = True
+    runtime.logger = logging.getLogger("test")
+    runtime.telegram_logger = runtime.logger
+    runtime.error_logger = runtime.logger
+    runtime.workspace_dir = tmp_path
+    runtime.config = SimpleNamespace(extra={})
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", AsyncMock())
+    monkeypatch.setattr(runtime_delivery.telegram_delivery_failover, "handle_blocked_send", AsyncMock(return_value=False))
+
+    _, count = await runtime_delivery._send_long_message_transport(
+        runtime, chat_id=101, text="hello", purpose=purpose, frontend_owner_id=owner,
+        skip_local_capture=True,
+    )
+    assert count == int(permitted)
+    assert runtime.app.bot.send_message.await_count == int(permitted)
+
 
 @pytest.mark.asyncio
 async def test_media_stops_between_files_when_access_is_revoked(tmp_path):
@@ -76,6 +106,46 @@ async def test_media_stops_between_files_when_access_is_revoked(tmp_path):
             delivery_mode="final_delivery", outbox_outcome={},
         )
     assert sent == [100]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor, purpose, permitted", [
+    (100, "explicit-media-notification", True),
+    (100, "response", False),
+    (200, "explicit-media-notification", False),
+])
+async def test_only_global_users_can_explicitly_deliver_media_elsewhere(
+    tmp_path, actor, purpose, permitted
+):
+    runtime, _observations, _config_path = instance(tmp_path)
+    owner = _delegated_owner(runtime_snapshot(runtime), actor)
+    file_path = tmp_path / "image.png"
+    file_path.write_bytes(b"image")
+    runtime.app.bot = SimpleNamespace(send_photo=AsyncMock(return_value=SimpleNamespace(message_id=12)))
+    runtime.config = SimpleNamespace(extra={})
+    runtime.telegram_logger = logging.getLogger("test")
+    store = SimpleNamespace(visible_message_attachment=lambda *args, **kwargs: {
+        "local_ref": str(file_path), "mime_type": "image/png"
+    })
+    event = {"content_blocks": [
+        {"type": "media_ref", "attachment_id": "one", "role": "photo"},
+    ]}
+
+    async def deliver():
+        return await runtime_delivery._send_standard_event_media_to_telegram(
+            runtime, chat_id=101, store=store,
+            claim={"session_id": "s", "detail": {"message_id": "m"}},
+            owner_id=owner, event=event, request_id="r", purpose=purpose,
+            delivery_mode="final_delivery", outbox_outcome={},
+        )
+
+    if permitted:
+        await deliver()
+        runtime.app.bot.send_photo.assert_awaited_once()
+    else:
+        with pytest.raises(runtime_delivery.TelegramAccessRevoked):
+            await deliver()
+        runtime.app.bot.send_photo.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_media_revoked_while_waiting_is_settled_without_retry(tmp_path, monkeypatch):

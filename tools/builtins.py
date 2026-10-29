@@ -1861,7 +1861,7 @@ async def execute_telegram_send_file(
 
         scoped_session = str(context.get("hashi_session_id") or "").strip()
         if not scoped_session or not delivery_allowed(
-            runtime, owner_id=scoped_owner, chat_id=chat_id
+            runtime, owner_id=scoped_owner, chat_id=chat_id, explicit_recipient=True
         ):
             return "Error: Telegram access or the conversation destination is no longer valid"
         scoped_route = {

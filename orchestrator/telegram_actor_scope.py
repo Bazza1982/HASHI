@@ -80,7 +80,20 @@ def runtime_snapshot(runtime: Any) -> TelegramAccessSnapshot:
     return access_snapshot(config_doc, secrets_doc, str(getattr(runtime, "name", "")))
 
 
-def delivery_allowed(runtime: Any, *, owner_id: str | None, chat_id: Any) -> bool:
+def explicit_telegram_purpose(purpose: str) -> bool:
+    """Recognize the explicit notification tools, not ordinary replies."""
+    name = str(purpose or "")
+    return (
+        name == "explicit-media-notification"
+        or name == "explicit-notification"
+        or name.startswith("explicit-notification:")
+    )
+
+
+def delivery_allowed(
+    runtime: Any, *, owner_id: str | None, chat_id: Any,
+    explicit_recipient: bool = False,
+) -> bool:
     """Check the current grant for a delegated Session at delivery time."""
     owner = str(owner_id or "")
     if not owner.startswith("telegram-user:"):
@@ -92,7 +105,10 @@ def delivery_allowed(runtime: Any, *, owner_id: str | None, chat_id: Any) -> boo
         return (
             actor in snapshot.effective_user_ids
             and actor != snapshot.primary_user_id
-            and int(chat_id) == actor
+            and (
+                int(chat_id) == actor
+                or (explicit_recipient and actor in snapshot.global_user_ids)
+            )
             and owner == _delegated_owner(snapshot, actor)
         )
     except (OSError, ValueError, TypeError, AttributeError, LookupError):
