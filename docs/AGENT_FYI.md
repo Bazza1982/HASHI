@@ -114,8 +114,9 @@ receipts, each final once. `/bg` freezes admission; schedules imply no chat.
 `/delay` and interactive `/loop` retain context.
 
 Multi-user Telegram off. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
-Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
-Bounded polls preserve pending updates.
+Telegram readiness requires separate Bot-bound app/ingress and a user;
+activation is Agent-only. Bounded polls preserve pending updates.
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery
 

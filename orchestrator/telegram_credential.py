@@ -308,9 +308,10 @@ class TelegramCredentialService:
         receiver_adopted = bool(expected_bot and ingress.get("bot_fingerprint") == expected_bot)
         inbound = bool(live and adopted and receiver_adopted and ingress.get("running") and ingress.get("connected"))
         outbound = bool(live and adopted and metadata.get("telegram_outbound_connected"))
-        ready = inbound and outbound
+        ready = inbound and outbound and context.authorized_user_configured
         activation_status = (
             "unconfigured" if not context.configured else
+            "user_required" if not context.authorized_user_configured else
             "inactive" if not runtime_active else
             "connected" if ready else
             "connecting" if adopted and receiver_adopted and live and ingress.get("running") else "pending"

@@ -5284,7 +5284,9 @@ class WorkbenchApiServer:
             for key in ("activation_status", "activation_required", "inbound_connected",
                         "outbound_connected", "bidirectional_ready"):
                 result[key] = status[key]
-            if status["activation_status"] in {"inactive", "connected", "connecting"}:
+            if status["activation_status"] in {
+                "inactive", "connected", "connecting", "user_required"
+            }:
                 return
             runtime = self._runtime_map().get(result["agent_id"].casefold())
             owner = self._v1_owner_id(request)
