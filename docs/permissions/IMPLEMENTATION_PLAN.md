@@ -62,23 +62,23 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只�
 
 ## 4. M01 — 类型、配置和 L0 真旁路
 
-### 4.1 模块与依赖建议
+### 4.1 当前模块与依赖（2026-10-30）
 
-新增模块均为候选路径；最终名称可遵循仓库习惯，职责不变：
+最初候选拆分已由实际接入收敛；完整文件关系见 [CODE_MAP MAP-11](CODE_MAP.md#map-11--当前实现与边界2026-10-30)，实际验证和采用仍见 [实施状态](IMPLEMENTATION_STATUS.md)。
 
-| 模块 | 唯一职责 |
+| 实际 owner 模块 | 唯一职责 |
 | --- | --- |
-| `orchestrator/permissions/models.py` | 不可变领域类型、状态、稳定错误/结果分类 |
-| `orchestrator/permissions/descriptors.py` | 部分工具的范围、参数摘要与实际覆盖说明；未知工具拒绝 |
-| 规范化 | 当前由 `models.py` 实现；如需拆分则迁移唯一实现，不复制状态 |
-| `interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 |
-| 账本与迁移 | 当前 `authority.py` 有基础事务、outbox、v1–v5→v6 迁移、账本级代次隔离、展示动作重试绑定与受验回执对账；备份恢复及真实服务接线待实现 |
-| 权限服务 | 当前 `authority.py` 有部分决定与 claim/start；派生授权及真实入口待实现 |
-| `task_binding.py`、`lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 |
-| `waiting.py` / 拟新增持久 continuation | 内部权威重查等待已实现；持久恢复计划、park 与 HERV3 接线待实现 |\n| `pao_run_fence.py` | 隔离测试中按 PAO 当前 Run 和停止状态为短暂文件执行提供次序；真实绑定、生命周期与有界停止待实现 |
-| `trusted_decisions.py`、`fc_bridge.py` | Principal、receipt、标准 FC 投影和统一权限写门 |
-| `execution_gate.py`、`registry.py`、`backend_capabilities.py` | 执行协调、registry 和本机 Windows 文件 supervisor 已隔离联调；真实服务、后端选择、L1/L2 选择与覆盖报告待实现 |
-| `tools/request_access.py` | 三个 agent 工具的薄适配已实现但未接入，不拥有授权状态 |
+| models / descriptors / authority | 类型、工具范围、schema 8 事务、决定、期限、并发用权与回收 |
+| service / run_service / pao_run_fence | 单一 PAO 任务与原 Run 绑定、可信 start/stop、执行服务接入 |
+| parking / continuation / provider_continuation | provider 精确 checkpoint、持久等待、新 epoch 与同操作恢复 |
+| frontend_auth/binding/control/native / decision_commands / commands.safety | 独立人类登录、原始身份关联、受签 action、标准命令；不扩展公开 FC |
+| execution_channel/gate / registry / physical_journal / result_store | 真实 registry、最后验权、进程/资源 owner、可恢复加密结果 |
+| runner / script_runner / windows_* / capsule | 逐任务 LPAC、固定 registryRead、Job 与低完整性目录、封闭运行库 |
+| file_operations / network_worker / script_helper | 原文件对象、HTTP/凭证代理、输入快照与临时脚本结果 |
+| model_broker/receipts / host_usage / worker_usage | 原选定模型与隐私、HTTP intent、稳定物理计费回执 |
+| runtime_ports / media_bridge/output | 原服务、当前附件、语音确认、音频成果持久 owner |
+| observed_controls / frontend_transition / level_transition | 实际控制与依赖观察、兼容后端继续、设置与运行采用分开 |
+| tools/request_access / questions | 薄工具适配；普通问题不生成权限 |
 
 共享服务在 `manager_registry.FUNCTION_MANAGER_SPECS` 对应 Functions 内按需接线。不要仅因添加 manager spec 就在所有 L0 worker 构造 SQLite、连接 service 或导入 Windows native 模块。可使用懒 facade，但 L0 执行分支不得调用它；Core 不能导入权限产品模块。
 
@@ -203,7 +203,7 @@ L1 在 Functions 受管理的数据位置保存独立权限账本；L2 在安全
 5. revoke 若先提交，start 必须失败并清理 prepared 资源；start 若先线性化，revoke 必须能找到已登记资源并中止/收尾。不得出现“数据库写 started，但未被监督的进程稍后无条件启动”。
 6. 操作完成写持久回执；传输重试读取同一 operation。若开始/提交结果不确定，标 unknown 并对账，不为继续任务换新 ID 重做副作用。
 
-当前内部同步本地操作栅栏仅用于隔离测试：在受信回调执行时暂持账本写锁，并在最后重验租约。它不适用于网络或长时间 I/O，阻塞时可能推迟撤权；开始记录提交后、真实效果前失败仍会保守标未确认。真实平台监督、可中止资源、单次授权精确释放和运行接线仍待实现。
+本地同步栅栏保留为直接回归夹具。当前安装链通过可中止固定 helper、受控 Runner、真实对象准备、authority-owned start 栅栏、物理 journal 与加密结果接入；网络业务不持有全局数据库写锁。开始或效果未知仍保守对账；源码、组件资格和完整平台验收分别记录。
 
 `ExecutionTicket` 不是脱离账本即可离线使用的通行证。60 秒期限不能成为撤销后仍允许新启动的理由；票据还绑定 task、operation、executor/connection、epoch 和 policy。执行器收到丢失/延迟 revoke 推送时，实际 start 的权威查询仍拒绝。
 
@@ -322,7 +322,7 @@ HERV3 每 Turn 的 `HERTaskState` 不承担跨 Run 权限寿命。通过可信�
 
 ### 8.5 恢复判定
 
-恢复时三分：尚未开始 → 重验后执行；已完成 → 复用回执；结果未知 → 先对账或请求用户针对结果的决策。结果未知不是缺权限，不能用再次批准当作重复发送授权。恢复新epoch可以复用仍有效Task批准；Run-scoped能力只在原Run仍有效时适用，绝不因重启自动延长时限。内部原型仅在旧代次已 fence、资源停止有受验凭据且结果摘要一致时复用；已有加密结果副本的隔离联调，可信密钥与目录保护、正式服务和持久 continuation 仍待实现。
+恢复时三分：尚未开始 → 重验后执行；已完成 → 复用回执；结果未知 → 先对账或请求用户针对结果的决策。结果未知不是缺权限，不能用再次批准当作重复发送授权。恢复新epoch可以复用仍有效Task批准；Run-scoped能力只在原Run仍有效时适用，绝不因重启自动延长时限。当前恢复只在旧代次已 fence、各 owner 停止有受验凭据且原结果摘要一致时复用。安装服务使用独立结果密钥及私有目录，真实 provider checkpoint 与原 Run parking 保存续跑边界；未确认副作用不能换 ID 重放。完整安装资格仍按 Windows 验收执行。
 
 **退出条件：** 普通等待不烧模型、不误触发AC；正常批准同操作续跑；pause/stop/switch晚批准不复活；hot adoption不挂住；旧worker退出不撤新worker权；Run终结不误撤Task。见 `CASE-LIFE-*`。
 

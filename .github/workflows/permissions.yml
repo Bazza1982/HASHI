@@ -204,6 +204,9 @@ jobs:
           orchestrator/her_v2/provider_continuation.py scripts/permissions/windows_lpac_probe.py
           scripts/permissions/windows_file_helper_probe.py
           scripts/permissions/build_runtime_capsule.py
+          scripts/permissions/windows_script_probe.py
+          scripts/permissions/windows_loader_diagnostic.py
+          scripts/permissions/windows_script_loader_probe.py
       - name: Check backend manager against its existing import baseline
         run: python -m ruff check orchestrator/flexible_backend_manager.py --ignore E402
       - name: Test permission and legacy contracts

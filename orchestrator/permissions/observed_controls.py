@@ -9,6 +9,7 @@ from orchestrator.permissions.backend_capabilities import (
     ActivePath, BackendBinding, ControlFinding, ServiceObservation, project_controls, CONTROLS,
 )
 from orchestrator.permissions.models import PermissionLevel
+from orchestrator.permissions.windows_capabilities import python_runtime_capabilities
 
 
 def execution_report(execution):
@@ -27,7 +28,7 @@ def execution_report(execution):
     host = (getattr(runner, "_prepared", {}).get(binding.context.execution_epoch)
             if runner is not None else None)
     native = bool(isinstance(host, dict) and host.get("lpac") is True
-                  and host.get("capability_count") == 0 and host.get("elevated") is False
+                  and python_runtime_capabilities(host) and host.get("elevated") is False
                   and host.get("atomic_job") is True and host.get("parent_job_count") == 1)
     level = policy.settings.requested_level
     layer = "L1" if level is PermissionLevel.L1 else "L2"

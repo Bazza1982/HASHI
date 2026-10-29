@@ -45,3 +45,20 @@ def test_task_scratch_is_low_integrity_without_relabeling_its_parent(tmp_path):
     child.write_text("owned temporary output", encoding="utf-8")
     assert ";;;LW)" in label(child)
     assert label(tmp_path) == parent_label
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native user environment")
+def test_lpac_environment_uses_native_profile_and_excludes_caller_secrets():
+    from orchestrator.permissions.windows_process import _appcontainer_environment, _native_profile_environment
+
+    actual = _native_profile_environment()
+    supplied = {"USERPROFILE": r"C:\fake", "LOCALAPPDATA": r"C:\fake",
+                "APPDATA": r"C:\fake", "API_KEY": "must-not-inherit",
+                "HTTP_PROXY": "must-not-inherit", "PYTHONPATH": "must-not-inherit",
+                "TEMP": r"C:\owned-task"}
+    result = _appcontainer_environment(supplied)
+    assert {name: result[name] for name in actual} == actual
+    assert all(result[name] != r"C:\fake" for name in actual)
+    assert result["TEMP"] == r"C:\owned-task"
+    assert not {"API_KEY", "HTTP_PROXY", "PYTHONPATH"} & result.keys()
+    assert supplied["USERPROFILE"] == r"C:\fake"

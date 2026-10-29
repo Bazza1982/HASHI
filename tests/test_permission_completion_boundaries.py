@@ -11,6 +11,8 @@ import wave
 
 import pytest
 
+from orchestrator.permissions.windows_capabilities import PYTHON_RUNTIME_CAPABILITIES
+
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.models import PermissionLevel, PermissionSettings, RuntimeExecutionBinding, normalize_scope
 from tests.test_permission_service_application import environment as environment, Endpoint
@@ -82,7 +84,7 @@ def test_observed_controls_never_turn_settings_or_mixed_approval_into_full_l2(tm
     registry = SimpleNamespace(_permission_gate=SimpleNamespace(_supervisor=supervisor))
     channel = SimpleNamespace(_current=lambda: None, registry=registry,
                               tool_definitions=lambda: [{"function": {"name": name}} for name in ("file_read", "desktop_click")])
-    observation = {"lpac": True, "capability_count": 0, "elevated": False, "atomic_job": True, "parent_job_count": 1}
+    observation = {"lpac": True, "capability_count": 1, "capability_sids": PYTHON_RUNTIME_CAPABILITIES, "elevated": False, "atomic_job": True, "parent_job_count": 1}
     factory = SimpleNamespace(authority=SimpleNamespace(observed_time=lambda: 1000, _service_generation="observed"),
                               helper=SimpleNamespace(entry_digest="a" * 64, executable_digest="b" * 64),
                               runner=SimpleNamespace(_prepared={context.execution_epoch: observation} if native else {}))

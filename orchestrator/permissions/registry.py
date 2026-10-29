@@ -1,8 +1,7 @@
-"""Explicit managed registry prototype; it is never selected by legacy L0.
+"""Explicit managed registry; it is never selected by legacy L0.
 
-The supplied supervisor must independently enforce resource binding, start,
-revoke and cleanup. This class has not yet been installed in the production
-backend or paired with a real security service.
+The installed execution channel supplies the authoritative gate and supervisor,
+which independently enforce resource binding, start, revoke and cleanup.
 """
 from __future__ import annotations
 

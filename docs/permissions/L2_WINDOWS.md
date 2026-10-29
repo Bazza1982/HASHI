@@ -149,7 +149,7 @@ named pipe 不使用默认 ACL。服务端应区分连接权和方法权，避�
 
 每个 execution host／operation runner 都有服务登记的 profile、基础身份、package SID、capability 集合、任务、operation、generation 和期限。不能凭 moniker 或 package SID 自报身份；也不能复用一个已累加多任务权限的全局 profile。
 
-没有 network capability 是主默认。宿主推理、模型调用和结构化网络工具通过窄 broker 使用连接。只有已通过专门验收的 direct-network profile 才能改变这一默认，并准确披露发送能力。
+没有 network capability 是主默认。当前封闭 Python host/脚本 profile 仅增加固定的 `registryRead`，供 Windows SxS 加载依赖读取系统注册表；它不授予注册表写、网络或原文件访问。真实 token 必须恰有这个已知 SID，不能只核对 capability 个数。其 SID 由 Windows `DeriveCapabilitySidsFromName("registryRead")` 确认；实现唯一来源为 `windows_capabilities.py`。不修改系统注册表 ACL，不开放调用者选择 capability。宿主推理、模型调用和结构化网络工具通过窄 broker 使用连接。只有已通过专门验收的 direct-network profile 才能改变这一默认，并准确披露发送能力。
 
 ### 4.2 启动步骤
 
@@ -529,6 +529,14 @@ worker 支持什么方法、用户可以管理谁、agent 获批什么能力是�
 | Windows profile／其他 OS 尚未验收 | 明确 unknown/partial 和缺失项 | 可用 L0/L1 或用户选择的兼容 backend；不以装 WSL 为唯一条件 |
 
 这里的继续原则不允许模型自行降低等级来规避明确拒绝，也不允许无可信证据时虚构一条 grant。它要求保留工作连续性和用户选择，并准确区分“该受保护动作还不能执行”与“整个客户任务被禁止”。
+
+### 2026-10-30 当前脚本组件资格
+
+独立一次性普通账户、真实 LPAC、固定 `registryRead`、无网络 capability；实际脚本不能读/改父目录原文件或创建子进程，TCP/UDP IPv4/IPv6 四项网络均返回系统访问拒绝。输入副本及临时结果通过，原文件未改变；实际核对 128 MiB Job 限制、两个父 Job 和所有 Job 清空。profile、账户、用户配置及 staging 全部清理。低完整性目录的实际继承标签也单独验证。完整逐文件摘要与失败历史保留在测试证据中。
+
+前置失败是 Windows SxS 加载缺少注册表读能力，调试固定 probe 捕捉到该失败；增加固定 capability 后，正式无调试器脚本通过。只读代码 ACL 的试探没有解决问题，未保留扩大 ACL 的试验改动。测试命令长度问题属于引导诊断，已恢复短固定启动命令。
+
+这项组件证据不将下列 WAC 组合、独立服务安装、审批桌面隔离或当前实例采用自动计为通过。
 
 ## 9. Windows 人工与平台验收
 

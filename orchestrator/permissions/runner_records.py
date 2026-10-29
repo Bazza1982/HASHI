@@ -12,6 +12,7 @@ import sqlite3
 from uuid import uuid4
 
 from orchestrator.permissions.models import RuntimeExecutionBinding
+from orchestrator.permissions.windows_capabilities import python_runtime_capabilities
 from orchestrator.permissions.windows_container import TaskContainerProfile
 from orchestrator.permissions.windows_job_security import private_job_name
 from orchestrator.permissions.windows_jobs import WindowsJob
@@ -99,7 +100,7 @@ class RunnerRecords:
 
     def observe(self, binding, observation, *, operation_id=None):
         if (not isinstance(observation, ProcessObservation) or observation.user_sid != self.sid
-                or not observation.atomic_job or not observation.lpac or observation.capability_count != 0
+                or not observation.atomic_job or not observation.lpac or not python_runtime_capabilities(observation)
                 or observation.elevated or observation.creation_time_100ns <= 0):
             raise ValueError("an actual restricted host observation is required")
         binding_digest(binding)

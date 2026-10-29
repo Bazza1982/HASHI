@@ -188,34 +188,26 @@
 
 追踪：PRD `SCOPE/BACKEND/UX/MIG`；验收 `CASE-L1-08/12`、`CASE-L2-06/09`、`CASE-OPS-05/06`。
 
-## MAP-11 — 拟新增模块与边界
+## MAP-11 — 当前实现与边界（2026-10-30）
 
-下表区分已经新增但未接入的领域代码和仍拟新增的路径。路径统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 4.1 节的候选结构，不另建平行模块。名称允许实施时小幅调整，职责、owner 和测试关系不得丢失；更名须同步施工计划、本图和接手记录。不为未来假设预建通用插件框架。
+下表为当前实际模块；旧基线事实仍保留在前述 MAP。源码、组件资格、完整平台组合和运行中采用分别见 [状态](IMPLEMENTATION_STATUS.md)。不再使用最初候选的 interfaces/task_binding/fc_bridge 名称建立第二套权威。
 
-| 建议路径 | 唯一职责 | 消费者 / 验收主题 |
-|---|---|---|
-| `orchestrator/permissions/models.py` | 不可变领域类型、设置、范围规范化与摘要 | 已新增；尚未接入运行路径 |
-| `orchestrator/permissions/authority.py` | SQLite 单一事务账本与权限生命周期基础 | 已新增；可信 ingress、执行器与平台隔离尚未接线 |
-| `orchestrator/permissions/descriptors.py` | 部分已知工具的范围和参数摘要；未知工具拒绝 | 已新增；未接入执行器，不宣称 OS 强制 |
-| 规范化与 subset | 当前由 `models.py` 唯一实现；如后续拆出则迁移而不复制 | authority、执行绑定；SCOPE |
-| `orchestrator/permissions/interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 | L1/L2 实现与消费者；单一权威 |
-| 账本与迁移 | `authority.py` 有内部事务、v1–v5→v6 迁移、账本级代次隔离、审批动作快照与展示重试绑定、受验回执对账和同步本地操作栅栏；真实服务、受保护监督及备份恢复待实现 | service；并发/恢复/迁移 |
-| 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
-| `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
-| `orchestrator/permissions/waiting.py` | 本地异步等待、权威状态重查、同 operation 与部分批准续等 | 已新增；尚未接入 HERV3，也不提供持久 continuation 或 park |
-| `orchestrator/permissions/execution_gate.py` | 内部受管执行协调、范围检查、等待、监督回执匹配及原操作结果恢复端口 | 已新增；仅与测试 supervisor 联调，恢复须校验旧代次、结果摘要和资源停止；真实执行隔离未接线 |
-| `orchestrator/permissions/result_store.py` | 绑定任务与原操作的加密结果副本，拒绝篡改、覆盖和不一致恢复 | 已新增并在隔离测试中接到执行协调；可信密钥、目录 ACL、正式服务与实际运行接线仍待实现 |
-| `orchestrator/permissions/registry.py` | 受管 ToolRegistry 原型，保留旧 admission 并调用执行协调 | 仅隔离测试构造；未安装到实际后端，尚无可信执行服务 |
-| `orchestrator/permissions/signed_receipts.py` | 校验固定公钥签署的准确决定 | 仅验证签名和格式；真实人类认证、受保护签发及密钥部署仍待实现 |
-| `orchestrator/permissions/enterprise_decisions.py` | 以现有企业用户会话和已登记动作进行离线签发联调 | 原型未接线；session 本身不证明真人意图，凭据及 signer 的隔离部署仍待实现 |
-| `orchestrator/permissions/windows_file_binding.py` | 持有本机路径组件与文件句柄，绑定读取及新建文件 | 原生 Windows 测试；不能覆盖既有文件，崩溃后暂存文件恢复未实现；不是授权或进程隔离 |
-| `orchestrator/permissions/windows_file_supervisor.py` | 本机文件读取与新建、最后验权、加密结果和停止凭据协调 | 已在 Windows 隔离目录联调；不能覆盖文件或新建父目录，阻塞调用无法限时终止；未接入真实运行环境，非 L2 服务 |
-| `orchestrator/permissions/backend_capabilities.py` | 从活动路径清单及绑定后端、执行器、服务代次和时效的观察结果保守派生覆盖；传播依赖与未受管通道 | 已新增纯投影与离线测试；真实可信证据、路径发现和 /safety 尚未接线；BACKEND |
-| `orchestrator/permissions/fc_bridge.py` | 私有 principal/receipt 与命令输入到权限服务的桥接 | 公共 FC Functions；CASE-FC |
-| `orchestrator/permissions/trusted_decisions.py` | 验证 VerifiedPrincipal 和一次 DecisionReceipt；与执行票据分离 | 公共 FC ingress/service；APPROVAL |
-| `orchestrator/commands/safety.py` | `/safety` RuntimeCommand/RuntimeCallback | 既有 generic action；FC_CONTRACT |
-| `tools/request_access.py` | 三个 agent 控制工具与按需 schema 的薄适配，不拥有授权状态 | 已新增；尚未注册或接入 ToolRegistry |
-| L2 trusted service / restricted runner | OS 受信控制边界、受限进程及专用 IPC | 包位置/部署详见 L2_WINDOWS；真实平台验收 |
+| 实际模块（均在 permissions 目录，另注明者除外） | 唯一职责与接入 | 直接验证 |
+| --- | --- | --- |
+| models、authority、service | 类型、范围、schema 8 事务迁移、决定、期限、once、派生、撤销与受验结果 | authority、requests、models、service_recovery |
+| run_service、pao_run_fence、control_plane、parking、continuation | PAO 原 Run、任务跨轮、provider checkpoint、新 epoch 与自动续跑；未知副作用保留原 ID | pao_fence、parking、execution_checkpoint、restricted_her、service_roundtrip |
+| frontend_auth/binding/control/native、decision_commands、enterprise_decisions；commands/safety | 明确人类关联、独立登录、受签 action 和标准 /safety；公共 API actor、普通回答不授权 | frontend_decisions、decision_commands、completion_boundaries |
+| registry、execution_channel/gate、file_process_supervisor、physical_journal、result_store | 保留原 admission；实际对象准备、最后 start 栅栏、加密结果、各 owner 独立回收 | execution_gate、running_claim、physical_journal、resource_cleanup |
+| windows_file_binding、file_operations、file_worker、network_worker | 持有原文件对象；读取、写入、目录、搜索、严格补丁；固定 HTTP 目标与具名凭证代理 | windows_file_binding、file_operations、network_worker |
+| runner、runner_records、script_runner/helper/worker/protocol | 固定 HERV3 host、逐操作 LPAC 脚本、输入快照与临时输出；父/子 Job、加密结果和 profile 回收 | runner_records、scripts、completion_boundaries；实体脚本组件资格 |
+| windows_process/container/jobs/ipc/token/capabilities | 真实 SID/token、固定只读 registryRead、无网络 capability、原子 Job、低完整性私有目录、ACL 与私有 pipe | scratch_integrity、windows_ipc/token/supervisor；实际普通账户 probe |
+| model_broker、configured_models、model_receipts、host_usage、worker_usage | 选定模型/隐私策略的窄出口，实际 HTTP intent、物理调用及先持久化用量投影 | model_broker、model_receipts、configured_models、service_roundtrip |
+| runtime_ports、her_callbacks、media_bridge/output、host_provider | 复用原 Persona、草稿、压缩、语音确认与音频资产 owner；仅接收当前原始附件 | runtime_ports、media_bridge、completion_boundaries |
+| backend_capabilities、observed_controls、frontend_transition、level_transition | 新鲜实际路径观察、依赖降级；明确兼容后端继续 unmanaged；设置采用和执行停止分开 | capabilities、level_transition、backend_selection_transaction |
+| installation、runner_installation、capsule、native_factory、bootstrap | 显式独立安装入口、封闭完整源码与依赖、单写锁；L0 不启动；L1 不强求独立 Runner | capsule、installed_boundaries、her_adoption |
+| tools/request_access、questions | Agent 申请/查询/撤回薄适配及原 RunQuestions；普通回答固定不授权 | agent_tools、questions |
+
+windows_file_supervisor 的本地同步实现保留为直接回归夹具；安装执行采用 file_process_supervisor 的可中止固定 helper。它的历史隔离测试不被拿来替代当前服务或完整 L2。
 
 不得为了上述模块改 protected tuple、Core bootstrap、Core envelope 或 dependency baseline。新的可选/原生依赖使用隔离 sidecar/environment，不能安装到运行中的 Core interpreter。
 

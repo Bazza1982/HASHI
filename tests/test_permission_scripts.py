@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from orchestrator.permissions.windows_capabilities import PYTHON_RUNTIME_CAPABILITIES
+
 from orchestrator.permissions.descriptors import describe_tool
 from orchestrator.permissions.script_protocol import validate
 from orchestrator.permissions.script_runner import unpack_plan
@@ -77,8 +79,14 @@ def test_fixed_worker_captures_only_its_script_output_and_restores_process_strea
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native held input handle")
-@pytest.mark.parametrize("wrong_peer", [False, True])
-def test_fixed_safety_helper_only_snapshots_inputs_and_never_executes_python(tmp_path, monkeypatch, wrong_peer):
+@pytest.mark.parametrize("observation_changes", [
+    {}, {"elevated": True},
+    {"capability_sids": ("S-1-15-3-1",)},
+    {"capability_count": 2, "capability_sids": (*PYTHON_RUNTIME_CAPABILITIES, "S-1-15-3-1")},
+    {"capability_count": 0, "capability_sids": ()},
+    {"capability_count": True},
+])
+def test_fixed_safety_helper_only_snapshots_inputs_and_never_executes_python(tmp_path, monkeypatch, observation_changes):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from orchestrator.permissions.models import RuntimeExecutionBinding, normalize_scope
     from orchestrator.permissions.script_helper import ScriptNotStarted, run
@@ -106,9 +114,9 @@ def test_fixed_safety_helper_only_snapshots_inputs_and_never_executes_python(tmp
                 snapshot = values["plan"]["snapshots"][0]
                 assert base64.b64decode(snapshot["data"]) == b"original input"
                 assert snapshot["sha256"] == sha256(b"original input").hexdigest()
-                return {"user_sid": "S-1-5-21-2", "lpac": True, "elevated": wrong_peer,
-                        "atomic_job": True, "capability_count": 0, "parent_job_count": 2,
-                        "appcontainer_sid": "S-1-15-2-123"}
+                return {"user_sid": "S-1-5-21-2", "lpac": True, "elevated": False,
+                        "atomic_job": True, "capability_count": 1, "capability_sids": PYTHON_RUNTIME_CAPABILITIES, "parent_job_count": 2,
+                        "appcontainer_sid": "S-1-15-2-123", **observation_changes}
             if method == "run_script":
                 return {"outcome": "succeeded", "payload": payload,
                         "result_digest": sha256(payload.encode()).hexdigest()}
@@ -122,7 +130,7 @@ def test_fixed_safety_helper_only_snapshots_inputs_and_never_executes_python(tmp
             "input_indices": [0], "result": str(tmp_path / "result.json")}
     with open_bound_read(normalize_scope("file", str(source), ["read"], cwd=tmp_path)) as bound:
         _, transfer = inheritable_handle_copy(bound._handles[-1])
-        if wrong_peer:
+        if observation_changes:
             with pytest.raises(ScriptNotStarted):
                 run(plan, [transfer])
             assert calls == ["prepare_script", "stop_script"]

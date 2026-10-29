@@ -2,7 +2,7 @@
 
 基本概念及 L1 L2 实现要求
 
-版本 1.1 · 2026 年 10 月 23 日 · 已确定的产品设计，实施尚未完成
+版本 1.1 · 2026 年 10 月 23 日 · 已确定的产品设计；当前实施与验证见实施状态
 
 本文完整替代 v1.0 对本功能的描述。配套施工顺序见 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md)，源码落点见 [CODE_MAP](CODE_MAP.md)，交付事实见 [IMPLEMENTATION_STATUS](IMPLEMENTATION_STATUS.md)。**本分支正在实施，具体进度以实施状态为准；不表示权限功能已经上线。**
 

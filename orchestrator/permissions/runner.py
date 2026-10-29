@@ -8,6 +8,7 @@ from multiprocessing import Pipe
 from pathlib import Path
 
 from orchestrator.permissions.authority import PermissionDenied
+from orchestrator.permissions.windows_capabilities import python_runtime_capabilities
 from orchestrator.permissions.ipc_rpc import emit_private_event
 from orchestrator.permissions.runner_records import RunnerRecords, binding_digest as _binding_digest
 from orchestrator.permissions.windows_container import TaskContainerProfile, protect_task_scratch
@@ -103,7 +104,7 @@ class RestrictedHerRunner:
                     cwd=scratch, environment={**self.environment, "TMP": str(scratch), "TEMP": str(scratch)},
                     expected_user_sid=self.runner_sid,
                     executable_digest=self.executable_digest, inherited_handles=(transfer,),
-                    appcontainer_sid=profile.sid, require_lpac=True, max_processes=1, job_name=reserved["job_name"],
+                    appcontainer_sid=profile.sid, require_lpac=True, python_runtime=True, max_processes=1, job_name=reserved["job_name"],
                     parent_jobs=(int(parent_job.handle),),
                 )
                 record["process"] = owned
@@ -326,7 +327,7 @@ class RunnerClient:
         result = await self.client.call_async("prepare_host", {"binding": binding, "parent_job_name": self.parent_job_name})
         if (not isinstance(result, dict) or result.get("user_sid") != self.runner_sid
                 or result.get("elevated") is not False or result.get("atomic_job") is not True
-                or result.get("lpac") is not True or result.get("capability_count") != 0
+                or result.get("lpac") is not True or not python_runtime_capabilities(result)
                 or result.get("parent_job_count") != 1
                 or result.get("executable_digest") != self.observation["executable_digest"]
                 or not isinstance(result.get("appcontainer_sid"), str)

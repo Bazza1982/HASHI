@@ -115,7 +115,7 @@ class RestrictedScriptRuns:
                     arguments=["-I", "-S", "-B", str(self.entry), str(scratch)],
                     cwd=scratch, environment={**self.runner.environment, "TMP": str(scratch), "TEMP": str(scratch)},
                     expected_user_sid=self.runner.runner_sid, executable_digest=self.runner.executable_digest,
-                    appcontainer_sid=profile.sid, require_lpac=True, max_processes=1, memory_bytes=self.memory_bytes,
+                    appcontainer_sid=profile.sid, require_lpac=True, python_runtime=True, max_processes=1, memory_bytes=self.memory_bytes,
                     job_name=reserved["job_name"], parent_jobs=(int(root.handle), int(parent.handle)),
                 )
                 record["process"] = process

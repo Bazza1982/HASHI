@@ -4,7 +4,7 @@
 |---|---|
 | 文档版本 / 日期 | 1.1 / 2026-10-23 |
 | 代码基线 | `d6b6513973bfc8f9f22c40ddd8f72802f907baa0` |
-| 文档与功能状态 | **内部基础实施中；完整功能与平台 CASE 待执行** |
+| 文档与功能状态 | **源码实施已接入；当前验证见实施状态，完整平台组合 CASE 保持独立验收** |
 | 本次范围 | 历史设计交付曾为 docs-only；当前实施与证据见状态文件，不自动部署或重启 |
 | 权威与边界 | [PRD](PRD.md)、[施工计划](IMPLEMENTATION_PLAN.md)、[代码接入图](CODE_MAP.md)、[FC 契约](FC_CONTRACT.md)、[Windows L2](L2_WINDOWS.md) |
 
@@ -150,9 +150,9 @@ python -m pytest -q tests/test_kernel_process.py tests/test_minimal_core.py test
 python -m pytest -q
 ```
 
-## 5. 拟新增测试入口（proposed）
+## 5. 原始拟新增测试入口（历史拆解）
 
-以下文件/目录**基线不存在、尚未创建**，统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 14 节的候选结构，不创建第二套平行测试。实施者可以调整拆分，但必须同步两份文档、维护 CASE 覆盖表与 red/green 证据，不能只测试实现细节或复制文档文字。
+以下文件/目录在原始冻结基线中不存在，是最初的候选拆解；当前实际模块/测试已收敛到 [CODE_MAP MAP-11](CODE_MAP.md#map-11--当前实现与边界2026-10-30) 和 [实施状态](IMPLEMENTATION_STATUS.md)。下表保留原始设计追踪，不能当作当前缺失文件清单。原候选统一采用 [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md) 第 14 节的候选结构，不创建第二套平行测试。实施者可以调整拆分，但必须同步两份文档、维护 CASE 覆盖表与 red/green 证据，不能只测试实现细节或复制文档文字。
 
 | Proposed 文件/目录 | 主要负责 CASE | 未来 focused 命令 |
 |---|---|---|

@@ -1,6 +1,7 @@
 # HASHI Agent FYI
 
-- 权限闭环已接入服务、共享 FC 与现行 HERV3；当前 Windows 脚本资格超时仍在定位，暂不交付整体审阅。
+- 权限闭环已接入服务、共享 FC 与现行 HERV3；独立账户的 Windows 实体脚本资格通过。
+  Python LPAC 仅含固定 registryRead，实际 token SID 集合必须匹配；没有网络 capability。
   缺权保留原 Run；普通回答/API actor 不授权；混合审批隔离未验证时保持 partial。
   源码、平台资格、采用和用户实测分别核实。[决定](permissions/IMPLEMENTATION_DECISION_20261030.md)、[状态](permissions/IMPLEMENTATION_STATUS.md)。
 

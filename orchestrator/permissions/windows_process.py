@@ -15,6 +15,7 @@ import subprocess
 import threading
 from ctypes import wintypes
 
+from orchestrator.permissions.windows_capabilities import PYTHON_RUNTIME_CAPABILITIES
 from orchestrator.permissions.windows_jobs import WindowsJob
 from orchestrator.permissions.windows_token import token_is_lpac
 
@@ -43,6 +44,14 @@ class _Capabilities(ctypes.Structure):
     _fields_ = [("sid", _PTR), ("capabilities", _PTR), ("count", _DWORD), ("reserved", _DWORD)]
 
 
+class _SidAndAttributes(ctypes.Structure):
+    _fields_ = [("sid", _PTR), ("attributes", _DWORD)]
+
+
+class _TokenGroups(ctypes.Structure):
+    _fields_ = [("count", _DWORD), ("groups", _SidAndAttributes * 1)]
+
+
 class _Attributes(ctypes.Structure):
     _fields_ = [("size", _DWORD), ("descriptor", _PTR), ("inherit", wintypes.BOOL)]
 
@@ -59,6 +68,7 @@ class ProcessObservation:
     executable_digest: str
     creation_time_100ns: int = 0
     parent_job_count: int = 0
+    capability_sids: tuple[str, ...] = ()
 
 
 def _api():
@@ -162,7 +172,18 @@ def _observe(process, kernel, security, job, digest, parent_jobs=()):
         user_sid = _sid_text(ctypes.cast(user, ctypes.POINTER(_PTR))[0], kernel, security)
         container = bool(ctypes.cast(data(29), ctypes.POINTER(_DWORD))[0])
         app_sid = _sid_text(ctypes.cast(data(31), ctypes.POINTER(_PTR))[0], kernel, security) if container else None
-        capability_count = int(ctypes.cast(data(30), ctypes.POINTER(_DWORD))[0]) if container else 0
+        capabilities = data(30) if container else None
+        capability_count = int(ctypes.cast(capabilities, ctypes.POINTER(_DWORD))[0]) if container else 0
+        capability_sids = []
+        if container:
+            offset = _TokenGroups.groups.offset
+            if capability_count > 16 or offset + capability_count * ctypes.sizeof(_SidAndAttributes) > ctypes.sizeof(capabilities):
+                raise PermissionError("native capability observation exceeds its buffer")
+            for index in range(capability_count):
+                item = _SidAndAttributes.from_buffer(capabilities, offset + index * ctypes.sizeof(_SidAndAttributes))
+                if not item.attributes & 4 or item.attributes & 0x10:
+                    raise PermissionError("native capability is not enabled")
+                capability_sids.append(_sid_text(item.sid, kernel, security))
         lpac = token_is_lpac(token, security) if container else False
         parent_bound = True
         for parent in parent_jobs:
@@ -173,7 +194,7 @@ def _observe(process, kernel, security, job, digest, parent_jobs=()):
             int(process.pid), user_sid, app_sid, capability_count,
             lpac,
             bool(ctypes.cast(data(20), ctypes.POINTER(_DWORD))[0]), job.contains(process.process) and parent_bound, digest,
-            _creation_time(process.process, kernel), len(parent_jobs),
+            _creation_time(process.process, kernel), len(parent_jobs), tuple(sorted(capability_sids)),
         )
     finally:
         kernel.CloseHandle(token)
@@ -254,11 +275,59 @@ def inheritable_handle_copy(handle):
 
 
 
+def _native_profile_environment():
+    """Read required profile locations from the current Windows token."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = [], _HANDLE
+    security.OpenProcessToken.argtypes = [_HANDLE, _DWORD, ctypes.POINTER(_HANDLE)]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [_HANDLE], wintypes.BOOL
+    userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(_PTR), _HANDLE, wintypes.BOOL]
+    userenv.CreateEnvironmentBlock.restype = wintypes.BOOL
+    userenv.DestroyEnvironmentBlock.argtypes = [_PTR]
+    userenv.DestroyEnvironmentBlock.restype = wintypes.BOOL
+    token, block = _HANDLE(), _PTR()
+    _checked(security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008 | 0x0002, ctypes.byref(token)))
+    try:
+        _checked(userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False))
+        try:
+            if not block:
+                raise OSError("native profile environment is unavailable")
+            allowed = {"USERPROFILE", "LOCALAPPDATA", "APPDATA"}
+            result, offset = {}, 0
+            while offset < 65536:
+                value = ctypes.wstring_at(block.value + offset * ctypes.sizeof(wintypes.WCHAR))
+                if not value:
+                    break
+                offset += len(value.encode("utf-16-le")) // 2 + 1
+                key, separator, item = value.partition("=")
+                if separator and key.upper() in allowed:
+                    result[key.upper()] = item
+            else:
+                raise PermissionError("native profile environment exceeds its bound")
+            if any(not result.get(key) or not Path(result[key]).is_absolute() for key in allowed):
+                raise PermissionError("the actual Windows user profile is not loaded")
+            return result
+        finally:
+            _checked(userenv.DestroyEnvironmentBlock(block))
+    finally:
+        _checked(kernel.CloseHandle(token))
+
+
+def _appcontainer_environment(environment):
+    allowed = {"SYSTEMROOT", "WINDIR", "PATH", "TMP", "TEMP"}
+    result = {key.upper(): value for key, value in environment.items() if key.upper() in allowed}
+    result.update(_native_profile_environment())
+    return result
+
+
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),
                      appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None, parent_jobs=(),
-                     job_assignees=(), memory_bytes=None):
+                     job_assignees=(), memory_bytes=None, python_runtime=False):
     kernel, security = _api()
     executable, cwd = Path(executable), Path(cwd)
     if (not executable.is_absolute() or not cwd.is_absolute() or not cwd.is_dir()
@@ -269,6 +338,9 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         raise ValueError("a fixed qualified executable and owned working directory are required")
     if require_lpac and appcontainer_sid is None:
         raise ValueError("LPAC requires an AppContainer identity")
+    if type(python_runtime) is not bool or python_runtime and not require_lpac:
+        raise ValueError("the fixed Python capability requires verified LPAC")
+    expected_capabilities = PYTHON_RUNTIME_CAPABILITIES if python_runtime else ()
     if (not isinstance(environment, dict)
             or any(not isinstance(key, str) or not key or "=" in key or "\0" in key
                    or not isinstance(value, str) or "\0" in value for key, value in environment.items())):
@@ -279,6 +351,7 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
     ), _PTR(), None
     attributes, initialized, transferred = None, False, False
     cleanup_failure, cleanup_cause = None, None
+    capability_pointers = []
     try:
         count = 2 + (1 if appcontainer_sid else 0) + (1 if require_lpac else 0)
         size = _SIZE()
@@ -300,7 +373,13 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         attribute(0x0002000D, jobs)
         if appcontainer_sid:
             _checked(security.ConvertStringSidToSidW(appcontainer_sid, ctypes.byref(sid)))
-            caps = _Capabilities(sid, None, 0, 0)
+            entries = (_SidAndAttributes * len(expected_capabilities))()
+            for index, capability in enumerate(expected_capabilities):
+                pointer = _PTR()
+                _checked(security.ConvertStringSidToSidW(capability, ctypes.byref(pointer)))
+                capability_pointers.append(pointer)
+                entries[index] = _SidAndAttributes(pointer, 4)
+            caps = _Capabilities(sid, ctypes.cast(entries, _PTR) if entries else None, len(entries), 0)
             attribute(0x00020009, caps)
         if require_lpac:
             opt_out = _DWORD(1)  # PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
@@ -323,6 +402,8 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         startup.startup.stdin = startup.startup.stdout = startup.startup.stderr = null_handle
         startup.attributes = ctypes.cast(attributes, _PTR)
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline([str(executable), *arguments]))
+        if appcontainer_sid is not None:
+            environment = _appcontainer_environment(environment)
         env = ctypes.create_unicode_buffer("\0".join(f"{key}={value}" for key, value in sorted(
             environment.items(), key=lambda pair: pair[0].casefold(),
         )) + "\0\0")
@@ -339,7 +420,9 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             raise creation_error
         observation = _observe(process, kernel, security, job, executable_digest, parent_jobs)
         if (observation.user_sid != expected_user_sid or observation.appcontainer_sid != appcontainer_sid
-                or observation.elevated or not observation.atomic_job or observation.capability_count != 0
+                or observation.elevated or not observation.atomic_job
+                or observation.capability_count != len(expected_capabilities)
+                or observation.capability_sids != expected_capabilities
                 or require_lpac and not observation.lpac):
             verification_error = PermissionError("suspended child differs from the qualified execution identity")
             verification_error.observation = observation
@@ -377,6 +460,8 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                             cleanup_cause = ctypes.WinError(ctypes.get_last_error())
         if initialized:
             kernel.DeleteProcThreadAttributeList(attributes)
+        for pointer in capability_pointers:
+            kernel.LocalFree(pointer)
         if sid:
             kernel.LocalFree(sid)
         if null_handle and null_handle != ctypes.c_void_p(-1).value:

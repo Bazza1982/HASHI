@@ -45,7 +45,72 @@ def diagnostics(process):
     return {"modules": modules, "process": asdict(process.observation)}
 
 
+def runtime_access(process, paths):
+    """Inspect the actual suspended token against required runtime DACLs."""
+    import ctypes
+    from ctypes import wintypes
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer, handle = wintypes.LPVOID, wintypes.HANDLE
+    class Mapping(ctypes.Structure):
+        _fields_ = [(name, wintypes.DWORD) for name in ("read", "write", "execute", "all")]
+    security.OpenProcessToken.argtypes = [handle, wintypes.DWORD, ctypes.POINTER(handle)]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    security.DuplicateToken.argtypes = [handle, ctypes.c_int, ctypes.POINTER(handle)]
+    security.DuplicateToken.restype = wintypes.BOOL
+    security.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        pointer, pointer, pointer, pointer, ctypes.POINTER(pointer)]
+    security.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    security.AccessCheck.argtypes = [pointer, handle, wintypes.DWORD, ctypes.POINTER(Mapping),
+        pointer, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.BOOL)]
+    security.AccessCheck.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [handle], wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [pointer], pointer
+    token, impersonation = handle(), handle()
+    if not security.OpenProcessToken(process.process_handle, 0x0008 | 0x0002, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not security.DuplicateToken(token, 2, ctypes.byref(impersonation)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        result = {}
+        for path in paths:
+            descriptor = pointer()
+            error = security.GetNamedSecurityInfoW(str(path), 1, 7, None, None, None, None, ctypes.byref(descriptor))
+            if error:
+                result[path.name] = {"descriptor_error": error}
+                continue
+            try:
+                privileges = ctypes.create_string_buffer(4096)
+                length, granted, allowed = wintypes.DWORD(4096), wintypes.DWORD(), wintypes.BOOL()
+                mapping = Mapping(0x120089, 0x120116, 0x1200a0, 0x1f01ff)
+                if not security.AccessCheck(descriptor, impersonation, 0x1200a9, ctypes.byref(mapping),
+                    privileges, ctypes.byref(length), ctypes.byref(granted), ctypes.byref(allowed)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                result[path.name] = {"read_execute": bool(allowed.value), "granted": int(granted.value)}
+            finally:
+                kernel.LocalFree(descriptor)
+        return result
+    finally:
+        if impersonation and not kernel.CloseHandle(impersonation):
+            raise OSError("diagnostic token close failed")
+        if not kernel.CloseHandle(token):
+            raise OSError("diagnostic original token close failed")
+
+
 def probe(expected_sid):
+    try:
+        return _probe(expected_sid)
+    except Exception as error:
+        import traceback
+
+        frames = [{"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+                  for frame in traceback.extract_tb(error.__traceback__)[-16:]]
+        raise RuntimeError(json.dumps({"type": type(error).__name__, "error": str(error)[:1200],
+                                       "frames": frames})) from error
+
+
+def _probe(expected_sid):
     observed_identity = require_nonadmin_identity(expected_sid)
     if current_process_user_sid() != expected_sid:
         raise RuntimeError("qualification account changed")
@@ -56,6 +121,11 @@ def probe(expected_sid):
     runtime = Path(sys.executable)
     entry = Path(__file__).parent / "orchestrator/permissions/script_worker.py"
     parent_root = Path(os.environ["TEMP"])
+    def progress(step):
+        with (parent_root / "native-progress.json").open("a", encoding="utf-8") as output:
+            output.write(json.dumps({"step": step}) + "\n")
+
+    progress("profile")
     original = parent_root / "private-canary.txt"
     original.write_bytes(b"original-must-not-change")
     task = parent_root / "script-task"
@@ -76,7 +146,14 @@ def probe(expected_sid):
             + "try:\n private.write_bytes(b'forbidden')\nexcept PermissionError:\n flags['write_blocked']=True\n"
             + "print('before-child',file=sys.stderr,flush=True)\ntry:\n subprocess.run([sys.executable,'-I','-S','-c','pass'],check=True,timeout=2)\n"
             + "except OSError as error:\n flags['child_blocked']=getattr(error,'winerror',None) in (5,1816)\n"
-            + "print('before-network',file=sys.stderr,flush=True)\nwith socket.socket() as connection:\n connection.settimeout(1)\n flags['network_blocked']=connection.connect_ex(('127.0.0.1',9))==10013\nprint('network-done',file=sys.stderr,flush=True)\n"
+            + "print('before-network',file=sys.stderr,flush=True)\nnetwork=[]\n"
+            + "for family,target in ((socket.AF_INET,('192.0.2.1',9)),(socket.AF_INET6,('2001:db8::1',9))):\n"
+            + " for kind in (socket.SOCK_STREAM,socket.SOCK_DGRAM):\n"
+            + "  blocked=False\n  try:\n   with socket.socket(family,kind) as connection:\n    connection.settimeout(.5)\n"
+            + "    if kind==socket.SOCK_STREAM:\n     blocked=connection.connect_ex(target)==10013\n"
+            + "    else:\n     connection.sendto(b'fixed-probe',target)\n"
+            + "  except OSError as error:\n   blocked=getattr(error,'winerror',None)==10013\n  network.append(blocked)\n"
+            + "flags['network_blocked']=all(network)\nflags['network_variants']=len(network)\nprint('network-done',file=sys.stderr,flush=True)\n"
             + "value=Path('inputs/input.txt').read_text()\n"
             + "Path('outputs/result.txt').write_text(value.upper())\n"
             + "print(json.dumps(flags,sort_keys=True))\n"
@@ -85,19 +162,28 @@ def probe(expected_sid):
         (task / "task.py").write_text(source, encoding="utf-8")
         root, helper = WindowsJob(), WindowsJob(max_processes=2)
         memory = 128 * 1024 * 1024
+        progress("create-restricted-child")
         process = launch_suspended(
             executable=runtime, arguments=["-I", "-S", "-B", str(entry), str(task)], cwd=task,
             environment={"SystemRoot": os.environ["SystemRoot"], "WINDIR": os.environ["SystemRoot"],
                          "PATH": str(runtime.parent) + os.pathsep + str(Path(os.environ["SystemRoot"]) / "System32"),
                          "TMP": str(task), "TEMP": str(task)},
             expected_user_sid=expected_sid, executable_digest=sha256(runtime.read_bytes()).hexdigest(),
-            appcontainer_sid=profile.sid, require_lpac=True, max_processes=1, memory_bytes=memory,
+            appcontainer_sid=profile.sid, require_lpac=True, python_runtime=True, max_processes=1, memory_bytes=memory,
             parent_jobs=(int(root.handle), int(helper.handle)),
         )
+        required = [runtime, runtime.parent / f"python{sys.version_info.major}{sys.version_info.minor}.dll",
+                    *runtime.parent.glob("vcruntime*.dll"),
+                    *[Path(os.environ["SystemRoot"]) / "System32" / name
+                      for name in ("ntdll.dll", "kernel32.dll", "KernelBase.dll", "ucrtbase.dll")]]
+        access = runtime_access(process, required)
+        progress("resume-restricted-child")
         process.start()
+        progress("wait-restricted-child")
         deadline = time.monotonic() + 10
         while not process.poll():
             if time.monotonic() > deadline:
+                progress("timeout-diagnostics")
                 native = diagnostics(process)
                 process.stop(timeout_ms=4500)
                 details = {name: ((task / name).read_text(encoding="utf-8", errors="replace")[:2000]
@@ -108,7 +194,7 @@ def probe(expected_sid):
         observation = asdict(process.observation)
         process.stop(timeout_ms=4500)
         if exit_code != 0:
-            raise RuntimeError("native script exited before completion: " + json.dumps({"exit_code": exit_code,
+            raise RuntimeError("native script exited before completion: " + json.dumps({"exit_code": exit_code, "runtime_access": access,
                 "stderr": ((task / "stderr.txt").read_text(encoding="utf-8")[:2000] if (task / "stderr.txt").exists() else "[not created]")}))
         flags = json.loads((task / "stdout.txt").read_text(encoding="utf-8"))
         if (exit_code != 0 or original.read_bytes() != b"original-must-not-change"
@@ -124,6 +210,7 @@ def probe(expected_sid):
                 "native_memory_limit_bytes": memory, "temporary_output_verified": True,
                 "original_input_unchanged": True, "all_jobs_stopped": True, "profile_deleted": profile_deleted}
     finally:
+        progress("cleanup-child")
         if process is not None:
             process.stop(timeout_ms=4500)
         if helper is not None:
@@ -134,3 +221,4 @@ def probe(expected_sid):
             profile.close()
         finally:
             kernel.SetErrorMode(previous_error_mode)
+            progress("cleanup-complete")

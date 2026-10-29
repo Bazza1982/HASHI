@@ -3,7 +3,8 @@
 This store does not authenticate callers, supply its own key, install an ACL,
 or replace the authority's result and resource checks. The parent directory and
 the key must be controlled by the trusted service. A managed agent must not
-receive this object or its key. It is not yet installed in a running service.
+receive this object or its key. Only the explicit service installation supplies
+those protected objects.
 """
 from __future__ import annotations
 

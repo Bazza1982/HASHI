@@ -1,7 +1,8 @@
 """Wait for a task's durable permission decision without polling a model.
 
-This is an internal coordination primitive. It is not yet wired into HERV3,
-does not persist a Python continuation, and does not start a resource. A ready
+This is an internal queue-coordination primitive. HERV3 persists provider
+checkpoints and parks its canonical Run; this coroutine is not a persisted
+Python continuation and does not start a resource. A ready
 result only permits the caller to enter its normal resource queue; the real
 supervisor must recheck and commit start after that queue.
 """

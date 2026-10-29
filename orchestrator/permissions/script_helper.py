@@ -9,6 +9,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from orchestrator.permissions.ipc_rpc import PermissionPipeClient
+from orchestrator.permissions.windows_capabilities import python_runtime_capabilities
 from orchestrator.permissions.script_protocol import validate
 from orchestrator.permissions.wire import decode
 from orchestrator.permissions.windows_file_binding import BoundWindowsRead, _Windows
@@ -77,7 +78,7 @@ def run(plan, handles):
         })
         if (not isinstance(observation, dict) or observation.get("user_sid") != descriptor["runner_sid"]
                 or observation.get("lpac") is not True or observation.get("elevated") is not False
-                or observation.get("atomic_job") is not True or observation.get("capability_count") != 0
+                or observation.get("atomic_job") is not True or not python_runtime_capabilities(observation)
                 or observation.get("parent_job_count") != 2 or not observation.get("appcontainer_sid")):
             raise ValueError("script process has no matching native qualification")
         run_sent = True
