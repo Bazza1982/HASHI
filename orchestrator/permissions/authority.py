@@ -95,6 +95,23 @@ class ResourceStopReceipt:
     expires_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class OperationOutcomeReceipt:
+    """Verified supervisor evidence of an interrupted operation's final outcome."""
+
+    nonce: str
+    claim_id: str
+    operation_id: str
+    arguments_digest: str
+    instance_id: str
+    task_id: str
+    execution_epoch: str
+    observer_id: str
+    outcome: str
+    result_digest: str
+    expires_at: float
+
+
 class ReceiptVerifier(Protocol):
     def verify(self, reference: str) -> DecisionReceipt | None:
         """Verify private provenance and return the exact immutable decision."""
@@ -162,7 +179,7 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
     "permission_tasks": {"task_id", "instance_id", "owner_id", "agent_id", "session_id",
@@ -492,6 +509,8 @@ class PermissionAuthority:
             for table in ("access_requests", "access_request_versions"):
                 required[table].update({"suggested_lifetime", "suggested_seconds", "request_key"})
             required["request_idempotency"] = {"task_id", "request_key", "fingerprint", "request_id", "outcome"}
+        if version >= 4:
+            required["operation_outcome_receipts"] = {"nonce", "claim_id", "proof_hash", "recorded_at"}
         primary = {
             "authority_metadata": ("key",), "permission_tasks": ("task_id",),
             "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
@@ -504,6 +523,8 @@ class PermissionAuthority:
             primary["access_request_versions"] = ("request_id", "revision")
         if version >= 3:
             primary["request_idempotency"] = ("task_id", "request_key")
+        if version >= 4:
+            primary["operation_outcome_receipts"] = ("nonce",)
         for table, columns in required.items():
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = {row["name"] for row in rows}
@@ -544,7 +565,7 @@ class PermissionAuthority:
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -570,28 +591,38 @@ class PermissionAuthority:
                     "arguments_digest,purpose,created_at FROM access_requests"
                 )
                 version = 2
-            if version != 2:
+            # Every supported migration is one transaction; unknown or
+            # conflicting tables roll the entire upgrade back.
+            if version == 2:
+                for table in ("access_requests", "access_request_versions"):
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN suggested_lifetime TEXT NOT NULL DEFAULT 'task'"
+                    )
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN suggested_seconds INTEGER NOT NULL DEFAULT 14400"
+                    )
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN request_key TEXT")
+                connection.execute(
+                    "CREATE TABLE request_idempotency ("
+                    "task_id TEXT NOT NULL REFERENCES permission_tasks(task_id),"
+                    "request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,"
+                    "request_id TEXT REFERENCES access_requests(request_id),"
+                    "outcome TEXT NOT NULL CHECK(outcome IN ('request','granted_existing')),"
+                    "PRIMARY KEY(task_id,request_key),"
+                    "CHECK ((outcome='request' AND request_id IS NOT NULL) OR "
+                    "(outcome='granted_existing' AND request_id IS NULL)))"
+                )
+                version = 3
+            if version == 3:
+                connection.execute(
+                    "CREATE TABLE operation_outcome_receipts ("
+                    "nonce TEXT PRIMARY KEY, "
+                    "claim_id TEXT NOT NULL REFERENCES execution_claims(claim_id), "
+                    "proof_hash TEXT NOT NULL, recorded_at REAL NOT NULL)"
+                )
+                version = 4
+            if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
-            # The whole v1/v2 upgrade is one transaction: a conflicting table
-            # or index leaves the original database and version untouched.
-            for table in ("access_requests", "access_request_versions"):
-                connection.execute(
-                    f"ALTER TABLE {table} ADD COLUMN suggested_lifetime TEXT NOT NULL DEFAULT 'task'"
-                )
-                connection.execute(
-                    f"ALTER TABLE {table} ADD COLUMN suggested_seconds INTEGER NOT NULL DEFAULT 14400"
-                )
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN request_key TEXT")
-            connection.execute(
-                "CREATE TABLE request_idempotency ("
-                "task_id TEXT NOT NULL REFERENCES permission_tasks(task_id),"
-                "request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,"
-                "request_id TEXT REFERENCES access_requests(request_id),"
-                "outcome TEXT NOT NULL CHECK(outcome IN ('request','granted_existing')),"
-                "PRIMARY KEY(task_id,request_key),"
-                "CHECK ((outcome='request' AND request_id IS NOT NULL) OR "
-                "(outcome='granted_existing' AND request_id IS NULL)))"
-            )
             self._validate_schema(connection, _SCHEMA_VERSION)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
@@ -1579,6 +1610,78 @@ class PermissionAuthority:
             connection.execute("UPDATE execution_resources SET state='unknown' WHERE claim_id=? AND state!='stopped'", (claim_id,))
             self._event(connection, context.task_id, "operation_" + outcome, claim["operation_id"], now)
 
+    def reconcile_outcome(
+        self, context: ExecutionContext, claim_id: str, *, receipt_reference: str
+    ) -> None:
+        """Resolve an unknown operation only with verified supervisor evidence."""
+        try:
+            _nonempty(claim_id, "claim_id")
+            _nonempty(receipt_reference, "operation outcome receipt", limit=16 * 1024)
+        except ValueError as exc:
+            raise PermissionDenied("invalid operation outcome reference") from exc
+        verifier = getattr(self._verifier, "verify_outcome", None)
+        receipt = verifier(receipt_reference) if callable(verifier) else None
+        if not isinstance(receipt, OperationOutcomeReceipt):
+            raise PermissionDenied("trusted operation outcome evidence is required")
+        try:
+            for key in ("nonce", "claim_id", "operation_id", "instance_id",
+                        "task_id", "execution_epoch", "observer_id"):
+                _nonempty(getattr(receipt, key), key)
+            _digest(receipt.arguments_digest, "arguments_digest")
+            _digest(receipt.result_digest, "result_digest")
+        except ValueError as exc:
+            raise PermissionDenied("invalid operation outcome evidence") from exc
+        if (
+            not isinstance(receipt.outcome, str)
+            or receipt.outcome not in {"succeeded", "failed"}
+            or isinstance(receipt.expires_at, bool)
+            or not isinstance(receipt.expires_at, (int, float))
+            or not math.isfinite(receipt.expires_at)
+        ):
+            raise PermissionDenied("invalid operation outcome evidence")
+        proof_hash = hashlib.sha256(_json(asdict(receipt)).encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context, active=False)
+            claim = self._claim(connection, context, claim_id)
+            operation = connection.execute(
+                "SELECT * FROM pending_operations WHERE operation_id=?", (claim["operation_id"],)
+            ).fetchone()
+            if operation is None or any((
+                receipt.claim_id != claim_id, receipt.operation_id != claim["operation_id"],
+                receipt.arguments_digest != operation["arguments_digest"],
+                receipt.instance_id != context.instance_id, receipt.task_id != context.task_id,
+                receipt.execution_epoch != context.execution_epoch,
+                receipt.observer_id != context.executor_id,
+            )):
+                raise PermissionDenied("operation outcome evidence does not match the claim")
+            prior = connection.execute(
+                "SELECT claim_id,proof_hash FROM operation_outcome_receipts WHERE nonce=?",
+                (receipt.nonce,),
+            ).fetchone()
+            if prior is not None:
+                if prior["claim_id"] != claim_id or prior["proof_hash"] != proof_hash:
+                    raise PermissionDenied("operation outcome receipt replayed")
+                return
+            if receipt.expires_at <= now:
+                raise PermissionDenied("operation outcome evidence expired")
+            if claim["state"] != "unknown" or operation["state"] != "unknown":
+                raise OperationConflict("operation outcome is not awaiting reconciliation")
+            connection.execute(
+                "INSERT INTO operation_outcome_receipts VALUES(?,?,?,?)",
+                (receipt.nonce, claim_id, proof_hash, now),
+            )
+            connection.execute(
+                "UPDATE execution_claims SET state=?,result_digest=? WHERE claim_id=?",
+                (receipt.outcome, receipt.result_digest, claim_id),
+            )
+            connection.execute(
+                "UPDATE pending_operations SET state=? WHERE operation_id=?",
+                (receipt.outcome, claim["operation_id"]),
+            )
+            # An outcome receipt is not evidence that all OS resources stopped.
+            self._event(connection, context.task_id, "operation_reconciled", claim["operation_id"], now)
+
     def revoke(self, context: ExecutionContext, lease_id: str) -> None:
         _nonempty(lease_id, "lease_id")
         with self._transaction() as connection:
@@ -1684,6 +1787,7 @@ class PermissionAuthority:
             if any((
                 receipt.claim_id != claim_id, receipt.instance_id != context.instance_id,
                 receipt.task_id != context.task_id, receipt.execution_epoch != context.execution_epoch,
+                receipt.observer_id != context.executor_id,
             )):
                 raise PermissionDenied("resource-stop evidence does not match the claim")
             prior = connection.execute(

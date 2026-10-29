@@ -360,7 +360,7 @@ def test_revocation_and_resource_cleanup_are_separate_facts(environment):
     receipt = ResourceStopReceipt(
         nonce="stop-nonce", claim_id=claim.claim_id, instance_id=context.instance_id,
         task_id=context.task_id, execution_epoch=context.execution_epoch,
-        observer_id="supervisor", evidence_digest="c" * 64, expires_at=clock.value + 30,
+        observer_id=context.executor_id, evidence_digest="c" * 64, expires_at=clock.value + 30,
     )
     authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(receipt))
     assert authority.resource_state(claim.claim_id) == "stopped"
@@ -397,7 +397,7 @@ def test_fenced_prepared_once_operation_waits_for_confirmed_cleanup(environment)
     receipt = ResourceStopReceipt(
         nonce="fenced-cleanup", claim_id=claim.claim_id, instance_id=context.instance_id,
         task_id=context.task_id, execution_epoch=context.execution_epoch,
-        observer_id="supervisor", evidence_digest="c" * 64, expires_at=clock.value + 30,
+        observer_id=context.executor_id, evidence_digest="c" * 64, expires_at=clock.value + 30,
     )
     authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(receipt))
     resumed = authority.prepare(newer, "once-op", "a" * 64, [scope])

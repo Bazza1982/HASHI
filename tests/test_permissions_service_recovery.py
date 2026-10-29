@@ -58,7 +58,7 @@ def test_restart_fences_old_service_and_waits_for_prepared_resource_cleanup(serv
     stop = ResourceStopReceipt(
         nonce="stop", claim_id=claim.claim_id, instance_id=context.instance_id,
         task_id=context.task_id, execution_epoch=context.execution_epoch,
-        observer_id="supervisor", evidence_digest="b" * 64, expires_at=clock.value + 30,
+        observer_id=context.executor_id, evidence_digest="b" * 64, expires_at=clock.value + 30,
     )
     new.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(stop))
     assert new.resource_state(claim.claim_id) == "stopped"
@@ -197,3 +197,45 @@ def test_restart_rejects_missing_pending_request_uniqueness(service):
         _reopen(path, issuer, clock)
     # A failed takeover must not replace the live service generation.
     assert old.evaluate(context, [scope])
+
+
+@pytest.mark.parametrize("conflicting_table", [False, True])
+def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflicting_table):
+    import sqlite3
+
+    path, old, issuer, clock, context, scope = service
+    request, reference, lease = approve(old, issuer, clock, context, [scope])
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE operation_outcome_receipts")
+        connection.execute("PRAGMA user_version=3")
+        if conflicting_table:
+            connection.execute("CREATE TABLE operation_outcome_receipts (keep TEXT)")
+            connection.execute("INSERT INTO operation_outcome_receipts VALUES('preserve')")
+    if conflicting_table:
+        with pytest.raises(sqlite3.OperationalError):
+            _reopen(path, issuer, clock)
+        assert old.evaluate(context, [scope])
+    else:
+        reopened = _reopen(path, issuer, clock)
+        assert reopened.decide(reference, approved_scopes=[scope]) == lease
+        assert reopened.decision_count(request.request_id) == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 4)
+        if conflicting_table:
+            assert connection.execute("SELECT keep FROM operation_outcome_receipts").fetchone() == ("preserve",)
+
+
+def test_restart_does_not_accept_stop_receipt_from_another_executor(service):
+    path, old, issuer, clock, context, scope = service
+    approve(old, issuer, clock, context, [scope], lifetime="once",
+            operation_id="operation", arguments_digest="a" * 64)
+    claim = old.prepare(context, "operation", "a" * 64, [scope])
+    new = _reopen(path, issuer, clock)
+    wrong = ResourceStopReceipt(
+        nonce="stop", claim_id=claim.claim_id, instance_id=context.instance_id,
+        task_id=context.task_id, execution_epoch=context.execution_epoch,
+        observer_id="other-executor", evidence_digest="b" * 64, expires_at=clock.value + 30,
+    )
+    with pytest.raises(PermissionDenied):
+        new.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(wrong))
+    assert new.resource_state(claim.claim_id) == "stopping"

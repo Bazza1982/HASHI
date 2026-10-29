@@ -281,6 +281,7 @@ def test_v2_upgrade_keeps_live_request_and_adds_safe_suggestions(environment):
     request = authority.request_access(context, [scope], purpose="keep this request")
     with sqlite3.connect(authority.path) as connection:
         connection.execute("DROP TABLE request_idempotency")
+        connection.execute("DROP TABLE operation_outcome_receipts")
         for table in ("access_requests", "access_request_versions"):
             for column in ("suggested_lifetime", "suggested_seconds", "request_key"):
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
@@ -298,7 +299,7 @@ def test_v2_upgrade_keeps_live_request_and_adds_safe_suggestions(environment):
 
 
 @pytest.mark.parametrize("conflicting_table", [False, True])
-def test_v1_to_v3_migration_is_atomic_and_preserves_existing_request(tmp_path, conflicting_table):
+def test_v1_to_v4_migration_is_atomic_and_preserves_existing_request(tmp_path, conflicting_table):
     path = tmp_path / "legacy.sqlite"
     from orchestrator.permissions.authority import _REQUEST_VERSIONS_SCHEMA, _SCHEMA
 
@@ -333,7 +334,7 @@ def test_v1_to_v3_migration_is_atomic_and_preserves_existing_request(tmp_path, c
         PermissionAuthority(path, verifier=ReceiptSource())
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (1 if conflicting_table else 3)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (1 if conflicting_table else 4)
         assert connection.execute(
             "SELECT purpose FROM access_requests WHERE request_id='legacy'"
         ).fetchone() == ("keep this reason",)

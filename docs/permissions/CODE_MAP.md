@@ -199,7 +199,7 @@
 | `orchestrator/permissions/descriptors.py` | 部分已知工具的范围和参数摘要；未知工具拒绝 | 已新增；未接入执行器，不宣称 OS 强制 |
 | 规范化与 subset | 当前由 `models.py` 唯一实现；如后续拆出则迁移而不复制 | authority、执行绑定；SCOPE |
 | `orchestrator/permissions/interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 | L1/L2 实现与消费者；单一权威 |
-| 账本与迁移 | `authority.py` 有内部事务、v1/v2→v3 申请迁移及账本级服务代次隔离；真实服务、备份恢复及资源对账待实现 | service；并发/恢复/迁移 |
+| 账本与迁移 | `authority.py` 有内部事务、v1/v2/v3→v4 迁移、账本级代次隔离和已验证回执的结果对账；真实服务及备份恢复待实现 | service；并发/恢复/迁移 |
 | 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
 | `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
 | `orchestrator/permissions/waiting.py` | 本地异步等待、权威状态重查、同 operation 与部分批准续等 | 已新增；尚未接入 HERV3，也不提供持久 continuation 或 park |

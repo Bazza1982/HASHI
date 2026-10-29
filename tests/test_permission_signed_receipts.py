@@ -10,7 +10,10 @@ import pytest
 from orchestrator.permissions.authority import (
     DecisionReceipt,
     InvalidDecision,
+    OperationOutcomeReceipt,
     PermissionAuthority,
+    PermissionDenied,
+    ResourceStopReceipt,
     RevisionConflict,
 )
 from orchestrator.permissions.models import ExecutionContext, normalize_scope, scope_digest
@@ -21,12 +24,13 @@ def _b64(data):
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _token(key, receipt, *, key_id="trusted", raw=None, domain=b"hashi-permission-decision-v1\0"):
+def _token(key, receipt, *, key_id="trusted", raw=None, domain=b"hashi-permission-decision-v1\0",
+           prefix="hpd1"):
     payload = (raw if raw is not None else json.dumps(
         asdict(receipt), sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8"))
     signature = key.sign(domain + key_id.encode("ascii") + b"\0" + payload)
-    return ".".join(("hpd1", key_id, _b64(payload), _b64(signature)))
+    return ".".join((prefix, key_id, _b64(payload), _b64(signature)))
 
 
 def _public(key):
@@ -157,3 +161,66 @@ def test_valid_signature_does_not_authorize_a_broader_scope(signed_environment, 
     with pytest.raises(InvalidDecision):
         authority.decide(reference, approved_scopes=[elsewhere])
     assert not authority.evaluate(context, [elsewhere])
+
+
+def test_supervisor_signatures_reconcile_unknown_without_approval_key_confusion(signed_environment):
+    authority, decision_key, _, context, scope, _, decision = signed_environment
+    supervisor_key = Ed25519PrivateKey.generate()
+    verifier = SignedReceiptVerifier(
+        {"trusted": _public(decision_key)}, trusted_supervisor_keys={context.executor_id: _public(supervisor_key)},
+    )
+    # The fixture substitutes the isolated test verifier before any decision.
+    authority._verifier = verifier
+    authority.decide(_token(decision_key, decision), approved_scopes=[scope])
+    claim = authority.prepare(context, "operation", "a" * 64, [scope])
+    authority.start(context, claim.claim_id)
+    recovered = PermissionAuthority(
+        authority.path, verifier=verifier, clock=lambda: 1000.0, monotonic=lambda: 1000.0,
+    )
+    outcome = OperationOutcomeReceipt(
+        nonce="outcome", claim_id=claim.claim_id, operation_id="operation",
+        arguments_digest="a" * 64, instance_id=context.instance_id, task_id=context.task_id,
+        execution_epoch=context.execution_epoch, observer_id=context.executor_id, outcome="succeeded",
+        result_digest="b" * 64, expires_at=1030.0,
+    )
+    options = {"key_id": context.executor_id, "domain": b"hashi-permission-outcome-v1\0", "prefix": "hpo1"}
+    forged = _token(decision_key, outcome, **options)
+    with pytest.raises(PermissionDenied):
+        recovered.reconcile_outcome(context, claim.claim_id, receipt_reference=forged)
+    wrong_observer = _token(supervisor_key, replace(outcome, observer_id="other"), **options)
+    assert verifier.verify_outcome(wrong_observer) is None
+    reference = _token(supervisor_key, outcome, **options)
+    assert verifier.verify_outcome(reference) == outcome
+    assert verifier.verify(reference) is None
+    recovered.reconcile_outcome(context, claim.claim_id, receipt_reference=reference)
+    assert recovered.operation_status_for_task(context, "operation").result_digest == "b" * 64
+    assert recovered.resource_state(claim.claim_id) == "stopping"
+    stop = ResourceStopReceipt(
+        nonce="stopped", claim_id=claim.claim_id, instance_id=context.instance_id,
+        task_id=context.task_id, execution_epoch=context.execution_epoch,
+        observer_id=context.executor_id, evidence_digest="c" * 64, expires_at=1030.0,
+    )
+    stop_options = {"key_id": context.executor_id, "domain": b"hashi-permission-stop-v1\0", "prefix": "hps1"}
+    with pytest.raises(PermissionDenied):
+        recovered.confirm_resource_stopped(context, claim.claim_id, receipt_reference=reference)
+    fake_stop = _token(decision_key, stop, **stop_options)
+    with pytest.raises(PermissionDenied):
+        recovered.confirm_resource_stopped(context, claim.claim_id, receipt_reference=fake_stop)
+    wrong_stop = _token(supervisor_key, replace(stop, observer_id="other"), **stop_options)
+    assert verifier.verify_stop(wrong_stop) is None
+    signed_stop = _token(supervisor_key, stop, **stop_options)
+    assert verifier.verify_stop(signed_stop) == stop
+    assert verifier.verify_outcome(signed_stop) is None
+    recovered.confirm_resource_stopped(context, claim.claim_id, receipt_reference=signed_stop)
+    assert recovered.resource_state(claim.claim_id) == "stopped"
+
+
+def test_approval_and_supervisor_must_not_share_signing_keys():
+    key = Ed25519PrivateKey.generate()
+    with pytest.raises(ValueError):
+        SignedReceiptVerifier({"approval": _public(key)}, trusted_supervisor_keys={"supervisor": _public(key)})
+    other = Ed25519PrivateKey.generate()
+    with pytest.raises(ValueError):
+        SignedReceiptVerifier(
+            {"approval": _public(key)}, trusted_supervisor_keys={"one": _public(other), "two": _public(other)},
+        )
