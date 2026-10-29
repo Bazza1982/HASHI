@@ -3,7 +3,7 @@
 Only held-handle reads and new-file creation are supported. Existing-file
 replacement, parent creation, process isolation and crash cleanup remain
 unimplemented. The authority, encrypted result key, stop signer and this
-supervisor must live in a trusted process. This class is not an L2 boundary.
+supervisor must live in a trusted process. A PAO Run fence is mandatory, but\nthe trusted integration is not installed. This class is not an L2 boundary.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from orchestrator.permissions.authority import PermissionAuthority, PermissionDe
 from orchestrator.permissions.descriptors import ToolDescriptor, describe_tool
 from orchestrator.permissions.execution_gate import SupervisedResult
 from orchestrator.permissions.models import ExecutionContext
+from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.result_store import EncryptedResultStore, ResultUnavailable
 from orchestrator.permissions.windows_file_binding import open_bound_create, open_bound_read
 
@@ -95,9 +96,10 @@ class WindowsFileSupervisor:
     def __init__(
         self, authority: PermissionAuthority, *, cwd: Path, read_roots: tuple[Path, ...],
         result_store: EncryptedResultStore, issue_stop: Callable[[ExecutionContext, str], str],
+        run_guard: PaoRunFence,
     ) -> None:
         if (not isinstance(authority, PermissionAuthority) or not isinstance(result_store, EncryptedResultStore)
-                or not callable(issue_stop)):
+                or not callable(issue_stop) or not isinstance(run_guard, PaoRunFence)):
             raise ValueError("trusted authority, result store and stop issuer are required")
         directory = Path(cwd)
         roots = tuple(Path(root) for root in read_roots)
@@ -108,6 +110,7 @@ class WindowsFileSupervisor:
         self._read_roots = tuple(root.resolve(strict=False) for root in roots)
         self._store = result_store
         self._issue_stop = issue_stop
+        self._run_guard = run_guard
 
     def supports(self, tool_name: str) -> bool:
         return os.name == "nt" and tool_name in {"file_read", "file_write"}
@@ -160,19 +163,21 @@ class WindowsFileSupervisor:
             try:
                 with binding as bound:
                     require_not_cancelled()
-                    claim = self._authority.prepare(
-                        context, operation_id, descriptor.arguments_digest, descriptor.scopes,
-                    )
-                    require_not_cancelled()
-
-                    def perform():
+                    guard = self._run_guard(context)
+                    with guard:
+                        claim = self._authority.prepare(
+                            context, operation_id, descriptor.arguments_digest, descriptor.scopes,
+                        )
                         require_not_cancelled()
-                        return effect(bound)
 
-                    value = self._authority.dispatch_guarded(
-                        context, claim.claim_id, operation_id=operation_id,
-                        arguments_digest=descriptor.arguments_digest, scopes=descriptor.scopes, effect=perform,
-                    )
+                        def perform():
+                            require_not_cancelled()
+                            return effect(bound)
+
+                        value = self._authority.dispatch_guarded(
+                            context, claim.claim_id, operation_id=operation_id,
+                            arguments_digest=descriptor.arguments_digest, scopes=descriptor.scopes, effect=perform,
+                        )
                 return claim, value
             except PermissionDenied:
                 if cancelled.is_set() and claim is not None:
@@ -211,10 +216,17 @@ class WindowsFileSupervisor:
         self._authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=reference)
         return result
 
+    def _recover_sync(
+        self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor,
+    ) -> SupervisedResult | None:
+        guard = self._run_guard(context)
+        with guard:
+            return self._store.get(context, operation_id, descriptor)
+
     async def recover(
         self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor,
     ) -> SupervisedResult:
-        result = await _settled_thread(self._store.get, context, operation_id, descriptor)
+        result = await _settled_thread(self._recover_sync, context, operation_id, descriptor)
         if result is None:
             raise ResultUnavailable("the original result is unavailable")
         return result

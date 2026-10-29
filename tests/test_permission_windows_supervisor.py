@@ -10,9 +10,11 @@ import pytest
 from orchestrator.permissions.authority import PermissionAuthority, ResourceStopReceipt
 from orchestrator.permissions.execution_gate import PermissionExecutionGate
 from orchestrator.permissions.models import ExecutionContext, normalize_scope
+from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.result_store import EncryptedResultStore
 from orchestrator.permissions.waiting import PermissionWaiter
 from orchestrator.permissions.windows_file_supervisor import WindowsFileSupervisor
+from orchestrator.session_store import SessionStore
 from tests.test_permission_execution_gate import Issuer, find_pending
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows file handles required")
@@ -20,10 +22,17 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows file han
 
 @pytest.fixture
 def environment(tmp_path):
+    pao_store = SessionStore(tmp_path / "pao" / "sessions.sqlite3", instance_id="INSTANCE")
+    session = pao_store.create_session(owner_id="owner", agent_id="agent")
+    accepted = pao_store.accept_run(
+        session_id=session["session_id"], owner_id="owner", agent_id="agent", request_id="request",
+        text="write report", source="test", idempotency_key="request",
+    )
+    fence = pao_store.mark_request_running(accepted.request_id, worker_id="INSTANCE:agent")
     context = ExecutionContext(
-        instance_id="instance", owner_id="owner", agent_id="agent", task_id="task",
-        run_id="run", session_id="session", turn_id="turn", worker_generation="worker",
-        context_generation="generation", execution_epoch="epoch", backend_id="herv3",
+        instance_id="INSTANCE", owner_id="owner", agent_id="agent", task_id="task",
+        run_id=accepted.run_id, session_id=session["session_id"], turn_id="turn", worker_generation="worker",
+        context_generation=str(session["context_generation"]), execution_epoch="epoch", backend_id="herv3",
         executor_id="test-file-supervisor", policy_revision=1,
     )
     issuer = Issuer()
@@ -45,6 +54,8 @@ def environment(tmp_path):
 
     supervisor = WindowsFileSupervisor(
         authority, cwd=tmp_path, read_roots=(tmp_path,), result_store=store, issue_stop=issue_stop,
+        run_guard=PaoRunFence(pao_store, context=context, request_id=accepted.request_id,
+                              fencing_token=fence, worker_id="INSTANCE:agent"),
     )
     return authority, issuer, context, key, store, issue_stop, supervisor
 
@@ -90,6 +101,10 @@ async def test_create_then_recover_after_service_restart_without_overwriting(env
     supervisor = WindowsFileSupervisor(
         reopened, cwd=tmp_path, read_roots=(tmp_path,),
         result_store=EncryptedResultStore(store.path, key=key), issue_stop=issue_stop,
+        run_guard=PaoRunFence(
+            SessionStore(tmp_path / "pao" / "sessions.sqlite3", instance_id="INSTANCE"),
+            context=later, request_id="request", fencing_token=1, worker_id="INSTANCE:agent",
+        ),
     )
     resumed = PermissionExecutionGate(
         reopened, PermissionWaiter(reopened), supervisor, context=later,
@@ -413,3 +428,13 @@ async def test_cancel_after_prepare_releases_once_only_after_verified_cleanup(en
         assert status.state == "waiting"
         assert authority.resource_state(claims[0]) == "stopped"
         assert authority.get_lease(lease.lease_id).status == ("revoked" if cleanup == "revoked" else "active")
+
+
+def test_supervisor_rejects_missing_or_unverified_pao_run_guard(environment, tmp_path):
+    authority, _, _, _, results, issue_stop, _ = environment
+    for guard in (None, lambda _context: None):
+        with pytest.raises(ValueError):
+            WindowsFileSupervisor(
+                authority, cwd=tmp_path, read_roots=(tmp_path,), result_store=results,
+                issue_stop=issue_stop, run_guard=guard,
+            )
