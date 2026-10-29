@@ -14,6 +14,7 @@ on:
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
       - "tests/test_permission_signed_receipts.py"
+      - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
       - "tests/test_permission_test_identity.py"
       - "tests/test_permissions_*.py"
@@ -39,6 +40,7 @@ on:
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
       - "tests/test_permission_signed_receipts.py"
+      - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
       - "tests/test_permission_test_identity.py"
       - "tests/test_permissions_*.py"
@@ -82,6 +84,7 @@ jobs:
           adapters/her_v2_provider.py tools/request_access.py
           scripts/permissions/windows_appcontainer_probe.py
           scripts/permissions/windows_test_identity.py tests/test_permission_test_identity.py
+          tests/test_permission_capabilities.py
           tests/test_permission_agent_tools.py tests/test_permission_wait.py
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
           tests/test_permission_signed_receipts.py
@@ -101,6 +104,7 @@ jobs:
           tests/test_permission_execution_gate.py
           tests/test_permission_registry.py
           tests/test_permission_test_identity.py
+          tests/test_permission_capabilities.py
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
           tests/test_permissions_authority.py
