@@ -1182,7 +1182,12 @@ class _EvidenceRecordingToolRegistry:
                     "A permission-controlled operation did not complete.",
                     retryable=False,
                     code="PERMISSION_CONTROL_INCOMPLETE",
-                    side_effects_possible=result.state in {"unknown", "prepared", "started"},
+                    # Without a complete authoritative result, an existing
+                    # operation ID cannot prove that an earlier attempt had no
+                    # side effect, even if this attempt did not start one.
+                    side_effects_possible=bool(result.operation_id) or result.state in {
+                        "unknown", "prepared", "started", "result_unavailable",
+                    },
                     details={
                         "permission_state": result.state,
                         "permission_operation_id": result.operation_id,

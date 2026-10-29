@@ -27,6 +27,10 @@ class WaitAuthority(Protocol):
 
     def operation_status_for_task(self, context: ExecutionContext, operation_id: str) -> OperationStatus: ...
 
+    def find_operation_for_task(
+        self, context: ExecutionContext, operation_id: str
+    ) -> OperationStatus | None: ...
+
     def get_request(self, context: ExecutionContext, request_id: str) -> AccessRequest: ...
 
     def evaluate(

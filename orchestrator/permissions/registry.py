@@ -139,6 +139,9 @@ class ManagedToolRegistry(ToolRegistry):
         result = ToolResult(
             tool_call_id=call_id, output=outcome.payload,
             is_error=outcome.state == "failed",
-            details={"control_disposition": "allowed", "permission_operation": operation_id},
+            details={
+                "control_disposition": "allowed", "permission_operation": operation_id,
+                "permission_replayed": outcome.replayed,
+            },
         )
         return self._finish_result(tool_name, arguments, result, started)

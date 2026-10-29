@@ -186,6 +186,7 @@ class OperationStatus:
     scope_digest: str
     execution_epoch: str
     result_digest: str | None
+    resource_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2246,6 +2247,34 @@ class PermissionAuthority:
             binding = self._binding(connection, context, active=False)
             return ExecutionStatus(task["state"], binding["state"])
 
+    def find_operation_for_task(
+        self, context: ExecutionContext, operation_id: str
+    ) -> OperationStatus | None:
+        """Read an operation for an active execution, including a fenced predecessor."""
+        _nonempty(operation_id, "operation_id")
+        with self._transaction() as connection:
+            self._now(connection)
+            self._context(connection, context)
+            row = connection.execute(
+                "SELECT p.*,(SELECT c.result_digest FROM execution_claims c "
+                "WHERE c.operation_id=p.operation_id AND c.state=p.state "
+                "ORDER BY c.rowid DESC LIMIT 1) AS result_digest,"
+                "(SELECT r.state FROM execution_claims c JOIN execution_resources r ON r.claim_id=c.claim_id "
+                "WHERE c.operation_id=p.operation_id AND c.state=p.state "
+                "ORDER BY c.rowid DESC LIMIT 1) AS resource_state "
+                "FROM pending_operations p WHERE p.operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["task_id"] != context.task_id or row["run_id"] != context.run_id:
+                raise OperationConflict("operation belongs to another task or run")
+            self._require_prior_execution_fenced(connection, row, context)
+            return OperationStatus(
+                row["state"], row["arguments_digest"], row["scope_digest"],
+                row["execution_epoch"], row["result_digest"], row["resource_state"],
+            )
+
     def operation_status_for_task(
         self, context: ExecutionContext, operation_id: str
     ) -> OperationStatus:
@@ -2256,7 +2285,10 @@ class PermissionAuthority:
             row = connection.execute(
                 "SELECT p.state,p.arguments_digest,p.scope_digest,p.execution_epoch,"
                 "(SELECT c.result_digest FROM execution_claims c WHERE c.operation_id=p.operation_id "
-                "AND c.state=p.state ORDER BY c.rowid DESC LIMIT 1) AS result_digest "
+                "AND c.state=p.state ORDER BY c.rowid DESC LIMIT 1) AS result_digest,"
+                "(SELECT r.state FROM execution_claims c JOIN execution_resources r ON r.claim_id=c.claim_id "
+                "WHERE c.operation_id=p.operation_id AND c.state=p.state "
+                "ORDER BY c.rowid DESC LIMIT 1) AS resource_state "
                 "FROM pending_operations p WHERE p.operation_id=? AND p.task_id=? AND p.run_id=?",
                 (operation_id, context.task_id, context.run_id),
             ).fetchone()
@@ -2264,7 +2296,7 @@ class PermissionAuthority:
                 raise PermissionDenied("operation not found for this task and run")
             return OperationStatus(
                 row["state"], row["arguments_digest"], row["scope_digest"],
-                row["execution_epoch"], row["result_digest"],
+                row["execution_epoch"], row["result_digest"], row["resource_state"],
             )
 
     def get_lease_for_task(

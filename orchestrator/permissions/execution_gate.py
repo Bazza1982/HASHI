@@ -37,6 +37,7 @@ class GateResult:
     operation_id: str
     request_id: str = ""
     payload: Any = None
+    replayed: bool = False
 
 
 class Supervisor(Protocol):
@@ -47,6 +48,10 @@ class Supervisor(Protocol):
     async def execute(
         self, context: ExecutionContext, operation_id: str,
         descriptor: ToolDescriptor, arguments: dict[str, Any],
+    ) -> SupervisedResult: ...
+
+    async def recover(
+        self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor,
     ) -> SupervisedResult: ...
 
 
@@ -64,7 +69,10 @@ class PermissionExecutionGate:
         read_roots: tuple[Path, ...],
         requestable_scopes: tuple[Scope, ...],
     ) -> None:
-        methods = ("execution_status", "operation_status_for_task", "get_request", "evaluate", "request_access")
+        methods = (
+            "execution_status", "operation_status_for_task", "find_operation_for_task",
+            "get_request", "evaluate", "request_access",
+        )
         if not isinstance(context, ExecutionContext) or not all(
             callable(getattr(authority, name, None)) for name in methods
         ):
@@ -115,24 +123,53 @@ class PermissionExecutionGate:
                 raise ValueError("arguments changed during admission")
         except (UnknownTool, TypeError, ValueError, UnicodeError):
             return GateResult("unavailable", operation_id)
-        try:
-            supported = self._supervisor.supports(tool_name)
-        except Exception:
+        if not descriptor.scopes:
             return GateResult("unavailable", operation_id)
-        if not descriptor.scopes or supported is not True:
-            return GateResult("unavailable", operation_id)
-        if not all(
-            any(scope_covers(parent, required) for parent in self._requestable)
-            for required in descriptor.scopes
-        ):
-            return GateResult("unavailable", operation_id)
-
         try:
             status = await asyncio.to_thread(self._authority.execution_status, self._context)
             if status.task_state != "active":
                 return GateResult(status.task_state, operation_id)
             if status.binding_state != "active":
                 return GateResult("fenced", operation_id)
+            existing = await asyncio.to_thread(
+                self._authority.find_operation_for_task, self._context, operation_id,
+            )
+        except OperationConflict:
+            return GateResult("conflict", operation_id)
+        except Exception:
+            return GateResult("unavailable", operation_id)
+
+        if existing is not None:
+            if (existing.arguments_digest != descriptor.arguments_digest
+                    or existing.scope_digest != scope_digest(descriptor.scopes)):
+                return GateResult("conflict", operation_id)
+            if existing.state in {"prepared", "started", "unknown"}:
+                return GateResult("unknown", operation_id)
+        try:
+            supported = self._supervisor.supports(tool_name) is True
+        except Exception:
+            supported = False
+        covered_by_policy = bool(descriptor.scopes) and all(
+            any(scope_covers(parent, required) for parent in self._requestable)
+            for required in descriptor.scopes
+        )
+        if existing is not None:
+            if existing.state in {"succeeded", "failed"}:
+                if not supported or not covered_by_policy or existing.resource_state != "stopped":
+                    return GateResult("result_unavailable", operation_id)
+                recover = getattr(self._supervisor, "recover", None)
+                if not callable(recover):
+                    return GateResult("result_unavailable", operation_id)
+                try:
+                    receipt = await recover(self._context, operation_id, descriptor)
+                except Exception:
+                    return GateResult("result_unavailable", operation_id)
+                return await self._verified_receipt(operation_id, descriptor, receipt, replay=True)
+            if existing.state != "waiting":
+                return GateResult("permission_changed", operation_id)
+        if not supported or not covered_by_policy:
+            return GateResult("unavailable", operation_id)
+        try:
             covered = await asyncio.to_thread(
                 self._authority.evaluate, self._context, descriptor.scopes, operation_id=operation_id,
             )
@@ -192,29 +229,37 @@ class PermissionExecutionGate:
             # A runner failure can follow a side effect. The caller must not
             # replace the operation ID and retry without reconciliation.
             return GateResult("unknown", operation_id, request_id)
+        return await self._verified_receipt(operation_id, descriptor, receipt, request_id=request_id)
+
+    async def _verified_receipt(
+        self, operation_id: str, descriptor: ToolDescriptor, receipt: object, *,
+        request_id: str = "", replay: bool = False,
+    ) -> GateResult:
+        failure = "result_unavailable" if replay else "unknown"
         if not isinstance(receipt, SupervisedResult):
-            return GateResult("unknown", operation_id, request_id)
+            return GateResult(failure, operation_id, request_id)
         if (receipt.operation_id != operation_id or receipt.arguments_digest != descriptor.arguments_digest
                 or receipt.outcome not in {"succeeded", "failed", "unknown"}):
-            return GateResult("unknown", operation_id, request_id)
+            return GateResult(failure, operation_id, request_id)
         try:
             stored = await asyncio.to_thread(
-                self._authority.operation_status_for_task, self._context, operation_id
+                self._authority.find_operation_for_task, self._context, operation_id
             )
         except Exception:
-            return GateResult("unknown", operation_id, request_id)
-        if (stored.arguments_digest != descriptor.arguments_digest
+            return GateResult(failure, operation_id, request_id)
+        if (stored is None or stored.arguments_digest != descriptor.arguments_digest
                 or stored.scope_digest != scope_digest(descriptor.scopes)
-                or stored.state != receipt.outcome or stored.result_digest != receipt.result_digest):
-            return GateResult("unknown", operation_id, request_id)
+                or stored.state != receipt.outcome or stored.result_digest != receipt.result_digest
+                or (replay and stored.resource_state != "stopped")):
+            return GateResult(failure, operation_id, request_id)
         if receipt.outcome == "unknown":
             return GateResult("unknown", operation_id, request_id)
         try:
             if not isinstance(receipt.payload, str):
-                return GateResult("unknown", operation_id, request_id)
+                return GateResult(failure, operation_id, request_id)
             payload_digest = sha256(receipt.payload.encode("utf-8")).hexdigest()
         except UnicodeError:
-            return GateResult("unknown", operation_id, request_id)
+            return GateResult(failure, operation_id, request_id)
         if payload_digest != receipt.result_digest:
-            return GateResult("unknown", operation_id, request_id)
-        return GateResult(receipt.outcome, operation_id, request_id, receipt.payload)
+            return GateResult(failure, operation_id, request_id)
+        return GateResult(receipt.outcome, operation_id, request_id, receipt.payload, replayed=replay)

@@ -138,13 +138,13 @@ async def test_same_provider_call_cannot_repeat_or_replace_completed_write(envir
     changed = await registry.execute(
         "file_write", {"path": "once.txt", "content": "replacement"}, "same-call",
     )
-    assert same.state == "conflict"
+    assert same.state == "result_unavailable"
     assert changed.state == "conflict"
     assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "original"
     assert len(authority.list_requests(context)) == 1
 
 
-@pytest.mark.parametrize("control_state", ["unavailable", "unknown"])
+@pytest.mark.parametrize("control_state", ["unavailable", "unknown", "result_unavailable", "conflict"])
 @pytest.mark.asyncio
 async def test_evidence_wrapper_never_records_incomplete_permission_control_as_success(
     environment, monkeypatch, control_state,
@@ -169,7 +169,9 @@ async def test_evidence_wrapper_never_records_incomplete_permission_control_as_s
         await wrapper.execute("file_write", {"path": "file", "content": "data"}, "call")
     assert caught.value.retryable is False
     assert caught.value.code == "PERMISSION_CONTROL_INCOMPLETE"
-    assert caught.value.side_effects_possible is (control_state == "unknown")
+    # The authority cannot exclude a prior side effect merely from an incomplete
+    # control state for a previously assigned operation ID.
+    assert caught.value.side_effects_possible is True
     assert wrapper.receipts[-1].status is ToolReceiptStatus.FAILED
     assert wrapper.receipts[-1].completed is False
 
@@ -230,3 +232,36 @@ async def test_herv3_direct_turn_waits_for_approved_tool_and_finishes_once(envir
     assert (tmp_path / "her-result.txt").read_text(encoding="utf-8") == "hello"
     assert len(provider.receipts) == 1
     assert provider.receipts[0].status is ToolReceiptStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_herv3_receipt_marks_recovered_output_without_repeating_file_effect(environment, tmp_path):
+    from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
+    from orchestrator.her_v2.models import Effort, Stage, StageRequest
+    from tests.test_permission_execution_gate import RecoverableFileSupervisor
+
+    authority, issuer, context, _, registry = environment
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    registry._permission_gate._supervisor = supervisor
+    invocation = StageRequest(
+        turn_id="turn", request_ref="request", stage=Stage.EXECUTION, role="primary",
+        attempt=1, goal="execute", classification=None, effort=Effort.HIGH, allow_tools=True,
+    )
+    wrapper = _EvidenceRecordingToolRegistry(registry, invocation)
+    arguments = {"path": "once.txt", "content": "created"}
+    task = asyncio.create_task(wrapper.execute("file_write", arguments, "provider-call"))
+    request = await find_pending(authority, context)
+    operation = authority.operation_status_for_task(context, request.operation_id)
+    issuer.approve(authority, context, request, operation.arguments_digest)
+    registry._permission_waiter.notify()
+    first = await asyncio.wait_for(task, 1)
+    assert first.output.startswith("written")
+    assert wrapper.receipts[-1].details["permission_replayed"] is False
+
+    (tmp_path / "once.txt").write_text("later change", encoding="utf-8")
+    second = await wrapper.execute("file_write", arguments, "provider-call")
+    assert second.output.startswith("written")
+    assert wrapper.receipts[-1].details["permission_replayed"] is True
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
+    assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "later change"
+    assert authority.decision_count(request.request_id) == 1

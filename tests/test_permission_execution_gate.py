@@ -5,7 +5,7 @@ from hashlib import sha256
 
 import pytest
 
-from orchestrator.permissions.authority import DecisionReceipt, PermissionAuthority, PermissionDenied
+from orchestrator.permissions.authority import DecisionReceipt, PermissionAuthority, PermissionDenied, ResourceStopReceipt
 from orchestrator.permissions.execution_gate import (
     PermissionExecutionGate,
     SupervisedResult,
@@ -17,9 +17,23 @@ from orchestrator.permissions.waiting import PermissionWaiter
 class Issuer:
     def __init__(self):
         self.proofs = {}
+        self.stop_proofs = {}
 
     def verify(self, reference):
         return self.proofs.get(reference)
+
+    def verify_stop(self, reference):
+        return self.stop_proofs.get(reference)
+
+    def confirm_stopped(self, authority, context, claim_id):
+        reference = "stop-" + claim_id
+        self.stop_proofs[reference] = ResourceStopReceipt(
+            nonce=reference, claim_id=claim_id, instance_id=context.instance_id,
+            task_id=context.task_id, execution_epoch=context.execution_epoch,
+            observer_id=context.executor_id, evidence_digest=sha256(claim_id.encode()).hexdigest(),
+            expires_at=1_030.0,
+        )
+        authority.confirm_resource_stopped(context, claim_id, receipt_reference=reference)
 
     def approve(self, authority, context, request, arguments_digest):
         proof = DecisionReceipt(
@@ -57,6 +71,7 @@ class TestFileSupervisor:
             claim = self.authority.prepare(
                 context, operation_id, descriptor.arguments_digest, descriptor.scopes,
             )
+            self.last_claim = claim.claim_id
             self.authority.start(context, claim.claim_id)
             target = self.root / arguments["path"]
             target.write_text(arguments["content"], encoding="utf-8")
@@ -169,7 +184,7 @@ async def test_runner_error_after_start_is_unknown_and_cannot_repeat(environment
     assert authority.operation_state("operation") == "started"
     assert (tmp_path / "uncertain.txt").read_text(encoding="utf-8") == "written"
     retry = await gate.execute("operation", "file_write", arguments, reason="write")
-    assert retry.state == "conflict"
+    assert retry.state == "unknown"
     assert len(calls) == 1
 
 
@@ -231,3 +246,238 @@ async def test_runner_cannot_replace_payload_after_the_result_was_recorded(envir
     result = await asyncio.wait_for(task, 1)
     assert result.state == "unknown"
     assert result.payload is None
+
+
+class RecoverableFileSupervisor(TestFileSupervisor):
+    """Test-only runner with a separate, persisted result copy."""
+
+    def __init__(self, authority, root, *, confirm_stop=True):
+        super().__init__(authority, root)
+        self.result_path = root / "test-supervisor-result.json"
+        self.execute_calls = 0
+        self.recover_calls = 0
+        self.confirm_stop = confirm_stop
+
+    async def execute(self, context, operation_id, descriptor, arguments):
+        import json
+        from dataclasses import asdict
+
+        self.execute_calls += 1
+        receipt = await super().execute(context, operation_id, descriptor, arguments)
+        self.result_path.write_text(json.dumps(asdict(receipt)), encoding="utf-8")
+        if self.confirm_stop:
+            self.authority._verifier.confirm_stopped(self.authority, context, self.last_claim)
+        return receipt
+
+    async def recover(self, context, operation_id, descriptor):
+        import json
+
+        self.recover_calls += 1
+        return SupervisedResult(**json.loads(self.result_path.read_text(encoding="utf-8")))
+
+
+async def _complete_recoverable_operation(environment, tmp_path, *, confirm_stop=True):
+    authority, issuer, context, waiter, _, gate = environment
+    supervisor = RecoverableFileSupervisor(authority, tmp_path, confirm_stop=confirm_stop)
+    gate._supervisor = supervisor
+    arguments = {"path": "recovery.txt", "content": "created once"}
+    task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
+    request = await find_pending(authority, context)
+    operation = authority.operation_status_for_task(context, "operation")
+    issuer.approve(authority, context, request, operation.arguments_digest)
+    waiter.notify()
+    assert (await asyncio.wait_for(task, 1)).state == "succeeded"
+    return authority, issuer, context, gate, supervisor, arguments, request
+
+
+@pytest.mark.asyncio
+async def test_completed_operation_replays_verified_result_after_worker_change(environment, tmp_path):
+    authority, issuer, context, _, supervisor, arguments, request = await _complete_recoverable_operation(
+        environment, tmp_path
+    )
+    # Preserve a visible later change: a replay must never write this path again.
+    (tmp_path / "recovery.txt").write_text("changed later", encoding="utf-8")
+    reopened = PermissionAuthority(authority.path, verifier=issuer, clock=lambda: 1_000.0, monotonic=lambda: 1_000.0)
+    later = replace(context, execution_epoch="new-epoch", worker_generation="new-worker")
+    reopened.bind_execution(later)
+    recovered_supervisor = RecoverableFileSupervisor(reopened, tmp_path)
+    maximum = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+    gate = PermissionExecutionGate(
+        reopened, PermissionWaiter(reopened), recovered_supervisor, context=later,
+        cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
+    )
+    result = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert result.state == "succeeded" and result.payload == "written"
+    assert recovered_supervisor.recover_calls == 1 and recovered_supervisor.execute_calls == 0
+    assert (tmp_path / "recovery.txt").read_text(encoding="utf-8") == "changed later"
+    assert reopened.decision_count(request.request_id) == 1
+    changed = await gate.execute(
+        "operation", "file_write", {"path": "recovery.txt", "content": "different"}, reason="report"
+    )
+    assert changed.state == "conflict"
+    assert recovered_supervisor.recover_calls == 1 and recovered_supervisor.execute_calls == 0
+    assert supervisor.execute_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_new_worker_cannot_replay_until_the_old_execution_is_fenced(environment, tmp_path):
+    authority, _, context, _, _, arguments, _ = await _complete_recoverable_operation(environment, tmp_path)
+    later = replace(context, execution_epoch="new-epoch", worker_generation="new-worker")
+    authority.bind_execution(later)
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    maximum = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+    gate = PermissionExecutionGate(
+        authority, PermissionWaiter(authority), supervisor, context=later,
+        cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
+    )
+    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    assert supervisor.recover_calls == 0 and supervisor.execute_calls == 0
+    authority.fence_execution(context)
+    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "succeeded"
+    assert supervisor.recover_calls == 1 and supervisor.execute_calls == 0
+
+
+@pytest.mark.parametrize("damage", ["missing", "payload", "operation", "arguments", "digest", "outcome"])
+@pytest.mark.asyncio
+async def test_missing_or_tampered_result_never_reexecutes(environment, tmp_path, damage):
+    import json
+
+    _, _, _, gate, supervisor, arguments, _ = await _complete_recoverable_operation(environment, tmp_path)
+    if damage == "missing":
+        supervisor.result_path.unlink()
+    else:
+        stored = json.loads(supervisor.result_path.read_text(encoding="utf-8"))
+        key = {
+            "payload": "payload", "operation": "operation_id", "arguments": "arguments_digest",
+            "digest": "result_digest", "outcome": "outcome",
+        }[damage]
+        stored[key] = "failed" if damage == "outcome" else "altered"
+        supervisor.result_path.write_text(json.dumps(stored), encoding="utf-8")
+    result = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert result.state == "result_unavailable"
+    assert result.payload is None and supervisor.execute_calls == 1 and supervisor.recover_calls == 1
+    assert (tmp_path / "recovery.txt").read_text(encoding="utf-8") == "created once"
+
+
+@pytest.mark.asyncio
+async def test_started_operation_with_lost_result_never_runs_again(environment, tmp_path, monkeypatch):
+    authority, issuer, context, waiter, _, gate = environment
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    gate._supervisor = supervisor
+
+    def lost_finish(*args, **kwargs):
+        raise OSError("result storage unavailable")
+
+    monkeypatch.setattr(authority, "finish", lost_finish)
+    arguments = {"path": "uncertain.txt", "content": "written once"}
+    task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
+    request = await find_pending(authority, context)
+    operation = authority.operation_status_for_task(context, "operation")
+    issuer.approve(authority, context, request, operation.arguments_digest)
+    waiter.notify()
+    assert (await asyncio.wait_for(task, 1)).state == "unknown"
+    monkeypatch.setattr(supervisor, "supports", lambda _name: False)
+    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "unknown"
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 0
+    assert (tmp_path / "uncertain.txt").read_text(encoding="utf-8") == "written once"
+
+
+@pytest.mark.asyncio
+async def test_completed_operation_stays_nonretryable_when_supervisor_is_unavailable(environment, tmp_path, monkeypatch):
+    _, _, _, gate, supervisor, arguments, _ = await _complete_recoverable_operation(environment, tmp_path)
+    monkeypatch.setattr(supervisor, "supports", lambda _name: False)
+    result = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert result.state == "result_unavailable"
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stopped_task_cannot_receive_a_result_that_is_still_loading(environment, tmp_path, monkeypatch):
+    authority, _, context, gate, supervisor, arguments, _ = await _complete_recoverable_operation(
+        environment, tmp_path
+    )
+    loading, release = asyncio.Event(), asyncio.Event()
+    recover = supervisor.recover
+
+    async def slow_recovery(*args):
+        loading.set()
+        await release.wait()
+        return await recover(*args)
+
+    monkeypatch.setattr(supervisor, "recover", slow_recovery)
+    task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
+    await asyncio.wait_for(loading.wait(), 1)
+    authority.end_task(context, outcome="cancelled")
+    release.set()
+    result = await asyncio.wait_for(task, 1)
+    assert result.state == "result_unavailable" and result.payload is None
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_another_run_cannot_reuse_the_original_operation_id(environment, tmp_path):
+    authority, _, context, _, _, arguments, _ = await _complete_recoverable_operation(environment, tmp_path)
+    later = replace(context, run_id="other-run", execution_epoch="new-epoch", worker_generation="new-worker")
+    authority.fence_execution(context)
+    authority.bind_execution(later)
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    maximum = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+    gate = PermissionExecutionGate(
+        authority, PermissionWaiter(authority), supervisor, context=later,
+        cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
+    )
+    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    assert supervisor.execute_calls == 0 and supervisor.recover_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_completed_failure_replays_its_original_result_without_executing_again(environment, tmp_path, monkeypatch):
+    import json
+    from dataclasses import asdict
+
+    authority, issuer, context, waiter, _, gate = environment
+    supervisor = RecoverableFileSupervisor(authority, tmp_path)
+    gate._supervisor = supervisor
+
+    async def failed_execution(ctx, operation_id, descriptor, arguments):
+        supervisor.execute_calls += 1
+        claim = authority.prepare(ctx, operation_id, descriptor.arguments_digest, descriptor.scopes)
+        authority.start(ctx, claim.claim_id)
+        payload = "target already exists"
+        digest = sha256(payload.encode("utf-8")).hexdigest()
+        authority.finish(ctx, claim.claim_id, outcome="failed", result_digest=digest)
+        receipt = SupervisedResult(operation_id, descriptor.arguments_digest, "failed", digest, payload)
+        supervisor.result_path.write_text(json.dumps(asdict(receipt)), encoding="utf-8")
+        issuer.confirm_stopped(authority, ctx, claim.claim_id)
+        return receipt
+
+    monkeypatch.setattr(supervisor, "execute", failed_execution)
+    arguments = {"path": "already.txt", "content": "do not write"}
+    task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
+    request = await find_pending(authority, context)
+    operation = authority.operation_status_for_task(context, "operation")
+    issuer.approve(authority, context, request, operation.arguments_digest)
+    waiter.notify()
+    first = await asyncio.wait_for(task, 1)
+    assert first.state == "failed" and first.payload == "target already exists" and not first.replayed
+    again = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert again.state == "failed" and again.payload == first.payload and again.replayed
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
+    assert not (tmp_path / "already.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_completed_result_waits_for_verified_resource_cleanup(environment, tmp_path):
+    authority, issuer, context, gate, supervisor, arguments, _ = await _complete_recoverable_operation(
+        environment, tmp_path, confirm_stop=False
+    )
+    events = authority.pending_events(context, consumer_id="cleanup-check")
+    claim = next(event.reference_id for event in events if event.event == "claim_prepared")
+    assert authority.resource_state(claim) == "unknown"
+    result = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert result.state == "result_unavailable" and result.payload is None
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 0
+    issuer.confirm_stopped(authority, context, claim)
+    result = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert result.state == "succeeded" and result.replayed
+    assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
