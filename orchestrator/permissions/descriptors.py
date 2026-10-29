@@ -170,8 +170,14 @@ def describe_tool(
         else:
             actions = ["send", "upload"]
         scope = _network_scope(raw_url, tuple(actions), cwd)
+        scopes = [scope]
+        if tool_name == "http_request" and arguments.get("credential") is not None:
+            name = arguments["credential"]
+            if not isinstance(name, str) or not name or len(name) > 64:
+                raise ValueError("a named installed credential capability is required")
+            scopes.append(normalize_scope("capability", "credential:" + name, ("use",), cwd=cwd))
         return ToolDescriptor(
-            tool_name, (scope,), digest, "partial",
+            tool_name, canonical_scope_set(scopes), digest, "partial",
             ("Redirects, DNS changes and actual connections need execution-time checks.",),
         )
 

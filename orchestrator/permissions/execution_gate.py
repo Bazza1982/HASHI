@@ -152,6 +152,9 @@ class PermissionExecutionGate:
                 return GateResult("unknown", operation_id)
         try:
             supported = self._supervisor.supports(tool_name) is True
+            validate_plan = getattr(self._supervisor, "validate_plan", None)
+            if supported and callable(validate_plan):
+                supported = validate_plan(descriptor, frozen_arguments) is True
         except Exception:
             return GateResult("unavailable", operation_id)
         covered_by_policy = bool(descriptor.scopes) and all(

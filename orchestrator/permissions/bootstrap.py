@@ -12,7 +12,7 @@ async def bind_agent(runtime):
     if settings is None or settings.requested_level is PermissionLevel.L0:
         return None
     from orchestrator import runtime_session
-    from orchestrator.flexible_backend_registry import is_cli_backend
+    from orchestrator.flexible_backend_registry import canonical_backend_engine
 
     try:
         pao, _ = service_clients(runtime.global_config)
@@ -30,7 +30,7 @@ async def bind_agent(runtime):
     except Exception:
         # A user-selected third-party CLI remains honestly unmanaged. Managed
         # native paths stay closed; no exception may trigger their L0 fallback.
-        if is_cli_backend(runtime.config.active_backend):
+        if canonical_backend_engine(runtime.config.active_backend) != "her-v2":
             return None
         raise
     runtime.permission_service_client = service

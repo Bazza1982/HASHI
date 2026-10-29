@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict
-import base64
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -16,7 +15,9 @@ import sqlite3
 
 from orchestrator.permissions.descriptors import ToolDescriptor, _arguments_digest
 from orchestrator.permissions.models import ExecutionContext, Scope
-from orchestrator.permissions.windows_file_supervisor import _render_read
+from orchestrator.permissions.file_operations import FILE_TOOLS
+from orchestrator.permissions.network_worker import NETWORK_TOOLS
+from orchestrator.permissions.file_results import render_helper_result
 from orchestrator.permissions.windows_process import ProcessObservation, observe_original_process_stopped
 from orchestrator.permissions.windows_jobs import WindowsJob
 from orchestrator.permissions.windows_job_security import private_job_name
@@ -254,9 +255,10 @@ class PhysicalFileJournal:
             raw["tool_name"], tuple(Scope(**scope) for scope in raw["scopes"]),
             raw["arguments_digest"], raw["coverage"], tuple(raw["limitations"]),
         )
-        if (descriptor.tool_name not in {"file_read", "file_write"}
+        if (descriptor.tool_name not in FILE_TOOLS | NETWORK_TOOLS
                 or _arguments_digest(descriptor.tool_name, value["arguments"], Path(value["cwd"]))
-                != descriptor.arguments_digest or len(descriptor.scopes) != 1):
+                != descriptor.arguments_digest or not descriptor.scopes
+                or (descriptor.tool_name not in ({"file_search"} | NETWORK_TOOLS) and len(descriptor.scopes) != 1)):
             raise ValueError("physical helper arguments changed")
         claim = self.authority.resource_claim_for_operation(
             context, value["operation_id"], descriptor.arguments_digest, claim_id=value["claim_id"],
@@ -284,16 +286,9 @@ class PhysicalFileJournal:
             if result_path.stat().st_size > 24 * 1024 * 1024:
                 raise ValueError("physical helper result is oversized")
             candidate = json.loads(result_path.read_bytes())
-            if isinstance(candidate, dict) and set(candidate) == {"outcome", "data"} and candidate["outcome"] == "succeeded":
-                if descriptor.tool_name == "file_read":
-                    args = value["arguments"]
-                    payload = _render_read(
-                        descriptor.scopes[0].resource, base64.b64decode(candidate["data"], validate=True),
-                        max(1, args.get("offset", 1)), max(1, min(500, args.get("limit", 500))),
-                    )
-                else:
-                    payload = f"OK: wrote {len(value['arguments']['content'])} characters to {descriptor.scopes[0].resource}"
-                result = self.results.put(context, value["operation_id"], descriptor, outcome="succeeded", payload=payload)
+            if isinstance(candidate, dict) and set(candidate) == {"outcome", "data"} and candidate["outcome"] in {"succeeded", "failed"}:
+                payload = render_helper_result(descriptor, value["arguments"], candidate)
+                result = self.results.put(context, value["operation_id"], descriptor, outcome=candidate["outcome"], payload=payload)
         if result is not None:
             if status.state == "unknown":
                 self.authority.reconcile_outcome(
@@ -302,7 +297,7 @@ class PhysicalFileJournal:
                 )
             elif status.state == "started":
                 self.authority.finish(context, claim.claim_id, outcome=result.outcome, result_digest=result.result_digest)
-            elif status.state != "succeeded" or status.result_digest != result.result_digest:
+            elif status.state != result.outcome or status.result_digest != result.result_digest:
                 raise ValueError("physical result conflicts with the permission ledger")
         elif status.state == "started":
             self.authority.finish(context, claim.claim_id, outcome="unknown", result_digest=None)

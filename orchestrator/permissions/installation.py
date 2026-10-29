@@ -58,8 +58,8 @@ def _scopes(values, cwd):
 
 
 class InstancePolicies:
-    def __init__(self, manager, installation, *, private_path):
-        self.manager, self.installation = manager, installation
+    def __init__(self, manager, installation, *, private_path, run_store):
+        self.manager, self.installation, self.store = manager, installation, run_store
         self._private_path = private_path
         self.config = ConfigAdmin(type("ConfigPaths", (), {"config_path": manager.config_path})())
         self._frozen, self._current = {}, {}
@@ -94,7 +94,7 @@ class InstancePolicies:
             "requestable_scopes": [asdict(scope) for scope in _scopes(declared["requestable_scopes"], cwd)],
             "installation_revision": self.installation.revision,
             "protected_roots": [str(path) for path in self.protected_policy(global_config).policy.protected_write_paths],
-            "native_tools": ["file_read", "file_write"],
+            "native_tools": list(InstalledExecutorFactory.native_tool_names()),
         }
 
     def settings(self, agent_id):
@@ -102,7 +102,7 @@ class InstancePolicies:
 
     def __call__(self, agent_id, owner_id, session_id):
         del session_id
-        global_config, agents, _ = self.manager.load()
+        global_config, agents, secrets = self.manager.load()
         matches = [agent for agent in agents if agent.name == agent_id]
         declared = self.installation["agents"].get(agent_id)
         if (len(matches) != 1 or not isinstance(declared, dict) or declared.get("owner_id") != owner_id):
@@ -111,34 +111,43 @@ class InstancePolicies:
         snapshot = self.config.read_agent_permission_settings(agent_id)
         if snapshot.settings.requested_level is PermissionLevel.L0:
             raise PermissionDenied("this Agent has left managed execution")
-        extra = dict(agent.extra or {})
-        state = workzone.normalize_workzone_state(extra.get("workzone_state"))
-        if not state["slots"] and extra.get("workzone_dir"):
-            state = workzone.normalize_workzone_state({"slots": [
-                {"slot_id": "main", "path": extra["workzone_dir"], "enabled": True},
-            ]})
+        # Agent workzone truth belongs to PAO's owner-scoped profile. Config
+        # extras are only a backend projection and may be stale after a change.
+        state = workzone.normalize_workzone_state(self.store.get_agent_workzone_set(
+            owner_id=owner_id, agent_id=agent_id,
+        ))
         cwd = workzone.primary_workzone_path(state) or agent.workspace_dir
         roots = workzone.access_roots_for_workzones(agent.resolve_access_root(), state,
                                                    workspace_dir=agent.workspace_dir)
-        backend = next((raw for raw in agent.allowed_backends if raw.get("engine") == "her-v2"), {})
-        tools = dict(backend.get("tools") or extra.get("tools") or {})
+        from orchestrator.flexible_backend_manager import FlexibleBackendManager
+
+        backend_owner = FlexibleBackendManager(agent, global_config, secrets)
+        backend = backend_owner._select_backend_cfg("her-v2")
+        if backend is None:
+            raise PermissionDenied("the Agent has no configured HERV3 execution path")
+        tools = dict(backend_owner._resolve_tools_config(backend) or {})
         allowed = tools.pop("allowed", [])
         if not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed):
             raise PermissionDenied("installed tool policy is invalid")
         baseline = _scopes(declared["baseline_scopes"], Path(cwd))
         requestable = _scopes(declared["requestable_scopes"], Path(cwd))
         protected = self.protected_policy(global_config)
+        from orchestrator.permissions.network_worker import build_options
+
+        network = build_options(declared.get("network", {}), secrets)
         digest = sha256(json.dumps({
             "config_revision": snapshot.revision, "base_revision": self.installation.revision,
             "cwd": str(cwd), "roots": [str(root) for root in roots],
             "settings": asdict(snapshot.settings), "tools": allowed, "tool_options": tools,
-            "protected": asdict(protected.policy),
+            "protected": asdict(protected.policy), "network_digest": sha256(json.dumps(network, sort_keys=True).encode()).hexdigest(),
         }, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         revision = int(digest[:15], 16) + settings_revision(snapshot.settings)
         self._current[agent_id] = (revision, baseline, requestable, digest, protected)
         return ManagedRunPolicy(
             snapshot.settings, revision, Path(cwd), requestable, tuple(allowed),
             {"access_roots": list(roots), "tool_options": tools,
+             "protected_read_paths": [str(path) for path in protected.policy.protected_read_paths],
+             "network_options": network,
              "audit_context": {"agent_name": agent_id, "owner_id": owner_id,
                                "permission_policy_digest": digest, "global_config": global_config}},
         )
@@ -237,7 +246,8 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
     global_config, _, _ = manager.load()
     if str(global_config.instance_id).upper() != str(installation["instance_id"]).upper():
         raise PermissionDenied("permission installation belongs to another HASHI instance")
-    policies = InstancePolicies(manager, installation, private_path=private)
+    store = SessionStore.from_global_config(global_config)
+    policies = InstancePolicies(manager, installation, private_path=private, run_store=store)
     verifier = SignedReceiptVerifier(
         {"approval": approval.public_key().public_bytes_raw()},
         trusted_supervisor_keys={issuer.key_id: issuer.public_key},
@@ -249,7 +259,6 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
                                         baseline_resolver=policies.baseline,
                                         settings_resolver=lambda subject: policies.settings(subject.agent_id))
         policies.authority = authority
-        store = SessionStore.from_global_config(global_config)
         identity_path = _path(installation["identity_path"])
         if not identity_path.is_file():
             raise PermissionDenied("human permission owners must be provisioned before service startup")

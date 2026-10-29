@@ -1,4 +1,4 @@
-"""An unsupported permission setting must never start as legacy L0."""
+"""Managed HER never falls back on outage; explicit other backends stay usable."""
 import pytest
 
 from orchestrator.config import ConfigManager
@@ -26,22 +26,29 @@ def test_explicit_unavailable_or_invalid_level_cannot_start_an_unmanaged_backend
     assert agent.extra["unrelated"] == "kept"
     assert agent.permission_settings_present
     manager = FlexibleBackendManager(agent, global_config, secrets)
-    with pytest.raises(ValueError, match="permission"):
-        manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+    if level in {"L1", "L2"}:
+        cfg = manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+        assert cfg.engine == "ollama-api"
+        with pytest.raises(ValueError, match="permission"):
+            manager._build_adapter_config("her-v2", {"engine": "her-v2", "model": "example"})
+    else:
+        with pytest.raises(ValueError, match="permission"):
+            manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
 
 
 @pytest.mark.asyncio
 async def test_unavailable_level_cannot_initialize_a_real_or_fallback_backend(tmp_path, monkeypatch):
     global_config, agent, secrets = _load(tmp_path, {"requested_level": "L1"})
+    agent.allowed_backends.append({"engine": "her-v2", "model": "example"})
     manager = FlexibleBackendManager(agent, global_config, secrets)
 
     def forbidden_backend(_engine):
         raise AssertionError("an unprotected backend must not be constructed")
 
     monkeypatch.setattr("adapters.registry.get_backend_class", forbidden_backend)
-    assert await manager._create_initialized_backend("ollama-api", target_model="example") is None
+    assert await manager._create_initialized_backend("her-v2", target_model="example") is None
     with pytest.raises(ValueError, match="permission"):
-        manager.create_ephemeral_backend("ollama-api", target_model="example")
+        manager.create_ephemeral_backend("her-v2", target_model="example")
 
 
 def test_legacy_and_explicit_l0_still_build_the_same_backend_config(tmp_path):
@@ -69,7 +76,7 @@ def test_nested_setting_cannot_be_hidden_by_other_extra_fields(tmp_path):
     )
     manager = FlexibleBackendManager(agent, global_config, secrets)
     with pytest.raises(ValueError, match="permission"):
-        manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+        manager._build_adapter_config("her-v2", {"engine": "her-v2", "model": "example"})
 
 
 def test_settings_cannot_hide_in_direct_or_backend_configuration(tmp_path):
@@ -77,7 +84,7 @@ def test_settings_cannot_hide_in_direct_or_backend_configuration(tmp_path):
     agent.extra = {"permission_settings": {"requested_level": "L1"}}
     manager = FlexibleBackendManager(agent, global_config, secrets)
     with pytest.raises(ValueError, match="permission"):
-        manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+        manager._build_adapter_config("her-v2", {"engine": "her-v2", "model": "example"})
 
     agent.extra = None
     with pytest.raises(ValueError, match="permission"):
@@ -122,7 +129,7 @@ def test_admin_update_and_runtime_agree_on_nested_level(tmp_path):
     assert agent.extra["unrelated"] == "kept"
     manager = FlexibleBackendManager(agent, global_config, secrets)
     with pytest.raises(ValueError, match="permission"):
-        manager._build_adapter_config("ollama-api", {"engine": "ollama-api", "model": "example"})
+        manager._build_adapter_config("her-v2", {"engine": "her-v2", "model": "example"})
 
 
 @pytest.mark.asyncio

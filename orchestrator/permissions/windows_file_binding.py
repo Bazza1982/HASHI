@@ -256,10 +256,13 @@ class _Windows:
 def _close_handles(api: _Windows, handles: list[int]) -> None:
     failed = False
     while handles:
-        if not api.kernel.CloseHandle(handles.pop()):
+        handle = handles[-1]
+        if not api.kernel.CloseHandle(handle):
             failed = True
+            break
+        handles.pop()
     if failed:
-        raise FileBindingError("handle cleanup could not be confirmed")
+        raise FileBindingCleanupFailed(api, handles)
 
 
 class _BoundHandles:
@@ -417,7 +420,7 @@ def open_bound_write(scope: Scope) -> BoundWindowsWrite | BoundWindowsCreate:
     try:
         try:
             child = api.open_child(handles[-1], names[-1], directory=False,
-                                   access=0x00100082, share=1)
+                                   access=0x00100083 if "read" in scope.actions else 0x00100082, share=1)
         except FileBindingError as error:
             if getattr(error, "ntstatus", None) != 0xC0000034:
                 raise
@@ -428,3 +431,70 @@ def open_bound_write(scope: Scope) -> BoundWindowsWrite | BoundWindowsCreate:
     except BaseException:
         _close_handles(api, handles)
         raise
+
+
+class _DirectoryInformation(ctypes.Structure):
+    _fields_ = [
+        ("next", wintypes.DWORD), ("index", wintypes.DWORD),
+        ("creation", ctypes.c_longlong), ("access", ctypes.c_longlong),
+        ("write", ctypes.c_longlong), ("change", ctypes.c_longlong),
+        ("size", ctypes.c_longlong), ("allocation", ctypes.c_longlong),
+        ("attributes", wintypes.DWORD), ("name_bytes", wintypes.DWORD),
+        ("ea_size", wintypes.DWORD), ("short_length", wintypes.BYTE),
+        ("short_name", wintypes.WCHAR * 12), ("file_id", ctypes.c_longlong),
+        ("name", wintypes.WCHAR * 1),
+    ]
+
+
+class BoundWindowsDirectory(_BoundHandles):
+    """Enumerate the already held directory, without resolving its path again."""
+
+    def entries(self):
+        first = True
+        while True:
+            buffer = ctypes.create_string_buffer(65536)
+            if not self._api.kernel.GetFileInformationByHandleEx(
+                self._handles[-1], 11 if first else 10, buffer, len(buffer),
+            ):
+                if ctypes.get_last_error() == 18:  # ERROR_NO_MORE_FILES
+                    return
+                raise FileBindingError("cannot enumerate the held directory")
+            first, offset = False, 0
+            while True:
+                if offset + _DirectoryInformation.name.offset > len(buffer):
+                    raise FileBindingError("invalid directory entry layout")
+                value = _DirectoryInformation.from_buffer(buffer, offset)
+                begin = offset + _DirectoryInformation.name.offset
+                end = begin + value.name_bytes
+                if value.name_bytes % 2 or end > len(buffer) or value.name_bytes > 510:
+                    raise FileBindingError("invalid directory entry name")
+                name = buffer.raw[begin:end].decode("utf-16-le", errors="strict")
+                if name not in {".", ".."}:
+                    if (not name or name.endswith((" ", ".")) or any(
+                            char in name for char in ':/*?"<>|\x00\\')):
+                        raise FileBindingError("unsafe directory entry name")
+                    yield {"name": name, "directory": bool(value.attributes & _DIRECTORY_ATTRIBUTE),
+                           "reparse": bool(value.attributes & _REPARSE_ATTRIBUTE),
+                           "hidden": bool(value.attributes & 2), "size": int(value.size)}
+                if not value.next:
+                    break
+                if value.next < _DirectoryInformation.name.offset or offset + value.next >= len(buffer):
+                    raise FileBindingError("invalid directory entry continuation")
+                offset += value.next
+
+
+def open_bound_directory(scope: Scope) -> BoundWindowsDirectory:
+    drive, names = _path_parts(scope, frozenset({"list"}))
+    api = _Windows()
+    handles, _ = _open_parents(api, drive, names + ["held-leaf"])
+    return BoundWindowsDirectory(api, handles)
+
+
+class FileBindingCleanupFailed(FileBindingError):
+    def __init__(self, api, handles):
+        super().__init__("file binding cleanup remains owned and unverified")
+        self.api, self.handles = api, handles
+
+    def retry_cleanup(self):
+        _close_handles(self.api, self.handles)
+        return True

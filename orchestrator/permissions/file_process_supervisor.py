@@ -18,9 +18,11 @@ from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.descriptors import describe_tool
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.windows_file_binding import (
-    BoundWindowsCreate, BoundWindowsRead, open_bound_read, open_bound_write,
+    BoundWindowsCreate, FileBindingCleanupFailed, open_bound_read, open_bound_write, open_bound_directory,
 )
-from orchestrator.permissions.windows_file_supervisor import _render_read
+from orchestrator.permissions.file_operations import FILE_TOOLS, search_options
+from orchestrator.permissions.network_worker import NETWORK_TOOLS, RequestNotSent, prepare as prepare_network
+from orchestrator.permissions.file_results import render_helper_result
 from orchestrator.permissions.windows_process import (
     WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended,
 )
@@ -29,7 +31,7 @@ from orchestrator.permissions.windows_process import (
 class WindowsFileProcessSupervisor:
     def __init__(self, authority, *, cwd, read_roots, result_store, issue_stop, run_guard,
                  helper_executable, helper_entry, executable_digest, entry_digest,
-                 private_root, environment, expected_user_sid, validate_resource, physical_journal=None):
+                 private_root, environment, expected_user_sid, validate_resource, physical_journal=None, protected_paths=(), network_options=None):
         if (not isinstance(run_guard, PaoRunFence) or not callable(issue_stop)
                 or not callable(validate_resource) or os.name != "nt"):
             raise ValueError("a native trusted file supervisor is required")
@@ -45,12 +47,25 @@ class WindowsFileProcessSupervisor:
                 or sha256(self._entry.read_bytes()).hexdigest() != entry_digest):
             raise ValueError("a qualified helper and protected artifact root are required")
         self._environment, self._sid = dict(environment), expected_user_sid
+        self._protected_paths = tuple(str(path) for path in protected_paths)
+        self._network_options = dict(network_options or {})
+        self.credential_names = tuple(sorted(self._network_options.get("credentials", {})))
         self._capacity = asyncio.Semaphore(1)
         self._active, self._closed = {}, False
         self._tasks = set()
 
+    TOOL_NAMES = FILE_TOOLS | NETWORK_TOOLS
+
     def supports(self, tool_name):
-        return tool_name in {"file_read", "file_write"}
+        return tool_name in self.TOOL_NAMES
+
+    def validate_plan(self, descriptor, arguments):
+        if descriptor.tool_name in NETWORK_TOOLS:
+            try:
+                prepare_network(descriptor.tool_name, arguments, self._network_options)
+            except RequestNotSent:
+                return False
+        return True
 
     def _authorized(self, context, claim, operation_id, descriptor):
         if self._closed or any(self._validate(context, scope) is not True for scope in descriptor.scopes):
@@ -64,24 +79,37 @@ class WindowsFileProcessSupervisor:
     async def execute(self, context, operation_id, descriptor, arguments):
         frozen = json.loads(json.dumps(arguments, allow_nan=False))
         actual = describe_tool(descriptor.tool_name, frozen, cwd=self._cwd, read_roots=self._roots)
-        if actual != descriptor or len(descriptor.scopes) != 1 or not self.supports(descriptor.tool_name):
+        if (actual != descriptor or not descriptor.scopes or len(descriptor.scopes) > 32
+                or (descriptor.tool_name not in ({"file_search"} | NETWORK_TOOLS) and len(descriptor.scopes) != 1)
+                or not self.supports(descriptor.tool_name)):
             raise PermissionDenied("file plan differs from its reviewed descriptor")
-        scope = descriptor.scopes[0]
-        if self._validate(context, scope) is not True:
+        if any(self._validate(context, item) is not True for item in descriptor.scopes):
             raise PermissionDenied("file is outside the installed execution policy")
-        if descriptor.tool_name == "file_read":
+        if descriptor.tool_name in NETWORK_TOOLS:
+            data = json.dumps(prepare_network(descriptor.tool_name, frozen, self._network_options),
+                              ensure_ascii=False).encode("utf-8")
+        elif descriptor.tool_name == "file_read":
             if set(frozen) - {"path", "offset", "limit"}:
                 raise PermissionDenied("unsupported file read arguments")
             offset, limit = frozen.get("offset", 1), frozen.get("limit", 500)
             if type(offset) is not int or type(limit) is not int:
                 raise PermissionDenied("invalid read range")
             data = None
-        else:
-            if set(frozen) != {"path", "content"} or not isinstance(frozen["content"], str):
-                raise PermissionDenied("unsupported file write arguments")
-            data = frozen["content"].encode("utf-8")
+        elif descriptor.tool_name in {"file_write", "apply_patch"}:
+            field = "patch" if descriptor.tool_name == "apply_patch" else "content"
+            if set(frozen) != {"path", field} or not isinstance(frozen[field], str):
+                raise PermissionDenied("unsupported file mutation arguments")
+            data = frozen[field].encode("utf-8")
             if len(data) > 1024 * 1024:
                 raise PermissionDenied("file data exceeds the supervised limit")
+        else:
+            if descriptor.tool_name == "file_search":
+                search_options(frozen)
+            elif (set(frozen) - {"path", "limit"} or type(frozen.get("limit", 200)) is not int
+                    or not 1 <= frozen.get("limit", 200) <= 500):
+                raise PermissionDenied("unsupported directory list arguments")
+            data = json.dumps({"arguments": frozen, "roots": [item.resource for item in descriptor.scopes],
+                               "protected": self._protected_paths}, ensure_ascii=False).encode("utf-8")
         async with self._capacity:
             if self._closed:
                 raise PermissionDenied("file supervisor is closed")
@@ -95,15 +123,22 @@ class WindowsFileProcessSupervisor:
             resource = {"lock": asyncio.Lock(), "context": context, "descriptor": descriptor}
             self._active[operation_id] = resource
             try:
-                bound = open_bound_read(scope) if data is None else open_bound_write(scope)
-                resource["bound"] = bound
-                copy_kernel, copy_handle = inheritable_handle_copy(bound._handles[-1])
-                resource.update(transfer_kernel=copy_kernel, transfer=copy_handle)
-                action = "read" if isinstance(bound, BoundWindowsRead) else (
-                    "create" if isinstance(bound, BoundWindowsCreate) else "write")
+                bounds, transfers = [], []
+                resource.update(bounds=bounds, transfers=transfers)
+                for item in (() if descriptor.tool_name in NETWORK_TOOLS else descriptor.scopes):
+                    bound = (open_bound_directory(item) if descriptor.tool_name in {"file_list", "file_search"} else
+                             open_bound_read(item) if descriptor.tool_name == "file_read" else open_bound_write(item))
+                    bounds.append(bound)
+                    copy_kernel, copy_handle = inheritable_handle_copy(bound._handles[-1])
+                    transfers.append((copy_kernel, copy_handle))
+                bound = bounds[0] if bounds else None
+                action = ({"file_read": "read", "file_list": "list", "file_search": "search",
+                           "http_request": "http", "web_fetch": "http"}.get(descriptor.tool_name)
+                          or (("patch_" if descriptor.tool_name == "apply_patch" else "")
+                              + ("create" if isinstance(bound, BoundWindowsCreate) else "write")))
                 result_path = folder / "result.json"
                 plan = {
-                    "format": "hashi-file-helper-v1", "action": action, "handles": [copy_handle],
+                    "format": "hashi-file-helper-v1", "action": action, "handles": [handle for _, handle in transfers],
                     "directory": getattr(bound, "_directory", ""), "name": getattr(bound, "_name", ""),
                     "data": base64.b64encode(data or b"").decode("ascii"), "result": str(result_path),
                 }
@@ -130,14 +165,14 @@ class WindowsFileProcessSupervisor:
                     executable=self._executable,
                     arguments=["-I", "-S", "-B", str(self._entry), str(plan_path), sha256(encoded).hexdigest()],
                     cwd=folder, environment=self._environment, expected_user_sid=self._sid,
-                    executable_digest=self._executable_digest, inherited_handles=(copy_handle,),
+                    executable_digest=self._executable_digest, inherited_handles=tuple(handle for _, handle in transfers),
                     max_processes=1, job_name=job_name,
                 )
-                resource.update(process=owned, bound=bound, transfer_kernel=copy_kernel, transfer=copy_handle)
+                resource["process"] = owned
                 if journal is not None:
                     journal.observe_process(preassigned, owned.observation, max_processes=owned._job.max_processes)
                 with self._guard(context):
-                    if self._closed or self._validate(context, scope) is not True:
+                    if self._closed or any(self._validate(context, item) is not True for item in descriptor.scopes):
                         raise PermissionDenied("file execution policy changed before start")
                     claim = self._authority.prepare(
                         context, operation_id, descriptor.arguments_digest, descriptor.scopes, **claim_options,
@@ -159,19 +194,17 @@ class WindowsFileProcessSupervisor:
                 if exit_code or not result_path.is_file() or result_path.stat().st_size > 24 * 1024 * 1024:
                     raise OSError("trusted file result is unavailable")
                 result = json.loads(result_path.read_bytes())
-                if not isinstance(result, dict) or set(result) != {"outcome", "data"} or result["outcome"] != "succeeded":
+                if not isinstance(result, dict) or set(result) != {"outcome", "data"} or result["outcome"] not in {"succeeded", "failed"}:
                     raise OSError("trusted file outcome requires reconciliation")
-                if data is None:
-                    payload = _render_read(scope.resource, base64.b64decode(result["data"], validate=True),
-                                           max(1, offset), max(1, min(500, limit)))
-                else:
-                    payload = f"OK: wrote {len(frozen['content'])} characters to {scope.resource}"
-                receipt = self._store.put(context, operation_id, descriptor, outcome="succeeded", payload=payload)
+                payload = render_helper_result(descriptor, frozen, result)
+                receipt = self._store.put(context, operation_id, descriptor, outcome=result["outcome"], payload=payload)
                 self._authority.finish(context, claim.claim_id, outcome=receipt.outcome,
                                         result_digest=receipt.result_digest)
                 resource["plan_digest"] = sha256(encoded).hexdigest()
                 return receipt
             except BaseException as error:
+                if isinstance(error, FileBindingCleanupFailed):
+                    resource["binding_failure"] = error
                 if isinstance(error, WindowsProcessCleanupFailed):
                     resource["launch_failure"] = error
                 # A failed ResumeThread may already have started. Inspect the
@@ -190,7 +223,7 @@ class WindowsFileProcessSupervisor:
                     self._tasks.discard(task)
                 # Preserve failed plans/results for reconciliation; cleanup is
                 # not evidence that a business write did or did not happen.
-                if started and self._authority.operation_state(operation_id) == "succeeded":
+                if started and self._authority.operation_state(operation_id) in {"succeeded", "failed"}:
                     for entry in folder.iterdir():
                         entry.unlink()
                     folder.rmdir()
@@ -204,11 +237,12 @@ class WindowsFileProcessSupervisor:
         # Native waits run off the service loop so revocation/other Jobs remain
         # responsive. Concurrent shutdown and Tool completion share this owner.
         async with resource["lock"]:
-            failure = resource.get("launch_failure")
-            if failure is not None:
-                cleanup = asyncio.create_task(asyncio.to_thread(failure.retry_cleanup))
-                await asyncio.shield(cleanup)
-                resource.pop("launch_failure", None)
+            for name in ("launch_failure", "binding_failure"):
+                failure = resource.get(name)
+                if failure is not None:
+                    cleanup = asyncio.create_task(asyncio.to_thread(failure.retry_cleanup))
+                    await asyncio.shield(cleanup)
+                    resource.pop(name, None)
             owned = resource.get("process")
             if owned is not None:
                 stop = asyncio.create_task(asyncio.to_thread(owned.stop, timeout_ms=4500))
@@ -220,6 +254,13 @@ class WindowsFileProcessSupervisor:
                         raise OSError("native file stop remains unverified") from None
                     stop.result()
                     raise
+            for bound in tuple(resource.get("bounds", ())):
+                bound.close()
+                resource["bounds"].remove(bound)
+            for kernel, handle in tuple(resource.get("transfers", ())):
+                if not kernel.CloseHandle(handle):
+                    raise OSError("file transfer handle cleanup is unverified")
+                resource["transfers"].remove((kernel, handle))
             bound = resource.get("bound")
             if bound is not None:
                 bound.close()

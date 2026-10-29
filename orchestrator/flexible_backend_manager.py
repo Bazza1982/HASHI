@@ -42,7 +42,6 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
-    is_cli_backend,
     public_backend_engine,
 )
 from orchestrator.her_v2.config import HERv2Config
@@ -1394,7 +1393,7 @@ class FlexibleBackendManager:
 
         backend = self.current_backend
         engine = str(getattr(getattr(backend, "config", None), "engine", "") or self.config.active_backend)
-        state = "unmanaged" if backend is not None and is_cli_backend(engine) else "unavailable"
+        state = "unmanaged" if backend is not None and canonical_backend_engine(engine) != HER_V2_ENGINE else "unavailable"
         return BackendPermissionStatus(
             settings.requested_level, public_backend_engine(engine), state,
         )
@@ -1416,7 +1415,7 @@ class FlexibleBackendManager:
         # unmanaged coverage notice. Native HASHI tool paths cannot claim a
         # requested level until their trusted executor is installed.
         if (settings is not None and settings.requested_level.value != "L0"
-                and not is_cli_backend(engine)):
+                and (canonical_backend_engine(engine) == HER_V2_ENGINE or _permission_provider)):
             owner = getattr(getattr(self, "runtime", None), "permission_service_client", None)
             if owner is None or not owner.permits_native(engine, provider=_permission_provider):
                 raise ValueError("requested permission controls are not yet available")
@@ -2041,7 +2040,8 @@ class FlexibleBackendManager:
 
             registry_class = ToolRegistry
             permission_settings, _ = self._agent_permission_settings()
-            if permission_settings is not None and permission_settings.requested_level.value != "L0":
+            if (permission_settings is not None and permission_settings.requested_level.value != "L0"
+                    and canonical_backend_engine(adapter_cfg.engine) == HER_V2_ENGINE):
                 from orchestrator.permissions.registry import ManagedCatalogueRegistry
 
                 registry_class = ManagedCatalogueRegistry

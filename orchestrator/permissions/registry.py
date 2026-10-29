@@ -39,6 +39,7 @@ class ManagedToolRegistry(ToolRegistry):
         requestable_scopes: tuple[Scope, ...],
         durable_wait: bool = False,
         ordinary_questions: Any = None,
+        credential_names: tuple[str, ...] = (),
         **legacy_options: Any,
     ) -> None:
         if secrets:
@@ -47,6 +48,7 @@ class ManagedToolRegistry(ToolRegistry):
             raise ValueError("durable wait must be explicit")
         self.permission_durable_wait = durable_wait
         self._ordinary_questions = ordinary_questions
+        self._credential_names = tuple(credential_names)
         super().__init__(
             allowed_tools=allowed_tools, access_root=access_root,
             workspace_dir=workspace_dir, secrets={}, **legacy_options,
@@ -74,6 +76,14 @@ class ManagedToolRegistry(ToolRegistry):
 
     def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
         definitions = super().get_tool_definitions(tiers)
+        if self._credential_names:
+            definitions = json.loads(json.dumps(definitions))
+            for definition in definitions:
+                if definition.get("function", {}).get("name") == "http_request":
+                    definition["function"]["parameters"].setdefault("properties", {})["credential"] = {
+                        "type": "string", "enum": list(self._credential_names),
+                        "description": "Use an installed credential for its approved target operation. No key is returned.",
+                    }
         if tiers is not None and "ask_user" not in resolve_tiers(tiers):
             return definitions
         request_allowlist = self._effective_audit_context().get("request_tool_allowlist")
