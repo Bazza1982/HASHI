@@ -189,3 +189,23 @@ def test_finalize_replaces_only_private_owner_fallback(tmp_path):
     assert secrets["hashiko"] == "bot-token-is-preserved"
     assert secrets["provider"] == "provider-secret-is-preserved"
     assert read_config_json(config_path)["global"]["owner_scope_id"] == "user:8872"
+
+
+def test_owner_replacement_revokes_global_grants_and_fences_finalization(tmp_path):
+    config_path, secrets_path, _store = _instance(tmp_path)
+    config = read_config_json(config_path)
+    config["global"]["authorized_telegram_user_ids"] = [9888, 9777]
+    write_config_json(config_path, config)
+    stage_telegram_owner_replacement(
+        bridge_home=tmp_path, new_owner_id=7666, expected_current_owner_id=8872,
+    )
+    staged = read_config_json(config_path)
+    assert staged["global"]["authorized_telegram_user_ids"] == []
+    staged["global"]["authorized_telegram_user_ids"] = [9888]
+    write_config_json(config_path, staged)
+    before = secrets_path.read_bytes()
+    with pytest.raises(TelegramOwnerMigrationError):
+        finalize_telegram_owner_secret(
+            bridge_home=tmp_path, owner_id=7666, expected_previous_owner_id=8872,
+        )
+    assert secrets_path.read_bytes() == before

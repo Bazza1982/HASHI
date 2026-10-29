@@ -2039,6 +2039,17 @@ async def answer_preview_loop(
             preview_disabled = True
             dirty = False
             return
+        from orchestrator.telegram_actor_scope import delivery_allowed
+
+        if not delivery_allowed(
+            runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+        ):
+            preview_disabled = True
+            dirty = False
+            if stream_state is not None:
+                stream_state.failed = True
+                stream_state.failure_reason = "telegram_access_revoked"
+            return
         text = _preview_text()
         if len(text.strip()) < min_chars:
             return
@@ -3116,6 +3127,16 @@ async def finalize_streamed_answer(
     if stream_state is None:
         return StreamFinalization(streamed=False, final_delivered=False, fallback_required=True)
 
+    from orchestrator.telegram_actor_scope import delivery_allowed
+
+    if not delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    ):
+        return StreamFinalization(
+            streamed=stream_state.has_text, final_delivered=False,
+            fallback_required=True, error="telegram_access_revoked",
+        )
+
     # A text preview cannot settle an Event that also carries canonical media.
     # Remove the ephemeral placeholder and let the FC adapter claim and render
     # the complete ordered Event under one durable outbox lease.
@@ -3201,6 +3222,21 @@ async def finalize_streamed_answer(
         )
 
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
+    if not delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    ):
+        if claim is not None:
+            runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status="suppressed",
+                error_code="telegram_access_revoked",
+            )
+        return StreamFinalization(
+            streamed=stream_state.has_text, final_delivered=False,
+            fallback_required=claim is None, error="telegram_access_revoked",
+        )
+
     max_chars = int(extra.get("answer_stream_max_chars", 3400))
     first_chunk = (final_text or "")[:max_chars]
     continuation = (final_text or "")[max_chars:]

@@ -113,6 +113,7 @@ Scheduler/recovery/`/bg`: Agent-owned hidden Session; separate execution/deliver
 receipts, each final once. `/bg` freezes admission; schedules imply no chat.
 `/delay` and interactive `/loop` retain context.
 
+Multi-user Telegram off. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
 Bounded polls preserve pending updates.
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from orchestrator.config_json import read_config_json, write_config_json
+from orchestrator.telegram_access import GLOBAL_USERS_KEY
 from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
@@ -206,6 +207,8 @@ def stage_telegram_owner_replacement(
     global_config["owner_scope_id"] = owner_scope_id
     global_config["authorized_id"] = candidate
     global_config["telegram_owner_id"] = candidate
+    if GLOBAL_USERS_KEY in global_config:
+        global_config[GLOBAL_USERS_KEY] = []
 
     revision = write_config_json(config_path, config)
     return {
@@ -251,6 +254,10 @@ def finalize_telegram_owner_secret(
             "The compatibility owner projection is not staged"
         )
     _owner_scope(global_config, expected_previous)
+    if global_config.get(GLOBAL_USERS_KEY, []) != []:
+        raise TelegramOwnerMigrationError(
+            "The staged Telegram owner must be the sole global actor"
+        )
     for row in agents:
         extra = row.get("extra") if isinstance(row, dict) else None
         if not isinstance(extra, dict) or extra.get("authorized_telegram_ids") != [candidate]:

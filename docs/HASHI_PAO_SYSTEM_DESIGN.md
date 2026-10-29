@@ -7,6 +7,24 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-10-30 Telegram user access (HASHI3 foundation only)
+
+PAO's intended authorization is additive: the configured primary and other
+global Telegram user IDs may access every Agent; additional Agent-scoped IDs
+may access only their selected Agent. Grant changes are revision checked, and
+replacing the primary revokes previously granted global users. An additional
+actor's direct private Telegram chat must use its own Session owner scope; the
+existing primary owner scope and Workbench conversation remain unchanged.
+
+The candidate contains a non-advertised configuration service, actor-scope
+helpers, and initial delivery checks. It does not yet connect these helpers to
+Worker ingress or expose a management API. Command routing, all streaming/audio
+and explicit-tool delivery paths, mixed Worker generations, and live Telegram
+acceptance remain unverified. The UI must not advertise this capability until
+those paths are enforced and tested together. An Agent's shared memory and tool
+permissions are distinct from its conversation scope; no sandbox guarantee
+follows from the Telegram grant.
+
 ## 1. Definition
 
 Device Tool request IDs are deterministically scoped to the canonical request,

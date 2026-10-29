@@ -125,6 +125,12 @@ def ensure_store(runtime: Any) -> SessionStore:
 
 
 def owner_id(runtime: Any, explicit: str | None = None) -> str:
+    if not explicit:
+        from orchestrator.telegram_actor_scope import current_actor
+
+        actor = current_actor(runtime)
+        if actor is not None:
+            return actor.owner_id
     return SessionStore.owner_id_for(runtime.global_config, explicit)
 
 
