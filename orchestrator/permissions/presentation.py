@@ -119,5 +119,22 @@ def backend_permission_notice(status) -> str:
 
     if not isinstance(status, BackendPermissionStatus):
         raise ValueError("a current backend permission status is required")
+    if status.state == "managed":
+        from orchestrator.permissions.backend_capabilities import CONTROLS
+
+        states = {"enforced", "partial", "unmanaged", "unavailable", "unknown"}
+        priority = {"unknown": 0, "unavailable": 1, "unmanaged": 2, "partial": 3, "enforced": 4}
+        lines = [ui_language.tr("safety.backend_observed", backend=status.backend_id)]
+        for control in CONTROLS:
+            values = [report.get("controls", {}).get(control, {}).get("state", "unknown") for report in status.reports]
+            value = min((item if item in states else "unknown" for item in values), key=priority.get)
+            lines.append(ui_language.tr("safety.control_" + control) + " · " + ui_language.tr("safety.state_" + value))
+        if status.requested_level.value == "L2":
+            lines.append(ui_language.tr("safety.approval_isolation_note"))
+        engines = sorted({item["engine"] for report in status.reports
+                          for item in report.get("analysis", {}).get("models", [])})
+        if engines:
+            lines.append(ui_language.tr("safety.analysis_location", providers=", ".join(engines)))
+        return "\n".join(lines)
     key = "safety.backend_unmanaged" if status.state == "unmanaged" else "safety.backend_unavailable"
     return ui_language.tr(key, backend=status.backend_id, level=status.requested_level.value)

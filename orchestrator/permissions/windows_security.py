@@ -96,7 +96,7 @@ def require_private_path(path, *, trusted_sids, read_only_public=False):
         kernel.LocalFree(descriptor)
 
 
-def require_nonadmin_identity(expected_sid, *, excluded_sids=()):
+def _require_service_identity(expected_sid, *, excluded_sids=(), nonadmin=True):
     """Observe actual account groups, including filtered administrator tokens."""
     kernel, security = _api()
     sid = current_process_user_sid()
@@ -133,12 +133,22 @@ def require_nonadmin_identity(expected_sid, *, excluded_sids=()):
         if offset + count * ctypes.sizeof(Entry) > ctypes.sizeof(groups):
             raise PermissionError("service token group layout is incomplete")
         entries = ctypes.cast(ctypes.addressof(groups) + offset, ctypes.POINTER(Entry))
-        if any(_sid(entries[i].sid, kernel, security) == "S-1-5-32-544" for i in range(count)):
+        administrator = any(_sid(entries[i].sid, kernel, security) == "S-1-5-32-544" for i in range(count))
+        if nonadmin and administrator:
             raise PermissionError("an administrator account is not a nonadmin service identity")
-        return {"user_sid": sid, "elevated": False, "administrator_member": False}
+        return {"user_sid": sid, "elevated": False, "administrator_member": administrator}
     finally:
         kernel.CloseHandle(token)
 
+
+
+def require_nonadmin_identity(expected_sid, *, excluded_sids=()):
+    return _require_service_identity(expected_sid, excluded_sids=excluded_sids, nonadmin=True)
+
+
+def require_l1_identity(expected_sid):
+    """L1 may share a normal filtered user account; elevated execution is refused."""
+    return _require_service_identity(expected_sid, nonadmin=False)
 
 
 class InstallationLock:

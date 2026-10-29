@@ -21,13 +21,13 @@ from orchestrator.permissions.remote_registry import BrokeredToolRegistry
 PAO_METHODS = frozenset({
     "health", "open_execution", "execution_descriptor", "close_execution",
     "settle_run", "context_status", "request_state", "fence_context", "run_her", "configure_inference",
-    "auxiliary_provider_call", "project_model_usage",
-    "operation_status",
+    "auxiliary_provider_call", "project_model_usage", "worker_usage_receipts",
+    "operation_status", "execution_controls",
 })
 CONTROL_METHODS = frozenset({
     "get_session_request", "list_session_requests", "withdraw_session_request",
     "issue_session_actions", "submit_session_action", "submit_session_decision",
-    "login", "logout", "session_user", "manage_session", "session_summary",
+    "login", "logout", "session_user", "manage_session", "session_summary", "native_login",
 })
 
 
@@ -63,6 +63,17 @@ class PermissionControlClient:
 
     def __init__(self, client):
         self._client = client
+
+    def get_session_request(self, subject, request_id):
+        return self._client.call("get_session_request", {"subject": subject, "request_id": request_id})
+
+    def list_session_requests(self, subject, *, before=None, limit=10):
+        return self._client.call("list_session_requests", {"subject": subject, "before": before, "limit": limit})
+
+    def withdraw_session_request(self, subject, request_id, expected_revision):
+        return self._client.call("withdraw_session_request", {
+            "subject": subject, "request_id": request_id, "expected_revision": expected_revision,
+        })
 
     def __getattr__(self, name):
         if name not in CONTROL_METHODS:
@@ -105,15 +116,17 @@ class _AuthorityViews:
 class _AuxiliaryModelClient:
     """Only the trusted Worker uses this PAO surface for its original ports."""
 
-    def __init__(self, client, binding):
-        self.client, self.binding = client, binding
+    def __init__(self, client, binding, accounting):
+        self.client, self.binding, self.accounting = client, binding, accounting
 
     async def call_async(self, method, arguments, *, on_event=None):
         if method != "provider_call":
             raise PermissionDenied("the Worker auxiliary model port is fixed")
-        return await self.client.call_async("auxiliary_provider_call", {
+        value = await self.client.call_async("auxiliary_provider_call", {
             "binding": self.binding, **arguments,
         }, on_event=on_event)
+        self.accounting.received(value["receipt"])
+        return value["result"]
 
 
 class RemoteRunExecutor:
@@ -161,15 +174,18 @@ class RemoteRunExecutor:
             self._permission_prestart_failure = True
             raise PermissionPark(GateResult("unavailable", "")) from error
         if self._stage_provider is not None:
-            client = self._execution_client
+            from orchestrator.permissions.worker_usage import WorkerAccounting
+
+            accounting = WorkerAccounting(self._stage_provider, self._owner._client, binding)
+            client = _AuxiliaryModelClient(self._owner._client, binding, accounting)
             if self._level == "L2":
-                client = _AuxiliaryModelClient(self._owner._client, binding)
                 # Only the host owns main-loop continuation. Presentation and
                 # companion calls must not overwrite its ready/pending batch.
                 self._stage_provider.bind_provider_context(observer=None)
             self._stage_provider.backend_manager = BrokeredProviderFactory(
                 client, profile_config=public["profiles"],
                 scratch_root=self._owner.workspace_dir, privacy_level=public["privacy_level"],
+                global_config=getattr(getattr(self._stage_provider, "runtime_context", None), "global_config", None),
             )
         if self._level == "L1":
             # L1 preserves all existing HERV3 presentation, habits, companion
@@ -229,6 +245,12 @@ class PermissionRunClient:
         self._executors = {}
         self._health = None
 
+    def actual_controls(self):
+        reports = []
+        for executor in tuple(self._executors.values()):
+            reports.append(self._client.call("execution_controls", {"binding": executor.binding}))
+        return reports
+
     async def qualify(self):
         result = await self._client.call_async("health", {"instance_id": self.store.instance_id})
         if (not isinstance(result, dict) or result.get("instance_id") != self.store.instance_id
@@ -258,6 +280,18 @@ class PermissionRunClient:
         if result is None or result.binding != binding:
             raise PermissionDenied("execution channel is unavailable")
         return result
+
+    async def fence_for_backend_switch(self, binding):
+        # A fresh bounded control connection cannot inherit a model's long idle
+        # timeout. PAO has already fenced locally before this best-effort cleanup.
+        client = PermissionPipeClient(self._client.endpoint, self._client.public_key,
+                                      methods={"fence_context", "close_execution"}, idle_timeout_s=5)
+        await client.call_async("fence_context", {"context": binding.context})
+        result = await client.call_async("close_execution", {"binding": binding})
+        if result is not True:
+            raise OSError("old backend cleanup is unverified")
+        self._executors.pop(binding.context.execution_epoch, None)
+        return True
 
     async def close_execution(self, *, binding):
         result = await self._client.call_async("close_execution", {"binding": binding})

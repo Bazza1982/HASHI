@@ -83,6 +83,8 @@ class InstalledExecution:
                     return self._inference
                 if self.factory.model_factory is None:
                     raise PermissionDenied("the selected model owner is unavailable")
+                if self._callbacks is not None:
+                    self._callbacks.client.idle_timeout_s = float(config.user_idle_timeout_s)
                 models, public = await self.factory.model_factory.create(self.binding, config, self.channel._guard)
                 try:
                     self.channel._current()
@@ -269,13 +271,16 @@ class InstalledExecutorFactory:
         finally:
             self._creates.discard(task)
 
-    async def reconcile(self):
+    async def reconcile(self, binding=None):
         journal = getattr(self, "physical_journal", None)
         if journal is not None:
-            await asyncio.to_thread(journal.reconcile)
+            if binding is None:
+                await asyncio.to_thread(journal.reconcile)
+            else:
+                await asyncio.to_thread(journal.reconcile, binding=binding)
 
     async def retire(self, binding):
-        await self.reconcile()
+        await self.reconcile(binding)
         executor = self._owned.get(binding.context.execution_epoch)
         if executor is None:
             # Service recovery may not invent a clean stop. A separate native

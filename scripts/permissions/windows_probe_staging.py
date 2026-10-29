@@ -106,11 +106,15 @@ class WindowsStageACL:
         if not self.kernel.CloseHandle(handle):
             raise StageError("test directory handle cleanup is unverified")
 
-    def apply(self, path: Path, sid: str, *, writable: bool) -> None:
+    def apply(self, path: Path, sid: str, *, writable: bool, restricted_readonly: bool = False) -> None:
         if not isinstance(sid, str) or not _SID.fullmatch(sid):
             raise StageError("a disposable local account SID is required")
         access = "FA" if writable else "0x1200a9"
         sddl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;{access};;;{sid})"
+        if restricted_readonly:
+            if writable:
+                raise StageError("restricted packages receive only readonly test code")
+            sddl += "(A;OICI;0x1200a9;;;S-1-15-2-2)"
         descriptor = ctypes.c_void_p()
         if not self.adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ctypes.byref(descriptor), None

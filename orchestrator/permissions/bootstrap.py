@@ -15,7 +15,7 @@ async def bind_agent(runtime):
     from orchestrator.flexible_backend_registry import canonical_backend_engine
 
     try:
-        pao, _ = service_clients(runtime.global_config)
+        pao, control_client = service_clients(runtime.global_config)
         service = PermissionRunClient(
             pao, store=runtime_session.ensure_store(runtime),
             workspace_dir=runtime.workspace_dir, settings=settings,
@@ -34,6 +34,8 @@ async def bind_agent(runtime):
             return None
         raise
     runtime.permission_service_client = service
+    runtime._permission_native_control = PermissionControlClient(control_client)
+    runtime.permission_authority = runtime._permission_native_control
     runtime.permission_runs = PermissionAgentController(runtime, service)
     return runtime.permission_runs
 

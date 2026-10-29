@@ -199,6 +199,7 @@ def test_v4_action_migration_is_atomic_and_preserves_requests(setup_actions, con
         connection.execute("DROP TABLE decision_action_presentations")
         connection.execute("DROP TABLE decision_actions")
         connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
+        connection.execute("DROP TABLE IF EXISTS prestart_failures")
         connection.execute("PRAGMA user_version=4")
         if conflicting_table:
             connection.execute("CREATE TABLE decision_actions (keep TEXT)")
@@ -212,7 +213,7 @@ def test_v4_action_migration_is_atomic_and_preserves_requests(setup_actions, con
                                        clock=lambda: clock[0], monotonic=lambda: clock[0])
         assert reopened.get_request(context, request.request_id).scopes == (scope,)
     with sqlite3.connect(authority.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (4 if conflicting_table else 7)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (4 if conflicting_table else 8)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM decision_actions").fetchone() == ("preserve",)
 
@@ -400,6 +401,7 @@ def test_v5_presentation_migration_preserves_a_committed_action(setup_actions, c
     with sqlite3.connect(authority.path) as connection:
         connection.execute("DROP TABLE decision_action_presentations")
         connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
+        connection.execute("DROP TABLE IF EXISTS prestart_failures")
         connection.execute("PRAGMA user_version=5")
         if conflicting_table:
             connection.execute("CREATE TABLE decision_action_presentations (keep TEXT)")
@@ -416,7 +418,7 @@ def test_v5_presentation_migration_preserves_a_committed_action(setup_actions, c
         assert reopened.decide(reference, approved_scopes=[scope], action_id=action.action_id) == lease
         assert reopened.decision_count(request.request_id) == 1
     with sqlite3.connect(authority.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (5 if conflicting_table else 7)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (5 if conflicting_table else 8)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM decision_action_presentations").fetchone() == ("preserve",)
 

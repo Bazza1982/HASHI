@@ -1385,7 +1385,7 @@ class FlexibleBackendManager:
             raise ValueError("invalid permission settings") from exc
 
     def permission_status(self):
-        """Conservative current-backend status; never claim enforced controls."""
+        """Read fresh installed controls, retaining unmanaged compatibility paths."""
         settings, _ = self._agent_permission_settings()
         if settings is None or settings.requested_level.value == "L0":
             return None
@@ -1394,8 +1394,19 @@ class FlexibleBackendManager:
         backend = self.current_backend
         engine = str(getattr(getattr(backend, "config", None), "engine", "") or self.config.active_backend)
         state = "unmanaged" if backend is not None and canonical_backend_engine(engine) != HER_V2_ENGINE else "unavailable"
+        reports = ()
+        if state != "unmanaged":
+            owner = getattr(getattr(self, "runtime", None), "permission_service_client", None)
+            reader = getattr(owner, "actual_controls", None)
+            if callable(reader):
+                try:
+                    reports = tuple(reader())
+                    if reports:
+                        state = "managed"
+                except (OSError, ValueError):
+                    reports = ()
         return BackendPermissionStatus(
-            settings.requested_level, public_backend_engine(engine), state,
+            settings.requested_level, public_backend_engine(engine), state, reports,
         )
 
     def _build_adapter_config(
@@ -2160,6 +2171,10 @@ class FlexibleBackendManager:
             if supports_sessions and not await candidate.handle_new_session():
                 raise RuntimeError("Target backend could not start a new session")
 
+            controller = getattr(getattr(self, "runtime", None), "permission_runs", None)
+            fence_previous = getattr(controller, "before_backend_switch", None)
+            if callable(fence_previous):
+                await fence_previous(target_engine)
             previous_backend = self.current_backend
             previous_engine = self.config.active_backend
             previous_model = self._active_model_override

@@ -71,6 +71,7 @@ def test_v6_runtime_metadata_migration_preserves_requests_and_never_invents_clai
     _, authority, context, subject, _, request = bound
     with sqlite3.connect(authority.path) as connection:
         connection.execute("DROP TABLE execution_runtime_metadata")
+        connection.execute("DROP TABLE IF EXISTS prestart_failures")
         connection.execute("PRAGMA user_version=6")
         if conflict:
             connection.execute("CREATE TABLE execution_runtime_metadata (keep TEXT)")
@@ -84,7 +85,7 @@ def test_v6_runtime_metadata_migration_preserves_requests_and_never_invents_clai
         with pytest.raises(PermissionDenied):
             reopened.get_request_runtime_binding(subject, request.request_id)
     with sqlite3.connect(authority.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (6 if conflict else 7)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (6 if conflict else 8)
         if conflict:
             assert connection.execute("SELECT keep FROM execution_runtime_metadata").fetchone() == ("preserve",)
 

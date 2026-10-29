@@ -19,7 +19,7 @@ from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.descriptors import describe_tool
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.windows_file_binding import (
-    BoundWindowsCreate, FileBindingCleanupFailed, open_bound_read, open_bound_write, open_bound_directory, _path_parts,
+    BoundWindowsCreate, FileBindingError, FileBindingCleanupFailed, open_bound_read, open_bound_write, open_bound_directory, _path_parts,
 )
 from orchestrator.permissions.file_operations import FILE_TOOLS, search_options
 from orchestrator.permissions.network_worker import NETWORK_TOOLS, RequestNotSent, prepare as prepare_network
@@ -267,6 +267,16 @@ class WindowsFileProcessSupervisor:
                     resource["binding_failure"] = error
                 if isinstance(error, WindowsProcessCleanupFailed):
                     resource["launch_failure"] = error
+                if (isinstance(error, FileBindingError) and claim is None and owned is None
+                        and not resource.get("journal_claim")):
+                    await self._cleanup(operation_id, resource)
+                    with self._guard(context):
+                        receipt = self._store.put(context, operation_id, descriptor, outcome="failed",
+                                                  payload="File could not be opened safely; no action started.")
+                        self._authority.reject_before_start(context, operation_id, descriptor.arguments_digest,
+                                                            descriptor.scopes, result_digest=receipt.result_digest)
+                    resource["prestart_rejected"] = True
+                    return receipt
                 # A failed ResumeThread may already have started. Inspect the
                 # authoritative operation; never release once by a local flag.
                 if claim is not None:
@@ -283,7 +293,7 @@ class WindowsFileProcessSupervisor:
                     self._tasks.discard(task)
                 # Preserve failed plans/results for reconciliation; cleanup is
                 # not evidence that a business write did or did not happen.
-                if started and self._authority.operation_state(operation_id) in {"succeeded", "failed"}:
+                if (started or resource.get("prestart_rejected")) and self._authority.operation_state(operation_id) in {"succeeded", "failed"}:
                     for entry in folder.iterdir():
                         entry.unlink()
                     folder.rmdir()

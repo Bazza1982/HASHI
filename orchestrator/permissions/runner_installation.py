@@ -48,7 +48,8 @@ def build_runner(path):
     require_private_path(private, trusted_sids=(sid,))
     key_path = Path(raw["transport_key"])
     require_private_path(key_path, trusted_sids=(sid,))
-    key = Ed25519PrivateKey.from_private_bytes(key_path.read_bytes())
+    transport_material = key_path.read_bytes()
+    key = Ed25519PrivateKey.from_private_bytes(transport_material)
     capsule = read_capsule(raw["capsule"], trusted_sids=(sid, raw["safety_sid"]))
     lock = InstallationLock(private)
     try:
@@ -62,7 +63,10 @@ def build_runner(path):
 
             result_key = Path(raw["script_result_key"])
             require_private_path(result_key, trusted_sids=(sid,))
-            script_results = EncryptedResultStore(private / "script-results.sqlite", key=result_key.read_bytes())
+            result_material = result_key.read_bytes()
+            if result_key.resolve() == key_path.resolve() or result_material == transport_material:
+                raise ValueError("script encryption and Runner transport require separate keys")
+            script_results = EncryptedResultStore(private / "script-results.sqlite", key=result_material)
         elif limits:
             raise ValueError("script execution needs its separate result key")
         runner = RestrictedHerRunner(

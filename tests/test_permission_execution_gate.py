@@ -485,3 +485,57 @@ async def test_completed_result_waits_for_verified_resource_cleanup(environment,
     result = await gate.execute("operation", "file_write", arguments, reason="report")
     assert result.state == "succeeded" and result.replayed
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once(environment, tmp_path):
+    from orchestrator.permissions.descriptors import describe_tool
+    from orchestrator.permissions.result_store import EncryptedResultStore
+
+    authority, issuer, context, _, supervisor, gate = environment
+    arguments = {"path": "missing/report.txt", "content": "save"}
+    descriptor = describe_tool("file_write", arguments, cwd=tmp_path, read_roots=(tmp_path,))
+    pending = authority.request_access(context, descriptor.scopes, purpose="Save report",
+                                       operation_id="prestart", arguments_digest=descriptor.arguments_digest)
+    lease = issuer.approve(authority, context, pending, descriptor.arguments_digest)
+    results = EncryptedResultStore(tmp_path / "results.db", key=bytes(range(32)))
+    calls = []
+
+    async def fail_before_start(ctx, operation_id, plan, frozen):
+        calls.append(operation_id)
+        receipt = results.put(ctx, operation_id, plan, outcome="failed", payload="File was not opened; no action started.")
+        authority.reject_before_start(ctx, operation_id, plan.arguments_digest, plan.scopes,
+                                      result_digest=receipt.result_digest)
+        return receipt
+
+    async def recover(ctx, operation_id, plan):
+        return results.get(ctx, operation_id, plan)
+
+    supervisor.execute, supervisor.recover = fail_before_start, recover
+    first = await gate.execute("prestart", "file_write", arguments, reason="Save")
+    second = await gate.execute("prestart", "file_write", arguments, reason="Save")
+    assert first.state == second.state == "failed"
+    assert second.replayed and first.payload == second.payload and calls == ["prestart"]
+    assert authority.get_lease(lease.lease_id).status == "active"
+    with authority._transaction() as db:
+        assert db.execute("SELECT count(*) FROM execution_claims").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_prestart_failure_cannot_replace_a_prepared_or_started_claim(environment, tmp_path):
+    from orchestrator.permissions.descriptors import describe_tool
+    from orchestrator.permissions.authority import OperationConflict
+
+    authority, issuer, context, _, _, _ = environment
+    descriptor = describe_tool("file_write", {"path": "report.txt", "content": "save"}, cwd=tmp_path, read_roots=(tmp_path,))
+    request = authority.request_access(context, descriptor.scopes, purpose="Save",
+                                       operation_id="started", arguments_digest=descriptor.arguments_digest)
+    issuer.approve(authority, context, request, descriptor.arguments_digest)
+    claim = authority.prepare(context, "started", descriptor.arguments_digest, descriptor.scopes)
+    for started in (False, True):
+        if started:
+            authority.start(context, claim.claim_id)
+        with pytest.raises(OperationConflict):
+            authority.reject_before_start(context, "started", descriptor.arguments_digest, descriptor.scopes,
+                                          result_digest=sha256(b"failed").hexdigest())
+    assert authority.operation_state("started") == "started"

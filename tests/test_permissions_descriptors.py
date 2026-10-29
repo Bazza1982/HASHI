@@ -68,7 +68,8 @@ def test_network_read_and_upload_are_separate_and_redirects_not_claimed_enforced
         cwd=tmp_path, read_roots=(tmp_path,),
     )
     assert fetch.scopes[0].resource == "https://example.com:443"
-    assert "fetch" in fetch.scopes[0].actions
+    assert {"fetch", "send"} <= set(fetch.scopes[0].actions)
+    # A path can encode read data even without headers, a body or a query.
     assert "upload" in upload.scopes[0].actions
     assert not scope_covers(fetch.scopes[0], upload.scopes[0])
     assert fetch.coverage == "partial"

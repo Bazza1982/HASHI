@@ -188,14 +188,18 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         "approval_key", "transport_key", "supervisor_key", "supervisor_key_id",
         "result_key", "helper", "endpoints", "owner_bindings", "agents", "protected_roots", "capsule",
     }
-    if not required.issubset(installation) or set(installation) - required - {"transition", "runner"} or installation["version"] != 1:
+    if not required.issubset(installation) or set(installation) - required - {"transition", "runner", "native_identities"} or installation["version"] != 1:
         raise ValueError("invalid private permission installation")
     sid = current_process_user_sid()
     if sid != installation["service_sid"]:
         raise PermissionDenied("permission service is running under the wrong account")
     # Native service owners must be ordinary accounts. L2 additionally requires
     # independent Safety, Runner, and agent identities at executor creation.
-    require_nonadmin_identity(sid)
+    if runner is not None or installation.get("runner") is not None:
+        require_nonadmin_identity(sid)
+    else:
+        from orchestrator.permissions.windows_security import require_l1_identity
+        require_l1_identity(sid)
     private = _path(installation["private_root"])
     require_private_path(private, trusted_sids=(sid,))
     require_private_path(path, trusted_sids=(sid,))
@@ -236,9 +240,13 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
             raise ValueError("private permission key size changed")
         return data
 
-    approval = Ed25519PrivateKey.from_private_bytes(key_bytes("approval_key", 32))
-    transport = Ed25519PrivateKey.from_private_bytes(key_bytes("transport_key", 32))
-    supervisor_key = Ed25519PrivateKey.from_private_bytes(key_bytes("supervisor_key", 32))
+    materials = {role: key_bytes(role, 32) for role in ("approval_key", "transport_key", "supervisor_key", "result_key")}
+    if (len(set(materials.values())) != len(materials)
+            or len({str(_path(installation[role]).resolve()).casefold() for role in materials}) != len(materials)):
+        raise ValueError("private key roles require separate paths and material")
+    approval = Ed25519PrivateKey.from_private_bytes(materials["approval_key"])
+    transport = Ed25519PrivateKey.from_private_bytes(materials["transport_key"])
+    supervisor_key = Ed25519PrivateKey.from_private_bytes(materials["supervisor_key"])
     issuer = SupervisorReceiptIssuer(key_id=installation["supervisor_key_id"], signing_key=supervisor_key,
                                      clock=lambda: policies.authority.observed_time())
     manager = ConfigManager(_path(installation["config_path"]), _path(installation["secrets_path"]),
@@ -286,7 +294,7 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         from orchestrator.permissions.physical_journal import PhysicalFileJournal
         from orchestrator.permissions.model_receipts import ModelReceiptJournal
 
-        result_store = EncryptedResultStore(private / "results.sqlite", key=key_bytes("result_key", 32))
+        result_store = EncryptedResultStore(private / "results.sqlite", key=materials["result_key"])
         journal = PhysicalFileJournal(
             private / "physical.sqlite", artifact_root=file_helper.private_root,
             authority=authority, results=result_store, issuer=issuer,
@@ -314,7 +322,7 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         application = PermissionServiceApplication(
             authority, store, identity, policy_resolver=policies, executor_factory=factory,
             key_id="approval", signing_key=approval, owner_bindings=dict(installation["owner_bindings"]),
-            levels=levels, settings=policies.settings,
+            levels=levels, settings=policies.settings, native_identities=installation.get("native_identities"),
         )
         application._installation_lock = ownership
         from orchestrator.permissions.management import PermissionManagement

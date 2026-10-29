@@ -239,18 +239,40 @@ class PhysicalFileJournal:
                 result.append((row["state"], payload, row["digest"]))
             return result
 
-    def reconcile(self):
-        """Read original PID identity and fixed result artifacts; never execute."""
-        self._recover_parents()
+    def reconcile(self, *, binding=None):
+        """Settle every independent owner; one failed row cannot skip the others."""
+        failures = []
+        if binding is None:
+            try:
+                self._recover_parents()
+            except Exception as error:
+                failures.append(error)
         for state, value, evidence_digest in self.pending():
-            observation = ProcessObservation(**value["observation"]) if value["observation"] is not None else None
-            if state != "stopped":
-                proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=value["max_processes"])
-                if not isinstance(proof, dict) or proof.get("zero_job") is not True:
-                    continue
-                if observation is not None and self._observe_stopped(observation) is not True:
-                    continue
-            self._reconcile_stopped(value, evidence_digest)
+            if binding is not None and value["context"] != asdict(binding.context):
+                continue
+            try:
+                observation = ProcessObservation(**value["observation"]) if value["observation"] is not None else None
+                if state != "stopped":
+                    proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=value["max_processes"])
+                    if not isinstance(proof, dict) or proof.get("zero_job") is not True:
+                        continue
+                    if observation is not None and self._observe_stopped(observation) is not True:
+                        continue
+                self._reconcile_stopped(value, evidence_digest)
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise OSError("some physical owners remain unverified") from failures[0]
+
+    def _already_settled(self, context, operation_id, descriptor, claim_id):
+        status = self.authority.operation_status_for_task(context, operation_id)
+        if status.state not in {"succeeded", "failed"} or self.authority.resource_state(claim_id) != "stopped":
+            return False
+        result = self.results.get(context, operation_id, descriptor)
+        if result.outcome != status.state or result.result_digest != status.result_digest:
+            raise ValueError("the settled result differs from the permission ledger")
+        self._state(claim_id, "finished")
+        return True
 
     def _reconcile_stopped(self, value, evidence_digest):
         context = ExecutionContext(**value["context"])
@@ -278,7 +300,14 @@ class PhysicalFileJournal:
         plan_path = Path(value["plan"]).resolve()
         if not plan_path.is_relative_to(self.root) or plan_path.name != "plan.json":
             raise ValueError("physical artifact path changed")
-        plan_bytes = plan_path.read_bytes()
+        if self._already_settled(context, value["operation_id"], descriptor, claim.claim_id):
+            return
+        try:
+            plan_bytes = plan_path.read_bytes()
+        except FileNotFoundError:
+            if self._already_settled(context, value["operation_id"], descriptor, claim.claim_id):
+                return
+            raise
         if sha256(plan_bytes).hexdigest() != value["plan_digest"]:
             raise ValueError("physical helper plan changed")
         plan = json.loads(plan_bytes)

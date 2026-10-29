@@ -215,7 +215,7 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MAX_LIVE_DECISION_ACTIONS = 1024
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
@@ -293,6 +293,13 @@ _RUNTIME_METADATA_SCHEMA = """CREATE TABLE execution_runtime_metadata (
     pao_request_id TEXT NOT NULL,
     fencing_token INTEGER NOT NULL CHECK(fencing_token>0),
     worker_id TEXT NOT NULL
+)"""
+
+
+_PRESTART_FAILURES_SCHEMA = """CREATE TABLE prestart_failures (
+    operation_id TEXT PRIMARY KEY REFERENCES pending_operations(operation_id),
+    result_digest TEXT NOT NULL CHECK(length(result_digest)=64),
+    recorded_at REAL NOT NULL
 )"""
 
 
@@ -615,6 +622,8 @@ class PermissionAuthority:
             required["execution_runtime_metadata"] = {
                 "execution_epoch", "turn_id", "pao_request_id", "fencing_token", "worker_id",
             }
+        if version >= 8:
+            required["prestart_failures"] = {"operation_id", "result_digest", "recorded_at"}
         primary = {
             "authority_metadata": ("key",), "permission_tasks": ("task_id",),
             "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
@@ -635,6 +644,8 @@ class PermissionAuthority:
             primary["decision_action_presentations"] = ("presentation_id", "presentation_slot")
         if version >= 7:
             primary["execution_runtime_metadata"] = ("execution_epoch",)
+        if version >= 8:
+            primary["prestart_failures"] = ("operation_id",)
         for table, columns in required.items():
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = {row["name"] for row in rows}
@@ -692,6 +703,10 @@ class PermissionAuthority:
                 != "".join(_RUNTIME_METADATA_SCHEMA.split()).casefold()
             ):
                 raise ValueError("permission runtime binding constraints are incomplete")
+        if version >= 8:
+            table = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='prestart_failures'").fetchone()
+            if table is None or "".join(table["sql"].split()).casefold() != "".join(_PRESTART_FAILURES_SCHEMA.split()).casefold():
+                raise ValueError("permission prestart failure constraints are incomplete")
         index = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_pending_request'"
         ).fetchone()
@@ -707,7 +722,7 @@ class PermissionAuthority:
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, 4, 5, 6, 7, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -772,6 +787,9 @@ class PermissionAuthority:
             if version == 6:
                 connection.execute(_RUNTIME_METADATA_SCHEMA)
                 version = 7
+            if version == 7:
+                connection.execute(_PRESTART_FAILURES_SCHEMA)
+                version = 8
             if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
             self._validate_schema(connection, _SCHEMA_VERSION)
@@ -2349,6 +2367,61 @@ class PermissionAuthority:
                 connection, context, now, normalized, operation_id=operation_id
             ) is not None
 
+    def reject_before_start(self, context, operation_id, arguments_digest, scopes, *, result_digest):
+        """Trusted supervisor records a known failure with no execution claim ever created."""
+        _nonempty(operation_id, "operation_id")
+        _digest(arguments_digest, "arguments_digest")
+        _digest(result_digest, "result_digest")
+        normalized = canonical_scope_set(scopes)
+        digest = scope_digest(normalized)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context)
+            operation = connection.execute(
+                "SELECT * FROM pending_operations WHERE operation_id=?", (operation_id,),
+            ).fetchone()
+            if operation is not None and any((
+                operation["task_id"] != context.task_id, operation["run_id"] != context.run_id,
+                operation["arguments_digest"] != arguments_digest, operation["scope_digest"] != digest,
+                operation["execution_epoch"] != context.execution_epoch,
+            )):
+                raise OperationConflict("the unstarted failure belongs to another operation")
+            if connection.execute("SELECT 1 FROM execution_claims WHERE operation_id=? LIMIT 1",
+                                  (operation_id,)).fetchone() is not None:
+                raise OperationConflict("an execution claim already exists")
+            previous = connection.execute(
+                "SELECT result_digest FROM prestart_failures WHERE operation_id=?", (operation_id,),
+            ).fetchone()
+            if previous is not None:
+                if operation["state"] != "failed" or previous[0] != result_digest:
+                    raise OperationConflict("the unstarted failure is immutable")
+                return
+            if operation is not None and operation["state"] != "waiting":
+                raise OperationConflict("the operation is no longer waiting")
+            if self._covering_leases(connection, context, now, normalized, operation_id=operation_id) is None:
+                raise PermissionDenied("the unstarted failure requires current permission")
+            if operation is None:
+                connection.execute("INSERT INTO pending_operations VALUES(?,?,?,?,?,?,?)",
+                                   (operation_id, context.task_id, context.run_id, arguments_digest,
+                                    digest, context.execution_epoch, "failed"))
+            else:
+                connection.execute("UPDATE pending_operations SET state='failed' WHERE operation_id=?",
+                                   (operation_id,))
+            connection.execute("INSERT INTO prestart_failures VALUES(?,?,?)", (operation_id, result_digest, now))
+            self._event(connection, context.task_id, "operation_not_started", operation_id, now)
+
+    @staticmethod
+    def _operation_status(connection, row):
+        result, resources = row["result_digest"], row["resource_state"]
+        if row["state"] == "failed" and result is None:
+            failure = connection.execute(
+                "SELECT result_digest FROM prestart_failures WHERE operation_id=?", (row["operation_id"],),
+            ).fetchone()
+            if failure is not None:
+                result, resources = failure[0], "stopped"
+        return OperationStatus(row["state"], row["arguments_digest"], row["scope_digest"],
+                               row["execution_epoch"], result, resources)
+
     def prepare(
         self,
         context: ExecutionContext,
@@ -3071,10 +3144,7 @@ class PermissionAuthority:
             if row["task_id"] != context.task_id or row["run_id"] != context.run_id:
                 raise OperationConflict("operation belongs to another task or run")
             self._require_prior_execution_fenced(connection, row, context)
-            return OperationStatus(
-                row["state"], row["arguments_digest"], row["scope_digest"],
-                row["execution_epoch"], row["result_digest"], row["resource_state"],
-            )
+            return self._operation_status(connection, row)
 
     def operation_status_for_task(
         self, context: ExecutionContext, operation_id: str
@@ -3084,7 +3154,7 @@ class PermissionAuthority:
             self._now(connection)
             self._context(connection, context, active=False)
             row = connection.execute(
-                "SELECT p.state,p.arguments_digest,p.scope_digest,p.execution_epoch,"
+                "SELECT p.operation_id,p.state,p.arguments_digest,p.scope_digest,p.execution_epoch,"
                 "(SELECT c.result_digest FROM execution_claims c WHERE c.operation_id=p.operation_id "
                 "AND c.state=p.state ORDER BY c.rowid DESC LIMIT 1) AS result_digest,"
                 "(SELECT r.state FROM execution_claims c JOIN execution_resources r ON r.claim_id=c.claim_id "
@@ -3095,10 +3165,7 @@ class PermissionAuthority:
             ).fetchone()
             if row is None:
                 raise PermissionDenied("operation not found for this task and run")
-            return OperationStatus(
-                row["state"], row["arguments_digest"], row["scope_digest"],
-                row["execution_epoch"], row["result_digest"], row["resource_state"],
-            )
+            return self._operation_status(connection, row)
 
     def get_lease_for_task(
         self, context: ExecutionContext, lease_id: str

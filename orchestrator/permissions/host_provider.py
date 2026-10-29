@@ -16,11 +16,12 @@ from orchestrator.permissions.wire import PermissionRemoteError
 class BrokeredProviderFactory:
     """Create existing adapters for exact qualified profiles, without real keys."""
 
-    def __init__(self, client, *, profile_config, scratch_root, privacy_level):
+    def __init__(self, client, *, profile_config, scratch_root, privacy_level, global_config=None):
         self._client = client
         self._profiles = {}
         self.privacy_level = privacy_level
         self._root = Path(scratch_root)
+        self._artifact_ports = None
         if not self._root.is_absolute():
             raise ValueError("a sealed host scratch root is required")
         for item in profile_config:
@@ -32,7 +33,7 @@ class BrokeredProviderFactory:
         self.config = SimpleNamespace(allowed_backends=[
             {"engine": engine, "model": model} for engine, model in self._profiles
         ])
-        self.global_config = SimpleNamespace()
+        self.global_config = global_config or SimpleNamespace()
 
     def create_ephemeral_backend(self, engine, target_model=None):
         return self._create(engine, target_model)
@@ -54,6 +55,9 @@ class BrokeredProviderFactory:
         )
         backend = get_backend_class(engine)(cfg, self.global_config, "broker-transport-no-credential")
         backend.privacy_level = self.privacy_level
+        if self._artifact_ports is not None:
+            from orchestrator.permissions.media_output import HostAudioStore
+            backend._audio_asset_store = HostAudioStore(self._artifact_ports, engine, model)
         client = self._client
 
         async def invoke(adapter, payload, headers, callback, *, use_stream):

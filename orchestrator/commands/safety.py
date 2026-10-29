@@ -12,6 +12,7 @@ from typing import Any
 from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import card_title
+from orchestrator.permissions.frontend_native import native_command
 
 
 def _authorized(runtime: Any, update: Any) -> bool:
@@ -240,5 +241,5 @@ async def safety_command(runtime: Any, update: Any, context: Any):
     await runtime._reply_text(update, text, parse_mode="HTML")
 
 
-COMMANDS = [RuntimeCommand("safety", "View permission status", safety_command)]
-CALLBACKS = [RuntimeCallback(r"^safety:d:[a-f0-9]{32}$", safety_decision_callback)]
+COMMANDS = [RuntimeCommand("safety", "View permission status", native_command(safety_command))]
+CALLBACKS = [RuntimeCallback(r"^safety:d:[a-f0-9]{32}$", native_command(safety_decision_callback))]

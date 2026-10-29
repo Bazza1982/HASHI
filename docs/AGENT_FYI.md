@@ -1,8 +1,8 @@
 # HASHI Agent FYI
 
-- 权限施工尚未交付／采用。缺权保留原 Run，不得作为模型失败触发 fallback；
-  只有可信会话决定可以授权，普通回答不能授权。Windows 原生试验不代表完整 L2。
-  [进度](permissions/IMPLEMENTATION_STATUS.md)。
+- 权限闭环已接入服务、共享 FC 与现行 HERV3；当前 Windows 脚本资格超时仍在定位，暂不交付整体审阅。
+  缺权保留原 Run；普通回答/API actor 不授权；混合审批隔离未验证时保持 partial。
+  源码、平台资格、采用和用户实测分别核实。[决定](permissions/IMPLEMENTATION_DECISION_20261030.md)、[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

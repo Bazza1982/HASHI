@@ -192,6 +192,10 @@ jobs:
           tests/test_permission_file_operations.py
           tests/test_permission_network_worker.py
           tests/test_permission_scripts.py
+          tests/test_permission_media_bridge.py
+          tests/test_permission_completion_boundaries.py
+          tests/test_permission_service_roundtrip.py
+          tests/test_permission_scratch_integrity.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py
@@ -269,6 +273,10 @@ jobs:
           tests/test_permission_file_operations.py
           tests/test_permission_network_worker.py
           tests/test_permission_scripts.py
+          tests/test_permission_media_bridge.py
+          tests/test_permission_completion_boundaries.py
+          tests/test_permission_service_roundtrip.py
+          tests/test_permission_scratch_integrity.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py

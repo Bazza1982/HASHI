@@ -23,6 +23,10 @@ def protect_task_scratch(path, *, runner_sid, appcontainer_sid):
         pointer, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(pointer), ctypes.POINTER(wintypes.BOOL),
     ]
     security.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    security.GetSecurityDescriptorSacl.argtypes = [
+        pointer, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(pointer), ctypes.POINTER(wintypes.BOOL),
+    ]
+    security.GetSecurityDescriptorSacl.restype = wintypes.BOOL
     security.SetNamedSecurityInfoW.argtypes = [
         wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD, pointer, pointer, pointer, pointer,
     ]
@@ -31,7 +35,7 @@ def protect_task_scratch(path, *, runner_sid, appcontainer_sid):
     # The task receives Modify on its own generated data, not WRITE_DAC,
     # WRITE_OWNER, another task's scratch, or any service private directory.
     sddl = (f"D:P(A;OICI;FA;;;{runner_sid})(A;OICI;0x1301bf;;;{appcontainer_sid})"
-            "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+            "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NW;;;LW)")
     descriptor = pointer()
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -41,7 +45,14 @@ def protect_task_scratch(path, *, runner_sid, appcontainer_sid):
             descriptor, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted),
         ) or not present or not acl:
             raise PermissionError("task scratch DACL is incomplete")
-        result = security.SetNamedSecurityInfoW(str(path), 1, 0x80000004, None, None, acl, None)
+        label_present, label_defaulted, label = wintypes.BOOL(), wintypes.BOOL(), pointer()
+        if not security.GetSecurityDescriptorSacl(
+            descriptor, ctypes.byref(label_present), ctypes.byref(label), ctypes.byref(label_defaulted),
+        ) or not label_present or not label:
+            raise PermissionError("task scratch low-integrity label is incomplete")
+        # LPAC is low integrity. A DACL grant alone cannot permit writes into a
+        # default medium-integrity folder; lower only this owned task subtree.
+        result = security.SetNamedSecurityInfoW(str(path), 1, 0x80000014, None, None, acl, label)
         if result:
             raise ctypes.WinError(result)
     finally:

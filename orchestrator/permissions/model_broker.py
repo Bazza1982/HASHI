@@ -56,7 +56,7 @@ class SelectedModelBroker:
         if status.task_state != "active" or status.binding_state != "active":
             raise PermissionDenied("selected model capability is inactive")
 
-    async def provider_call(self, *, engine, model, payload, use_stream, origin="host"):
+    async def provider_call(self, *, engine, model, payload, use_stream, origin="host", include_receipt=False):
         if origin not in {"host", "worker"}:
             raise PermissionDenied("invalid model accounting owner")
         if type(use_stream) is not bool or not isinstance(payload, dict) or set(payload) - _MODEL_FIELDS:
@@ -127,7 +127,8 @@ class SelectedModelBroker:
                     self._receipt_store.complete(self._binding, receipt)
                 with self._run_guard(self._binding.context):
                     self._current()
-                return api_result_to_wire(result)
+                value = api_result_to_wire(result)
+                return {"result": value, "receipt": dict(receipt)} if include_receipt else value
             finally:
                 owned = tuple(item for item in (request, monitor) if item is not None)
                 for item in owned:

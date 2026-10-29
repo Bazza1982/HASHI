@@ -144,7 +144,8 @@ async def test_parked_stop_proof_is_not_issued_until_every_owned_handle_is_close
 
 
 @pytest.mark.asyncio
-async def test_completed_file_path_signs_stop_only_after_parent_handles_close(tmp_path, monkeypatch):
+@pytest.mark.parametrize("binding_failure", [False, True])
+async def test_completed_file_path_signs_stop_only_after_parent_handles_close(tmp_path, monkeypatch, binding_failure):
     """Real ledger/result store and temp write; injected kernel, no OS claim."""
     import base64
     from hashlib import sha256
@@ -218,7 +219,12 @@ async def test_completed_file_path_signs_stop_only_after_parent_handles_close(tm
         assert arguments["inherited_handles"] == (18,)
         return process
 
-    monkeypatch.setattr(module, "open_bound_write", lambda scope: Bound())
+    def bind(scope):
+        if binding_failure:
+            raise module.FileBindingError("cannot open approved target")
+        return Bound()
+
+    monkeypatch.setattr(module, "open_bound_write", bind)
     monkeypatch.setattr(module, "inheritable_handle_copy", lambda handle: (Kernel(), 18))
     monkeypatch.setattr(module, "launch_suspended", launch)
     owner = WindowsFileProcessSupervisor.__new__(WindowsFileProcessSupervisor)
@@ -243,6 +249,13 @@ async def test_completed_file_path_signs_stop_only_after_parent_handles_close(tm
     authority.request_access(context, descriptor.scopes, purpose="Write report", operation_id="operation",
                               arguments_digest=descriptor.arguments_digest)
     result = await owner.execute(context, "operation", descriptor, arguments)
+    if binding_failure:
+        assert result.outcome == "failed" and not events and not owner._active
+        assert not (tmp_path / "report.txt").exists()
+        status = authority.operation_status_for_task(context, "operation")
+        assert status.state == "failed" and status.resource_state == "stopped"
+        assert (await owner.recover(context, "operation", descriptor)).result_digest == result.result_digest
+        return
     assert result.outcome == "succeeded"
     assert (tmp_path / "report.txt").read_text() == "saved once"
     assert events[-1] == "proof" and not owner._active

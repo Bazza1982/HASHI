@@ -23,12 +23,17 @@ class BackendPermissionStatus:
     requested_level: PermissionLevel
     backend_id: str
     state: str
+    reports: tuple[dict, ...] = ()
 
     def __post_init__(self) -> None:
         if (not isinstance(self.requested_level, PermissionLevel)
                 or self.requested_level is PermissionLevel.L0
-                or not _text(self.backend_id) or self.state not in {"unmanaged", "unavailable"}):
+                or not _text(self.backend_id) or self.state not in {"unmanaged", "unavailable", "managed"}):
             raise ValueError("invalid current-backend permission status")
+        if (not isinstance(self.reports, tuple) or len(self.reports) > 64
+                or any(not isinstance(report, dict) for report in self.reports)
+                or (self.state == "managed" and not self.reports)):
+            raise ValueError("current managed controls require observed reports")
 
 
 CONTROLS = ("files", "scripts", "network", "credentials", "devices", "approval", "cleanup")

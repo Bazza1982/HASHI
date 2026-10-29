@@ -170,10 +170,9 @@ def describe_tool(
             raise ValueError("unknown network method")
         method = method.upper()
         if method in {"GET", "HEAD"}:
-            actions = ["fetch"]
-            parts = urlsplit(raw_url) if isinstance(raw_url, str) else None
-            if (parts and parts.query) or arguments.get("body") is not None or arguments.get("headers"):
-                actions.append("send")
+            actions = ["fetch", "send"]
+            # A caller-controlled URL path can carry read data just as a query or
+            # header can. Origin permission alone cannot promise receive-only I/O.
         else:
             actions = ["send", "upload"]
         scope = _network_scope(raw_url, tuple(actions), cwd)

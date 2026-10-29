@@ -288,6 +288,7 @@ def test_v2_upgrade_keeps_live_request_and_adds_safe_suggestions(environment):
             for column in ("suggested_lifetime", "suggested_seconds", "request_key"):
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
+        connection.execute("DROP TABLE IF EXISTS prestart_failures")
         connection.execute("PRAGMA user_version=2")
     reopened = PermissionAuthority(
         authority.path, verifier=issuer, clock=lambda: clock[0], monotonic=lambda: clock[0],
@@ -302,7 +303,7 @@ def test_v2_upgrade_keeps_live_request_and_adds_safe_suggestions(environment):
 
 
 @pytest.mark.parametrize("conflicting_table", [False, True])
-def test_v1_to_v7_migration_is_atomic_and_preserves_existing_request(tmp_path, conflicting_table):
+def test_v1_to_v8_migration_is_atomic_and_preserves_existing_request(tmp_path, conflicting_table):
     path = tmp_path / "legacy.sqlite"
     from orchestrator.permissions.authority import _REQUEST_VERSIONS_SCHEMA, _SCHEMA
 
@@ -326,6 +327,7 @@ def test_v1_to_v7_migration_is_atomic_and_preserves_existing_request(tmp_path, c
              "old-scope", "b" * 64, "keep this reason", 1, "pending", 1000.0, 4000000000.0),
         )
         connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
+        connection.execute("DROP TABLE IF EXISTS prestart_failures")
         connection.execute("PRAGMA user_version=1")
         if conflicting_table:
             connection.execute("CREATE TABLE access_request_versions (keep TEXT)")
@@ -338,7 +340,7 @@ def test_v1_to_v7_migration_is_atomic_and_preserves_existing_request(tmp_path, c
         PermissionAuthority(path, verifier=ReceiptSource())
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (1 if conflicting_table else 7)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (1 if conflicting_table else 8)
         assert connection.execute(
             "SELECT purpose FROM access_requests WHERE request_id='legacy'"
         ).fetchone() == ("keep this reason",)

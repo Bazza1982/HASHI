@@ -12,6 +12,33 @@ from tools.meter_cost import PerCallUsageLineItem
 from tools.token_tracker import resolve_usage_cost
 
 
+def canonical_item(receipt, matching):
+    source, cost = receipt["token_source"], receipt["cost_usd"]
+    if source not in {"provider", "estimated", "unknown"}:
+        raise ValueError("invalid observed token provenance")
+    thinking_in_output = source == "provider"
+    if source == "unknown" and cost is None:
+        resolved, cost_source, revision = None, "unknown", "unknown"
+    else:
+        resolved, cost_source, revision = resolve_usage_cost(
+            cost_usd=cost, model=receipt["model"], engine=receipt["engine"],
+            input_tokens=receipt["input_tokens"], output_tokens=receipt["output_tokens"],
+            thinking_tokens=receipt["thinking_tokens"],
+            cached_tokens=receipt.get("prompt_cache_hit_tokens") or 0,
+            thinking_in_output=thinking_in_output, schedule_missing=False,
+        )
+    return replace(
+        matching, request_id="permission-provider:" + receipt["id"],
+        input_tokens=receipt["input_tokens"], output_tokens=receipt["output_tokens"],
+        thinking_tokens=receipt["thinking_tokens"], token_source=source,
+        thinking_in_output=thinking_in_output, cost_usd=resolved, cost_source=cost_source,
+        pricing_revision=revision, prompt_cache_hit_tokens=receipt.get("prompt_cache_hit_tokens"),
+        prompt_cache_miss_tokens=receipt.get("prompt_cache_miss_tokens"),
+        provider_request_id=(receipt["provider_ids"][0] if receipt["provider_ids"] else receipt["id"]),
+        status="completed" if receipt["status"] == "completed" else "failed",
+    )
+
+
 def accept_host_usage(provider, response):
     if not isinstance(provider, HashiStageProvider) or not isinstance(response, dict):
         raise ValueError("a real HERV3 accounting receiver is required")
@@ -77,29 +104,7 @@ def accept_host_usage(provider, response):
             if not isinstance(saved, dict) or set(saved) != names:
                 raise ValueError("invalid saved canonical model projection")
             matching = PerCallUsageLineItem(**saved)
-        source = receipt["token_source"]
-        if source not in {"provider", "estimated", "unknown"}:
-            raise ValueError("invalid observed token provenance")
-        thinking_in_output = source == "provider"
-        if source == "unknown" and cost is None:
-            resolved, cost_source, revision = None, "unknown", "unknown"
-        else:
-            resolved, cost_source, revision = resolve_usage_cost(
-                cost_usd=cost, model=receipt["model"], engine=receipt["engine"],
-                input_tokens=receipt["input_tokens"], output_tokens=receipt["output_tokens"],
-                thinking_tokens=receipt["thinking_tokens"],
-                cached_tokens=receipt.get("prompt_cache_hit_tokens") or 0,
-                thinking_in_output=thinking_in_output, schedule_missing=False,
-            )
-        imported.append((identity, digest, replace(
-            matching, request_id="permission-provider:" + receipt["id"], input_tokens=receipt["input_tokens"], output_tokens=receipt["output_tokens"],
-            thinking_tokens=receipt["thinking_tokens"], token_source=source,
-            thinking_in_output=thinking_in_output, cost_usd=resolved, cost_source=cost_source,
-            pricing_revision=revision, prompt_cache_hit_tokens=receipt.get("prompt_cache_hit_tokens"),
-            prompt_cache_miss_tokens=receipt.get("prompt_cache_miss_tokens"),
-            provider_request_id=(receipt["provider_ids"][0] if receipt["provider_ids"] else receipt["id"]),
-            status="completed" if receipt["status"] == "completed" else "failed",
-        )))
+        imported.append((identity, digest, canonical_item(receipt, matching)))
     if pending:
         raise ValueError("host claimed model invocations without service observations")
     # Validate the entire projection before notifying the durable accounting

@@ -19,13 +19,26 @@ from orchestrator.permissions.wire import PermissionServiceRouter
 class PermissionServiceApplication:
     def __init__(self, authority, run_store, identity_service, *, policy_resolver,
                  executor_factory, key_id, signing_key, owner_bindings, levels,
-                 settings=None, management=None):
+                 settings=None, management=None, native_identities=None):
         if not isinstance(owner_bindings, dict) or not owner_bindings:
             raise ValueError("explicit human user to PAO owner bindings are required")
         if not isinstance(levels, tuple) or not levels or set(levels) - {"L1", "L2"}:
             raise ValueError("qualified installed service levels are required")
         self.authority, self.store = authority, run_store
         self.identity, self.owners = identity_service, dict(owner_bindings)
+
+        self.native_identities = {}
+        for entry in native_identities or ():
+            from orchestrator.frontend_connector_registry import registered_connector_id
+
+            if (not isinstance(entry, dict) or set(entry) != {"connector_id", "actor_id", "user_id"}
+                    or any(not isinstance(value, str) or not value or len(value) > 512 for value in entry.values())
+                    or entry["user_id"] not in self.owners):
+                raise ValueError("explicit native human identity links are required")
+            key = (registered_connector_id(entry["connector_id"]), entry["actor_id"])
+            if key in self.native_identities:
+                raise ValueError("duplicate native human identity link")
+            self.native_identities[key] = entry["user_id"]
         self.generation = uuid4().hex
         self.levels, self._factory = levels, executor_factory
         self.runs = PermissionRunService(
@@ -49,7 +62,12 @@ class PermissionServiceApplication:
         try:
             reconcile = getattr(self._factory, "reconcile", None)
             if callable(reconcile):
-                await reconcile()
+                try:
+                    await reconcile()
+                except Exception as error:
+                    # Old bindings remain fenced and retain their unresolved
+                    # records. Independent tasks and human controls still serve.
+                    self._recovery_error = type(error).__name__
             for endpoint in endpoints:
                 await endpoint.start()
             self._started = True
@@ -137,6 +155,11 @@ class PermissionServiceApplication:
             self.runs.execution_registry(binding).attach_callbacks(callbacks)
         return binding
 
+    def execution_controls(self, *, binding):
+        from orchestrator.permissions.observed_controls import execution_report
+
+        return execution_report(self.runs.execution_registry(binding))
+
     def execution_descriptor(self, *, binding):
         executor = self.runs.execution_registry(binding)
         value = executor.descriptor()
@@ -188,11 +211,16 @@ class PermissionServiceApplication:
         executor.channel._current()
         return executor.channel._models.commit_usage(projections)
 
+    def worker_usage_receipts(self, *, binding):
+        executor = self.runs.execution_registry(binding)
+        executor.channel._current()
+        return executor.channel._models.usage_receipts(origin="worker")
+
     async def auxiliary_provider_call(self, *, binding, engine, model, payload, use_stream):
         executor = self.runs.execution_registry(binding)
         executor.channel._current()
         result = await executor.channel._models.provider_call(
-            engine=engine, model=model, payload=payload, use_stream=use_stream, origin="worker",
+            engine=engine, model=model, payload=payload, use_stream=use_stream, origin="worker", include_receipt=True,
         )
         executor.channel._current()
         return result
@@ -225,6 +253,25 @@ class PermissionServiceApplication:
             subject, arguments, session_token=session_token,
             invocation_id=invocation_id, connection_binding=connection_binding,
         )
+
+    def native_login(self, *, subject, connector_id, actor_id, invocation_id):
+        """Private FC attestation of an original, already authenticated command."""
+        from orchestrator.permissions.models import PermissionSubject
+
+        if (not isinstance(subject, PermissionSubject) or not all(isinstance(value, str) and value
+                and len(value) <= 512 for value in (connector_id, actor_id, invocation_id))):
+            raise PermissionDenied("invalid original command authentication")
+        user_id = self.native_identities.get((connector_id, actor_id))
+        user = self.identity.get_user(user_id) if user_id else None
+        if (user is None or user.status != "active" or self.owners.get(user.id) != subject.owner_id
+                or subject.instance_id != self.store.instance_id):
+            raise PermissionDenied("no explicit native human owner link exists")
+        session = self.store.get_session(subject.session_id, owner_id=subject.owner_id, include_deleted=False)
+        if (session["agent_id"] != subject.agent_id or session["status"] != "active"
+                or str(session["context_generation"]) != subject.context_generation):
+            raise PermissionDenied("original command Session changed")
+        login = self.identity.create_session(user_id=user.id, ttl_seconds=60)
+        return {"session_token": login.token, "expires_at": login.expires_at}
 
     def login(self, *, org_id, email, password):
         # API keys, shared instance bearers and ordinary question answers never

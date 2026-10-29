@@ -40,7 +40,40 @@ def manifest(runtime):
         "operations": available,
         "allow_immediate_response": bool(getattr(runtime.delivery, "allow_immediate_response", False)),
         "workzone_ref": runtime.workzone_ref,
+        "provider_features": provider_features(runtime),
+        "media_ports": hasattr(runtime, "provider"),
     }
+
+
+def provider_features(runtime):
+    from adapters.her_v2 import _ExecutionStageCompactionProvider, _HChatDraftToolProvider
+
+    current, found = getattr(runtime, "provider", None), []
+    for _ in range(4):
+        if type(current) is _HChatDraftToolProvider:
+            found.append("hchat_draft")
+        elif type(current) is _ExecutionStageCompactionProvider:
+            found.append("execution_compaction")
+        else:
+            break
+        current = current._base
+    return found
+
+
+def start_execution(runtime):
+    from adapters.her_v2 import _ExecutionStageCompactionProvider, _HChatDraftToolProvider
+
+    current = runtime.provider
+    for _ in range(4):
+        if type(current) is _ExecutionStageCompactionProvider:
+            if not current._scheduled:
+                current._scheduled = True
+                current._on_execution()
+            return None
+        if type(current) is not _HChatDraftToolProvider:
+            break
+        current = current._base
+    raise PermissionDenied("the original execution trigger is unavailable")
 
 
 async def invoke(turn, operation, arguments):
@@ -51,12 +84,21 @@ async def invoke(turn, operation, arguments):
         if arguments != {"args": [], "kwargs": {}}:
             raise PermissionDenied("runtime manifest takes no arguments")
         return pack(manifest(runtime))
-    if (operation not in _OPERATIONS or not isinstance(arguments, dict)
+    if (operation not in (_OPERATIONS.keys() | {"provider_features", "execution_start", "media_manifest", "media_chunk",
+                                                "voice_state", "voice_transcript", "text_audio", "media_cleanup",
+                                                "audio_begin", "audio_chunk", "audio_complete"}) or not isinstance(arguments, dict)
             or set(arguments) != {"args", "kwargs"}
             or not isinstance(arguments["args"], list) or not isinstance(arguments["kwargs"], dict)):
         raise PermissionDenied("unknown fixed HER runtime port")
     if len(json.dumps(arguments, allow_nan=False)) > 2_000_000:
         raise PermissionDenied("HER runtime port payload exceeds its bound")
+    if operation not in _OPERATIONS:
+        args = [unpack(value) for value in arguments["args"]]
+        kwargs = {key: unpack(value) for key, value in arguments["kwargs"].items()}
+        if operation in {"provider_features", "execution_start"} and not args and not kwargs:
+            return pack(provider_features(runtime) if operation == "provider_features" else start_execution(runtime))
+        from orchestrator.permissions.media_bridge import invoke_media
+        return pack(await invoke_media(turn, operation, args, kwargs))
     attribute, method = _OPERATIONS[operation]
     target = getattr(getattr(runtime, attribute, None), method, None)
     if not callable(target):
@@ -82,10 +124,16 @@ class HostRuntimePorts:
         self.client = client
         self.manifest = self._sync("manifest")
         if (not isinstance(self.manifest, dict)
-                or set(self.manifest) != {"operations", "allow_immediate_response", "workzone_ref"}
+                or set(self.manifest) - {"operations", "allow_immediate_response", "workzone_ref", "provider_features", "media_ports"}
+                or not {"operations", "allow_immediate_response", "workzone_ref"} <= self.manifest.keys()
                 or not isinstance(self.manifest["operations"], list)
                 or set(self.manifest["operations"]) - _OPERATIONS.keys()):
             raise ValueError("invalid bound HERV3 runtime ports")
+        features = self.manifest.setdefault("provider_features", [])
+        media = self.manifest.setdefault("media_ports", False)
+        if (not isinstance(features, list) or set(features) - {"execution_compaction", "hchat_draft"}
+                or type(media) is not bool):
+            raise ValueError("invalid original HER provider features")
 
     @staticmethod
     def _arguments(args, kwargs):

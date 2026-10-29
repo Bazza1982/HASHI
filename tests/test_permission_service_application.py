@@ -46,6 +46,7 @@ def environment(tmp_path):
     service = PermissionServiceApplication(
         authority, store, identity, policy_resolver=lambda *args: policy, executor_factory=factory,
         key_id="approval", signing_key=key, owner_bindings={"human": context.owner_id}, levels=("L1",),
+        native_identities=[{"connector_id": "telegram", "actor_id": "731", "user_id": "human"}],
     )
     arguments = dict(request_id=accepted.request_id, run_id=accepted.run_id, owner_id=context.owner_id,
                      agent_id=context.agent_id, session_id=context.session_id, context_generation=1,

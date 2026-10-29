@@ -27,6 +27,7 @@ class ManagedHerTurn:
     accepted: object | None = None
     resumed_unstarted: bool = False
     runtime: object | None = None
+    media: object | None = None
 
     def bind_provider(self, provider):
         binder = getattr(self.executor, "bind_provider", None)
@@ -37,6 +38,9 @@ class ManagedHerTurn:
 
     async def run(self, runtime, prompt, request_id, **arguments):
         self.runtime = runtime
+        from orchestrator.permissions.media_bridge import RunMedia
+
+        self.media = RunMedia(arguments.get("request_content"), prompt)
         delegated = getattr(self.executor, "run_her", None)
         if callable(delegated):
             return await delegated(runtime, prompt, request_id, binding=self.binding,
@@ -276,6 +280,34 @@ class PermissionAgentController:
             except BaseException:
                 self._queued.discard(binding.request_id)
                 raise
+
+    async def before_backend_switch(self, target_engine):
+        from orchestrator.flexible_backend_registry import canonical_backend_engine
+
+        if canonical_backend_engine(target_engine) == "her-v2":
+            return
+        bindings = dict(self._owned_bindings)
+        for payload in self.parking.list_parked(agent_id=self.runtime.name):
+            from orchestrator.permissions.run_service import binding_from_route
+            binding = binding_from_route(payload["binding"])
+            bindings.setdefault(binding.context.execution_epoch, binding)
+        # Stop the canonical attempts first. Even an offline Safety service
+        # cannot use its old PaoRunFence to dispatch a Tool or Provider call.
+        for binding in bindings.values():
+            self.service.store.cancel_run(binding.context.run_id, owner_id=binding.context.owner_id,
+                                          reason="backend_changed_to_unmanaged")
+        async def retire(binding):
+            closer = getattr(self.service, "fence_for_backend_switch", None)
+            if callable(closer):
+                return await closer(binding)
+            await asyncio.to_thread(self.service.authority.fence_execution, binding.context)
+            return await self.service.close_execution(binding=binding)
+        results = await asyncio.gather(*(retire(binding) for binding in bindings.values()), return_exceptions=True)
+        for binding, result in zip(bindings.values(), results):
+            if not isinstance(result, BaseException):
+                self._owned_bindings.pop(binding.context.execution_epoch, None)
+        if any(isinstance(value, BaseException) for value in results):
+            self.runtime.error_logger.warning("Old backend remains fenced; resource settlement is unverified")
 
     async def close(self):
         self._closing = True
