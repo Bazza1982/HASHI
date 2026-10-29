@@ -225,6 +225,8 @@ Job Object 用于进程组、限制和清理，**不提供文件／网络／身�
 
 **同日补充准备（仍未通过 W01）：**一次性非管理员账户可登录，实际 token 无管理员组；独立测试目录中的解释器、标准库和 probe 对该身份只读，scratch 可写。测试目录和账户已确认清理。仍未以该身份启动 AppContainer、HERV3、shell 或服务。
 
+**受限身份启动阻塞：**需要在进程开始执行前原子加入 kill-on-close Job。`CreateProcessWithLogonW` 搭配扩展 Job 属性返回 Windows 87；换用 `LogonUserW` + `CreateProcessAsUserW` 返回 1314（缺少必要权限）。当前 token 不含 `SeAssignPrimaryTokenPrivilege`。两次测试的账户和测试目录均已清理；未放宽系统账户权限，也未使用先运行后补 Job 的降级路径。需在经授权的隔离测试服务身份下继续验证；以上失败不证明特定缺失权限就是 1314 的唯一原因。
+
 ### W02 — 独立服务、测试安装和最小账户
 
 **输入：**W01 的平台组合与身份矩阵。
