@@ -114,6 +114,8 @@ class _Windows:
             ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
         ]
         self.kernel.WriteFile.restype = wintypes.BOOL
+        self.kernel.SetEndOfFile.argtypes = [wintypes.HANDLE]
+        self.kernel.SetEndOfFile.restype = wintypes.BOOL
         self.kernel.FlushFileBuffers.argtypes = [wintypes.HANDLE]
         self.kernel.FlushFileBuffers.restype = wintypes.BOOL
         self.kernel.SetFilePointerEx.argtypes = [
@@ -146,7 +148,8 @@ class _Windows:
             raise FileBindingError("cannot open approved volume root")
         return handle
 
-    def open_child(self, parent: int, name: str, *, directory: bool) -> int:
+    def open_child(self, parent: int, name: str, *, directory: bool,
+                   access: int = _READ_ACCESS, share: int = _SHARE_READ_WRITE) -> int:
         buffer = ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
         string = _UnicodeString(length, length + 2, ctypes.cast(buffer, wintypes.LPWSTR))
@@ -158,11 +161,13 @@ class _Windows:
         io = _IoStatus()
         options = _OPEN_REPARSE_POINT | _NT_SYNCHRONOUS | (_NT_DIRECTORY if directory else _NT_NON_DIRECTORY)
         status = self.nt.NtCreateFile(
-            ctypes.byref(handle), _READ_ACCESS, ctypes.byref(attributes), ctypes.byref(io),
-            None, 0, _SHARE_READ_WRITE, _NT_OPEN, options, None, 0,
+            ctypes.byref(handle), access, ctypes.byref(attributes), ctypes.byref(io),
+            None, 0, share, _NT_OPEN, options, None, 0,
         )
         if status < 0 or not handle.value:
-            raise FileBindingError("cannot safely open approved path component")
+            error = FileBindingError("cannot safely open approved path component")
+            error.ntstatus = status & 0xFFFFFFFF
+            raise error
         return handle.value
 
     def create_temporary(self, parent: int, name: str) -> int:
@@ -296,6 +301,20 @@ class BoundWindowsRead(_BoundHandles):
         raise FileBindingError("file exceeds the read limit")
 
 
+class BoundWindowsWrite(_BoundHandles):
+    """An existing file held exclusively against other writers and replacement."""
+
+    def commit(self, data: bytes) -> None:
+        if not self._handles or not isinstance(data, bytes) or len(data) > 1024 * 1024:
+            raise FileBindingError("invalid held file write")
+        handle = self._handles[-1]
+        if not self._api.kernel.SetFilePointerEx(handle, 0, None, 0):
+            raise FileBindingError("cannot seek approved write target")
+        self._api.write_all(handle, data)
+        if not self._api.kernel.SetEndOfFile(handle) or not self._api.kernel.FlushFileBuffers(handle):
+            raise FileBindingError("cannot durably truncate approved write target")
+
+
 class BoundWindowsCreate(_BoundHandles):
     """A parent directory held stable until a new-only atomic rename."""
 
@@ -388,3 +407,24 @@ def open_bound_create(scope: Scope) -> BoundWindowsCreate:
     api = _Windows()
     handles, current = _open_parents(api, drive, names)
     return BoundWindowsCreate(api, handles, current, names[-1])
+
+
+def open_bound_write(scope: Scope) -> BoundWindowsWrite | BoundWindowsCreate:
+    """Bind an existing exclusive writer, or a held parent for a new file."""
+    drive, names = _path_parts(scope, frozenset({"create", "write"}))
+    api = _Windows()
+    handles, current = _open_parents(api, drive, names)
+    try:
+        try:
+            child = api.open_child(handles[-1], names[-1], directory=False,
+                                   access=0x00100082, share=1)
+        except FileBindingError as error:
+            if getattr(error, "ntstatus", None) != 0xC0000034:
+                raise
+            return BoundWindowsCreate(api, handles, current, names[-1])
+        handles.append(child)
+        api.check(child, ntpath.join(current, names[-1]), directory=False)
+        return BoundWindowsWrite(api, handles)
+    except BaseException:
+        _close_handles(api, handles)
+        raise

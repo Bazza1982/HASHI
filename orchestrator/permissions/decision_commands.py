@@ -54,6 +54,9 @@ def parse_decision_intent(arguments: str, *, default_seconds: int | None = None)
             raise ValueError("select once, run, task, or ttl")
         lifetime, position = words[2], 3
     options = {}
+    if choice == "approve" and lifetime == "ttl" and position < len(words) and not words[position].startswith("--"):
+        options["--for"] = words[position]
+        position += 1
     while position < len(words):
         key = words[position]
         allowed = {"--revision"} if choice == "deny" else {

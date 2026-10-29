@@ -1498,6 +1498,29 @@ class HerSessionStore:
                 )
         return self._provider_context_metadata(context_metadata, digest=digest)
 
+    def mark_permission_waiting(self, *, session_id: str, turn_id: str,
+                                execution_owner_id: str, expected_digest: str):
+        """Mark an exact pending boundary after PAO has durably parked its Run."""
+        with self._transaction() as connection:
+            turn = connection.execute(
+                "SELECT * FROM her_turns WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+            ).fetchone()
+            recovery = connection.execute(
+                "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?",
+                (session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
+            self._assert_execution_owner(dict(turn), execution_owner_id)
+            if (turn["status"] not in {"active", "waiting_permission"} or recovery is None
+                    or recovery["provider_context_digest"] != expected_digest
+                    or _object(recovery["provider_context_json"]).get("boundary") != "pending_tool_batch"):
+                raise HerSessionStoreError("permission_park_conflict", "Pending Tool context changed.")
+            connection.execute(
+                "UPDATE her_turns SET status='waiting_permission',execution_lease_updated_at=? "
+                "WHERE session_id=? AND turn_id=?", (_utc_now(), session_id, turn_id),
+            )
+
     def adopt_permission_turn(self, ticket, *, execution_owner: Mapping[str, Any]):
         """Adopt one exact parked batch through the canonical PAO resume fence."""
         from orchestrator.permissions.parking import PermissionResumeTicket
@@ -1520,7 +1543,7 @@ class HerSessionStore:
                     "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?",
                     (session_id, turn_id),
                 ).fetchone()
-                if (turn is None or recovery is None or turn["status"] not in {"active", "failed"}
+                if (turn is None or recovery is None or turn["status"] not in {"active", "failed", "waiting_permission"}
                         or turn["request_id"] != ticket.binding.request_id
                         or proof["binding"]["context"]["turn_id"] != turn_id
                         or reference["digest"] != recovery["provider_context_digest"]):

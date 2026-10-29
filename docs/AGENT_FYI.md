@@ -1,6 +1,8 @@
 # HASHI Agent FYI
 
-- 权限未完成。[进度](permissions/IMPLEMENTATION_STATUS.md)。
+- 权限施工尚未交付／采用。缺权保留原 Run，不得作为模型失败触发 fallback；
+  只有可信会话决定可以授权，普通回答不能授权。Windows 原生试验不代表完整 L2。
+  [进度](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

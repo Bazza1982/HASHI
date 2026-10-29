@@ -181,6 +181,23 @@ class OwnedWindowsProcess:
         self._stopped = True
 
 
+def inheritable_handle_copy(handle):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = [], wintypes.HANDLE
+    kernel.DuplicateHandle.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+    ]
+    kernel.DuplicateHandle.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wintypes.HANDLE], wintypes.BOOL
+    copy = wintypes.HANDLE()
+    current = kernel.GetCurrentProcess()
+    if not kernel.DuplicateHandle(current, handle, current, ctypes.byref(copy), 0, True, 2):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return kernel, copy.value
+
+
+
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),

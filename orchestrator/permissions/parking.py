@@ -103,7 +103,7 @@ class PermissionParkingStore:
             raise ValueError("canonical binding and queue item are required")
         if not isinstance(checkpoint_reference, dict) or not checkpoint_reference.get("digest"):
             raise ValueError("an exact durable provider checkpoint reference is required")
-        if state not in {"waiting", "paused", "recovering", "unknown", "fenced", "permission_changed", "unavailable"}:
+        if state not in {"waiting", "paused", "recovering", "unknown", "fenced", "permission_changed", "unavailable", "result_unavailable", "conflict"}:
             raise ValueError("this control state cannot be parked")
         context = binding.context
         if (item.run_id != context.run_id or item.request_id != binding.request_id
@@ -229,6 +229,28 @@ class PermissionParkingStore:
                 (next_fence, binding.context.run_id),
             )
         return item, token
+
+    def recover_queued(self, binding):
+        """Recover the CAS-to-queue crash window without inventing another Run."""
+        from orchestrator.runtime_common import QueuedRequest
+
+        run = self.store.get_run(binding.context.run_id, owner_id=binding.context.owner_id)
+        with self.store._lock, self.store._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM permission_run_parks WHERE run_id=?", (binding.context.run_id,),
+            ).fetchone()
+            if (row is None or row["state"] != "resuming" or run["state"] != "queued"
+                    or row["producer_fence"] != binding.fencing_token
+                    or not self.recoverable(connection, run)):
+                raise SessionConflict("queued permission continuation changed")
+            payload = self._payload(row)
+            if payload["binding"] != asdict(binding):
+                raise SessionConflict("queued permission binding changed")
+            try:
+                return QueuedRequest(**{**payload["item"], "fencing_token": None,
+                                        "queued_monotonic": time.monotonic()})
+            except (TypeError, ValueError) as exc:
+                raise SessionConflict("queued permission continuation is invalid") from exc
 
     @contextmanager
     def hold_resume(self, binding, token):

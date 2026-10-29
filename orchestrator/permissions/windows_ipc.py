@@ -77,6 +77,8 @@ def _sid_text(pointer, ctypes, wintypes, kernel, security):
 
 
 def pipe_peer(handle) -> WindowsPeer:
+    from orchestrator.permissions.windows_token import token_is_lpac
+
     ctypes, wintypes, kernel, security = _windows()
     get_pid = kernel.GetNamedPipeClientProcessId
     get_pid.argtypes, get_pid.restype = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)], wintypes.BOOL
@@ -131,7 +133,6 @@ def pipe_peer(handle) -> WindowsPeer:
             if app_sid is None:
                 raise PermissionError("AppContainer identity is missing")
         elevated = bool(ctypes.cast(information(20), ctypes.POINTER(wintypes.DWORD))[0])
-        from orchestrator.permissions.windows_token import token_is_lpac
         lpac = token_is_lpac(token, security) if is_container else False
         return WindowsPeer(pid.value, user_sid, app_sid, elevated, lpac)
     finally:
@@ -312,7 +313,8 @@ def connect_pipe(name, *, timeout_s=5):
     from multiprocessing.connection import PipeConnection
 
     _winapi.WaitNamedPipe(name, int(timeout_s * 1000))
-    handle = _winapi.CreateFile(name, 0x80000000 | 0x40000000, 0, 0, 3, 0x40000000, 0)
+    handle = _winapi.CreateFile(name, 0x80000000 | 0x40000000, 0, 0, 3,
+                                 0x40000000 | 0x00100000 | 0x00010000, 0)
     try:
         _winapi.SetNamedPipeHandleState(handle, 0x00000002, None, None)
         return JsonPipe(PipeConnection(handle, readable=True, writable=True))

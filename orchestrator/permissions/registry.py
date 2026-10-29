@@ -61,6 +61,7 @@ class ManagedToolRegistry(ToolRegistry):
             permission_authority, self._permission_waiter, permission_supervisor,
             context=permission_context, cwd=self._permission_cwd,
             read_roots=self._permission_roots, requestable_scopes=requestable_scopes,
+            durable_control=durable_wait,
         )
 
     def is_allowed(self, tool_name: str) -> bool:
@@ -139,6 +140,12 @@ class ManagedToolRegistry(ToolRegistry):
             operation_id, tool_name, arguments, reason=f"Use {tool_name}",
             wait_for_approval=not self.permission_durable_wait,
         )
+        if self.permission_durable_wait and outcome.state == "unsupported":
+            result = ToolResult(
+                tool_call_id=call_id, output="This tool or resource scope is unavailable under the installed policy. Choose a supported alternative.",
+                is_error=False, details={"control_disposition": "denied", "permission_operation": operation_id},
+            )
+            return self._finish_result(tool_name, arguments, result, started)
         if self.permission_durable_wait and outcome.state in {"denied", "withdrawn"}:
             result = ToolResult(
                 tool_call_id=call_id, output="Access was denied or withdrawn. Keep completed work and choose an allowed alternative.",
@@ -146,7 +153,7 @@ class ManagedToolRegistry(ToolRegistry):
                                          "permission_operation": operation_id},
             )
             return self._finish_result(tool_name, arguments, result, started)
-        if self.permission_durable_wait and outcome.state not in {"succeeded", "failed", "unavailable"}:
+        if self.permission_durable_wait and outcome.state not in {"succeeded", "failed"}:
             from orchestrator.permissions.continuation import PermissionPark
 
             raise PermissionPark(outcome)

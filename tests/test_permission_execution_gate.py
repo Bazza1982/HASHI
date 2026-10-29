@@ -77,6 +77,8 @@ class TestFileSupervisor:
             target.write_text(arguments["content"], encoding="utf-8")
             digest = sha256(b"written").hexdigest()
             self.authority.finish(context, claim.claim_id, outcome="succeeded", result_digest=digest)
+            if getattr(self, "confirm_stop", True):
+                self.authority._verifier.confirm_stopped(self.authority, context, claim.claim_id)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, "written")
 
 
@@ -286,7 +288,7 @@ async def _complete_recoverable_operation(environment, tmp_path, *, confirm_stop
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    assert (await asyncio.wait_for(task, 1)).state == "succeeded"
+    assert (await asyncio.wait_for(task, 1)).state == ("succeeded" if confirm_stop else "unknown")
     return authority, issuer, context, gate, supervisor, arguments, request
 
 

@@ -4,6 +4,14 @@ on:
   push:
     paths:
       - "orchestrator/permissions/**"
+      - "tests/test_permission_*.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/runtime_lifecycle.py"
+      - "adapters/her_v2.py"
+      - "adapters/openrouter_api.py"
+      - "adapters/deepseek_api.py"
+      - "adapters/ollama_api.py"
+      - "adapters/xai_api.py"
       - "orchestrator/enterprise/identity.py"
       - "orchestrator/commands/safety.py"
       - "orchestrator/command_registry.py"
@@ -53,6 +61,14 @@ on:
   pull_request:
     paths:
       - "orchestrator/permissions/**"
+      - "tests/test_permission_*.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/runtime_lifecycle.py"
+      - "adapters/her_v2.py"
+      - "adapters/openrouter_api.py"
+      - "adapters/deepseek_api.py"
+      - "adapters/ollama_api.py"
+      - "adapters/xai_api.py"
       - "orchestrator/enterprise/identity.py"
       - "orchestrator/commands/safety.py"
       - "orchestrator/command_registry.py"
@@ -150,6 +166,23 @@ jobs:
           tests/test_permissions_config.py tests/test_permissions_descriptors.py
           tests/test_permissions_l0_baseline.py tests/test_permissions_models.py
           tests/test_permissions_requests.py tests/test_permissions_runtime_guard.py
+          tests/test_permission_api_decisions.py
+          tests/test_permission_baseline.py
+          tests/test_permission_decision_commands.py
+          tests/test_permission_frontend_decisions.py
+          tests/test_permission_her_adoption.py
+          tests/test_permission_model_broker.py
+          tests/test_permission_parking.py
+          tests/test_permission_private_rpc.py
+          tests/test_permission_provider_park.py
+          tests/test_permission_restricted_her.py
+          tests/test_permission_run_service.py
+          tests/test_permission_running_claim.py
+          tests/test_permission_runtime_context.py
+          tests/test_permission_windows_ipc.py
+          tests/test_permission_windows_token.py
+          orchestrator/her_v2/provider_continuation.py scripts/permissions/windows_lpac_probe.py
+          scripts/permissions/windows_file_helper_probe.py
       - name: Check backend manager against its existing import baseline
         run: python -m ruff check orchestrator/flexible_backend_manager.py --ignore E402
       - name: Test permission and legacy contracts
@@ -193,3 +226,18 @@ jobs:
           tests/test_config_json.py
           tests/test_config.py
           tests/test_flexible_backend_state.py
+          tests/test_permission_api_decisions.py
+          tests/test_permission_baseline.py
+          tests/test_permission_decision_commands.py
+          tests/test_permission_frontend_decisions.py
+          tests/test_permission_her_adoption.py
+          tests/test_permission_model_broker.py
+          tests/test_permission_parking.py
+          tests/test_permission_private_rpc.py
+          tests/test_permission_provider_park.py
+          tests/test_permission_restricted_her.py
+          tests/test_permission_run_service.py
+          tests/test_permission_running_claim.py
+          tests/test_permission_runtime_context.py
+          tests/test_permission_windows_ipc.py
+          tests/test_permission_windows_token.py

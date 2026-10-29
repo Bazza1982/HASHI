@@ -24,6 +24,9 @@ def test_baseline_dispatch_and_removal_between_prepare_and_start(tmp_path):
     authority.open_task(context)
     target = normalize_scope("file", str(tmp_path / "report"), ("read",), cwd=tmp_path)
     assert authority.evaluate(context, [target])
+    request = authority.request_access(context, [target], purpose="Read own report", request_key="baseline")
+    assert request.state == "granted_existing" and not request.request_id
+    assert authority.request_access(context, [target], purpose="Read own report", request_key="baseline").state == "granted_existing"
     claim = authority.prepare(context, "read", "a" * 64, [target])
     assert authority.dispatch_guarded(context, claim.claim_id, operation_id="read",
                                       arguments_digest="a" * 64, scopes=[target], effect=lambda: b"ok") == b"ok"

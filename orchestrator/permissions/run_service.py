@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import inspect
 from pathlib import Path
 from uuid import uuid4
@@ -102,6 +102,7 @@ class PermissionRunService:
                         candidate = binding_from_route(route)
                         status = self.authority.execution_status(candidate.context)
                         if (candidate.context.agent_id == agent_id and candidate.context.session_id == session_id
+                                and candidate.context.context_generation == str(context_generation)
                                 and status.task_state in {"active", "paused"}):
                             task_id = candidate.context.task_id
             context = ExecutionContext(
@@ -152,23 +153,33 @@ class PermissionRunService:
             raise PermissionDenied("an exact execution binding is required")
         run = self.store.get_run(binding.context.run_id, owner_id=binding.context.owner_id)
         if run["fencing_token"] != binding.fencing_token:
-            # Late completion/exit only fences the old epoch.
-            await self.close_execution(binding=binding)
-            return "superseded"
+            route = self.parking.route(binding.context.run_id, owner_id=binding.context.owner_id)
+            # User stop/terminal resolution also advances the PAO fence. Only
+            # the last recorded executor may settle that terminal Run. A late
+            # older Worker must never settle a replacement execution.
+            if run["state"] not in TERMINAL_RUN_STATES or route != asdict(binding):
+                await self.close_execution(binding=binding)
+                return "superseded"
         if run["state"] not in TERMINAL_RUN_STATES:
             raise PermissionDenied("the PAO Run is not terminal")
-        self.authority.end_run(binding.context)
         with self.store._connection() as connection:
             active = connection.execute(
                 "SELECT 1 FROM permission_run_routes p JOIN runs r ON r.run_id=p.run_id "
-                "WHERE p.task_id=? AND r.state IN ('queued','running') LIMIT 1",
-                (binding.context.task_id,),
+                "WHERE p.task_id=? AND r.state IN ('queued','running') "
+                "UNION ALL SELECT 1 FROM runs child WHERE child.parent_run_id IN "
+                "(SELECT run_id FROM permission_run_routes WHERE task_id=?) "
+                "AND child.state IN ('queued','running') AND child.session_id=? "
+                "AND child.agent_id=? AND child.context_generation=? LIMIT 1",
+                (binding.context.task_id, binding.context.task_id, binding.context.session_id,
+                 binding.context.agent_id, int(binding.context.context_generation)),
             ).fetchone()
         if active is None:
             terminal = "completed" if run["state"] == "completed" else (
                 "cancelled" if run["state"] in {"cancelled", "stopped"} else "failed_terminal"
             )
             self.authority.end_task(binding.context, outcome=terminal)
+        else:
+            self.authority.end_run(binding.context)
         self.parking.finish(binding)
         await self.close_execution(binding=binding)
         return "settled"

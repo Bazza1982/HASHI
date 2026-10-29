@@ -1256,7 +1256,7 @@ class PermissionAuthority:
                         raise OperationConflict("the prior grant is no longer active")
                     expires = min(connection.execute(
                         "SELECT expires_at FROM permission_leases WHERE lease_id=?", (lease_id,)
-                    ).fetchone()[0] for lease_id in still_covered)
+                    ).fetchone()[0] for lease_id in still_covered) if still_covered else now + self._max_lease
                     return AccessRequest("", context.task_id, 0, requested, operation_digest,
                                          operation_id, "granted_existing", expires, purpose,
                                          suggested_lifetime, suggested_seconds, request_key)
@@ -1279,7 +1279,7 @@ class PermissionAuthority:
             covering = self._covering_leases(
                 connection, context, now, requested, operation_id=operation_id
             )
-            if covering:
+            if covering is not None:
                 # Another approved lease may satisfy a waiting operation. Close
                 # obsolete prompts so an old action cannot grant a duplicate.
                 if operation_id:
@@ -1298,7 +1298,7 @@ class PermissionAuthority:
                                     item["request_id"], now)
                 expires = min(connection.execute(
                     "SELECT expires_at FROM permission_leases WHERE lease_id=?", (lease_id,)
-                ).fetchone()[0] for lease_id in covering)
+                ).fetchone()[0] for lease_id in covering) if covering else now + self._max_lease
                 self._record_request_key(connection, context.task_id, request_key, fingerprint, None)
                 return AccessRequest("", context.task_id, 0, requested, operation_digest,
                                      operation_id, "granted_existing", expires, purpose,
@@ -2314,6 +2314,75 @@ class PermissionAuthority:
             self._event(connection, context.task_id, "claim_started", claim_id, now)
             return ExecutionClaim(claim_id, claim["operation_id"], "started")
 
+    def _assert_running_claim(self, connection, context, now, claim_id, *, operation_id,
+                              arguments_digest, normalized):
+        self._context(connection, context)
+        claim = self._claim(connection, context, claim_id)
+        operation = connection.execute(
+            "SELECT * FROM pending_operations WHERE operation_id=?", (operation_id,),
+        ).fetchone()
+        if operation is None or any((
+            claim["state"] != "started", operation["state"] != "started",
+            claim["operation_id"] != operation_id, operation["task_id"] != context.task_id,
+            operation["run_id"] != context.run_id, operation["execution_epoch"] != context.execution_epoch,
+            operation["arguments_digest"] != arguments_digest,
+            operation["scope_digest"] != scope_digest(normalized),
+            _load_scopes(claim["scopes_json"]) != normalized,
+        )):
+            raise PermissionDenied("running claim binding changed")
+        if connection.execute(
+            "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+            (context.task_id,),
+        ).fetchone() is not None:
+            raise PermissionDenied("task requires operation reconciliation")
+        resource = connection.execute(
+            "SELECT state FROM execution_resources WHERE claim_id=?", (claim_id,)
+        ).fetchone()
+        if resource is None or resource["state"] != "running":
+            raise PermissionDenied("execution resource is no longer active")
+        try:
+            lease_ids = json.loads(claim["lease_ids_json"])
+        except (TypeError, ValueError) as exc:
+            raise PermissionDenied("claim lease bindings are invalid") from exc
+        if (not isinstance(lease_ids, list)
+                or any(not isinstance(item, str) or not item for item in lease_ids)
+                or len(lease_ids) != len(set(lease_ids))):
+            raise PermissionDenied("claim lease bindings are invalid")
+        granted = list(self._configured_scopes(context))
+        for lease_id in lease_ids:
+            lease = connection.execute(
+                "SELECT * FROM permission_leases WHERE lease_id=?", (lease_id,)
+            ).fetchone()
+            if lease is None or any((
+                lease["task_id"] != context.task_id,
+                lease["policy_revision"] != context.policy_revision,
+                lease["expires_at"] <= now,
+                lease["lifetime"] in {"once", "run"} and lease["run_id"] != context.run_id,
+                lease["lifetime"] == "once" and lease["operation_id"] != operation_id,
+                lease["lifetime"] == "once" and (
+                    lease["status"] != "consumed" or lease["reserved_claim"] != claim_id
+                ),
+                lease["lifetime"] != "once" and lease["status"] != "active",
+            )):
+                raise PermissionDenied("permission changed before dispatch")
+            granted.extend(_load_scopes(lease["scopes_json"]))
+        for required in normalized:
+            for action in required.actions:
+                single = Scope(required.kind, required.resource, (action,), required.normalization_version)
+                if not any(scope_covers(grant, single) for grant in granted):
+                    raise PermissionDenied("claim no longer covers the requested action")
+
+    def check_running_claim(self, context: ExecutionContext, claim_id: str, *, operation_id: str,
+                            arguments_digest: str, scopes: Iterable[Scope]) -> None:
+        """Recheck a running owned resource; consumed once grants remain claim-bound."""
+        normalized = canonical_scope_set(scopes)
+        _digest(arguments_digest, "arguments_digest")
+        with self._transaction() as connection:
+            self._assert_running_claim(
+                connection, context, self._now(connection), claim_id, operation_id=operation_id,
+                arguments_digest=arguments_digest, normalized=normalized,
+            )
+
     def dispatch_guarded(
         self, context: ExecutionContext, claim_id: str, *, operation_id: str,
         arguments_digest: str, scopes: Iterable[Scope], effect: Callable[[], object],
@@ -2370,43 +2439,11 @@ class PermissionAuthority:
 
         with self._transaction() as connection:
             now = self._now(connection)
-            claim = bound_claim(connection, "started")
-            resource = connection.execute(
-                "SELECT state FROM execution_resources WHERE claim_id=?", (claim_id,)
-            ).fetchone()
-            if resource is None or resource["state"] != "running":
-                raise PermissionDenied("execution resource is no longer active")
-            try:
-                lease_ids = json.loads(claim["lease_ids_json"])
-            except (TypeError, ValueError) as exc:
-                raise PermissionDenied("claim lease bindings are invalid") from exc
-            if (not isinstance(lease_ids, list)
-                    or any(not isinstance(item, str) or not item for item in lease_ids)
-                    or len(lease_ids) != len(set(lease_ids))):
-                raise PermissionDenied("claim lease bindings are invalid")
-            granted = list(self._configured_scopes(context))
-            for lease_id in lease_ids:
-                lease = connection.execute(
-                    "SELECT * FROM permission_leases WHERE lease_id=?", (lease_id,)
-                ).fetchone()
-                if lease is None or any((
-                    lease["task_id"] != context.task_id,
-                    lease["policy_revision"] != context.policy_revision,
-                    lease["expires_at"] <= now,
-                    lease["lifetime"] in {"once", "run"} and lease["run_id"] != context.run_id,
-                    lease["lifetime"] == "once" and lease["operation_id"] != operation_id,
-                    lease["lifetime"] == "once" and (
-                        lease["status"] != "consumed" or lease["reserved_claim"] != claim_id
-                    ),
-                    lease["lifetime"] != "once" and lease["status"] != "active",
-                )):
-                    raise PermissionDenied("permission changed before dispatch")
-                granted.extend(_load_scopes(lease["scopes_json"]))
-            for required in normalized:
-                for action in required.actions:
-                    single = Scope(required.kind, required.resource, (action,), required.normalization_version)
-                    if not any(scope_covers(grant, single) for grant in granted):
-                        raise PermissionDenied("claim no longer covers the requested action")
+            bound_claim(connection, "started")
+            self._assert_running_claim(
+                connection, context, now, claim_id, operation_id=operation_id,
+                arguments_digest=arguments_digest, normalized=normalized,
+            )
             result = effect()
             # A deferred object could run only after the authority lock closes.
             if inspect.iscoroutine(result) or inspect.isgenerator(result):

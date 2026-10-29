@@ -68,6 +68,7 @@ class PermissionExecutionGate:
         cwd: Path,
         read_roots: tuple[Path, ...],
         requestable_scopes: tuple[Scope, ...],
+        durable_control: bool = False,
     ) -> None:
         methods = (
             "execution_status", "operation_status_for_task", "find_operation_for_task",
@@ -83,6 +84,9 @@ class PermissionExecutionGate:
         directory = Path(cwd)
         if not directory.is_absolute():
             raise ValueError("trusted working directory must be absolute")
+        if type(durable_control) is not bool:
+            raise ValueError("durable control must be explicit")
+        self._unsupported_state = "unsupported" if durable_control else "unavailable"
         self._authority = authority
         self._waiter = waiter
         self._supervisor = supervisor
@@ -123,9 +127,9 @@ class PermissionExecutionGate:
             if descriptor != frozen_descriptor:
                 raise ValueError("arguments changed during admission")
         except (UnknownTool, TypeError, ValueError, UnicodeError):
-            return GateResult("unavailable", operation_id)
+            return GateResult(self._unsupported_state, operation_id)
         if not descriptor.scopes:
-            return GateResult("unavailable", operation_id)
+            return GateResult(self._unsupported_state, operation_id)
         try:
             status = await asyncio.to_thread(self._authority.execution_status, self._context)
             if status.task_state != "active":
@@ -149,7 +153,7 @@ class PermissionExecutionGate:
         try:
             supported = self._supervisor.supports(tool_name) is True
         except Exception:
-            supported = False
+            return GateResult("unavailable", operation_id)
         covered_by_policy = bool(descriptor.scopes) and all(
             any(scope_covers(parent, required) for parent in self._requestable)
             for required in descriptor.scopes
@@ -169,7 +173,7 @@ class PermissionExecutionGate:
             if existing.state != "waiting":
                 return GateResult("permission_changed", operation_id)
         if not supported or not covered_by_policy:
-            return GateResult("unavailable", operation_id)
+            return GateResult(self._unsupported_state, operation_id)
         try:
             covered = await asyncio.to_thread(
                 self._authority.evaluate, self._context, descriptor.scopes, operation_id=operation_id,
@@ -253,7 +257,7 @@ class PermissionExecutionGate:
         if (stored is None or stored.arguments_digest != descriptor.arguments_digest
                 or stored.scope_digest != scope_digest(descriptor.scopes)
                 or stored.state != receipt.outcome or stored.result_digest != receipt.result_digest
-                or (replay and stored.resource_state != "stopped")):
+                or stored.resource_state != "stopped"):
             return GateResult(failure, operation_id, request_id)
         if receipt.outcome == "unknown":
             return GateResult("unknown", operation_id, request_id)

@@ -9,6 +9,7 @@ from orchestrator.permissions.windows_file_binding import (
     FileBindingError,
     open_bound_create,
     open_bound_read,
+    open_bound_write,
 )
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows file handles required")
@@ -16,6 +17,37 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows file han
 
 def _scope(path: Path, cwd: Path):
     return normalize_scope("file", str(path), ["read"], cwd=cwd)
+
+
+def test_existing_write_holds_identity_and_truncates_shorter_or_empty_content(tmp_path):
+    source = tmp_path / "replace.txt"
+    source.write_bytes(b"long original content")
+    scope = normalize_scope("file", str(source), ("create", "write"), cwd=tmp_path)
+    with open_bound_write(scope) as bound:
+        with pytest.raises(OSError):
+            os.replace(source, tmp_path / "moved.txt")
+        with pytest.raises(OSError):
+            source.write_bytes(b"other writer")
+        bound.commit(b"short")
+    assert source.read_bytes() == b"short"
+    with open_bound_write(scope) as bound:
+        bound.commit(b"")
+    assert source.read_bytes() == b""
+
+
+def test_write_binding_rejects_hard_links_and_new_file_uses_held_parent(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"original")
+    alias = tmp_path / "alias.txt"
+    os.link(source, alias)
+    scope = normalize_scope("file", str(alias), ("create", "write"), cwd=tmp_path)
+    with pytest.raises(FileBindingError):
+        open_bound_write(scope)
+    target = tmp_path / "new.txt"
+    scope = normalize_scope("file", str(target), ("create", "write"), cwd=tmp_path)
+    with open_bound_write(scope) as bound:
+        bound.commit(b"new")
+    assert target.read_bytes() == b"new" and source.read_bytes() == b"original"
 
 
 def test_opened_file_is_read_through_held_handle(tmp_path):
@@ -150,6 +182,7 @@ async def test_authorized_operation_reads_the_bound_windows_file(tmp_path):
                 ).decode("utf-8")
             digest = sha256(result.encode("utf-8")).hexdigest()
             authority.finish(ctx, claim.claim_id, outcome="succeeded", result_digest=digest)
+            issuer.confirm_stopped(authority, ctx, claim.claim_id)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, result)
 
     ceiling = normalize_scope("file", str(tmp_path), ["read"], cwd=tmp_path)
@@ -342,6 +375,7 @@ async def test_authorized_operation_creates_the_bound_windows_file(tmp_path):
             output = "created"
             digest = sha256(output.encode("utf-8")).hexdigest()
             authority.finish(ctx, claim.claim_id, outcome="succeeded", result_digest=digest)
+            issuer.confirm_stopped(authority, ctx, claim.claim_id)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, output)
 
     ceiling = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
