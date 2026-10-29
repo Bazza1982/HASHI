@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from orchestrator.permissions.models import (
     ExecutionContext,
+    PermissionSubject,
     Scope,
     canonical_scope_set,
     scope_covers,
@@ -153,6 +154,19 @@ class AccessRequest:
     suggested_seconds: int = 4 * 60 * 60
     request_key: str | None = None
     is_current_revision: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRequestView:
+    request: AccessRequest
+    task_state: str
+    binding_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRequestPage:
+    requests: tuple[SessionRequestView, ...]
+    next_before: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1295,6 +1309,83 @@ class PermissionAuthority:
             ).fetchall()
             return tuple(self._visible_request(row, now) for row in rows)
 
+    @staticmethod
+    def _frontend_subject(subject: PermissionSubject) -> tuple[str, ...]:
+        if not isinstance(subject, PermissionSubject):
+            raise PermissionDenied("a trusted frontend subject is required")
+        return (subject.instance_id, subject.owner_id, subject.agent_id,
+                subject.session_id, subject.context_generation)
+
+    @staticmethod
+    def _session_request_view(row: sqlite3.Row, now: float) -> SessionRequestView:
+        try:
+            request = PermissionAuthority._visible_request(row, now)
+            if scope_digest(request.scopes) != request.scope_digest:
+                raise ValueError("scope snapshot changed")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise PermissionDenied("permission request snapshot is unavailable") from exc
+        return SessionRequestView(request, row["task_state"], row["binding_state"])
+
+    def _session_request_rows(
+        self, connection: sqlite3.Connection, subject: PermissionSubject,
+        *, request_id: str | None = None, before_rowid: int | None = None, limit: int = 1,
+    ) -> list[sqlite3.Row]:
+        # A command's actor string is not a subject. PAO/FC must derive all five
+        # bindings from its authenticated connection and canonical Session.
+        values = list(self._frontend_subject(subject))
+        query = (
+            "SELECT a.*,a.rowid AS request_rowid,t.state AS task_state,b.state AS binding_state "
+            "FROM access_requests a JOIN permission_tasks t ON t.task_id=a.task_id "
+            "JOIN execution_bindings b ON b.execution_epoch=a.execution_epoch "
+            "AND b.task_id=a.task_id AND b.run_id=a.run_id "
+            "AND b.context_generation=a.context_generation AND b.policy_revision=a.policy_revision "
+            "WHERE t.instance_id=? AND t.owner_id=? AND t.agent_id=? "
+            "AND t.session_id=? AND a.context_generation=? AND a.session_id=t.session_id "
+        )
+        if request_id is not None:
+            query += "AND a.request_id=? "
+            values.append(request_id)
+        if before_rowid is not None:
+            query += "AND a.rowid<? "
+            values.append(before_rowid)
+        values.append(limit)
+        return connection.execute(query + "ORDER BY a.rowid DESC LIMIT ?", values).fetchall()
+
+    def get_session_request(
+        self, subject: PermissionSubject, request_id: str,
+    ) -> SessionRequestView:
+        """Read one request without manufacturing an execution binding."""
+        _nonempty(request_id, "request_id")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            rows = self._session_request_rows(connection, subject, request_id=request_id)
+            if not rows:
+                raise PermissionDenied("permission request is unavailable")
+            return self._session_request_view(rows[0], now)
+
+    def list_session_requests(
+        self, subject: PermissionSubject, *, before: str | None = None, limit: int = 20,
+    ) -> SessionRequestPage:
+        """Bounded keyset view across tasks in one current owner/Agent Session."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if before is not None:
+            _nonempty(before, "before")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            before_rowid = None
+            if before is not None:
+                cursor = self._session_request_rows(connection, subject, request_id=before)
+                if not cursor:
+                    raise PermissionDenied("permission request page is unavailable")
+                before_rowid = cursor[0]["request_rowid"]
+            rows = self._session_request_rows(
+                connection, subject, before_rowid=before_rowid, limit=limit + 1,
+            )
+            views = tuple(self._session_request_view(row, now) for row in rows[:limit])
+            next_before = views[-1].request.request_id if len(rows) > limit else None
+            return SessionRequestPage(views, next_before)
+
     def get_request_version(
         self, context: ExecutionContext, request_id: str, revision: int
     ) -> AccessRequest:
@@ -1363,8 +1454,33 @@ class PermissionAuthority:
             self._event(connection, context.task_id, "request_narrowed", request_id, now)
             return _request_from(self._request_for_task(connection, context.task_id, request_id))
 
+    @classmethod
+    def _withdraw_request_row(
+        cls, connection: sqlite3.Connection, row: sqlite3.Row, expected_revision: int,
+        *, task_state: str, binding_state: str, now: float,
+    ) -> AccessRequest:
+        if row["revision"] != expected_revision:
+            raise RevisionConflict("request revision changed")
+        if row["state"] != "pending" or row["expires_at"] <= now:
+            return cls._visible_request(row, now)
+        if task_state not in {"active", "paused"} or binding_state != "active":
+            raise PermissionDenied("task cannot withdraw requests")
+        connection.execute(
+            "UPDATE access_requests SET state='withdrawn' WHERE request_id=?", (row["request_id"],),
+        )
+        if row["operation_id"]:
+            connection.execute(
+                "UPDATE pending_operations SET state='cancelled' "
+                "WHERE operation_id=? AND task_id=? AND state='waiting' "
+                "AND NOT EXISTS(SELECT 1 FROM access_requests WHERE task_id=? "
+                "AND operation_id=? AND state='pending' AND expires_at>?)",
+                (row["operation_id"], row["task_id"], row["task_id"], row["operation_id"], now),
+            )
+        cls._event(connection, row["task_id"], "request_withdrawn", row["request_id"], now)
+        return _request_from(cls._request_for_task(connection, row["task_id"], row["request_id"]))
+
     def withdraw_request(
-        self, context: ExecutionContext, request_id: str, expected_revision: int
+        self, context: ExecutionContext, request_id: str, expected_revision: int,
     ) -> AccessRequest:
         _nonempty(request_id, "request_id")
         if type(expected_revision) is not int or expected_revision < 1:
@@ -1374,26 +1490,29 @@ class PermissionAuthority:
             task = self._task(connection, context, active=False)
             binding = self._binding(connection, context, active=False)
             row = self._request_for_task(connection, context.task_id, request_id)
-            if row["revision"] != expected_revision:
-                raise RevisionConflict("request revision changed")
-            if row["state"] != "pending" or row["expires_at"] <= now:
-                return self._visible_request(row, now)
-            if task["state"] not in {"active", "paused"} or binding["state"] != "active":
-                raise PermissionDenied("task cannot withdraw requests")
-            connection.execute(
-                "UPDATE access_requests SET state='withdrawn' WHERE request_id=?", (request_id,),
+            return self._withdraw_request_row(
+                connection, row, expected_revision,
+                task_state=task["state"], binding_state=binding["state"], now=now,
             )
-            if row["operation_id"]:
-                connection.execute(
-                    "UPDATE pending_operations SET state='cancelled' "
-                    "WHERE operation_id=? AND task_id=? AND state='waiting' "
-                    "AND NOT EXISTS(SELECT 1 FROM access_requests WHERE task_id=? "
-                    "AND operation_id=? AND state='pending' AND expires_at>?)",
-                    (row["operation_id"], context.task_id, context.task_id,
-                     row["operation_id"], now),
-                )
-            self._event(connection, context.task_id, "request_withdrawn", request_id, now)
-            return _request_from(self._request_for_task(connection, context.task_id, request_id))
+
+    def withdraw_session_request(
+        self, subject: PermissionSubject, request_id: str, expected_revision: int,
+    ) -> SessionRequestView:
+        """Withdraw only this Session's pending request; never create a decision."""
+        _nonempty(request_id, "request_id")
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("revision must be a positive integer")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            rows = self._session_request_rows(connection, subject, request_id=request_id)
+            if not rows:
+                raise PermissionDenied("permission request is unavailable")
+            view = self._session_request_view(rows[0], now)
+            request = self._withdraw_request_row(
+                connection, rows[0], expected_revision, task_state=view.task_state,
+                binding_state=view.binding_state, now=now,
+            )
+            return SessionRequestView(request, view.task_state, view.binding_state)
 
     @staticmethod
     def _check_action_request(row: sqlite3.Row, context: ExecutionContext, now: float) -> None:

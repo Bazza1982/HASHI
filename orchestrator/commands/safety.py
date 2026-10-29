@@ -1,4 +1,4 @@
-"""Read-only permission status through the shared command registry.
+"""Permission status and non-granting controls through the shared registry.
 
 Permission decisions, policy changes and actual-control observations require a
 separate trusted service. This entry does not construct one or issue authority.
@@ -31,11 +31,67 @@ def _read_level(runtime: Any) -> str:
     return snapshot.settings.requested_level.value
 
 
+def _request_command(runtime: Any, update: Any, args: list[str]) -> str:
+    from orchestrator import runtime_session
+    from orchestrator.permissions.authority import PermissionAuthority
+    from orchestrator.permissions.models import PermissionSubject
+    from orchestrator.permissions.presentation import request_detail_card, request_list_card
+    from orchestrator.session_store import SessionStore
+
+    # Use the existing owner. Viewing must never open a second authority,
+    # create a ledger, fence an executor or initialize a missing Session store.
+    authority = getattr(runtime, "permission_authority", None)
+    store = getattr(runtime, "session_store", None)
+    if not isinstance(authority, PermissionAuthority) or not isinstance(store, SessionStore):
+        raise ValueError("permission service is unavailable")
+    session = runtime_session.current_session_for_update(runtime, update)
+    generation = session["context_generation"]
+    requested_generation = getattr(update, "_hashi_session_context_generation", None)
+    if requested_generation is not None and (
+        type(requested_generation) is not int or requested_generation != generation
+    ):
+        raise ValueError("session changed")
+    if (session["agent_id"] != runtime.name or session["status"] != "active"
+            or store.instance_id != str(runtime.global_config.instance_id).strip().upper()):
+        raise ValueError("session binding is unavailable")
+    subject = PermissionSubject(
+        store.instance_id, session["owner_id"], session["agent_id"],
+        session["session_id"], str(generation),
+    )
+    if args[0].casefold() == "withdraw" and len(args) == 4 and args[2] == "--revision":
+        raw_revision = args[3]
+        if (not raw_revision.isascii() or not raw_revision.isdecimal()
+                or len(raw_revision) > 9 or int(raw_revision) < 1):
+            raise ValueError("invalid permission request version")
+        return request_detail_card(
+            authority.withdraw_session_request(subject, args[1], int(raw_revision)),
+        )
+    if args[0].casefold() == "request" and len(args) == 2:
+        return request_detail_card(authority.get_session_request(subject, args[1]))
+    if args[0].casefold() == "requests":
+        if len(args) == 1:
+            before = None
+        elif len(args) == 3 and args[1].casefold() == "before":
+            before = args[2]
+        else:
+            raise ValueError("invalid permission request page")
+        return request_list_card(authority.list_session_requests(subject, before=before, limit=10))
+    raise ValueError("invalid permission view")
+
+
 async def safety_command(runtime: Any, update: Any, context: Any) -> None:
     if not _authorized(runtime, update):
         return
-    args = [str(item).strip().casefold() for item in (getattr(context, "args", None) or [])]
-    if args and args != ["status"]:
+    args = [str(item).strip() for item in (getattr(context, "args", None) or [])]
+    if args and args[0].casefold() in {"requests", "request", "withdraw"}:
+        try:
+            text = await asyncio.to_thread(_request_command, runtime, update, args)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            await runtime._reply_text(update, ui_language.tr("safety.requests_unavailable"))
+            return
+        await runtime._reply_text(update, text, parse_mode="HTML")
+        return
+    if args and [item.casefold() for item in args] != ["status"]:
         await runtime._reply_text(update, ui_language.tr("safety.action_unavailable"))
         return
     try:

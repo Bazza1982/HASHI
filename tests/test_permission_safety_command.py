@@ -129,3 +129,83 @@ async def test_shared_frontend_command_projection_uses_existing_contract(tmp_pat
     assert any(row["text"] == result["messages"][-1]["text"] for row in rows)
     assert all(not row["history_eligible"] for row in rows)
     assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_shared_request_views_render_current_scope_and_do_not_grant(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import orchestrator.command_registry as registry
+    from orchestrator.permissions.authority import PermissionAuthority
+    from orchestrator.permissions.models import ExecutionContext, normalize_scope
+    from orchestrator.session_store import SessionStore
+
+    class NoApprovals:
+        def verify(self, reference):
+            return None
+
+    monkeypatch.setattr(registry, "DEFAULT_PRIVATE_COMMAND_DIR", tmp_path / "no-private")
+    monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", "")
+    registry.invalidate_runtime_registry_cache()
+    runtime, path = runtime_for(tmp_path, [{"name": "agent"}])
+    before = path.read_bytes()
+    runtime.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="TEST")
+    session = runtime.session_store.create_session(owner_id="user:7", agent_id="agent")
+    runtime.permission_authority = PermissionAuthority(tmp_path / "permissions.sqlite", verifier=NoApprovals())
+    context = ExecutionContext(
+        instance_id="TEST", owner_id="user:7", agent_id="agent", task_id="task",
+        run_id="run", session_id=session["session_id"], turn_id="turn",
+        worker_generation="worker", context_generation="1", execution_epoch="epoch",
+        backend_id="her-v3", executor_id="files", policy_revision=1,
+    )
+    runtime.permission_authority.open_task(context)
+    scope = normalize_scope("file", str(tmp_path / "report&.txt"), ["read"], cwd=tmp_path)
+    request = runtime.permission_authority.request_access(
+        context, [scope], purpose="<script>not markup</script>",
+    )
+    other = replace(context, owner_id="user:8", task_id="other", execution_epoch="other")
+    runtime.permission_authority.open_task(other)
+    hidden = runtime.permission_authority.request_access(other, [scope], purpose="private other user")
+    metadata = {
+        "actor_id": 7, "instance_id": "TEST", "session_id": session["session_id"],
+        "context_generation": 1, "session_surface": "workbench", "session_channel_key": "default",
+        "connection_binding": "bindingabcdefghijk", "owner_id": "user:7",
+    }
+    for index, command in enumerate(("/safety requests", f"/safety request {request.request_id}")):
+        result = await dispatch_command_interaction(runtime, {
+            "version": 1, "op": "open", "command": command, "ui_locale": "zh-CN",
+            "client_id": "clientabcdefghijkl", "request_id": f"requestabcdefghijk{index}",
+        }, metadata)
+        assert result["ok"], result
+        text = result["messages"][-1]["text"]
+        assert request.request_id in text and hidden.request_id not in text
+        assert "不会授予权限" in text
+        if index:
+            assert "<script>" not in text and "&lt;script&gt;" in text
+            assert "report&amp;.txt" in text and "读取" in text
+        assert not runtime.permission_authority.evaluate(context, [scope])
+    rows = runtime.session_store.messages(session["session_id"], owner_id="user:7")
+    assert any(request.request_id in row["text"] for row in rows)
+    assert all(not row["history_eligible"] for row in rows)
+    assert path.read_bytes() == before
+
+    withdrawn = await dispatch_command_interaction(runtime, {
+        "version": 1, "op": "open",
+        "command": f"/safety withdraw {request.request_id} --revision 1",
+        "ui_locale": "zh-CN", "client_id": "clientabcdefghijkl",
+        "request_id": "requestwithdrawabcdef",
+    }, metadata)
+    assert withdrawn["ok"], withdrawn
+    assert "已撤回" in withdrawn["messages"][-1]["text"]
+    assert runtime.permission_authority.get_request(context, request.request_id).state == "withdrawn"
+    assert runtime.permission_authority.decision_count(request.request_id) == 0
+
+    # No fallback to the current owner's status, and no details on a stale page.
+    sent = []
+    update = update_for(7, sent)
+    update._hashi_session_surface = "workbench"
+    update._hashi_session_channel_key = "default"
+    update._hashi_session_owner_id = "user:7"
+    update._hashi_session_id = session["session_id"]
+    update._hashi_session_context_generation = 2
+    await safety_command(runtime, update, SimpleNamespace(args=["request", request.request_id]))
+    assert request.request_id not in sent[0][0] and "unavailable" in sent[0][0].lower()

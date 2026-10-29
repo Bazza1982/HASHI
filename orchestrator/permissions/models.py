@@ -73,6 +73,23 @@ class PermissionSettingsSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionSubject:
+    """Trusted frontend read scope; never an approval or execution capability."""
+
+    instance_id: str
+    owner_id: str
+    agent_id: str
+    session_id: str
+    context_generation: str
+
+    def __post_init__(self) -> None:
+        for name in ("instance_id", "owner_id", "agent_id", "session_id", "context_generation"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a nonempty trusted binding")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionContext:
     """Trusted runtime binding; creating one is not proof of caller identity."""
 
