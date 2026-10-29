@@ -82,6 +82,25 @@ class DecisionReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionAction:
+    """A server-issued snapshot, not a human approval or bearer capability."""
+
+    action_id: str
+    nonce: str
+    request_id: str
+    request_revision: int
+    requested_digest: str
+    approved_scopes: tuple[Scope, ...]
+    approved_digest: str
+    operation_id: str | None
+    arguments_digest: str | None
+    choice: str
+    lifetime: str
+    duration_seconds: int
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceStopReceipt:
     """Verified supervisor evidence that a specific execution resource stopped."""
 
@@ -179,7 +198,7 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
     "permission_tasks": {"task_id", "instance_id", "owner_id", "agent_id", "session_id",
@@ -222,6 +241,26 @@ _REQUEST_VERSIONS_SCHEMA = """CREATE TABLE access_request_versions (
     recorded_at REAL NOT NULL,
     PRIMARY KEY(request_id, revision)
 )"""
+
+_DECISION_ACTIONS_SCHEMA = """CREATE TABLE decision_actions (
+    action_id TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL UNIQUE,
+    request_id TEXT NOT NULL,
+    request_revision INTEGER NOT NULL,
+    requested_digest TEXT NOT NULL,
+    approved_scopes TEXT NOT NULL,
+    approved_digest TEXT NOT NULL,
+    operation_id TEXT,
+    arguments_digest TEXT,
+    choice TEXT NOT NULL CHECK(choice IN ('approve','deny')),
+    lifetime TEXT NOT NULL CHECK(lifetime IN ('once','run','task','ttl')),
+    duration_seconds INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    FOREIGN KEY(request_id,request_revision)
+        REFERENCES access_request_versions(request_id,revision)
+)"""
+
 
 _SCHEMA = (
     """CREATE TABLE authority_metadata (
@@ -370,6 +409,17 @@ def _request_from(row: sqlite3.Row) -> AccessRequest:
     )
 
 
+def _action_from(row: sqlite3.Row) -> DecisionAction:
+    return DecisionAction(
+        action_id=row["action_id"], nonce=row["nonce"], request_id=row["request_id"],
+        request_revision=row["request_revision"], requested_digest=row["requested_digest"],
+        approved_scopes=_load_scopes(row["approved_scopes"]), approved_digest=row["approved_digest"],
+        operation_id=row["operation_id"], arguments_digest=row["arguments_digest"],
+        choice=row["choice"], lifetime=row["lifetime"], duration_seconds=row["duration_seconds"],
+        expires_at=row["expires_at"],
+    )
+
+
 def _lease_from(row: sqlite3.Row) -> PermissionLease:
     return PermissionLease(
         lease_id=row["lease_id"], task_id=row["task_id"], scopes=_load_scopes(row["scopes_json"]),
@@ -511,6 +561,12 @@ class PermissionAuthority:
             required["request_idempotency"] = {"task_id", "request_key", "fingerprint", "request_id", "outcome"}
         if version >= 4:
             required["operation_outcome_receipts"] = {"nonce", "claim_id", "proof_hash", "recorded_at"}
+        if version >= 5:
+            required["decision_actions"] = {
+                "action_id", "nonce", "request_id", "request_revision", "requested_digest",
+                "approved_scopes", "approved_digest", "operation_id", "arguments_digest",
+                "choice", "lifetime", "duration_seconds", "created_at", "expires_at",
+            }
         primary = {
             "authority_metadata": ("key",), "permission_tasks": ("task_id",),
             "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
@@ -525,6 +581,8 @@ class PermissionAuthority:
             primary["request_idempotency"] = ("task_id", "request_key")
         if version >= 4:
             primary["operation_outcome_receipts"] = ("nonce",)
+        if version >= 5:
+            primary["decision_actions"] = ("action_id",)
         for table, columns in required.items():
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = {row["name"] for row in rows}
@@ -532,12 +590,15 @@ class PermissionAuthority:
             if not columns.issubset(actual) or keys != primary[table]:
                 raise ValueError("permission ledger schema is incomplete")
 
-        for table, columns in (
+        unique_constraints = [
             ("approval_decisions", ("nonce",)),
             ("approval_decisions", ("idempotency_key",)),
             ("approval_decisions", ("request_id", "request_revision")),
             ("permission_leases", ("decision_id",)),
-        ):
+        ]
+        if version >= 5:
+            unique_constraints.append(("decision_actions", ("nonce",)))
+        for table, columns in unique_constraints:
             valid = False
             for index in connection.execute(f"PRAGMA index_list({table})"):
                 if not index["unique"] or index["partial"]:
@@ -550,6 +611,15 @@ class PermissionAuthority:
                     break
             if not valid:
                 raise ValueError("permission ledger uniqueness is incomplete")
+        if version >= 5:
+            table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='decision_actions'"
+            ).fetchone()
+            if table is None or not isinstance(table["sql"], str) or (
+                "".join(table["sql"].split()).casefold()
+                != "".join(_DECISION_ACTIONS_SCHEMA.split()).casefold()
+            ):
+                raise ValueError("permission ledger decision action constraints are incomplete")
         index = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_pending_request'"
         ).fetchone()
@@ -565,7 +635,7 @@ class PermissionAuthority:
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, 3, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, 4, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -621,6 +691,9 @@ class PermissionAuthority:
                     "proof_hash TEXT NOT NULL, recorded_at REAL NOT NULL)"
                 )
                 version = 4
+            if version == 4:
+                connection.execute(_DECISION_ACTIONS_SCHEMA)
+                version = 5
             if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
             self._validate_schema(connection, _SCHEMA_VERSION)
@@ -1294,9 +1367,112 @@ class PermissionAuthority:
             self._event(connection, context.task_id, "request_withdrawn", request_id, now)
             return _request_from(self._request_for_task(connection, context.task_id, request_id))
 
-    def decide(self, reference: str, *, approved_scopes: Iterable[Scope]) -> PermissionLease | None:
+    @staticmethod
+    def _check_action_request(row: sqlite3.Row, context: ExecutionContext, now: float) -> None:
+        if (row["state"] != "pending" or row["expires_at"] <= now
+                or row["task_id"] != context.task_id or row["run_id"] != context.run_id
+                or row["session_id"] != context.session_id
+                or row["context_generation"] != context.context_generation
+                or row["execution_epoch"] != context.execution_epoch
+                or row["policy_revision"] != context.policy_revision):
+            raise InvalidDecision("request is no longer valid for this execution")
+
+    def issue_decision_action(
+        self, context: ExecutionContext, request_id: str, expected_revision: int, *,
+        approved_scopes: Iterable[Scope], choice: str, lifetime: str,
+        duration_seconds: int, action_ttl_seconds: int = 15 * 60,
+    ) -> DecisionAction:
+        """Register an exact UI choice; this does not grant or authenticate it.
+
+        Only a trusted presentation service may expose these snapshots. A later
+        action still requires an independently verified human decision receipt.
+        """
+        _nonempty(request_id, "request_id")
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("revision must be a positive integer")
+        if not isinstance(choice, str) or choice not in {"approve", "deny"}:
+            raise ValueError("invalid decision choice")
+        if not isinstance(lifetime, str) or lifetime not in {"once", "run", "task", "ttl"}:
+            raise ValueError("invalid decision lifetime")
+        if type(duration_seconds) is not int or not 1 <= duration_seconds <= self._max_lease:
+            raise ValueError("invalid decision duration")
+        if type(action_ttl_seconds) is not int or not 1 <= action_ttl_seconds <= 15 * 60:
+            raise ValueError("invalid action lifetime")
+        normalized = canonical_scope_set(approved_scopes)
+        approved_digest = scope_digest(normalized)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            task = self._task(connection, context, active=False)
+            binding = self._binding(connection, context, active=False)
+            if task["state"] not in {"active", "paused"} or binding["state"] != "active":
+                raise PermissionDenied("task cannot issue decision actions")
+            row = self._request_for_task(connection, context.task_id, request_id)
+            if row["revision"] != expected_revision:
+                raise RevisionConflict("request revision changed")
+            self._check_action_request(row, context, now)
+            requested = _load_scopes(row["scopes_json"])
+            if scope_digest(requested) != row["scope_digest"]:
+                raise InvalidDecision("request scope is damaged")
+            if not all(any(scope_covers(parent, child) for parent in requested) for child in normalized):
+                raise InvalidDecision("action scope exceeds the request")
+            if choice == "deny" and approved_digest != row["scope_digest"]:
+                raise InvalidDecision("denial must bind the entire displayed request")
+            if lifetime == "once" and not row["operation_id"]:
+                raise InvalidDecision("once requires an operation")
+            count = connection.execute(
+                "SELECT count(*) FROM decision_actions WHERE request_id=? "
+                "AND request_revision=? AND expires_at>?", (request_id, expected_revision, now),
+            ).fetchone()[0]
+            if count >= 64:
+                raise PermissionDenied("too many live decision actions")
+            action_id, nonce = uuid4().hex, uuid4().hex
+            connection.execute(
+                "INSERT INTO decision_actions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (action_id, nonce, request_id, expected_revision, row["scope_digest"],
+                 _scope_json(normalized), approved_digest, row["operation_id"] or None,
+                 row["arguments_digest"], choice, lifetime, duration_seconds, now,
+                 min(row["expires_at"], now + action_ttl_seconds)),
+            )
+            return _action_from(connection.execute(
+                "SELECT * FROM decision_actions WHERE action_id=?", (action_id,)
+            ).fetchone())
+
+    def get_decision_action(self, context: ExecutionContext, action_id: str) -> DecisionAction:
+        """Return an issued snapshot only while the original request is current."""
+        _nonempty(action_id, "action_id")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            task = self._task(connection, context, active=False)
+            binding = self._binding(connection, context, active=False)
+            if task["state"] not in {"active", "paused"} or binding["state"] != "active":
+                raise PermissionDenied("task cannot use decision actions")
+            action = connection.execute(
+                "SELECT * FROM decision_actions WHERE action_id=?", (action_id,)
+            ).fetchone()
+            if action is None:
+                raise PermissionDenied("decision action not found")
+            row = self._request_for_task(connection, context.task_id, action["request_id"])
+            if row["revision"] != action["request_revision"]:
+                raise RevisionConflict("request revision changed")
+            self._check_action_request(row, context, now)
+            if scope_digest(_load_scopes(row["scopes_json"])) != row["scope_digest"]:
+                raise InvalidDecision("request scope is damaged")
+            if (action["expires_at"] <= now or action["requested_digest"] != row["scope_digest"]
+                    or action["operation_id"] != (row["operation_id"] or None)
+                    or action["arguments_digest"] != row["arguments_digest"]):
+                raise InvalidDecision("decision action is no longer current")
+            result = _action_from(action)
+            if scope_digest(result.approved_scopes) != result.approved_digest:
+                raise InvalidDecision("decision action scope is damaged")
+            return result
+
+    def decide(
+        self, reference: str, *, approved_scopes: Iterable[Scope], action_id: str | None = None,
+    ) -> PermissionLease | None:
         try:
             _nonempty(reference, "decision receipt reference", limit=16 * 1024)
+            if action_id is not None:
+                _nonempty(action_id, "action_id")
         except ValueError as exc:
             raise InvalidDecision("invalid decision receipt reference") from exc
         proof = self._verifier.verify(reference)
@@ -1336,6 +1512,34 @@ class PermissionAuthority:
         proof_hash = hashlib.sha256(_json(asdict(proof)).encode("utf-8")).hexdigest()
         with self._transaction() as connection:
             now = self._now(connection)
+            related = connection.execute(
+                "SELECT action_id FROM decision_actions WHERE action_id=? OR nonce=? LIMIT 1",
+                (proof.idempotency_key, proof.nonce),
+            ).fetchone()
+            if action_id is None and related is not None:
+                raise InvalidDecision("issued decision action must be verified")
+            action = None
+            if action_id is not None:
+                action = connection.execute(
+                    "SELECT * FROM decision_actions WHERE action_id=?", (action_id,)
+                ).fetchone()
+                if action is None or any((
+                    action["action_id"] != proof.idempotency_key,
+                    action["nonce"] != proof.nonce,
+                    action["request_id"] != proof.request_id,
+                    action["request_revision"] != proof.request_revision,
+                    action["requested_digest"] != proof.requested_digest,
+                    action["approved_digest"] != approved_digest,
+                    action["approved_scopes"] != _scope_json(normalized),
+                    action["operation_id"] != proof.operation_id,
+                    action["arguments_digest"] != proof.arguments_digest,
+                    action["choice"] != proof.choice,
+                    action["lifetime"] != proof.lifetime,
+                    action["duration_seconds"] != proof.duration_seconds,
+                    proof.expires_at > action["expires_at"],
+                    proof.expires_at <= action["created_at"],
+                )):
+                    raise InvalidDecision("receipt does not bind the issued action")
             prior = connection.execute(
                 "SELECT * FROM approval_decisions WHERE idempotency_key=?", (proof.idempotency_key,)
             ).fetchone()
@@ -1346,8 +1550,8 @@ class PermissionAuthority:
                     "SELECT * FROM permission_leases WHERE decision_id=?", (prior["decision_id"],)
                 ).fetchone()
                 return _lease_from(lease) if lease is not None else None
-            if proof.expires_at <= now:
-                raise InvalidDecision("decision receipt expired")
+            if proof.expires_at <= now or (action is not None and action["expires_at"] <= now):
+                raise InvalidDecision("decision receipt or action expired")
             request = connection.execute(
                 "SELECT r.*,t.instance_id,t.owner_id,t.agent_id,t.state AS task_state "
                 "FROM access_requests r JOIN permission_tasks t ON t.task_id=r.task_id "
