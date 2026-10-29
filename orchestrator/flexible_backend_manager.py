@@ -2250,7 +2250,7 @@ class FlexibleBackendManager:
         from adapters.base import BackendResponse
         from orchestrator.multimodal_contract import MultimodalContractError
         from orchestrator.session_attachment_authorization import (
-            bind_backend_attachment_reads, current_run_attachment_grants,
+            VoiceTranscriptDiscarded, bind_backend_attachment_reads, current_run_attachment_grants,
             released_codex_voice_input,
         )
         try:
@@ -2268,6 +2268,10 @@ class FlexibleBackendManager:
                     metadata["multimodal_routing"] = list(transcript_routes) + list(metadata.get("multimodal_routing") or [])
                     response.stream_metadata = metadata
                 return response
+        except VoiceTranscriptDiscarded:
+            return BackendResponse(
+                text="", duration_ms=0, is_success=False, stop_reason="safe_voice_discarded",
+            )
         except MultimodalContractError as exc:
             return BackendResponse(
                 text="", duration_ms=0, error=str(exc), is_success=False,

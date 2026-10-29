@@ -1689,6 +1689,7 @@ def _canonical_terminal_payload(
         "public_failure",
         "interrupted",
         "interrupt_reason",
+        "termination_reason",
     ):
         resolved.pop(key, None)
     if state == "completed":
@@ -1729,6 +1730,21 @@ def _canonical_terminal_payload(
                     "incremental_only": True,
                 }
             )
+        return resolved
+    if state == "stopped" and store.request_terminal_reason(
+        str(run["request_id"]), owner_id=owner, agent_id=agent_id
+    ) == "safe_voice_discarded":
+        resolved.update(
+            {
+                "success": False,
+                "text": None,
+                "content": [],
+                "final_message_id": None,
+                "interrupted": True,
+                "interrupt_reason": "safe_voice_discarded",
+                "termination_reason": "safe_voice_discarded",
+            }
+        )
         return resolved
     resolved.update(
         {
@@ -1799,8 +1815,11 @@ def finish_request_from_listener(
     if fencing_token is not None and fencing_token <= 0:
         fencing_token = None
     success = bool(payload.get("success"))
+    interrupt_reason = str(payload.get("interrupt_reason") or "")
+    interrupted = not success and payload.get("interrupted") is True
+    normal_discard = interrupted and interrupt_reason == "safe_voice_discarded"
     failure_context = None
-    if not success:
+    if not success and not normal_discard:
         failure_context = {
             key: payload[key]
             for key in (
@@ -1815,10 +1834,8 @@ def finish_request_from_listener(
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
-    interrupt_reason = str(payload.get("interrupt_reason") or "")
-    interrupted = not success and payload.get("interrupted") is True
     failure_state = "failed"
-    if interrupted and interrupt_reason == "user_stop":
+    if interrupted and interrupt_reason in {"user_stop", "safe_voice_discarded"}:
         failure_state = "stopped"
     elif interrupted and interrupt_reason in {"user_steer", "user_focus"}:
         # A typed course correction replaces this Run with its linked
@@ -1842,6 +1859,7 @@ def finish_request_from_listener(
             error_text=str(payload.get("error") or "") or None,
             error_context=failure_context,
             failure_state=failure_state,
+            termination_reason="safe_voice_discarded" if normal_discard else "",
             fencing_token=fencing_token,
         )
     except Exception as exc:

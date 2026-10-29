@@ -1968,6 +1968,8 @@ class FlexibleAgentRuntime:
                 request_id,
                 success=bool(payload.get("success")),
                 error=payload.get("error") or "",
+                **({"termination_reason": "safe_voice_discarded"}
+                   if payload.get("termination_reason") == "safe_voice_discarded" else {}),
             )
         except Exception as exc:  # display telemetry must never block delivery
             self.logger.warning(
@@ -13334,6 +13336,16 @@ class FlexibleAgentRuntime:
                 raise asyncio.CancelledError
             receipt_response = response
 
+            if runtime_pipeline.is_safe_voice_discard(response):
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_interrupted(
+                    item, item.prompt, is_bridge_request=is_bridge_request,
+                    reason="safe_voice_discarded", error="",
+                )
+                await runtime_pipeline.handle_safe_voice_discard(self, item)
+                receipt_disposition = "safe_voice_discarded"
+                return
+
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
@@ -13747,10 +13759,11 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     disposition=receipt_disposition,
                 )
-            runtime_cross_session.record_turn_result(
-                self, item, assistant_text=receipt_text, response=receipt_response,
-                error=receipt_error, delivered=receipt_delivered, completion_path="background",
-            )
+            if receipt_disposition != "safe_voice_discarded":
+                runtime_cross_session.record_turn_result(
+                    self, item, assistant_text=receipt_text, response=receipt_response,
+                    error=receipt_error, delivered=receipt_delivered, completion_path="background",
+                )
             getattr(self, "_background_request_ids", set()).discard(item.request_id)
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
