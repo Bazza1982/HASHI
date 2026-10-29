@@ -72,7 +72,7 @@ M03 的渲染、M04 的声明目录可在 M02 接口确定后分别安排；只�
 | `orchestrator/permissions/descriptors.py` | 部分工具的范围、参数摘要与实际覆盖说明；未知工具拒绝 |
 | 规范化 | 当前由 `models.py` 实现；如需拆分则迁移唯一实现，不复制状态 |
 | `interfaces.py` | PermissionAuthority / Enforcer / TrustedDecision / Recovery 合同 |
-| 账本与迁移 | 当前 `authority.py` 有基础事务和 outbox；持久迁移及恢复待实现 |
+| 账本与迁移 | 当前 `authority.py` 有基础事务、outbox 与事务性 v1→v2 请求快照迁移；备份恢复、真实 service epoch 与资源对账待实现 |
 | 权限服务 | 当前 `authority.py` 有部分决定与 claim/start；派生授权及真实入口待实现 |
 | `task_binding.py`、`lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 |
 | `continuation.py` | PendingOperation、等待、恢复计划、回执消费 |

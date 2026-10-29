@@ -12,12 +12,13 @@ barrier enforce the committed claim; a database row alone is not OS isolation.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Callable, Iterable, Protocol
 from uuid import uuid4
@@ -109,6 +110,8 @@ class AccessRequest:
     operation_id: str | None
     state: str
     expires_at: float
+    purpose: str = ""
+    is_current_revision: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +143,24 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+_REQUEST_VERSIONS_SCHEMA = """CREATE TABLE access_request_versions (
+    request_id TEXT NOT NULL REFERENCES access_requests(request_id),
+    revision INTEGER NOT NULL,
+    scopes_json TEXT NOT NULL,
+    scope_digest TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    context_generation TEXT NOT NULL,
+    execution_epoch TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    operation_id TEXT NOT NULL,
+    arguments_digest TEXT,
+    purpose TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    PRIMARY KEY(request_id, revision)
+)"""
 
 _SCHEMA = (
     """CREATE TABLE authority_metadata (
@@ -187,6 +207,7 @@ _SCHEMA = (
         created_at REAL NOT NULL,
         expires_at REAL NOT NULL
     )""",
+    _REQUEST_VERSIONS_SCHEMA,
     """CREATE UNIQUE INDEX one_pending_request
        ON access_requests(task_id, operation_id, scope_digest, policy_revision) WHERE state='pending'""",
     """CREATE TABLE approval_decisions (
@@ -281,7 +302,8 @@ def _request_from(row: sqlite3.Row) -> AccessRequest:
     return AccessRequest(
         request_id=row["request_id"], task_id=row["task_id"], revision=row["revision"],
         scopes=_load_scopes(row["scopes_json"]), scope_digest=row["scope_digest"],
-        operation_id=row["operation_id"] or None, state=row["state"], expires_at=row["expires_at"],
+        operation_id=row["operation_id"] or None, state=row["state"],
+        expires_at=row["expires_at"], purpose=row["purpose"],
     )
 
 
@@ -332,6 +354,8 @@ class PermissionAuthority:
         self._max_lease = max_lease_seconds
         self._wall_anchor = float(clock())
         self._monotonic_anchor = float(monotonic())
+        self._clock_lock = threading.Lock()
+        self._clock_observations: dict[int, tuple[float, float]] = {}
         if not math.isfinite(self._wall_anchor) or not math.isfinite(self._monotonic_anchor):
             raise ValueError("invalid clock")
         self._initialize()
@@ -351,15 +375,45 @@ class PermissionAuthority:
             yield connection
             connection.commit()
         except BaseException:
+            # Roll back business state, but do not forget a later clock observed
+            # by the rejected transaction: a restart must not revive a lease.
+            with self._clock_lock:
+                observation = self._clock_observations.pop(id(connection), None)
             connection.rollback()
+            if observation is not None:
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._store_time_floor(connection, "wall_high_water", observation[0])
+                    self._store_time_floor(connection, "effective_high_water", observation[1])
+                    connection.commit()
+                except BaseException as exc:
+                    connection.rollback()
+                    raise PermissionDenied("trusted time could not be persisted") from exc
             raise
         finally:
+            with self._clock_lock:
+                self._clock_observations.pop(id(connection), None)
             connection.close()
 
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == _SCHEMA_VERSION:
+                return
+            if version == 1:
+                # Preserve each existing request as revision 1. The schema change
+                # and snapshots commit together; a failure leaves v1 untouched.
+                connection.execute(_REQUEST_VERSIONS_SCHEMA)
+                connection.execute(
+                    "INSERT INTO access_request_versions "
+                    "(request_id,revision,scopes_json,scope_digest,run_id,session_id,"
+                    "context_generation,execution_epoch,policy_revision,operation_id,"
+                    "arguments_digest,purpose,recorded_at) "
+                    "SELECT request_id,revision,scopes_json,scope_digest,run_id,session_id,"
+                    "context_generation,execution_epoch,policy_revision,operation_id,"
+                    "arguments_digest,purpose,created_at FROM access_requests"
+                )
+                connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 return
             if version != 0:
                 raise ValueError("unsupported permission ledger schema")
@@ -372,25 +426,58 @@ class PermissionAuthority:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
+    @staticmethod
+    def _time_floor(connection: sqlite3.Connection, key: str) -> float | None:
+        row = connection.execute(
+            "SELECT value FROM authority_metadata WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = float(row["value"])
+        except (TypeError, ValueError) as exc:
+            raise PermissionDenied("trusted time record is invalid") from exc
+        if not math.isfinite(value):
+            raise PermissionDenied("trusted time record is invalid")
+        return value
+
+    @classmethod
+    def _store_time_floor(
+        cls, connection: sqlite3.Connection, key: str, value: float
+    ) -> None:
+        old = cls._time_floor(connection, key)
+        if old is not None:
+            value = max(value, old)
+        connection.execute(
+            "INSERT INTO authority_metadata(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, repr(value)),
+        )
+
     def _now(self, connection: sqlite3.Connection) -> float:
         wall = float(self._clock())
         monotonic = float(self._monotonic())
         if not math.isfinite(wall) or not math.isfinite(monotonic):
             raise PermissionDenied("trusted time unavailable")
-        row = connection.execute(
-            "SELECT value FROM authority_metadata WHERE key='wall_high_water'"
-        ).fetchone()
-        if row is not None and wall < float(row["value"]):
+        previous_wall = self._time_floor(connection, "wall_high_water")
+        if previous_wall is not None and wall < previous_wall:
             raise PermissionDenied("clock rollback detected")
-        connection.execute(
-            "INSERT INTO authority_metadata(key,value) VALUES('wall_high_water',?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (repr(wall),),
-        )
-        elapsed = monotonic - self._monotonic_anchor
-        if elapsed < 0:
-            raise PermissionDenied("monotonic clock moved backwards")
-        return max(wall, self._wall_anchor + elapsed)
+        previous_effective = self._time_floor(connection, "effective_high_water")
+        with self._clock_lock:
+            elapsed = monotonic - self._monotonic_anchor
+            if elapsed < 0:
+                raise PermissionDenied("monotonic clock moved backwards")
+            effective = max(wall, self._wall_anchor + elapsed)
+            if previous_effective is not None and effective < previous_effective:
+                # A reopened service may see a stalled wall clock. Re-anchor
+                # monotonic time to the durable floor, so time keeps advancing.
+                effective = previous_effective
+                self._wall_anchor = effective
+                self._monotonic_anchor = monotonic
+            self._clock_observations[id(connection)] = (wall, effective)
+        self._store_time_floor(connection, "wall_high_water", wall)
+        self._store_time_floor(connection, "effective_high_water", effective)
+        return effective
 
     @staticmethod
     def _event(connection: sqlite3.Connection, task_id: str, event: str, ref: str, now: float) -> None:
@@ -440,6 +527,22 @@ class PermissionAuthority:
     def _context(cls, connection: sqlite3.Connection, context: ExecutionContext, *, active: bool = True) -> None:
         cls._task(connection, context, active=active)
         cls._binding(connection, context, active=active)
+
+    @staticmethod
+    def _require_prior_execution_fenced(
+        connection: sqlite3.Connection, operation: sqlite3.Row, context: ExecutionContext
+    ) -> None:
+        if operation["execution_epoch"] == context.execution_epoch:
+            return
+        prior = connection.execute(
+            "SELECT task_id,run_id,state FROM execution_bindings WHERE execution_epoch=?",
+            (operation["execution_epoch"],),
+        ).fetchone()
+        if (
+            prior is None or prior["state"] != "fenced"
+            or prior["task_id"] != operation["task_id"] or prior["run_id"] != operation["run_id"]
+        ):
+            raise OperationConflict("operation belongs to another active execution")
 
     @staticmethod
     def _insert_binding(connection: sqlite3.Connection, context: ExecutionContext) -> None:
@@ -584,8 +687,8 @@ class PermissionAuthority:
         operation_id: str | None = None,
         arguments_digest: str | None = None,
     ) -> AccessRequest:
-        normalized = canonical_scope_set(scopes)
-        digest = scope_digest(normalized)
+        requested = canonical_scope_set(scopes)
+        operation_digest = scope_digest(requested)
         purpose = _nonempty(purpose, "purpose", limit=2000)
         if (operation_id is None) != (arguments_digest is None):
             raise ValueError("operation identity and arguments digest must be provided together")
@@ -596,51 +699,143 @@ class PermissionAuthority:
         with self._transaction() as connection:
             now = self._now(connection)
             self._context(connection, context)
-            covering = self._covering_leases(
-                connection, context, now, normalized, operation_id=operation_id
-            )
-            if covering:
-                expires = min(connection.execute(
-                    "SELECT expires_at FROM permission_leases WHERE lease_id=?", (lease_id,)
-                ).fetchone()[0] for lease_id in covering)
-                return AccessRequest("", context.task_id, 0, normalized, digest, operation_id,
-                                     "granted_existing", expires)
-            prior = connection.execute(
-                "SELECT * FROM access_requests WHERE task_id=? AND operation_id=? AND scope_digest=? "
-                "AND policy_revision=? ORDER BY rowid DESC LIMIT 1", (context.task_id, op_key, digest, context.policy_revision),
-            ).fetchone()
-            if prior is not None and prior["state"] == "denied":
-                return _request_from(prior)
+            operation = None
             if operation_id:
                 operation = connection.execute(
                     "SELECT * FROM pending_operations WHERE operation_id=?", (operation_id,)
                 ).fetchone()
-                if operation is None:
-                    connection.execute(
-                        "INSERT INTO pending_operations VALUES(?,?,?,?,?,?,?)",
-                        (operation_id, context.task_id, context.run_id, arguments_digest,
-                         digest, context.execution_epoch, "waiting"),
-                    )
-                elif any((
+                if operation is not None and any((
                     operation["task_id"] != context.task_id,
                     operation["run_id"] != context.run_id,
                     operation["arguments_digest"] != arguments_digest,
-                    operation["scope_digest"] != digest,
+                    operation["scope_digest"] != operation_digest,
                     operation["state"] != "waiting",
                 )):
                     raise OperationConflict("operation identity already bound")
-            existing = connection.execute(
-                "SELECT * FROM access_requests WHERE task_id=? AND operation_id=? AND scope_digest=? "
-                "AND policy_revision=? AND state='pending'",
-                (context.task_id, op_key, digest, context.policy_revision),
-            ).fetchone()
-            if existing is not None and existing["expires_at"] > now:
-                return _request_from(existing)
-            if existing is not None:
+                if operation is not None:
+                    self._require_prior_execution_fenced(connection, operation, context)
+
+            covering = self._covering_leases(
+                connection, context, now, requested, operation_id=operation_id
+            )
+            if covering:
+                # Another approved lease may satisfy a waiting operation. Close
+                # obsolete prompts so an old action cannot grant a duplicate.
+                if operation_id:
+                    pending = connection.execute(
+                        "SELECT request_id,expires_at FROM access_requests "
+                        "WHERE task_id=? AND operation_id=? AND state='pending'",
+                        (context.task_id, operation_id),
+                    ).fetchall()
+                    for item in pending:
+                        state = "expired" if item["expires_at"] <= now else "withdrawn"
+                        connection.execute(
+                            "UPDATE access_requests SET state=? WHERE request_id=?",
+                            (state, item["request_id"]),
+                        )
+                        self._event(connection, context.task_id, "request_" + state,
+                                    item["request_id"], now)
+                expires = min(connection.execute(
+                    "SELECT expires_at FROM permission_leases WHERE lease_id=?", (lease_id,)
+                ).fetchone()[0] for lease_id in covering)
+                return AccessRequest("", context.task_id, 0, requested, operation_digest,
+                                     operation_id, "granted_existing", expires, purpose)
+
+            # Request only actions that existing leases do not already cover.
+            # Keep the pending operation bound to the complete original scope.
+            missing = []
+            for required in requested:
+                actions = []
+                for action in required.actions:
+                    single = Scope(required.kind, required.resource, (action,),
+                                   required.normalization_version)
+                    if self._covering_leases(
+                        connection, context, now, (single,), operation_id=operation_id
+                    ) is None:
+                        actions.append(action)
+                if actions:
+                    missing.append(Scope(required.kind, required.resource, tuple(actions),
+                                         required.normalization_version))
+            normalized = canonical_scope_set(missing)
+            digest = scope_digest(normalized)
+
+            if operation_id:
+                existing = connection.execute(
+                    "SELECT * FROM access_requests WHERE task_id=? AND operation_id=? "
+                    "AND policy_revision=? AND state='pending' ORDER BY rowid DESC LIMIT 1",
+                    (context.task_id, op_key, context.policy_revision),
+                ).fetchone()
+            else:
+                existing = connection.execute(
+                    "SELECT * FROM access_requests WHERE task_id=? AND operation_id='' "
+                    "AND scope_digest=? AND policy_revision=? AND state='pending'",
+                    (context.task_id, digest, context.policy_revision),
+                ).fetchone()
+            if existing is not None and existing["expires_at"] <= now:
                 connection.execute(
                     "UPDATE access_requests SET state='expired' WHERE request_id=?",
                     (existing["request_id"],),
                 )
+                self._event(connection, context.task_id, "request_expired", existing["request_id"], now)
+                existing = None
+            if existing is not None:
+                if existing["execution_epoch"] == context.execution_epoch:
+                    return _request_from(existing)
+                old_binding = connection.execute(
+                    "SELECT state FROM execution_bindings WHERE execution_epoch=?",
+                    (existing["execution_epoch"],),
+                ).fetchone()
+                if old_binding is None or old_binding["state"] != "fenced":
+                    raise OperationConflict("request belongs to another active execution")
+                if existing["run_id"] == context.run_id:
+                    revision = existing["revision"] + 1
+                    connection.execute(
+                        "UPDATE access_requests SET execution_epoch=?,context_generation=?,revision=? "
+                        "WHERE request_id=?",
+                        (context.execution_epoch, context.context_generation,
+                         revision, existing["request_id"]),
+                    )
+                    self._snapshot_request(connection, existing["request_id"], now)
+                    if operation_id:
+                        connection.execute(
+                            "UPDATE pending_operations SET execution_epoch=? WHERE operation_id=?",
+                            (context.execution_epoch, operation_id),
+                        )
+                    self._event(connection, context.task_id, "request_rebound", existing["request_id"], now)
+                    return _request_from(connection.execute(
+                        "SELECT * FROM access_requests WHERE request_id=?", (existing["request_id"],)
+                    ).fetchone())
+                connection.execute(
+                    "UPDATE access_requests SET state='withdrawn' WHERE request_id=?",
+                    (existing["request_id"],),
+                )
+                self._event(connection, context.task_id, "request_withdrawn", existing["request_id"], now)
+
+            prior = connection.execute(
+                "SELECT * FROM access_requests WHERE task_id=? AND operation_id=? AND scope_digest=? "
+                "AND policy_revision=? ORDER BY rowid DESC LIMIT 1",
+                (context.task_id, op_key, digest, context.policy_revision),
+            ).fetchone()
+            if prior is not None and prior["state"] == "denied":
+                return _request_from(prior)
+            if operation_id:
+                if operation is None:
+                    connection.execute(
+                        "INSERT INTO pending_operations VALUES(?,?,?,?,?,?,?)",
+                        (operation_id, context.task_id, context.run_id, arguments_digest,
+                         operation_digest, context.execution_epoch, "waiting"),
+                    )
+                elif operation["execution_epoch"] != context.execution_epoch:
+                    previous = connection.execute(
+                        "SELECT state FROM execution_bindings WHERE execution_epoch=?",
+                        (operation["execution_epoch"],),
+                    ).fetchone()
+                    if previous is None or previous["state"] != "fenced":
+                        raise OperationConflict("operation belongs to another active execution")
+                    connection.execute(
+                        "UPDATE pending_operations SET execution_epoch=? WHERE operation_id=?",
+                        (context.execution_epoch, operation_id),
+                    )
             request_id = uuid4().hex
             connection.execute(
                 "INSERT INTO access_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -649,10 +844,164 @@ class PermissionAuthority:
                  op_key, arguments_digest, _scope_json(normalized),
                  digest, purpose, 1, "pending", now, now + self._request_ttl),
             )
+            self._snapshot_request(connection, request_id, now)
             self._event(connection, context.task_id, "request_created", request_id, now)
             return _request_from(connection.execute(
                 "SELECT * FROM access_requests WHERE request_id=?", (request_id,)
             ).fetchone())
+
+    @staticmethod
+    def _snapshot_request(
+        connection: sqlite3.Connection, request_id: str, now: float
+    ) -> None:
+        connection.execute(
+            "INSERT INTO access_request_versions "
+            "(request_id,revision,scopes_json,scope_digest,run_id,session_id,"
+            "context_generation,execution_epoch,policy_revision,operation_id,"
+            "arguments_digest,purpose,recorded_at) "
+            "SELECT request_id,revision,scopes_json,scope_digest,run_id,session_id,"
+            "context_generation,execution_epoch,policy_revision,operation_id,"
+            "arguments_digest,purpose,? FROM access_requests WHERE request_id=?",
+            (now, request_id),
+        )
+
+    @staticmethod
+    def _request_for_task(
+        connection: sqlite3.Connection, task_id: str, request_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM access_requests WHERE request_id=? AND task_id=?",
+            (request_id, task_id),
+        ).fetchone()
+        if row is None:
+            raise PermissionDenied("request not found for this task")
+        return row
+
+    @staticmethod
+    def _visible_request(row: sqlite3.Row, now: float) -> AccessRequest:
+        request = _request_from(row)
+        if request.state == "pending" and request.expires_at <= now:
+            return replace(request, state="expired")
+        return request
+
+    def get_request(self, context: ExecutionContext, request_id: str) -> AccessRequest:
+        _nonempty(request_id, "request_id")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context, active=False)
+            row = self._request_for_task(connection, context.task_id, request_id)
+            return self._visible_request(row, now)
+
+    def list_requests(
+        self, context: ExecutionContext, *, limit: int = 100
+    ) -> tuple[AccessRequest, ...]:
+        if type(limit) is not int or not 1 <= limit <= 250:
+            raise ValueError("limit must be between 1 and 250")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context, active=False)
+            rows = connection.execute(
+                "SELECT * FROM access_requests WHERE task_id=? "
+                "ORDER BY rowid DESC LIMIT ?", (context.task_id, limit),
+            ).fetchall()
+            return tuple(self._visible_request(row, now) for row in rows)
+
+    def get_request_version(
+        self, context: ExecutionContext, request_id: str, revision: int
+    ) -> AccessRequest:
+        _nonempty(request_id, "request_id")
+        if type(revision) is not int or revision < 1:
+            raise ValueError("revision must be a positive integer")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context, active=False)
+            row = self._request_for_task(connection, context.task_id, request_id)
+            snapshot = connection.execute(
+                "SELECT * FROM access_request_versions WHERE request_id=? AND revision=?",
+                (request_id, revision),
+            ).fetchone()
+            if snapshot is None:
+                raise PermissionDenied("request revision not found")
+            return replace(
+                self._visible_request(row, now),
+                revision=revision,
+                scopes=_load_scopes(snapshot["scopes_json"]),
+                scope_digest=snapshot["scope_digest"],
+                purpose=snapshot["purpose"],
+                is_current_revision=(revision == row["revision"]),
+            )
+
+    def narrow_request(
+        self, context: ExecutionContext, request_id: str, expected_revision: int,
+        scopes: Iterable[Scope],
+    ) -> AccessRequest:
+        _nonempty(request_id, "request_id")
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("revision must be a positive integer")
+        normalized = canonical_scope_set(scopes)
+        digest = scope_digest(normalized)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            task = self._task(connection, context, active=False)
+            binding = self._binding(connection, context, active=False)
+            if task["state"] not in {"active", "paused"} or binding["state"] != "active":
+                raise PermissionDenied("task cannot change requests")
+            row = self._request_for_task(connection, context.task_id, request_id)
+            if row["revision"] != expected_revision:
+                raise RevisionConflict("request revision changed")
+            if row["state"] != "pending" or row["expires_at"] <= now:
+                raise InvalidDecision("request is no longer pending")
+            if row["execution_epoch"] != context.execution_epoch:
+                raise PermissionDenied("request belongs to a different execution")
+            original = _load_scopes(row["scopes_json"])
+            if not all(any(scope_covers(parent, child) for parent in original) for child in normalized):
+                raise InvalidDecision("new scope exceeds the request")
+            if digest == row["scope_digest"]:
+                return _request_from(row)
+            revision = expected_revision + 1
+            try:
+                connection.execute(
+                    "UPDATE access_requests SET scopes_json=?,scope_digest=?,revision=? "
+                    "WHERE request_id=?",
+                    (_scope_json(normalized), digest, revision, request_id),
+                )
+                self._snapshot_request(connection, request_id, now)
+            except sqlite3.IntegrityError as exc:
+                raise RevisionConflict("equivalent request is already pending") from exc
+            self._event(connection, context.task_id, "request_narrowed", request_id, now)
+            return _request_from(self._request_for_task(connection, context.task_id, request_id))
+
+    def withdraw_request(
+        self, context: ExecutionContext, request_id: str, expected_revision: int
+    ) -> AccessRequest:
+        _nonempty(request_id, "request_id")
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("revision must be a positive integer")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            task = self._task(connection, context, active=False)
+            binding = self._binding(connection, context, active=False)
+            row = self._request_for_task(connection, context.task_id, request_id)
+            if row["revision"] != expected_revision:
+                raise RevisionConflict("request revision changed")
+            if row["state"] != "pending" or row["expires_at"] <= now:
+                return self._visible_request(row, now)
+            if task["state"] not in {"active", "paused"} or binding["state"] != "active":
+                raise PermissionDenied("task cannot withdraw requests")
+            connection.execute(
+                "UPDATE access_requests SET state='withdrawn' WHERE request_id=?", (request_id,),
+            )
+            if row["operation_id"]:
+                connection.execute(
+                    "UPDATE pending_operations SET state='cancelled' "
+                    "WHERE operation_id=? AND task_id=? AND state='waiting' "
+                    "AND NOT EXISTS(SELECT 1 FROM access_requests WHERE task_id=? "
+                    "AND operation_id=? AND state='pending' AND expires_at>?)",
+                    (row["operation_id"], context.task_id, context.task_id,
+                     row["operation_id"], now),
+                )
+            self._event(connection, context.task_id, "request_withdrawn", request_id, now)
+            return _request_from(self._request_for_task(connection, context.task_id, request_id))
 
     def decide(self, reference: str, *, approved_scopes: Iterable[Scope]) -> PermissionLease | None:
         _nonempty(reference, "decision receipt reference")
@@ -857,6 +1206,8 @@ class PermissionAuthority:
                 operation["state"] != "waiting",
             )):
                 raise OperationConflict("operation is already bound or has begun")
+            if operation is not None:
+                self._require_prior_execution_fenced(connection, operation, context)
             leases = self._covering_leases(
                 connection, context, now, normalized, operation_id=operation_id
             )

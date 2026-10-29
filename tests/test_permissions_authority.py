@@ -220,6 +220,46 @@ def test_expiry_and_clock_rollback_fail_closed(environment):
         authority.evaluate(context, [scope])
 
 
+@pytest.mark.parametrize("failing_access", [False, True])
+def test_monotonic_expiry_cannot_revive_after_reopen(tmp_path, failing_access):
+    wall, monotonic = Clock(), Clock()
+    issuer = AuthenticatedReceiptSource()
+    context = ExecutionContext(
+        instance_id="instance", owner_id="owner", agent_id="agent",
+        task_id="clock-task", run_id="clock-run", session_id="session",
+        turn_id="turn", worker_generation="worker",
+        context_generation="generation", execution_epoch="epoch",
+        backend_id="herv3", executor_id="registry", policy_revision=1,
+    )
+    path = tmp_path / "clock.sqlite"
+    authority = PermissionAuthority(path, verifier=issuer, clock=wall, monotonic=monotonic)
+    authority.open_task(context)
+    scope = normalize_scope("file", str(tmp_path), ["read"], cwd=tmp_path)
+    approve(authority, issuer, wall, context, [scope], duration=60)
+    monotonic.value += 61
+    if failing_access:
+        # An operation that raises must still preserve observed time progress.
+        with pytest.raises(PermissionDenied):
+            authority.prepare(context, "expired-op", "a" * 64, [scope])
+    else:
+        assert not authority.evaluate(context, [scope])
+    reopened = PermissionAuthority(path, verifier=issuer, clock=wall, monotonic=monotonic)
+    try:
+        permitted = reopened.evaluate(context, [scope])
+    except PermissionDenied:
+        permitted = False
+    assert not permitted, "an expired permission became valid after restart"
+
+    # Once re-anchored, monotonic time must continue advancing even if the
+    # wall clock stays frozen, including after a rejected transaction.
+    first = reopened.request_access(context, [scope], purpose="new request")
+    assert first.expires_at == 1_061.0 + 24 * 60 * 60
+    monotonic.value += 10
+    other_scope = normalize_scope("network", "https://example.com", ["fetch"], cwd=tmp_path)
+    second = reopened.request_access(context, [other_scope], purpose="other request")
+    assert second.expires_at == 1_071.0 + 24 * 60 * 60
+
+
 def test_unknown_side_effect_cannot_be_automatically_repeated(environment):
     authority, issuer, clock, context, scope = environment
     approve(authority, issuer, clock, context, [scope])
