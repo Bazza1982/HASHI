@@ -30,7 +30,8 @@ from orchestrator.telegram_identity import resolve_owner_scope_id, resolve_teleg
 MAX_TELEGRAM_USER_ID = (1 << 52) - 1
 MAX_TELEGRAM_USERS_PER_SCOPE = 500
 GLOBAL_USERS_KEY = "authorized_telegram_user_ids"
-AGENT_USERS_KEY = "authorized_telegram_ids"
+LEGACY_AGENT_USERS_KEY = "authorized_telegram_ids"
+AGENT_USERS_KEY = "scoped_telegram_user_ids"
 _REVISION = re.compile(r"^[0-9a-f]{64}$")
 _DIGITS = re.compile(r"^[0-9]{1,16}$")
 
@@ -114,7 +115,11 @@ def access_snapshot(
     if primary is not None:
         primary = normalize_telegram_user_id(primary)
     global_users = _id_list(global_config.get(GLOBAL_USERS_KEY))
-    agent_users = _id_list(extra.get(AGENT_USERS_KEY), legacy_scalar=True)
+    legacy_agent_users = _id_list(extra.get(LEGACY_AGENT_USERS_KEY), legacy_scalar=True)
+    scoped_agent_users = _id_list(extra.get(AGENT_USERS_KEY))
+    agent_users = list(dict.fromkeys((*legacy_agent_users, *scoped_agent_users)))
+    if len(agent_users) > MAX_TELEGRAM_USERS_PER_SCOPE:
+        raise ValueError("too many Agent Telegram users")
     if primary is not None:
         global_users = [primary, *(user for user in global_users if user != primary)]
     elif global_users:
@@ -243,7 +248,13 @@ class TelegramAccessService:
                         == snapshot.agent_id.casefold()
                     )
                     extra = dict(row.get("extra") or {})
-                    extra[AGENT_USERS_KEY] = target
+                    legacy = _id_list(extra.get(LEGACY_AGENT_USERS_KEY), legacy_scalar=True)
+                    if action == "remove" and actor in legacy:
+                        legacy.remove(actor)
+                        extra[LEGACY_AGENT_USERS_KEY] = legacy
+                    # Keep new grants out of the legacy field: an older Worker
+                    # would otherwise treat them as its primary owner.
+                    extra[AGENT_USERS_KEY] = [user for user in target if user not in legacy]
                     row["extra"] = extra
                 write_config_json(self.config_path, config)
         except TelegramAccessError:

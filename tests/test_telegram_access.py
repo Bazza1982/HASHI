@@ -201,3 +201,32 @@ def test_uncertain_commit_is_reported_without_repeating_write(tmp_path, monkeypa
     assert caught.value.error_code == "telegram_access_outcome_unknown"
     assert calls == [1]
     assert service.status("lily")["agent_user_ids"] == ["75", "300"]
+
+
+def test_new_scoped_grant_is_invisible_to_legacy_allowlists(tmp_path):
+    from orchestrator.runtime_common import resolve_authorized_telegram_ids
+
+    service, config_path, _ = _instance(tmp_path)
+    state = service.status("lily")
+    result = service.change("lily", expected_revision=state["revision"],
+                            scope="agent", action="add", user_id="300")
+    extra = read_config_json(config_path)["agents"][0]["extra"]
+
+    assert result["agent_user_ids"] == ["75", "300"]
+    assert extra["authorized_telegram_ids"] == [75]
+    assert 300 not in resolve_authorized_telegram_ids(extra, 42)
+
+
+def test_removing_a_legacy_grant_also_removes_a_duplicate_new_grant(tmp_path):
+    service, config_path, _ = _instance(tmp_path)
+    config = read_config_json(config_path)
+    config["agents"][0]["extra"]["scoped_telegram_user_ids"] = [75, 300]
+    write_config_json(config_path, config)
+    state = service.status("lily")
+    result = service.change("lily", expected_revision=state["revision"],
+                            scope="agent", action="remove", user_id="75")
+
+    assert result["agent_user_ids"] == ["300"]
+    extra = read_config_json(config_path)["agents"][0]["extra"]
+    assert extra["authorized_telegram_ids"] == []
+    assert extra["scoped_telegram_user_ids"] == [300]

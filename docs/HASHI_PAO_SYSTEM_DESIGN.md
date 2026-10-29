@@ -23,8 +23,10 @@ The candidate contains a configuration service, actor-scope helpers, and initial
 delivery checks. Worker ingress is behind an unset internal gate; the management
 API returns unavailable. Command routing, all streaming/audio
 and explicit-tool delivery paths, mixed Worker generations, and live Telegram
-acceptance remain unverified. Older Workers interpret the existing per-Agent
-allowlist using their legacy Session and command rules; they may retain a cached
+acceptance remain unverified. New Agent-only grants use a separate configuration
+field so older Workers do not treat them as legacy users. Existing legacy grants
+remain visible to the new policy for compatibility. Older Workers interpret the
+legacy allowlist using their old Session and command rules and may retain a cached
 grant after it is removed. Qualification, fallback, and revocation across
 Worker generations therefore need an explicit compatibility fence before the
 management gate can open. The UI must not advertise this capability until
