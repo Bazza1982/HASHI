@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any, Protocol
@@ -205,5 +206,15 @@ class PermissionExecutionGate:
         if (stored.arguments_digest != descriptor.arguments_digest
                 or stored.scope_digest != scope_digest(descriptor.scopes)
                 or stored.state != receipt.outcome or stored.result_digest != receipt.result_digest):
+            return GateResult("unknown", operation_id, request_id)
+        if receipt.outcome == "unknown":
+            return GateResult("unknown", operation_id, request_id)
+        try:
+            if not isinstance(receipt.payload, str):
+                return GateResult("unknown", operation_id, request_id)
+            payload_digest = sha256(receipt.payload.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            return GateResult("unknown", operation_id, request_id)
+        if payload_digest != receipt.result_digest:
             return GateResult("unknown", operation_id, request_id)
         return GateResult(receipt.outcome, operation_id, request_id, receipt.payload)

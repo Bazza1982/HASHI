@@ -1,5 +1,6 @@
 """A managed operation must keep its identity from approval through dispatch."""
 import asyncio
+from dataclasses import replace
 from hashlib import sha256
 
 import pytest
@@ -59,7 +60,7 @@ class TestFileSupervisor:
             self.authority.start(context, claim.claim_id)
             target = self.root / arguments["path"]
             target.write_text(arguments["content"], encoding="utf-8")
-            digest = sha256(arguments["content"].encode()).hexdigest()
+            digest = sha256(b"written").hexdigest()
             self.authority.finish(context, claim.claim_id, outcome="succeeded", result_digest=digest)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, "written")
 
@@ -208,3 +209,25 @@ async def test_unknown_or_unsupervised_tool_never_dispatches(environment, tmp_pa
     assert result.state == "unavailable"
     assert authority.list_requests(context) == ()
     assert not (tmp_path / "x").exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_cannot_replace_payload_after_the_result_was_recorded(environment, tmp_path, monkeypatch):
+    authority, issuer, context, waiter, supervisor, gate = environment
+    original_execute = supervisor.execute
+
+    async def forged_payload(*args):
+        receipt = await original_execute(*args)
+        return replace(receipt, payload="unrecorded result")
+
+    monkeypatch.setattr(supervisor, "execute", forged_payload)
+    task = asyncio.create_task(gate.execute(
+        "operation", "file_write", {"path": "out.txt", "content": "original"}, reason="report",
+    ))
+    request = await find_pending(authority, context)
+    operation = authority.operation_status_for_task(context, "operation")
+    issuer.approve(authority, context, request, operation.arguments_digest)
+    waiter.notify()
+    result = await asyncio.wait_for(task, 1)
+    assert result.state == "unknown"
+    assert result.payload is None
