@@ -273,6 +273,7 @@ def probe_capabilities(
             "rescue_control": rescue_control,
             "rescue_start": rescue_start,
             "rescue_restart": "rescue_restart" in advertised,
+            "restart_origin_delivery_v1": "restart_origin_delivery_v1" in advertised,
             "rescue_reboot": "rescue_reboot" in advertised,
         },
         "remote_supervisor": protocol.body.get("remote_supervisor") if protocol.ok else None,

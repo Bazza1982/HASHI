@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +20,7 @@ from .coordinator import (
     get_outbound_move,
 )
 from .package import AgentMoveError, utc_now_iso
-from orchestrator.process_execution import process_is_alive
+from orchestrator.config_json import file_write_lock
 from orchestrator.agent_move_ui import render_background_notice
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 
@@ -41,7 +41,6 @@ _MAX_STATE_BYTES = 512 * 1024
 _WATCH_INTERVAL_SECONDS = 0.25
 _MAX_DELIVERY_ATTEMPTS = 5
 _MAX_EXECUTION_ATTEMPTS = 5
-_LOCK_STALE_SECONDS = 1.0
 
 
 class AgentMoveManager:
@@ -139,7 +138,7 @@ class AgentMoveManager:
                     "delivery": {
                         "status": (
                             "pending"
-                            if (origin or {}).get("chat_id") is not None
+                            if (origin or {}).get("session_id") or (origin or {}).get("chat_id") is not None
                             else "not_requested"
                         ),
                         "attempts": 0,
@@ -147,7 +146,7 @@ class AgentMoveManager:
                     },
                 }
                 directory[move_id] = record
-                self._write_operations_unlocked(directory)
+                self._write_operations_unlocked(directory, keep=move_id)
                 duplicate = False
             else:
                 record = previous
@@ -158,9 +157,12 @@ class AgentMoveManager:
                         execution_attempts=0,
                         retry_requested_at=utc_now_iso(),
                         updated_at=utc_now_iso(),
+                        instances=_json_mapping(instances, field="instances"),
                     )
+                    if (record.get("origin") or {}).get("session_id") or (record.get("origin") or {}).get("chat_id") is not None:
+                        record["delivery"] = {"status": "pending", "attempts": 0, "next_attempt_at": 0.0}
                     directory[move_id] = record
-                    self._write_operations_unlocked(directory)
+                    self._write_operations_unlocked(directory, keep=move_id)
         if _schedule and _ready_to_execute(record):
             self._spawn(move_id)
         return {
@@ -238,6 +240,21 @@ class AgentMoveManager:
         )
         self._update(package_id, delivery=delivery)
         origin = record.get("origin") or {}
+        if origin.get("session_id"):
+            from orchestrator.frontend_notice_delivery import deliver_notice
+
+            result = await deliver_notice(
+                self.kernel, agent_id=str(record.get("requested_by") or record.get("agent_id") or ""),
+                origin=origin, text=render_background_notice(record),
+                publication_id=f"agent-transfer:{package_id}:{record.get('status')}",
+                send_notice=send_runtime_notice,
+            )
+            if result.get("sent"):
+                delivery.update(status="sent", message_id=result.get("message_id"), sent_at=utc_now_iso())
+            elif attempts >= _MAX_DELIVERY_ATTEMPTS:
+                delivery["status"] = "exhausted"
+            self._update(package_id, delivery=delivery)
+            return
         result = await send_runtime_notice(
             self.kernel,
             source_agent=str(record.get("requested_by") or record.get("agent_id") or ""),
@@ -425,7 +442,7 @@ class AgentMoveManager:
                     record[key] = value
             record["updated_at"] = utc_now_iso()
             operations[package_id] = record
-            self._write_operations_unlocked(operations)
+            self._write_operations_unlocked(operations, keep=package_id)
             return record
 
     def _load_operations(self) -> dict[str, dict[str, Any]]:
@@ -459,29 +476,24 @@ class AgentMoveManager:
             raise AgentMoveError("automatic Agent move state is invalid")
         return {key: dict(value) for key, value in operations.items()}
 
-    def _write_operations_unlocked(self, operations: Mapping[str, Any]) -> None:
+    def _write_operations_unlocked(self, operations: Mapping[str, Any], *, keep: str | None = None) -> None:
         rows = dict(operations)
-        if len(rows) > _MAX_RECORDS:
-            terminal = sorted(
-                (
-                    (key, value)
-                    for key, value in rows.items()
-                    if value.get("status") not in _RECOVERABLE_STATUSES
-                ),
-                key=lambda item: str(item[1].get("updated_at") or ""),
-            )
-            for key, _value in terminal:
-                if len(rows) <= _MAX_RECORDS:
-                    break
-                rows.pop(key, None)
-        if len(rows) > _MAX_RECORDS:
-            raise AgentMoveError("automatic Agent move state is full")
-        payload = {"schema_version": _SCHEMA_VERSION, "operations": rows}
-        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(
-            "utf-8"
+        terminal = sorted(
+            (
+                key for key, value in rows.items()
+                if key != keep and value.get("status") in {"completed", "cancelled"}
+                and (value.get("delivery") or {}).get("status", "not_requested") != "pending"
+            ),
+            key=lambda key: str(rows[key].get("updated_at") or ""),
         )
-        if len(encoded) > _MAX_STATE_BYTES:
-            raise AgentMoveError("automatic Agent move state exceeds its size limit")
+        while True:
+            payload = {"schema_version": _SCHEMA_VERSION, "operations": rows}
+            encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            if len(rows) <= _MAX_RECORDS and len(encoded) <= _MAX_STATE_BYTES:
+                break
+            if not terminal:
+                raise AgentMoveError("automatic Agent transfer state is full of pending operations or undelivered results")
+            rows.pop(terminal.pop(0))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         handle, temp_name = tempfile.mkstemp(
             dir=self.state_path.parent,
@@ -502,35 +514,13 @@ class AgentMoveManager:
 
     @contextmanager
     def _state_lock(self):
-        lock_path = self.state_path.with_suffix(self.state_path.suffix + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor: int | None = None
-        deadline = time.monotonic() + 5.0
-        while descriptor is None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as locks:
             try:
-                descriptor = os.open(
-                    lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    0o600,
-                )
-            except FileExistsError as exc:
-                if _orphaned_lock(lock_path):
-                    lock_path.unlink(missing_ok=True)
-                    continue
-                if time.monotonic() >= deadline:
-                    raise AgentMoveError(
-                        "automatic Agent move state is busy"
-                    ) from exc
-                time.sleep(0.02)
-        try:
-            os.write(descriptor, f"pid={os.getpid()}\n".encode())
-            os.close(descriptor)
-            descriptor = None
+                locks.enter_context(file_write_lock(self.state_path))
+            except TimeoutError as exc:
+                raise AgentMoveError("automatic Agent transfer state is busy") from exc
             yield
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            lock_path.unlink(missing_ok=True)
 
     @staticmethod
     def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -558,20 +548,6 @@ def _json_mapping(value: Mapping[str, Any], *, field: str) -> dict[str, Any]:
 def _already_stopped(message: str) -> bool:
     normalized = str(message or "").casefold()
     return any(marker in normalized for marker in ("not running", "already stopped"))
-
-
-def _orphaned_lock(path: Path) -> bool:
-    try:
-        if time.time() - path.stat().st_mtime >= _LOCK_STALE_SECONDS:
-            return True
-    except OSError:
-        return False
-    try:
-        parts = path.read_text(encoding="utf-8", errors="replace").split()
-        pid = int(next(part.removeprefix("pid=") for part in parts if part.startswith("pid=")))
-    except (OSError, StopIteration, TypeError, ValueError):
-        return False
-    return not process_is_alive(pid)
 
 
 def _ready_to_execute(record: Mapping[str, Any]) -> bool:
@@ -646,4 +622,4 @@ def record_agent_move_admin_outcome(
         )
         record.pop("next_attempt_at", None)
         operations[move_id] = record
-        manager._write_operations_unlocked(operations)
+        manager._write_operations_unlocked(operations, keep=move_id)

@@ -65,6 +65,7 @@ def _runtime(tmp_path):
         _is_command_allowed=lambda command: command == "reboot",
     )
     runtime.workspace_dir.mkdir(parents=True)
+    runtime.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="TEST")
 
     async def reply_text(_self, update, text, **kwargs):
         return await update.message.reply_text(text, **kwargs)
@@ -155,7 +156,7 @@ async def test_typed_open_persists_and_replays_same_reboot_operation(tmp_path):
 @pytest.mark.asyncio
 async def test_typed_reboot_menu_action_returns_callback_operation(tmp_path):
     runtime, orchestrator = _runtime(tmp_path)
-    metadata = _metadata()
+    metadata = _metadata(runtime.session_store.ensure_default_session(owner_id="user:42", agent_id="zelda")["session_id"])
     opened = await dispatch_command_interaction(
         runtime,
         _open("/reboot", "requestmenuabcdefghi"),
@@ -244,7 +245,7 @@ async def test_typed_reboot_menu_identifies_previous_and_current_results(
     opened = await dispatch_command_interaction(
         runtime,
         _open("/reboot", f"request{status}abcdefgh"),
-        _metadata(),
+        _metadata(runtime.session_store.ensure_default_session(owner_id="user:42", agent_id="zelda")["session_id"]),
     )
 
     text = opened["messages"][0]["text"]

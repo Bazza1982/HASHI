@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import orchestrator
 import pytest
-from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
+from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate, _PublishingCapture
 from orchestrator import command_interaction_bridge as bridge
 from orchestrator.command_interactions import Binding, Capture, MenuStore
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -277,6 +277,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             'orchestrator.admin_local_testing': module('orchestrator.admin_local_testing',
                 supported_commands=lambda runtime: ['example', 'restart'],
                 _FakeUpdate=FakeUpdate, _capture_local_output=scope,
+                _PublishingCapture=_PublishingCapture,
                 execute_local_command=execute, _runtime_audit_path=lambda runtime: Path('/unused'),
                 _runtime_agent_name=lambda runtime: runtime.name,
                 _format_slash_command_line=lambda command, args: f"/{command}" + (

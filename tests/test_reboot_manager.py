@@ -457,6 +457,62 @@ def _notice_manager(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["workbench", "tui", "session-api"])
+async def test_session_bound_reboot_delivers_start_and_result_with_mocked_workers(
+    tmp_path, monkeypatch, surface
+):
+    from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
+    from orchestrator.frontend_projection import poll_frontend_feed
+    from orchestrator.runtime_reboot import origin_from_update
+    from orchestrator.session_store import SessionStore
+
+    kernel, manager, request = _notice_manager(tmp_path)
+    kernel.global_cfg = SimpleNamespace(
+        authorized_id=42, instance_id="REBOOT_TEST", bridge_home=tmp_path
+    )
+    kernel.session_store = store = SessionStore(
+        tmp_path / "sessions.sqlite3", instance_id="REBOOT_TEST"
+    )
+    primary = store.ensure_default_session(owner_id="user:42", agent_id="zelda")
+    selected = store.create_session(owner_id="user:42", agent_id="zelda")
+    runtime = SimpleNamespace(
+        name="zelda", global_config=kernel.global_cfg, session_store=store
+    )
+    update = _FakeUpdate(42, 42, _CaptureStore([]), "/reboot", session_metadata={
+        "owner_id": "user:42", "session_id": selected["session_id"],
+        "context_generation": 1, "session_surface": surface,
+        "session_channel_key": "selected-endpoint",
+    })
+    request["origin"] = origin_from_update(runtime, update)
+    kernel.queue_generation("a", names=("zelda",))
+
+    async def forbidden_transport(*_args, **_kwargs):
+        pytest.fail("Session-bound reboot must not fall back to Telegram")
+
+    monkeypatch.setattr("orchestrator.reboot_manager.send_runtime_notice", forbidden_transport)
+    admitted = manager.submit(request)
+    assert admitted["accepted"]
+    assert admitted["record"]["delivery"]["status"] == "pending"
+    assert await manager.hot_restart(kernel._restart_request)
+    await manager.send_pending()
+    result = manager.receipts.get(admitted["record"]["id"])
+    assert result["status"] == "succeeded"
+    assert result["start_delivery"]["status"] == "sent"
+    assert result["delivery"]["status"] == "sent"
+    rows = store.messages(selected["session_id"], owner_id="user:42")
+    assert len(rows) == 2 and all(row["role"] == "assistant" for row in rows)
+    assert not store.messages(primary["session_id"], owner_id="user:42")
+    feed = poll_frontend_feed(store, selected["session_id"], owner_id="user:42")
+    recorded = {event["event_id"] for event in store.events(
+        selected["session_id"], owner_id="user:42"
+    ) if event["kind"] == "frontend.message.recorded"}
+    assert len(recorded) == 2
+    assert recorded <= {event["event_id"] for event in feed["durable_events"]}
+    assert all(event["session_id"] == selected["session_id"]
+               for event in feed["durable_events"])
+
+
+@pytest.mark.asyncio
 async def test_admission_freezes_target_and_repeated_requests_do_not_overwrite(
     tmp_path,
 ):

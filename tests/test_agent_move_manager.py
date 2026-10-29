@@ -424,7 +424,7 @@ async def test_terminal_result_uses_persisted_delivery_origin(tmp_path, monkeypa
     assert manager.status("clone-notice")["delivery"]["status"] == "sent"
 
 
-def test_empty_lock_left_by_crash_is_reclaimed_after_stale_window(tmp_path):
+def test_legacy_empty_lock_does_not_block_or_require_deletion(tmp_path):
     state_path = (
         tmp_path / "state" / "instance" / "agent-move-autofinalize.json"
     )
@@ -440,25 +440,45 @@ def test_empty_lock_left_by_crash_is_reclaimed_after_stale_window(tmp_path):
     kernel, _stopped = _kernel(tmp_path)
 
     assert move_manager.AgentMoveManager(kernel).status("missing") is None
-    assert not lock_path.exists()
+    assert lock_path.read_bytes() == b""
 
 
-def test_stale_lock_from_live_process_is_reclaimed(tmp_path, monkeypatch):
-    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
-    lock_path.write_text("pid=1234\n", encoding="utf-8")
-    old = time.time() - 10
-    os.utime(lock_path, (old, old))
-    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
+def test_live_finalizer_writer_is_not_displaced_by_old_lock_mtime(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
 
-    assert move_manager._orphaned_lock(lock_path) is True
+    kernel, _stopped = _kernel(tmp_path)
+    first = move_manager.AgentMoveManager(kernel)
+    second = move_manager.AgentMoveManager(kernel)
+    entered = Event()
+
+    def read_after_lock():
+        entered.set()
+        return second.status("missing")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with first._state_lock():
+            lock = next(first.state_path.parent.glob("*lock"))
+            old = time.time() - 10
+            os.utime(lock, (old, old))
+            pending = pool.submit(read_after_lock)
+            assert entered.wait(5)
+            time.sleep(0.03)
+            assert not pending.done()
+        assert pending.result(timeout=5) is None
 
 
-def test_fresh_lock_from_live_process_is_preserved(tmp_path, monkeypatch):
-    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
-    lock_path.write_text("pid=1234\n", encoding="utf-8")
-    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
-
-    assert move_manager._orphaned_lock(lock_path) is False
+def test_completed_receipts_are_pruned_by_byte_budget_not_only_count(tmp_path, monkeypatch):
+    kernel, _stopped = _kernel(tmp_path)
+    manager = move_manager.AgentMoveManager(kernel)
+    monkeypatch.setattr(move_manager, "_MAX_STATE_BYTES", 1024)
+    with manager._state_lock():
+        manager._write_operations_unlocked({
+            "old": {"status": "completed", "updated_at": "2026-01-01", "delivery": {"status": "sent"}, "result": {"detail": "x" * 1000}},
+            "new": {"status": "accepted", "updated_at": "2026-10-29"},
+        })
+    assert manager.status("new")["status"] == "accepted"
+    assert manager.status("old") is None
 
 
 @pytest.mark.asyncio

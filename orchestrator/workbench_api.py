@@ -9139,6 +9139,7 @@ class WorkbenchApiServer:
                 request_digest=request_digest,
                 context_generation=context_generation,
                 invocation=command_invocation,
+                record_input=True,
             )
             if reservation["state"] == "completed":
                 replay = dict(reservation["response"])
@@ -14842,6 +14843,17 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "admin auth failed"}, status=403
             )
         payload = await request.json() if request.can_read_body else {}
+        origin = payload.get("origin")
+        if origin is not None:
+            from orchestrator.reboot_receipts import clean_origin
+
+            try:
+                origin = clean_origin(origin)
+                publication_id = payload.get("publication_id")
+                if not origin.get("session_id") or not isinstance(publication_id, str) or not 1 <= len(publication_id) <= 200:
+                    raise ValueError("Session-bound notice identity is required")
+            except (ValueError, TypeError) as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
         agent_name = str(payload.get("agent") or payload.get("agentId") or "").strip()
         text = str(payload.get("text") or payload.get("message") or "").strip()
         message_key = str(payload.get("message_key") or "").strip()
@@ -14864,7 +14876,30 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "agent is required"}, status=400
             )
         runtime = self._runtime_map().get(agent_name)
-        if runtime is None:
+        if origin is not None:
+            # Admin transport authentication is not a substitute for the
+            # frozen PAO scope. No Worker is needed to publish into that scope.
+            owner = SessionStore.owner_id_for(self.global_config)
+            if origin.get("owner_id") != owner:
+                return web.json_response(
+                    {"ok": False, "error": "notice owner does not match"}, status=403
+                )
+            try:
+                session = self.session_store.get_session(
+                    origin["session_id"], owner_id=owner, agent_id=agent_name,
+                    include_deleted=False,
+                )
+            except SessionNotFound:
+                return web.json_response(
+                    {"ok": False, "error": "notice session not found"}, status=404
+                )
+            if (session["session_kind"] != SESSION_KIND_CONVERSATION
+                    or session["status"] != "active"
+                    or session["context_generation"] != origin["context_generation"]):
+                return web.json_response(
+                    {"ok": False, "error": "notice session context changed"}, status=409
+                )
+        elif runtime is None:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
@@ -14902,13 +14937,25 @@ class WorkbenchApiServer:
                 ).strip()[:500]
             text = tr(
                 message_key,
-                locale=preferred_locale(runtime),
+                locale=(normalize_locale(payload.get("ui_locale")) if origin else preferred_locale(runtime)),
                 **render_args,
             )
         if not text:
             return web.json_response(
                 {"ok": False, "error": "text is required"}, status=400
             )
+        if origin:
+            from html import escape
+            from orchestrator.frontend_notice_delivery import deliver_notice
+            from orchestrator.telegram_delivery_failover import send_runtime_notice
+
+            result = await deliver_notice(
+                self.orchestrator or self, agent_id=agent_name, origin=origin,
+                text=escape(text), publication_id=publication_id, send_notice=send_runtime_notice,
+            )
+            return web.json_response({"ok": bool(result.get("sent")), "agent": agent_name,
+                "message_id": result.get("message_id"), "delivery": result},
+                status=200 if result.get("sent") else 503)
         chat_id = payload.get("chat_id")
         if chat_id is None:
             primary_chat_id = getattr(runtime, "_primary_chat_id", None)

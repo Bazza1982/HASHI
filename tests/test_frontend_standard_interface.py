@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -245,6 +246,58 @@ async def test_t03_ingress_command_and_control_cancellation(tmp_path: Path):
     )
     assert cmd_replay["status"] == "accepted"
     assert cmd_replay["replayed"] is True
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments", "redacted"),
+    [
+        ("token", ["set", "ingress-secret-fixture"], ["[redacted]"]),
+        ("status", ["token=ingress-secret-fixture"], ["token=[redacted]"]),
+    ],
+)
+def test_t03_command_arguments_are_redacted_before_durable_history(
+    tmp_path, command, arguments, redacted
+):
+    runtime, store, owner, session = _setup_runtime(tmp_path)
+    executed = []
+    runtime.command_registry.cmds[command] = SimpleNamespace(
+        handler=lambda _runtime, *args: executed.append(list(args)) or {"ok": True}
+    )
+    envelope = build_frontend_ingress_envelope(
+        source_id="backend_api", ingress_transport="session-api", surface="workbench",
+        channel_key="default", instance_id="HASHI1",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="not_applicable", relay_chain=[],
+        request_id="redacted-command", idempotency_key="redacted-command",
+        session_id=session["session_id"], agent_id="test-agent",
+    )
+    receipt = admit_frontend_ingress(
+        runtime, envelope, command_name=command, command_arguments=arguments
+    )
+    assert receipt["status"] == "accepted"
+    assert executed == [arguments], "execution must retain the original arguments"
+    replay = admit_frontend_ingress(
+        runtime, envelope, command_name=command, command_arguments=arguments
+    )
+    assert replay["replayed"] and executed == [arguments]
+    conflict = admit_frontend_ingress(
+        runtime, envelope, command_name=command,
+        command_arguments=["token=different-secret-fixture"],
+    )
+    assert conflict["status"] == "conflict"
+    with store._connection() as connection:
+        invocation = json.loads(connection.execute(
+            "SELECT invocation_json FROM frontend_command_invocations"
+        ).fetchone()[0])
+        persisted = "\n".join(connection.iterdump())
+    rows = store.messages(session["session_id"], owner_id=owner)
+    feed = poll_frontend_feed(store, session["session_id"], owner_id=owner)
+    assert invocation["arguments"] == redacted
+    assert [row["text"] for row in rows] == ["/" + command + " " + " ".join(redacted)]
+    for projection in (persisted, json.dumps(rows), json.dumps(feed)):
+        assert "ingress-secret-fixture" not in projection
+        assert "different-secret-fixture" not in projection
+    assert "[redacted]" in json.dumps(feed)
 
 
 def test_t03_stop_control_routes_to_agent_command_without_session_cancel(

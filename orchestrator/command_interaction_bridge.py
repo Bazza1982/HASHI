@@ -244,11 +244,16 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                 session_store = runtime_session.ensure_store(runtime)
                 session_store.update_presentation_message(
                     session_id=binding.session,
-                    owner_id=runtime_session.owner_id(runtime),
+                    owner_id=str(metadata.get("owner_id") or runtime_session.owner_id(runtime)),
                     agent_id=binding.agent,
                     message_id=menu.presentation_message_id,
                     text=menu.text,
-                    message_context={"command_ui": store.render(menu)},
+                    content_format=("telegram-html" if str(menu.parse_mode).casefold() == "html" else
+                                    "markdown" if str(menu.parse_mode).casefold().startswith("markdown") else "plain-text"),
+                    message_context={
+                        "command_ui": store.render(menu),
+                        "frontend_presentation": store.message(menu)["presentation"],
+                    },
                 )
             except Exception as exc:
                 logger.warning(
@@ -383,11 +388,14 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                         actor_id=actor, chat_id=actor,
                     )
                     async with lock:
+                        from orchestrator.admin_local_testing import _PublishingCapture
+
+                        publishing_capture = _PublishingCapture(runtime, capture, update)
                         original_send = getattr(runtime, "_send_text", None)
                         if original_send is not None:
-                            runtime._send_text = capture.capture_send
+                            runtime._send_text = publishing_capture.capture_send
                         try:
-                            with (_capture_local_output(runtime, capture),
+                            with (_capture_local_output(runtime, publishing_capture),
                                   ui_language.language_scope(runtime, update, locale=locale),
                                   bind_slash_command_audit_session(session)):
                                 if dynamic:
@@ -476,6 +484,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                     context_generation=generation,
                     payload=payload,
                     invocation=durable_invocation,
+                    record_input=op == "open",
                 )
             except IdempotencyConflict as exc:
                 raise InteractionError("command_menu_request_conflict", 409) from exc

@@ -403,6 +403,7 @@ def admit_frontend_ingress(
                     context_generation=int(session["context_generation"]),
                     payload={"action": "cancel"},
                     invocation=invocation,
+                    record_input=control_action is None,
                 )
             except IdempotencyConflict as exc:
                 return normalize_admission_receipt(
@@ -482,6 +483,8 @@ def admit_frontend_ingress(
 
     # 3. Command intent
     if command_name is not None:
+        from orchestrator.slash_command_audit import redact_args
+
         require_connector_operation(connector_id, "ingress", "command")
         cmd = str(command_name).strip().lstrip("/")
         args = list(command_arguments or [])
@@ -527,7 +530,9 @@ def admit_frontend_ingress(
             "command": cmd,
             "issued_action_id": None,
             "revision": None,
-            "arguments": args,
+            # Persist only the shared audit owner's redacted view. Keep args
+            # unchanged for execution and the content-binding request digest.
+            "arguments": redact_args(cmd, args),
             "actor_digest": "sha256:" + hashlib.sha256(resolved_owner.encode("utf-8")).hexdigest(),
             "idempotency_digest": normalized_env["message"]["idempotency_digest"],
             "authorization": {
@@ -545,6 +550,7 @@ def admit_frontend_ingress(
                 context_generation=int(session["context_generation"]),
                 payload={"command": cmd, "args": args},
                 invocation=invocation,
+                record_input=True,
             )
         except IdempotencyConflict as exc:
             return normalize_admission_receipt(

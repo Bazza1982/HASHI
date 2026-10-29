@@ -3,10 +3,110 @@
 ## Purpose
 
 `/move` transfers one durable Agent identity between HASHI instances. `/clone`
-creates a new Agent locally or remotely while leaving the source active. These
+creates a new Agent locally or remotely while leaving the source unchanged. These
 operations are separate from live task/session handoff and from the HASHI ↔
 Hermes transfer format, but deliberately share one package, receiver,
 authentication, transaction journal, and registry-writing implementation.
+
+## Clone retry and qualification audit (2026-10-29)
+
+PAO Functions owns clone intent and recovery; Frontend Connectors project its
+next action. An unfinished clone is not an unfinished source-changing Move.
+Repeating a preparation with the same source, destination, requested target ID,
+transfer scope and history policy reopens that transaction. This also accepts
+pre-existing journals without the new requested-ID field. Changing the explicit
+ID or history policy creates an independent clone. Completed/cancelled/fully
+rolled-back clones do not fence future preparations. A staged Move does not
+fence clone snapshots; a real source-changing cutover remains protected.
+
+Automatic target names are selected inside the receiver mutation transaction,
+not reserved by the earlier read-only resolution. They include configuration,
+workspace, capability-only and unfinished-import reservations. Generated suffixes
+fit the same canonical ID length limit. A Unix source ID that is a reserved
+Windows filename is metadata, not a target path: Clone can use a legal explicit
+ID or a safe `clone_` auto prefix. Actual target IDs and workspace members still
+obey target-platform path rules. Explicit occupied IDs never overwrite data.
+
+Preparation holds a per-transaction OS file lease through packaging/upload.
+Concurrent identical requests report the existing preparation, while an abandoned
+task is resumable even if its former process remains alive. Sender coordination,
+receiver mutation and durable-finalizer persistence reuse `config_json`'s public
+format-neutral file lock: old empty/PID lock artifacts cannot block progress, and
+a live writer is not displaced because its lock looks old. Locks are scoped so
+one clone's network/start wait does not serialize unrelated clone preparations.
+
+Clone captures ordinary files into checked stable copies and databases through
+SQLite backup. Its inventory and size/file-count limits cover the portable
+payload, not excluded software/cache trees. Exclusion reasons remain visible;
+those trees are not scanned for Move's source-deletion disclosure. Move keeps
+its whole-workspace inventory and limit. File-size limits, stability, checksums and archive/path
+validation still apply. Later source edits, new files or eligible conversation
+messages cannot veto this frozen clone snapshot. Move's deletion/freshness rules
+remain separate. Clone preparation does not upgrade or write the source Agent's
+incarnation; the receiver assigns the new clone its independent identity.
+
+Before showing confirmation, the receiver exercises existing import rules
+without publishing registry changes. Independent known Agent configuration,
+credential, schedule and capability errors are reported together. Revision and
+ownership checks at commit remain necessary for a writer racing *after* staging.
+Remote schema negotiation requires a valid overlapping range, not schema 1 on
+every newer receiver. A transport/discovery error is not misreported as proof
+that the receiver requires a restart.
+
+An upload retry reuses the exact package ID/bytes and receiver reservation.
+Definitive import-preflight rejection is different: after correcting source
+configuration, retry builds a fresh snapshot rather than replaying stale invalid
+metadata. Remote carries this distinction in a signed error code for JSON and
+streaming uploads; unverified errors never authorize abandoning an uncertain
+upload. Older receivers remain compatible but do not advertise this distinction.
+Saved preparation failures expose a preparation-retry action; preparing,
+prepared, confirming and completed transactions have different UI actions.
+After confirmation, uncertain commit/start/finalize responses preserve progress
+for the durable manager to retry. They do not implicitly stop or roll back a
+potentially running clone. Cancellation is explicit and retains existing
+confirmed-stop, target ownership and completed-target protections. A confirmed
+rollback is terminal; a later preparation gets a fresh transaction.
+
+The finalizer prunes delivered terminal receipts by both count and byte budget,
+never the operation being written, pending work or undelivered results. An
+explicit recovery retry refreshes the trusted peer snapshot and result-delivery
+intent. The remaining bounded-storage/locking errors describe real pending work
+or unavailable durable storage, not a reason to delete arbitrary journals.
+
+Offline qualification covers the full prepare/confirm/activate/finalize flow in
+disposable instances, duplication/concurrency, lost acknowledgements, frozen
+history/files, rollback/recovery and cross-platform name mapping. This changes
+shared Function ownership/locking and therefore adopts via the supported shared
+Functions handoff (`/reboot max`), not an in-process reload, targeted partial
+adoption or a cold Core restart. Qualification does not claim production adoption
+or finish a user's staged clone without confirmation.
+Remote error-code publication is adopted separately at the Remote process owner;
+the same-instance clone path does not require restarting Remote.
+
+## Stable owner and Clone qualification (2026-10-29)
+
+PAO owns this Functions-layer repair. A replaceable Telegram account is not the
+stable conversation owner. Source export, receiver staging/import and source
+retirement share `configured_conversation_owner_id`, which uses the canonical
+`telegram_identity` resolvers and honours `global.owner_scope_id`. An explicit
+stable scope does not require Telegram to be configured. Legacy configuration
+without a stable scope retains the canonical Telegram-owner compatibility order.
+
+SessionStore exports by exact instance, Agent and configured owner. A second
+scope, including a technical empty Session under a replacement account ID, does
+not prove a second human owner and cannot veto that export. Empty owner-scoped
+history is valid. An explicit foreign owner, unknown configured ownership and
+receiver owner mismatch still fail; histories are never merged across scopes.
+
+Clone can snapshot an inactive Agent, and pending messages or a busy source do
+not trigger Move's drain preflight. Package consistency checks remain in force;
+cloning never drains or disables source execution. A source already in Move
+cutover remains fenced. Clone always strips the Telegram credential, even when
+a direct caller leaves Move-oriented defaults unchanged. Move's active-source,
+last-active-Agent and source-stop gates are unchanged. Authentication, encryption,
+target-ID reservations, size/path/integrity checks, disabled imported schedules,
+and explicit-cancellation safeguards remain mandatory. Offline checks and adoption are
+separate; this repair does not require a production restart as a test.
 
 The source sends a platform-neutral `agent-move-v1` archive to a target-owned
 receiver. The source never writes a target filesystem path directly.
@@ -28,8 +128,9 @@ already accepted package invalid.
 A new Move cannot be cancelled after forward intent. Network, process-start and
 cleanup failures remain in the durable manager and retry idempotently without
 reactivating the source or rolling back the target. If the Agent must return, the
-operator completes this Move and starts a separate reverse Move. Clone and
-historical legacy-transfer rollback behavior are unchanged.
+operator completes this Move and starts a separate reverse Move. Historical
+legacy-transfer rollback is unchanged; Clone now follows its retry/cancellation
+decision above.
 
 ## HASHI1 repair decision (2026-10-05)
 

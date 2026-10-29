@@ -299,58 +299,47 @@ class MenuStore:
                 "rows": copy.deepcopy(menu.rows) if not menu.closed else []}
 
     def message(self, menu: Menu, *, deleted: bool = False) -> dict:
-        from orchestrator.frontend_contracts import normalize_content_blocks
-        from orchestrator.frontend_projection import transport_text_component
-
         parse_mode = str(menu.parse_mode or "").strip().casefold()
-        content_blocks: list[dict[str, Any]] = [
-            transport_text_component(
-                menu.text,
-                "telegram-html"
-                if parse_mode == "html"
-                else "markdown"
-                if parse_mode.startswith("markdown")
-                else "plain-text",
-            )
-        ]
-        for row_index, row in enumerate(menu.rows):
-            for column_index, button in enumerate(row):
-                if not isinstance(button, Mapping) or bool(button.get("disabled")):
-                    continue
-                action_id = str(button.get("button_id") or "").strip()
-                payload: dict[str, Any] = {}
-                if not action_id and button.get("url"):
-                    material = (
-                        f"{menu.id}\0{row_index}\0{column_index}\0{button['url']}"
-                    )
-                    action_id = "link_" + hashlib.sha256(
-                        material.encode("utf-8")
-                    ).hexdigest()[:24]
-                    payload["url"] = str(button["url"])
-                if not action_id:
-                    continue
-                content_blocks.append(
-                    {
-                        "type": "action",
-                        "action_id": action_id,
-                        "label": str(button.get("text") or "Action"),
-                        "style": "primary",
-                        "payload": payload,
-                    }
-                )
+        rendered = self.render(menu)
         return {
             "message_ref": "command-ui:" + menu.id,
             "channel": "command-ui",
             "op": "delete" if deleted else "upsert",
             "text": menu.text,
             "meta": {"parse_mode": menu.parse_mode},
-            "command_ui": self.render(menu),
-            "presentation": {
-                "interface_kind": "display",
-                "semantic_kind": "command_result",
-                "content_blocks": normalize_content_blocks(content_blocks),
-            },
+            "command_ui": rendered,
+            "presentation": command_menu_presentation(
+                menu.text, "telegram-html" if parse_mode == "html" else
+                "markdown" if parse_mode.startswith("markdown") else "plain-text",
+                rendered, deleted=deleted,
+            ),
         }
+
+
+def command_menu_presentation(text, content_format, menu, *, deleted=False):
+    """One typed renderer for capture and legacy stored-menu updates."""
+    from orchestrator.frontend_contracts import normalize_content_blocks
+    from orchestrator.frontend_projection import transport_text_component
+
+    blocks = [transport_text_component(text, content_format)]
+    rows = [] if menu.get("closed") or deleted else menu.get("rows") or []
+    for row_index, row in enumerate(rows):
+        for column_index, button in enumerate(row):
+            if not isinstance(button, Mapping) or bool(button.get("disabled")):
+                continue
+            action_id = str(button.get("button_id") or "").strip()
+            payload = {}
+            url = safe_url(button.get("url"))
+            if not action_id and url:
+                material = f"{menu.get('menu_id', '')}\0{row_index}\0{column_index}\0{url}"
+                action_id = "link_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+                payload["url"] = url
+            if action_id:
+                blocks.append({"type": "action", "action_id": action_id,
+                               "label": str(button.get("text") or "Action"),
+                               "style": "primary", "payload": payload})
+    return {"interface_kind": "display", "semantic_kind": "command_result",
+            "content_blocks": normalize_content_blocks(blocks)}
 
 
 class Capture:
