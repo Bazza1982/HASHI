@@ -228,6 +228,7 @@ async def test_completed_file_path_signs_stop_only_after_parent_handles_close(tm
     owner._executable, owner._entry = entry, entry
     owner._executable_digest = owner._entry_digest = sha256(entry.read_bytes()).hexdigest()
     owner._private, owner._environment, owner._sid = private, {}, "S-1-5-21-1"
+    owner._parent_job = owner._runner = None
     owner._capacity, owner._active, owner._closed, owner._tasks = asyncio.Semaphore(1), {}, False, set()
     owner._validate = lambda *args: True
 

@@ -33,10 +33,12 @@ def read_capsule(raw, *, trusted_sids):
 def build_runner(path):
     source = Path(path)
     raw = read_config_json(source)
-    if not isinstance(raw, dict) or set(raw) != {
+    required = {
         "version", "instance_id", "runner_sid", "safety_sid", "worker_sid",
         "private_root", "transport_key", "endpoint", "capsule",
-    } or raw["version"] != 1:
+    }
+    if (not isinstance(raw, dict) or not required.issubset(raw)
+            or set(raw) - required - {"script_result_key", "script_limits"} or raw["version"] != 1):
         raise ValueError("invalid private Runner installation")
     sid = current_process_user_sid()
     if sid != raw["runner_sid"]:
@@ -50,12 +52,27 @@ def build_runner(path):
     capsule = read_capsule(raw["capsule"], trusted_sids=(sid, raw["safety_sid"]))
     lock = InstallationLock(private)
     try:
+        script_results = None
+        limits = raw.get("script_limits", {})
+        if (not isinstance(limits, dict) or set(limits) - {"memory_mb", "scratch_mb"}
+                or any(type(value) is not int for value in limits.values())):
+            raise ValueError("invalid installed script limits")
+        if raw.get("script_result_key") is not None:
+            from orchestrator.permissions.result_store import EncryptedResultStore
+
+            result_key = Path(raw["script_result_key"])
+            require_private_path(result_key, trusted_sids=(sid,))
+            script_results = EncryptedResultStore(private / "script-results.sqlite", key=result_key.read_bytes())
+        elif limits:
+            raise ValueError("script execution needs its separate result key")
         runner = RestrictedHerRunner(
             runner_sid=sid, safety_sid=raw["safety_sid"], worker_sid=raw["worker_sid"],
             private_root=private, executable=capsule.executable, entry=capsule.host_entry,
             executable_digest=capsule.file_digest(capsule.executable),
             entry_digest=capsule.file_digest(capsule.host_entry), environment=capsule.environment,
             capsule_roots=(capsule.root,), instance_id=raw["instance_id"], capsule=capsule,
+            script_results=script_results, script_memory_bytes=limits.get("memory_mb", 1024) * 1024**2,
+            script_scratch_bytes=limits.get("scratch_mb", 64) * 1024**2,
         )
         endpoint = PermissionEndpoint(
             WindowsPipeListener(raw["endpoint"], service_sid=sid, peer_policy=PipePeerPolicy(raw["safety_sid"])),

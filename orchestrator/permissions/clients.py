@@ -139,6 +139,7 @@ class RemoteRunExecutor:
     def bind_provider(self, provider):
         provider.tool_registry = self.registry
         self._stage_provider = provider
+        self.registry._event_sink = getattr(provider, "on_stream_event", None)
 
     async def run_her(self, runtime, prompt, request_id, *, binding, **arguments):
         if binding != self.binding or request_id != binding.request_id:

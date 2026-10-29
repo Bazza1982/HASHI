@@ -40,6 +40,7 @@ class ManagedToolRegistry(ToolRegistry):
         durable_wait: bool = False,
         ordinary_questions: Any = None,
         credential_names: tuple[str, ...] = (),
+        script_enabled: bool = False,
         **legacy_options: Any,
     ) -> None:
         if secrets:
@@ -49,10 +50,14 @@ class ManagedToolRegistry(ToolRegistry):
         self.permission_durable_wait = durable_wait
         self._ordinary_questions = ordinary_questions
         self._credential_names = tuple(credential_names)
+        self._script_enabled = False
         super().__init__(
             allowed_tools=allowed_tools, access_root=access_root,
             workspace_dir=workspace_dir, secrets={}, **legacy_options,
         )
+        self._script_enabled = bool(script_enabled) and any(ToolRegistry.is_allowed(self, name) for name in (
+            "run_script", "shell", "bash", "verification_run",
+        ))
         self._permission_context = permission_context
         self._permission_cwd = Path(workspace_dir).resolve(strict=False)
         self._permission_roots = tuple(Path(root).resolve(strict=False) for root in self.read_access_roots)
@@ -69,13 +74,26 @@ class ManagedToolRegistry(ToolRegistry):
         )
 
     def is_allowed(self, tool_name: str) -> bool:
+        if tool_name == "run_script":
+            return self._script_enabled
         return tool_name in _PERMISSION_NAMES or super().is_allowed(tool_name)
 
     def allowed_tool_names(self) -> tuple[str, ...]:
-        return tuple(sorted(set(super().allowed_tool_names()) | _PERMISSION_NAMES))
+        names = set(super().allowed_tool_names()) | _PERMISSION_NAMES
+        names.discard("run_script")
+        if self._script_enabled:
+            names.add("run_script")
+        return tuple(sorted(names))
 
     def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
         definitions = super().get_tool_definitions(tiers)
+        if self._script_enabled:
+            from orchestrator.permissions.script_protocol import definition as script_definition
+
+            definitions = [item for item in definitions if item.get("function", {}).get("name") not in {
+                "shell", "bash", "verification_run", "run_script",
+            }]
+            definitions.append(script_definition())
         if self._credential_names:
             definitions = json.loads(json.dumps(definitions))
             for definition in definitions:

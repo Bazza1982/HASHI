@@ -38,10 +38,14 @@ def _save(path, value):
 def run(plan):
     fields = {"format", "action", "handles", "directory", "name", "data", "result"}
     if (not isinstance(plan, dict) or set(plan) != fields or plan["format"] != "hashi-file-helper-v1"
-            or plan["action"] not in {"read", "write", "create", "list", "search", "patch_create", "patch_write", "http"}
+            or plan["action"] not in {"read", "write", "create", "list", "search", "patch_create", "patch_write", "http", "script"}
             or not isinstance(plan["handles"], list) or not 0 <= len(plan["handles"]) <= 32
             or any(type(handle) is not int or handle <= 0 for handle in plan["handles"])):
         raise ValueError("invalid trusted file plan")
+    if plan["action"] == "script":
+        from orchestrator.permissions.script_helper import run as run_script
+
+        return run_script(json.loads(base64.b64decode(plan["data"], validate=True)), plan["handles"])
     if plan["action"] == "http":
         if plan["handles"]:
             raise ValueError("a network helper must not receive filesystem handles")
@@ -107,8 +111,9 @@ def main():
         result = run(plan)
     except BaseException as error:
         from orchestrator.permissions.network_worker import RequestNotSent
+        from orchestrator.permissions.script_helper import ScriptNotStarted
 
-        if isinstance(error, (FilePlanRejected, RequestNotSent)) or plan.get("action") in {"read", "list", "search"}:
+        if isinstance(error, (FilePlanRejected, RequestNotSent, ScriptNotStarted)) or plan.get("action") in {"read", "list", "search"}:
             result = {"outcome": "failed", "data": base64.b64encode(
                 b"Error: the fixed operation was rejected before its business mutation; choose an allowed alternative.").decode("ascii")}
         else:

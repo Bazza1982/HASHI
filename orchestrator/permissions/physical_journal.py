@@ -29,10 +29,11 @@ def _encoded(value):
 
 class PhysicalFileJournal:
     def __init__(self, path, *, artifact_root, authority, results, issuer,
-                 observe_stopped=observe_original_process_stopped, recover_job=WindowsJob.recover_stop):
+                 observe_stopped=observe_original_process_stopped, recover_job=WindowsJob.recover_stop, retire_script=None):
         self.path, self.root = Path(path), Path(artifact_root).resolve()
         self.authority, self.results, self.issuer = authority, results, issuer
         self._observe_stopped, self._recover_job = observe_stopped, recover_job
+        self._retire_script = retire_script
         with self._connection() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS physical_files(
                 claim_id TEXT PRIMARY KEY, generation TEXT NOT NULL,
@@ -155,7 +156,9 @@ class PhysicalFileJournal:
             connection.close()
 
     def reserve(self, *, context, operation_id, descriptor, arguments, cwd, claim_id,
-                owner_sid, plan_path, plan_digest):
+                owner_sid, plan_path, plan_digest, max_processes=1):
+        if max_processes != (2 if descriptor.tool_name == "run_script" else 1):
+            raise ValueError("the helper process limit differs from its fixed operation")
         job_name = private_job_name(claim_id)
         plan = Path(plan_path).resolve()
         if not plan.is_relative_to(self.root) or plan.name != "plan.json":
@@ -163,7 +166,7 @@ class PhysicalFileJournal:
         payload = {
             "version": 2, "context": asdict(context), "operation_id": operation_id,
             "descriptor": asdict(descriptor), "arguments": arguments, "cwd": str(cwd),
-            "claim_id": claim_id, "observation": None, "max_processes": 1,
+            "claim_id": claim_id, "observation": None, "max_processes": max_processes,
             "job_name": job_name, "owner_sid": owner_sid,
             "plan": str(plan), "plan_digest": plan_digest,
         }
@@ -178,14 +181,15 @@ class PhysicalFileJournal:
 
     def observe_process(self, claim_id, observation, *, max_processes):
         if (not isinstance(observation, ProcessObservation) or observation.creation_time_100ns <= 0
-                or not observation.atomic_job or max_processes != 1):
+                or not observation.atomic_job or max_processes not in {1, 2}):
             raise ValueError("a fixed single-process helper and observed creation identity are required")
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM physical_files WHERE claim_id=?", (claim_id,)).fetchone()
             if row is None or row["state"] != "open" or sha256(row["payload"]).hexdigest() != row["digest"]:
                 raise ValueError("physical reservation changed")
             payload = json.loads(row["payload"])
-            if payload["observation"] is not None or payload["owner_sid"] != observation.user_sid:
+            if (payload["observation"] is not None or payload["owner_sid"] != observation.user_sid
+                    or payload["max_processes"] != max_processes):
                 raise ValueError("physical process was already bound or belongs to another account")
             payload["observation"] = asdict(observation)
             data = _encoded(payload)
@@ -193,7 +197,7 @@ class PhysicalFileJournal:
                                (data, sha256(data).hexdigest(), claim_id))
 
     def record(self, *, observation, max_processes, **arguments):
-        self.reserve(owner_sid=observation.user_sid, **arguments)
+        self.reserve(owner_sid=observation.user_sid, max_processes=max_processes, **arguments)
         self.observe_process(arguments["claim_id"], observation, max_processes=max_processes)
 
     def stopped(self, claim_id, *, observed_stop=False):
@@ -203,7 +207,7 @@ class PhysicalFileJournal:
                 if row is None or sha256(row["payload"]).hexdigest() != row["digest"]:
                     raise ValueError("physical reservation changed")
                 value = json.loads(row["payload"])
-            proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=1)
+            proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=value["max_processes"])
             if not isinstance(proof, dict) or proof.get("zero_job") is not True:
                 raise OSError("reserved Job cleanup remains unverified")
         with self._connection() as connection:
@@ -229,7 +233,7 @@ class PhysicalFileJournal:
                     raise ValueError("physical helper evidence is damaged")
                 payload = json.loads(row["payload"])
                 if (payload.get("version") != 2 or payload["claim_id"] != row["claim_id"]
-                        or payload["max_processes"] != 1
+                        or payload["max_processes"] != (2 if payload["descriptor"]["tool_name"] == "run_script" else 1)
                         or payload["job_name"] != private_job_name(row["claim_id"])):
                     raise ValueError("physical helper binding changed")
                 result.append((row["state"], payload, row["digest"]))
@@ -241,7 +245,7 @@ class PhysicalFileJournal:
         for state, value, evidence_digest in self.pending():
             observation = ProcessObservation(**value["observation"]) if value["observation"] is not None else None
             if state != "stopped":
-                proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=1)
+                proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=value["max_processes"])
                 if not isinstance(proof, dict) or proof.get("zero_job") is not True:
                     continue
                 if observation is not None and self._observe_stopped(observation) is not True:
@@ -255,10 +259,10 @@ class PhysicalFileJournal:
             raw["tool_name"], tuple(Scope(**scope) for scope in raw["scopes"]),
             raw["arguments_digest"], raw["coverage"], tuple(raw["limitations"]),
         )
-        if (descriptor.tool_name not in FILE_TOOLS | NETWORK_TOOLS
+        if (descriptor.tool_name not in FILE_TOOLS | NETWORK_TOOLS | {"run_script"}
                 or _arguments_digest(descriptor.tool_name, value["arguments"], Path(value["cwd"]))
                 != descriptor.arguments_digest or not descriptor.scopes
-                or (descriptor.tool_name not in ({"file_search"} | NETWORK_TOOLS) and len(descriptor.scopes) != 1)):
+                or (descriptor.tool_name not in ({"file_search", "run_script"} | NETWORK_TOOLS) and len(descriptor.scopes) != 1)):
             raise ValueError("physical helper arguments changed")
         claim = self.authority.resource_claim_for_operation(
             context, value["operation_id"], descriptor.arguments_digest, claim_id=value["claim_id"],
@@ -282,12 +286,33 @@ class PhysicalFileJournal:
         if result_path != plan_path.parent / "result.json":
             raise ValueError("physical result destination changed")
         result = None
+        recovered_script = None
+        if descriptor.tool_name == "run_script":
+            if self._retire_script is None:
+                raise OSError("the original script resource owner is unavailable")
+            from orchestrator.permissions.wire import decode
+            import base64
+
+            helper = json.loads(base64.b64decode(plan["data"], validate=True))
+            binding = decode(helper["binding"])
+            if binding.context != context or helper["operation_id"] != value["operation_id"]:
+                raise ValueError("script physical recovery binding changed")
+            recovered_script = self._retire_script(binding, value["operation_id"], descriptor)
+            if recovered_script is not None:
+                if (not isinstance(recovered_script, dict) or recovered_script.get("outcome") not in {"succeeded", "failed"}
+                        or not isinstance(recovered_script.get("payload"), str)
+                        or sha256(recovered_script["payload"].encode("utf-8")).hexdigest() != recovered_script.get("result_digest")):
+                    raise ValueError("the original script result changed")
+                result = self.results.put(context, value["operation_id"], descriptor,
+                                          outcome=recovered_script["outcome"], payload=recovered_script["payload"])
         if result_path.is_file():
             if result_path.stat().st_size > 24 * 1024 * 1024:
                 raise ValueError("physical helper result is oversized")
             candidate = json.loads(result_path.read_bytes())
             if isinstance(candidate, dict) and set(candidate) == {"outcome", "data"} and candidate["outcome"] in {"succeeded", "failed"}:
                 payload = render_helper_result(descriptor, value["arguments"], candidate)
+                if recovered_script is not None and (recovered_script["payload"] != payload or recovered_script["outcome"] != candidate["outcome"]):
+                    raise ValueError("the helper and original script result disagree")
                 result = self.results.put(context, value["operation_id"], descriptor, outcome=candidate["outcome"], payload=payload)
         if result is not None:
             if status.state == "unknown":
@@ -308,7 +333,7 @@ class PhysicalFileJournal:
                 context, claim.claim_id, receipt_reference=self.issuer.issue_stop(context, claim.claim_id, {
                     "original_process_stopped": True, "pid": value["observation"]["process_id"],
                     "creation_time_100ns": value["observation"]["creation_time_100ns"],
-                    "single_process_job": True, "job_name": value["job_name"], "journal_digest": evidence_digest,
+                    "job_process_limit": value["max_processes"], "job_name": value["job_name"], "journal_digest": evidence_digest,
                     "plan_digest": value["plan_digest"],
                 }),
             )

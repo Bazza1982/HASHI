@@ -191,6 +191,7 @@ jobs:
           tests/test_permission_questions.py
           tests/test_permission_file_operations.py
           tests/test_permission_network_worker.py
+          tests/test_permission_scripts.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py
@@ -267,6 +268,7 @@ jobs:
           tests/test_permission_questions.py
           tests/test_permission_file_operations.py
           tests/test_permission_network_worker.py
+          tests/test_permission_scripts.py
           tests/test_permission_execution_checkpoint.py
           tests/test_permission_running_claim.py
           tests/test_permission_runtime_context.py

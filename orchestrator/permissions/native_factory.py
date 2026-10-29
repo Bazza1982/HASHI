@@ -163,8 +163,11 @@ class InstalledExecutorFactory:
     requires_callbacks = True
 
     @staticmethod
-    def native_tool_names():
-        return tuple(sorted(WindowsFileProcessSupervisor.TOOL_NAMES))
+    def native_tool_names(runner=None):
+        names = WindowsFileProcessSupervisor.TOOL_NAMES
+        if runner is None or not runner.scripts_qualified():
+            names = names - {"run_script"}
+        return tuple(sorted(names))
 
     def __init__(self, authority, run_store, *, helper, results, stop_issuer, signing_key,
                  worker_sid, validate_resource, checkpoint_writer, audit_writer, runner=None,
@@ -222,7 +225,7 @@ class InstalledExecutorFactory:
                 expected_user_sid=self.sid, validate_resource=self.validate_resource,
                 physical_journal=self.physical_journal,
                 protected_paths=tuple(options.pop("protected_read_paths", ())),
-                network_options=options.pop("network_options", {}),
+                network_options=options.pop("network_options", {}), runner_client=self.runner, parent_job=self.parent_job,
             )
             from orchestrator.permissions.questions import ScopedRunQuestions
 
@@ -231,7 +234,8 @@ class InstalledExecutorFactory:
                 secrets={}, permission_authority=self.authority, permission_context=binding.context,
                 permission_supervisor=supervisor, requestable_scopes=policy.requestable_scopes,
                 durable_wait=True, ordinary_questions=ScopedRunQuestions(self.store, binding, guard),
-                credential_names=tuple(getattr(supervisor, "credential_names", ())), **options,
+                credential_names=tuple(getattr(supervisor, "credential_names", ())),
+                script_enabled=supervisor.supports("run_script"), **options,
             )
             channel = PermissionExecutionChannel(
                 binding, authority=self.authority, run_guard=guard, registry=registry,

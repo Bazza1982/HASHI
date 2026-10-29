@@ -87,6 +87,24 @@ class _AssignmentJob:
             raise JobControlError("the parent Job reference is closed")
         return self._handle
 
+    def contains_pid(self, process_id):
+        capacity = 32
+        for _ in range(8):
+            class ProcessIds(ctypes.Structure):
+                _fields_ = [("assigned", wintypes.DWORD), ("listed", wintypes.DWORD),
+                            ("ids", ctypes.c_size_t * capacity)]
+            value = ProcessIds()
+            ok = self._kernel.QueryInformationJobObject(self.handle, 3, ctypes.byref(value), ctypes.sizeof(value), None)
+            if not ok and ctypes.get_last_error() != 234:  # ERROR_MORE_DATA
+                raise JobControlError("parent Job process membership is unverified")
+            if value.assigned > capacity or value.listed != value.assigned:
+                capacity = min(65536, max(capacity * 2, int(value.assigned) + 8))
+                continue
+            if value.listed > capacity:
+                raise JobControlError("invalid parent Job process list")
+            return process_id in tuple(value.ids[:value.listed])
+        raise JobControlError("parent Job process membership kept changing")
+
     def close(self):
         if self._handle is not None:
             if not self._kernel.CloseHandle(self._handle):
@@ -94,13 +112,21 @@ class _AssignmentJob:
             self._handle = None
 
 
+class ParentJobCleanupFailed(JobControlError):
+    def __init__(self, parent):
+        super().__init__("the parent Job reference remains owned")
+        self.parent = parent
+
+
 class WindowsJob:
     _recovery_owners = {}
     _recovery_lock = threading.RLock()
 
-    def __init__(self, *, max_processes=None, name=None, owner_sid=None, assignees=()) -> None:
+    def __init__(self, *, max_processes=None, name=None, owner_sid=None, assignees=(), memory_bytes=None) -> None:
         if max_processes is not None and (type(max_processes) is not int or max_processes <= 0):
             raise ValueError("a positive explicit Job process limit is required")
+        if memory_bytes is not None and (type(memory_bytes) is not int or not 64 * 1024 * 1024 <= memory_bytes <= 64 * 1024**3):
+            raise ValueError("an explicit bounded Job memory limit is required")
         if os.name != "nt":
             raise JobControlError("native Windows is required")
         kernel = _job_kernel()
@@ -116,6 +142,9 @@ class WindowsJob:
         try:
             limits = _ExtendedLimit()
             limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway flags.
+            if memory_bytes is not None:
+                limits.basic.flags |= 0x100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                limits.process_memory = memory_bytes
             if max_processes is not None:
                 limits.basic.flags |= 0x8  # ACTIVE_PROCESS
                 limits.basic.active_process_limit = max_processes
@@ -129,7 +158,9 @@ class WindowsJob:
             if max_processes is not None and (not observed.basic.flags & 0x8
                     or observed.basic.active_process_limit != max_processes):
                 raise JobControlError("execution Job process limit could not be observed")
-            self.max_processes = max_processes
+            if memory_bytes is not None and (not observed.basic.flags & 0x100 or observed.process_memory != memory_bytes):
+                raise JobControlError("execution memory limit could not be observed")
+            self.max_processes, self.memory_bytes = max_processes, memory_bytes
         except BaseException:
             if not kernel.CloseHandle(self._handle):
                 raise JobControlError(ctypes.get_last_error(), "unverified Job handle cleanup")
@@ -137,18 +168,26 @@ class WindowsJob:
             raise
 
     @staticmethod
-    def open_parent(name, owner_sid):
+    def open_parent(name, owner_sid, *, max_processes=None):
         kernel = _job_kernel()
         handle = open_private_job(kernel, name, owner_sid, access=0x20005)
         if handle is None:
             raise JobControlError("the owning Safety process has no live parent Job")
         parent = _AssignmentJob(kernel, handle)
         limits = _ExtendedLimit()
-        if not kernel.QueryInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits), None
-        ) or (limits.basic.flags & 0x3800) != 0x2000:
-            parent.close()
-            raise JobControlError("the Safety parent Job has unverified containment")
-        return parent
+        try:
+            if not kernel.QueryInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits), None
+            ) or (limits.basic.flags & 0x3800) != 0x2000:
+                raise JobControlError("the Safety parent Job has unverified containment")
+            if max_processes is not None and (not limits.basic.flags & 0x8 or limits.basic.active_process_limit != max_processes):
+                raise JobControlError("the parent Job process limit is unverified")
+            return parent
+        except BaseException:
+            try:
+                parent.close()
+            except BaseException as error:
+                raise ParentJobCleanupFailed(parent) from error
+            raise
 
     @classmethod
     def recover_stop(cls, name, owner_sid, *, max_processes=1, timeout_ms=4500):

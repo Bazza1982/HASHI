@@ -113,6 +113,13 @@ def describe_tool(
             ("Ordinary question answers never grant permissions.",),
         )
 
+    if tool_name == "run_script":
+        from orchestrator.permissions.script_protocol import scopes as script_scopes
+
+        return ToolDescriptor(tool_name, canonical_scope_set(script_scopes(arguments, cwd=cwd)), digest, "partial", (
+            "Offline isolated Python; real inputs are snapshots and outputs remain temporary until saved by a file tool.",
+        ))
+
     if tool_name in _FILE_ACTIONS:
         resource = arguments.get("path")
         scope = normalize_scope("file", resource, _FILE_ACTIONS[tool_name], cwd=cwd)

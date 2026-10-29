@@ -49,10 +49,15 @@ class PermissionExecutionChannel:
             saved = self._pending_calls.get(tool_call_id)
             if saved != (tool_name, json.dumps(arguments, sort_keys=True, separators=(",", ":"), allow_nan=False)):
                 raise PermissionDenied("the Tool call has no exact durable pending boundary")
+        from orchestrator.permissions.activity import TOOL_CALL
+
+        token = TOOL_CALL.set(tool_call_id)
         try:
             result = await self.registry.execute(tool_name, arguments, tool_call_id)
         except PermissionPark as park:
             result = park.result
+        finally:
+            TOOL_CALL.reset(token)
         self._current()
         from tools.registry import ToolResult
 

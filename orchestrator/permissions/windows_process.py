@@ -257,7 +257,8 @@ def inheritable_handle_copy(handle):
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),
-                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None, parent_jobs=()):
+                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None, parent_jobs=(),
+                     job_assignees=(), memory_bytes=None):
     kernel, security = _api()
     executable, cwd = Path(executable), Path(cwd)
     if (not executable.is_absolute() or not cwd.is_absolute() or not cwd.is_dir()
@@ -274,6 +275,7 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         raise ValueError("a complete sanitized environment is required")
     process, job, sid, null_handle = _Process(), WindowsJob(
         max_processes=max_processes, name=job_name, owner_sid=expected_user_sid if job_name else None,
+        assignees=job_assignees, memory_bytes=memory_bytes,
     ), _PTR(), None
     attributes, initialized, transferred = None, False, False
     cleanup_failure, cleanup_cause = None, None

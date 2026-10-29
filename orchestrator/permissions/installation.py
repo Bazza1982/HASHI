@@ -58,9 +58,9 @@ def _scopes(values, cwd):
 
 
 class InstancePolicies:
-    def __init__(self, manager, installation, *, private_path, run_store):
+    def __init__(self, manager, installation, *, private_path, run_store, runner=None):
         self.manager, self.installation, self.store = manager, installation, run_store
-        self._private_path = private_path
+        self._private_path, self.runner = private_path, runner
         self.config = ConfigAdmin(type("ConfigPaths", (), {"config_path": manager.config_path})())
         self._frozen, self._current = {}, {}
         self.authority = None
@@ -94,7 +94,7 @@ class InstancePolicies:
             "requestable_scopes": [asdict(scope) for scope in _scopes(declared["requestable_scopes"], cwd)],
             "installation_revision": self.installation.revision,
             "protected_roots": [str(path) for path in self.protected_policy(global_config).policy.protected_write_paths],
-            "native_tools": list(InstalledExecutorFactory.native_tool_names()),
+            "native_tools": list(InstalledExecutorFactory.native_tool_names(self.runner)),
         }
 
     def settings(self, agent_id):
@@ -247,7 +247,7 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
     if str(global_config.instance_id).upper() != str(installation["instance_id"]).upper():
         raise PermissionDenied("permission installation belongs to another HASHI instance")
     store = SessionStore.from_global_config(global_config)
-    policies = InstancePolicies(manager, installation, private_path=private, run_store=store)
+    policies = InstancePolicies(manager, installation, private_path=private, run_store=store, runner=runner)
     verifier = SignedReceiptVerifier(
         {"approval": approval.public_key().public_bytes_raw()},
         trusted_supervisor_keys={issuer.key_id: issuer.public_key},
@@ -290,6 +290,7 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         journal = PhysicalFileJournal(
             private / "physical.sqlite", artifact_root=file_helper.private_root,
             authority=authority, results=result_store, issuer=issuer,
+            retire_script=runner.retire_script_sync if runner is not None else None,
         )
         if runner is not None:
             from orchestrator.permissions.windows_jobs import WindowsJob

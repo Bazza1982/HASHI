@@ -28,6 +28,14 @@ def _encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
+def _identity(raw_binding, operation_id=None):
+    if operation_id is None:
+        return sha256(_encoded(raw_binding)).hexdigest()
+    if not isinstance(operation_id, str) or not operation_id or len(operation_id) > 512 or "\x00" in operation_id:
+        raise ValueError("an exact script operation identity is required")
+    return sha256(_encoded({"binding": raw_binding, "operation_id": operation_id})).hexdigest()
+
+
 class RunnerRecords:
     def __init__(self, root, *, instance_id, runner_sid, recover_job=WindowsJob.recover_stop,
                  observe_stopped=observe_original_process_stopped,
@@ -57,23 +65,27 @@ class RunnerRecords:
         if sha256(row["payload"]).hexdigest() != row["digest"]:
             raise ValueError("Runner ownership evidence is damaged")
         value = json.loads(row["payload"])
-        if (value.get("version") != 1 or value["binding"]["context"]["instance_id"] != self.instance
-                or sha256(_encoded(value["binding"])).hexdigest() != row["identity"]
+        if (value.get("version") not in {1, 2} or value["binding"]["context"]["instance_id"] != self.instance
+                or (value["version"] == 2 and not value.get("operation_id"))
+                or (value["version"] == 1 and "operation_id" in value)
+                or _identity(value["binding"], value.get("operation_id")) != row["identity"]
                 or value["runner_sid"] != self.sid
                 or re.fullmatch(r"HASHI\.Task\.[0-9a-f]{32}", value["profile"]) is None
                 or Path(value["scratch"]) != self.root / ("host-" + row["identity"])):
             raise ValueError("Runner ownership belongs to another binding")
         return value
 
-    def reserve(self, binding):
-        identity = binding_digest(binding)
+    def reserve(self, binding, *, operation_id=None):
+        binding_digest(binding)
+        identity = _identity(asdict(binding), operation_id)
         if binding.context.instance_id != self.instance:
             raise ValueError("host belongs to another instance")
         scratch = self.root / ("host-" + identity)
         if scratch.exists() or scratch.is_symlink() or getattr(scratch, "is_junction", lambda: False)():
             raise ValueError("an unknown host scratch directory must be preserved")
         value = {
-            "version": 1, "binding": asdict(binding), "runner_sid": self.sid,
+            "version": 1 if operation_id is None else 2, "binding": asdict(binding), "runner_sid": self.sid,
+            **({"operation_id": operation_id} if operation_id is not None else {}),
             "profile": "HASHI.Task." + uuid4().hex, "scratch": str(scratch),
             "job_name": private_job_name(uuid4().hex), "observation": None,
         }
@@ -85,12 +97,13 @@ class RunnerRecords:
                                (identity, data, sha256(data).hexdigest()))
         return value
 
-    def observe(self, binding, observation):
+    def observe(self, binding, observation, *, operation_id=None):
         if (not isinstance(observation, ProcessObservation) or observation.user_sid != self.sid
                 or not observation.atomic_job or not observation.lpac or observation.capability_count != 0
                 or observation.elevated or observation.creation_time_100ns <= 0):
             raise ValueError("an actual restricted host observation is required")
-        identity = binding_digest(binding)
+        binding_digest(binding)
+        identity = _identity(asdict(binding), operation_id)
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM hosts WHERE identity=?", (identity,)).fetchone()
             if row is None or row["state"] != "active":
@@ -109,8 +122,9 @@ class RunnerRecords:
                 "SELECT * FROM hosts WHERE state='active'",
             ).fetchall())
 
-    def retire(self, binding, *, process_stopped=False):
-        identity = binding_digest(binding)
+    def retire(self, binding, *, process_stopped=False, operation_id=None):
+        binding_digest(binding)
+        identity = _identity(asdict(binding), operation_id)
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM hosts WHERE identity=?", (identity,)).fetchone()
             if row is None or row["state"] == "retired":
@@ -142,4 +156,4 @@ class RunnerRecords:
             binding = RuntimeExecutionBinding(
                 ExecutionContext(**raw["context"]), raw["request_id"], raw["fencing_token"], raw["worker_id"],
             )
-            self.retire(binding)
+            self.retire(binding, operation_id=value.get("operation_id"))

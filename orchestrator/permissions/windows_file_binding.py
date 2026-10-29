@@ -389,13 +389,13 @@ def _open_parents(api: _Windows, drive: str, names: list[str]) -> tuple[list[int
         raise
 
 
-def open_bound_read(scope: Scope) -> BoundWindowsRead:
+def open_bound_read(scope: Scope, *, exclusive=False) -> BoundWindowsRead:
     """Hold a safe file object; authorization must be checked by the caller."""
     drive, names = _path_parts(scope, frozenset({"read"}))
     api = _Windows()
     handles, current = _open_parents(api, drive, names)
     try:
-        child = api.open_child(handles[-1], names[-1], directory=False)
+        child = api.open_child(handles[-1], names[-1], directory=False, share=1 if exclusive else _SHARE_READ_WRITE)
         handles.append(child)
         api.check(child, ntpath.join(current, names[-1]), directory=False)
         return BoundWindowsRead(api, handles)

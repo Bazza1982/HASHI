@@ -70,8 +70,11 @@ async def run_command(command, *, client, scratch_root, emit):
     async def stream(event):
         if not isinstance(event, StreamEvent):
             raise ValueError("invalid host stream event")
+        if event.kind == "tool_activity" and services is not None:
+            services.observe_tool_activity(event.metadata or {})
         await emit(event)
 
+    registry._event_sink = stream
     provider = HashiStageProvider(backend_manager=factory, tool_registry=registry,
                                  on_stream_event=stream, audit_log=audit,
                                  workzone_ref=str(root),

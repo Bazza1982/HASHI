@@ -14,15 +14,17 @@ from orchestrator.permissions.windows_container import TaskContainerProfile, pro
 from orchestrator.permissions.windows_ipc import JsonPipe, PipePeerPolicy
 from orchestrator.permissions.windows_process import WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended
 from orchestrator.permissions.windows_security import require_nonadmin_identity, require_private_path
-from orchestrator.permissions.windows_jobs import WindowsJob
+from orchestrator.permissions.windows_jobs import WindowsJob, ParentJobCleanupFailed
 from orchestrator.permissions.wire import decode
 
 
 class RestrictedHerRunner:
-    METHODS = frozenset({"health", "prepare_host", "run_host", "stop_host"})
+    METHODS = frozenset({"health", "prepare_host", "run_host", "stop_host",
+                         "prepare_script", "run_script", "stop_script", "script_result"})
 
     def __init__(self, *, runner_sid, safety_sid, worker_sid, private_root, executable,
-                 entry, executable_digest, entry_digest, environment, capsule_roots, instance_id, capsule=None):
+                 entry, executable_digest, entry_digest, environment, capsule_roots, instance_id, capsule=None, script_results=None,
+                 script_memory_bytes=1024**3, script_scratch_bytes=64 * 1024 * 1024):
         if not isinstance(instance_id, str) or not instance_id:
             raise ValueError("an installed instance identity is required")
         self.instance_id, self.capsule = instance_id, capsule
@@ -40,6 +42,14 @@ class RestrictedHerRunner:
         self._owned, self._locks, self._closing = {}, {}, False
         self.records = RunnerRecords(self.private, instance_id=self.instance_id, runner_sid=self.runner_sid)
         self._verify_images()
+        self._scripts = None
+        if script_results is not None:
+            if capsule is None:
+                raise ValueError("scripts require the complete sealed runtime capsule")
+            from orchestrator.permissions.script_runner import RestrictedScriptRuns
+
+            self._scripts = RestrictedScriptRuns(self, script_results, memory_bytes=script_memory_bytes,
+                                                 scratch_bytes=script_scratch_bytes)
 
     def _verify_images(self):
         if (sha256(self.executable.read_bytes()).hexdigest() != self.executable_digest
@@ -48,9 +58,12 @@ class RestrictedHerRunner:
 
     def health(self):
         self._verify_images()
+        if self._scripts is not None:
+            self._scripts._verify()
         return {"state": "ready", "identity": self.identity, "instance_id": self.instance_id, "safety_sid": self.safety_sid,
                 "worker_sid": self.worker_sid, "executable_digest": self.executable_digest,
                 "entry_digest": self.entry_digest, "runner_contract": 2,
+                "script_contract": 1 if self._scripts is not None else 0,
                 "capsule_digest": self.capsule.digest if self.capsule is not None else None}
 
     async def prepare_host(self, *, binding, parent_job_name):
@@ -97,6 +110,8 @@ class RestrictedHerRunner:
                 self.records.observe(binding, owned.observation)
                 return asdict(owned.observation)
             except BaseException as error:
+                if isinstance(error, ParentJobCleanupFailed):
+                    record["parent_job"] = error.parent
                 if isinstance(error, WindowsProcessCleanupFailed):
                     record["launch_failure"] = error
                 await self.stop_host(binding=binding)
@@ -153,7 +168,38 @@ class RestrictedHerRunner:
         finally:
             await self.stop_host(binding=binding)
 
+    async def prepare_script(self, **arguments):
+        if self._scripts is None:
+            raise PermissionDenied("the script result owner is not installed")
+        return await self._scripts.prepare(**arguments)
+
+    async def run_script(self, **arguments):
+        if self._scripts is None:
+            raise PermissionDenied("the script result owner is not installed")
+        return await self._scripts.run(**arguments)
+
+    async def stop_script(self, *, binding, operation_id):
+        if self._scripts is not None:
+            return await self._scripts.stop(binding=binding, operation_id=operation_id)
+        await asyncio.to_thread(self.records.retire, binding, operation_id=operation_id)
+        return {"stopped": True}
+
+    async def script_result(self, **arguments):
+        if self._scripts is None:
+            await self.stop_script(binding=arguments["binding"], operation_id=arguments["operation_id"])
+            return None
+        return await self._scripts.result(**arguments)
+
     async def stop_host(self, *, binding):
+        owners = [self._stop_her_host(binding=binding)]
+        if self._scripts is not None:
+            owners.append(self._scripts.stop_binding(binding))
+        results = await asyncio.gather(*owners, return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            raise OSError("Run host/script cleanup remains unverified")
+        return results[0]
+
+    async def _stop_her_host(self, *, binding):
         identity = _binding_digest(binding)
         record = self._owned.get(identity)
         if record is None:
@@ -189,6 +235,13 @@ class RestrictedHerRunner:
 
     async def close(self):
         self._closing = True
+        if self._scripts is not None:
+            self._scripts._closing = True
+            bindings = {record["binding"] for record in tuple(self._scripts._owned.values())}
+            results = await asyncio.gather(*(self._scripts.stop_binding(binding) for binding in bindings),
+                                           return_exceptions=True)
+            if any(isinstance(result, BaseException) for result in results):
+                raise OSError("Runner script cleanup remains unverified")
         results = await asyncio.gather(
             *(self.stop_host(binding=record["binding"]) for record in tuple(self._owned.values())),
             return_exceptions=True,
@@ -230,6 +283,40 @@ class RunnerClient:
 
     def qualified_for(self, safety_sid, worker_sid):
         return (self.observation is not None and self.parent_job_name is not None and self.safety_sid == safety_sid and self.worker_sid == worker_sid)
+
+    def scripts_qualified(self):
+        return (self.qualified_for(self.safety_sid, self.worker_sid)
+                and self.observation.get("script_contract") == 1)
+
+    def script_helper_descriptor(self):
+        import base64
+
+        if not self.scripts_qualified():
+            raise PermissionDenied("the offline script Runner is unavailable")
+        return {"endpoint": self.client.endpoint,
+                "public_key": base64.b64encode(self.client.public_key.public_bytes_raw()).decode("ascii"),
+                "root_job_name": self.parent_job_name, "runner_sid": self.runner_sid}
+
+    def retire_script_sync(self, binding, operation_id, descriptor):
+        from dataclasses import asdict
+
+        from orchestrator.permissions.ipc_rpc import PermissionPipeClient
+
+        client = PermissionPipeClient(self.client.endpoint, self.client.public_key,
+                                      methods={"script_result"}, idle_timeout_s=15)
+        result = client.call("script_result", {"binding": binding, "operation_id": operation_id,
+                                              "descriptor": asdict(descriptor)})
+        return result
+
+    async def stop_script(self, binding, operation_id):
+        from orchestrator.permissions.ipc_rpc import PermissionPipeClient
+
+        client = PermissionPipeClient(self.client.endpoint, self.client.public_key,
+                                      methods={"stop_script"}, idle_timeout_s=15)
+        result = await client.call_async("stop_script", {"binding": binding, "operation_id": operation_id})
+        if not isinstance(result, dict) or result.get("stopped") is not True:
+            raise OSError("script profile cleanup remains unverified")
+        return True
 
     async def prepare(self, binding):
         if self.observation is None or binding.context.instance_id != self.instance_id:

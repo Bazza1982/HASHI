@@ -27,6 +27,7 @@ class BrokeredToolRegistry(ToolRegistry):
         self._broker_names = tuple(names)
         self._broker_definitions = json.loads(json.dumps(definitions, allow_nan=False))
         self._broker = client
+        self._event_sink = None
         root = Path(scratch_root)
         super().__init__(allowed_tools=[], workspace_dir=root, access_root=root, secrets={})
 
@@ -49,7 +50,7 @@ class BrokeredToolRegistry(ToolRegistry):
         try:
             result = await self._broker.call_async("tool_execute", {
                 "tool_name": tool_name, "arguments": arguments, "tool_call_id": tool_call_id,
-            })
+            }, **({"on_event": self._event_sink} if self._event_sink is not None else {}))
         except (PermissionRemoteError, OSError, EOFError, TimeoutError) as exc:
             raise PermissionPark(GateResult("unavailable", "")) from exc
         if isinstance(result, GateResult):
