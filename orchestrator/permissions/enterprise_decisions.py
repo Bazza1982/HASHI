@@ -1,4 +1,4 @@
-"""Offline prototype for a governed-user session and an issued action.
+"""Private governed-user session binding for one exact issued action.
 
 This is not installed as an ingress or security service. A session credential
 authenticates a user session; it does not itself prove a human gesture or that
@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from types import MappingProxyType
 from datetime import datetime, timezone
 import json
 import math
@@ -21,7 +23,6 @@ from orchestrator.permissions.authority import (
     DecisionAction,
     DecisionReceipt,
     InvalidDecision,
-    PermissionAuthority,
     PermissionLease,
 )
 from orchestrator.permissions.models import ExecutionContext
@@ -47,12 +48,16 @@ def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
-class EnterpriseSessionDecisionPrototype:
+class SessionDecisionGateway:
     """Private in-process integration; never expose it to a managed agent."""
 
-    def __init__(self, identity_service, authority: PermissionAuthority, *, key_id: str, signing_key) -> None:
+    def __init__(self, identity_service, authority, *, key_id: str, signing_key,
+                 owner_bindings: Mapping[str, str] | None = None) -> None:
         if (not callable(getattr(identity_service, "hold_active_session", None))
-                or not isinstance(authority, PermissionAuthority)
+                or not all(callable(getattr(authority, name, None)) for name in (
+                    "get_committed_decision_action", "get_decision_action",
+                    "get_committed_decision_result", "decide",
+                ))
                 or not isinstance(key_id, str) or not _KEY_ID.fullmatch(key_id)
                 or not isinstance(signing_key, Ed25519PrivateKey)):
             raise ValueError("trusted identity, authority, and signing key are required")
@@ -60,6 +65,35 @@ class EnterpriseSessionDecisionPrototype:
         self._authority = authority
         self._key_id = key_id
         self._key = signing_key
+        if owner_bindings is not None and (
+            not isinstance(owner_bindings, Mapping)
+            or any(not isinstance(k, str) or not k or not isinstance(v, str) or not v.strip()
+                   for k, v in owner_bindings.items())
+        ):
+            raise ValueError("explicit user-to-owner bindings are required")
+        self._owner_bindings = None if owner_bindings is None else MappingProxyType(dict(owner_bindings))
+
+    def uses_authority(self, authority) -> bool:
+        return self._authority is authority
+
+    def _owner_for_user(self, user) -> str:
+        user_id = getattr(user, "id", None)
+        if getattr(user, "status", None) != "active" or not isinstance(user_id, str) or not user_id:
+            raise SessionDecisionDenied("a current governed user session is required")
+        if self._owner_bindings is None:
+            return "enterprise:" + user_id
+        owner = self._owner_bindings.get(user_id)
+        if owner is None:
+            raise SessionDecisionDenied("the user is not registered as a permission owner")
+        return owner
+
+    def owner_from_session(self, session_token: str) -> str:
+        if not isinstance(session_token, str) or not _SESSION_TOKEN.fullmatch(session_token):
+            raise SessionDecisionDenied("a current governed user session is required")
+        lookup = getattr(self._identity, "get_session_user", None)
+        if not callable(lookup):
+            raise SessionDecisionDenied("the user authentication service is unavailable")
+        return self._owner_for_user(lookup(session_token))
 
     def _reference(self, action: DecisionAction, context: ExecutionContext, expiry: float) -> str:
         receipt = DecisionReceipt(
@@ -92,9 +126,7 @@ class EnterpriseSessionDecisionPrototype:
             if authenticated is None:
                 raise SessionDecisionDenied("a current governed user session is required")
             user, expires_iso = authenticated
-            if (getattr(user, "status", None) != "active"
-                    or not isinstance(getattr(user, "id", None), str)
-                    or context.owner_id != "enterprise:" + user.id):
+            if context.owner_id != self._owner_for_user(user):
                 raise SessionDecisionDenied("the session does not own this task")
             try:
                 expiration = datetime.fromisoformat(expires_iso)
@@ -143,3 +175,7 @@ class EnterpriseSessionDecisionPrototype:
                     raise
                 return SessionDecisionOutcome(committed.request_id, committed.choice, lease, True)
             return SessionDecisionOutcome(action.request_id, action.choice, lease, False)
+
+
+# Compatibility export; no separate state or decision implementation.
+EnterpriseSessionDecisionPrototype = SessionDecisionGateway

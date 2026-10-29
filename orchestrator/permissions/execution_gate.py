@@ -99,6 +99,7 @@ class PermissionExecutionGate:
         *,
         reason: str,
         timeout_seconds: float | None = None,
+        wait_for_approval: bool = True,
     ) -> GateResult:
         # Operation identity is an internal PAO binding, not a model parameter.
         if (not isinstance(operation_id, str) or not operation_id.strip()
@@ -193,6 +194,8 @@ class PermissionExecutionGate:
             if request.state == "denied":
                 return GateResult("denied", operation_id, request_id)
             if request.state == "pending":
+                if not wait_for_approval:
+                    return GateResult("waiting", operation_id, request_id)
                 try:
                     wait = await self._waiter.wait(
                         self._context, request_id, operation_id, descriptor.arguments_digest,

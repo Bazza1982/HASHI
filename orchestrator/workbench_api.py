@@ -9161,9 +9161,17 @@ class WorkbenchApiServer:
                     },
                     status=409,
                 )
-            result = await command_interaction_bridge.dispatch_command_interaction(
-                runtime, operation, metadata
-            )
+            result = None
+            if getattr(self, "permission_control", None) is not None:
+                from orchestrator.permissions.frontend_binding import dispatch_permission_operation
+
+                result = await dispatch_permission_operation(
+                    self, request, runtime, operation, metadata,
+                )
+            if result is None:
+                result = await command_interaction_bridge.dispatch_command_interaction(
+                    runtime, operation, metadata
+                )
             response = dict(result) if isinstance(result, Mapping) else {
                 "ok": False,
                 "error_code": "command_invocation_response_invalid",
@@ -13200,17 +13208,25 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            chat_id=chat_id,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.admin_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                chat_id=chat_id,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.admin_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status)
@@ -13246,16 +13262,24 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.agent_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.agent_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status_code = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status_code)

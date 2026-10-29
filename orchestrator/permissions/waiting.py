@@ -101,6 +101,8 @@ class PermissionWaiter:
             status = await asyncio.to_thread(self._authority.execution_status, context)
             if status.task_state in {"completed", "cancelled", "failed_terminal"}:
                 return WaitResult(status.task_state, current_id, operation_id)
+            if status.task_state == "recovering":
+                return WaitResult("recovering", current_id, operation_id)
             if status.binding_state != "active":
                 return WaitResult("fenced", current_id, operation_id)
             operation = await asyncio.to_thread(

@@ -131,6 +131,7 @@ def test_incomplete_legacy_database_fails_without_committing_partial_migration(t
             "execution_epoch TEXT, policy_revision INTEGER, operation_id TEXT, "
             "arguments_digest TEXT, purpose TEXT, created_at REAL)"
         )
+        connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
         connection.execute("PRAGMA user_version=1")
     with pytest.raises(ValueError, match="incomplete"):
         PermissionAuthority(path, verifier=AuthenticatedReceiptSource())
@@ -209,6 +210,7 @@ def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflic
         connection.execute("DROP TABLE decision_action_presentations")
         connection.execute("DROP TABLE decision_actions")
         connection.execute("DROP TABLE operation_outcome_receipts")
+        connection.execute("DROP TABLE IF EXISTS execution_runtime_metadata")
         connection.execute("PRAGMA user_version=3")
         if conflicting_table:
             connection.execute("CREATE TABLE operation_outcome_receipts (keep TEXT)")
@@ -222,7 +224,7 @@ def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflic
         assert reopened.decide(reference, approved_scopes=[scope]) == lease
         assert reopened.decision_count(request.request_id) == 1
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 6)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 7)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM operation_outcome_receipts").fetchone() == ("preserve",)
 

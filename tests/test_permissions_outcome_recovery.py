@@ -107,3 +107,15 @@ def test_outcome_receipt_cannot_be_reused_for_a_conflicting_result(interrupted):
             context, claim.claim_id, receipt_reference=issuer.publish_outcome("conflict", conflict),
         )
     assert authority.operation_status_for_task(context, "operation").result_digest == "b" * 64
+
+
+def test_unknown_effect_cannot_be_retried_by_choosing_a_new_operation_id(interrupted):
+    _, authority, _, _, context, scope, _, _ = interrupted
+    later = replace(context, worker_generation="new-worker", execution_epoch="new-epoch")
+    authority.bind_execution(later)
+    assert authority.execution_status(later).task_state == "recovering"
+    assert not authority.evaluate(later, [scope], operation_id="fresh-operation")
+    with pytest.raises(PermissionDenied, match="reconciliation"):
+        authority.prepare(later, "fresh-operation", "c" * 64, [scope])
+    with pytest.raises(PermissionDenied, match="reconciliation"):
+        authority.request_access(later, [scope], purpose="try again with another identity")

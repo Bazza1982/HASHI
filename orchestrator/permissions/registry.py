@@ -37,10 +37,14 @@ class ManagedToolRegistry(ToolRegistry):
         permission_context: ExecutionContext,
         permission_supervisor: Any,
         requestable_scopes: tuple[Scope, ...],
+        durable_wait: bool = False,
         **legacy_options: Any,
     ) -> None:
         if secrets:
             raise ValueError("managed tool registry cannot hold shared credentials")
+        if type(durable_wait) is not bool:
+            raise ValueError("durable wait must be explicit")
+        self.permission_durable_wait = durable_wait
         super().__init__(
             allowed_tools=allowed_tools, access_root=access_root,
             workspace_dir=workspace_dir, secrets={}, **legacy_options,
@@ -51,7 +55,7 @@ class ManagedToolRegistry(ToolRegistry):
         self._permission_waiter = PermissionWaiter(permission_authority)
         self._permission_tools = PermissionAgentTools(
             permission_authority, permission_context, cwd=self._permission_cwd,
-            requestable_scopes=requestable_scopes,
+            requestable_scopes=requestable_scopes, durable_wait=durable_wait,
         )
         self._permission_gate = PermissionExecutionGate(
             permission_authority, self._permission_waiter, permission_supervisor,
@@ -110,6 +114,10 @@ class ManagedToolRegistry(ToolRegistry):
         if tool_name in _PERMISSION_NAMES:
             try:
                 response = await self._permission_tools.execute(tool_name, arguments)
+                if self.permission_durable_wait and response.get("status") == "pending":
+                    from orchestrator.permissions.continuation import PermissionPark
+
+                    raise PermissionPark(GateResult("waiting", "", response["request_id"]))
                 result = ToolResult(
                     tool_call_id=call_id, output=json.dumps(response, ensure_ascii=False),
                     details={"control_disposition": "allowed"},
@@ -129,7 +137,19 @@ class ManagedToolRegistry(ToolRegistry):
         operation_id = self._operation_id(call_id)
         outcome = await self._permission_gate.execute(
             operation_id, tool_name, arguments, reason=f"Use {tool_name}",
+            wait_for_approval=not self.permission_durable_wait,
         )
+        if self.permission_durable_wait and outcome.state in {"denied", "withdrawn"}:
+            result = ToolResult(
+                tool_call_id=call_id, output="Access was denied or withdrawn. Keep completed work and choose an allowed alternative.",
+                is_error=False, details={"control_disposition": "denied",
+                                         "permission_operation": operation_id},
+            )
+            return self._finish_result(tool_name, arguments, result, started)
+        if self.permission_durable_wait and outcome.state not in {"succeeded", "failed", "unavailable"}:
+            from orchestrator.permissions.continuation import PermissionPark
+
+            raise PermissionPark(outcome)
         if outcome.state not in {"succeeded", "failed"}:
             # This typed control state must be handled by HERV3, not converted
             # to a provider failure or a model-retryable ordinary tool error.

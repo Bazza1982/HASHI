@@ -3295,17 +3295,24 @@ class HashiStageProvider(StageProvider):
             and str(context.get("stage") or "").casefold()
             == request.stage.value.casefold()
             and str(context.get("boundary") or "")
-            in {"completed_tool_batch", "completed_provider_response"}
+            in {"completed_tool_batch", "completed_provider_response", "pending_tool_batch"}
         )
         raw_messages = context.get("messages")
         if not matches or not isinstance(raw_messages, list) or not raw_messages:
+            if context.get("boundary") == "pending_tool_batch":
+                raise ProviderContextObserverError("pending Tool continuation cannot change provider, model, or stage")
             return None
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ProviderContextObserverError(
                 "private provider recovery contains an invalid message"
             )
         continuation = [copy.deepcopy(dict(item)) for item in raw_messages]
-        continuation.append({"role": "user", "content": stage_prompt})
+        if context.get("boundary") == "pending_tool_batch":
+            from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+            pending_tool_calls(continuation)
+        else:
+            continuation.append({"role": "user", "content": stage_prompt})
         self._provider_context_recovery_consumed = True
         return continuation
 
@@ -5928,7 +5935,7 @@ class HashiStageProvider(StageProvider):
                 parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             )
-            if provider_request_content is None and (
+            if (provider_request_content is None or self._provider_context_recovery.get("boundary") == "pending_tool_batch") and (
                 "continuation_messages" in parameters or accepts_extra_keywords
             ):
                 continuation_messages = self._provider_recovery_messages(
@@ -5940,6 +5947,10 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
+                    if self._provider_context_recovery.get("boundary") == "pending_tool_batch":
+                        if "resume_pending_tools" not in parameters and not accepts_extra_keywords:
+                            raise ProviderContextObserverError("selected provider cannot resume a pending Tool batch")
+                        generation_kwargs["resume_pending_tools"] = True
             if provider_request_content is not None:
                 if "request_content" not in parameters and not any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD

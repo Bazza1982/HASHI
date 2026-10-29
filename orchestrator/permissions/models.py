@@ -120,6 +120,24 @@ class ExecutionContext:
             raise ValueError("policy_revision must be a nonnegative integer")
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeExecutionBinding:
+    """Recorded PAO claim facts; possession does not authenticate a caller."""
+
+    context: ExecutionContext
+    request_id: str
+    fencing_token: int
+    worker_id: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.context, ExecutionContext)
+                or type(self.fencing_token) is not int or self.fencing_token <= 0):
+            raise ValueError("a canonical execution and positive PAO fence are required")
+        for value in (self.request_id, self.worker_id):
+            if not isinstance(value, str) or not value.strip() or len(value) > 512:
+                raise ValueError("a complete PAO runtime binding is required")
+
+
 _SCOPE_ACTIONS = {
     "file": frozenset({"read", "list", "write", "create", "delete", "execute"}),
     "network": frozenset({"connect", "fetch", "upload", "send", "receive"}),

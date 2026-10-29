@@ -28,6 +28,7 @@ from uuid import uuid4
 from orchestrator.permissions.models import (
     ExecutionContext,
     PermissionSubject,
+    RuntimeExecutionBinding,
     Scope,
     canonical_scope_set,
     scope_covers,
@@ -214,7 +215,7 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MAX_LIVE_DECISION_ACTIONS = 1024
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
@@ -283,6 +284,15 @@ _DECISION_PRESENTATIONS_SCHEMA = """CREATE TABLE decision_action_presentations (
     presentation_slot TEXT NOT NULL,
     action_id TEXT NOT NULL UNIQUE REFERENCES decision_actions(action_id),
     PRIMARY KEY(presentation_id,presentation_slot)
+)"""
+
+
+_RUNTIME_METADATA_SCHEMA = """CREATE TABLE execution_runtime_metadata (
+    execution_epoch TEXT PRIMARY KEY REFERENCES execution_bindings(execution_epoch),
+    turn_id TEXT NOT NULL,
+    pao_request_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL CHECK(fencing_token>0),
+    worker_id TEXT NOT NULL
 )"""
 
 
@@ -476,6 +486,7 @@ class PermissionAuthority:
         monotonic: Callable[[], float] = time.monotonic,
         request_ttl_seconds: int = 24 * 60 * 60,
         max_lease_seconds: int = 4 * 60 * 60,
+        baseline_resolver: Callable[[ExecutionContext], Iterable[Scope]] | None = None,
     ) -> None:
         if not callable(getattr(verifier, "verify", None)):
             raise ValueError("trusted receipt verifier is required")
@@ -484,6 +495,9 @@ class PermissionAuthority:
                 raise ValueError(f"{name} must be a positive integer")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if baseline_resolver is not None and (not callable(baseline_resolver) or inspect.iscoroutinefunction(baseline_resolver)):
+            raise ValueError("a synchronous trusted baseline policy resolver is required")
+        self._baseline_resolver = baseline_resolver
         self._verifier = verifier
         self._clock = clock
         self._monotonic = monotonic
@@ -593,6 +607,10 @@ class PermissionAuthority:
             }
         if version >= 6:
             required["decision_action_presentations"] = {"presentation_id", "presentation_slot", "action_id"}
+        if version >= 7:
+            required["execution_runtime_metadata"] = {
+                "execution_epoch", "turn_id", "pao_request_id", "fencing_token", "worker_id",
+            }
         primary = {
             "authority_metadata": ("key",), "permission_tasks": ("task_id",),
             "execution_bindings": ("execution_epoch",), "access_requests": ("request_id",),
@@ -611,6 +629,8 @@ class PermissionAuthority:
             primary["decision_actions"] = ("action_id",)
         if version >= 6:
             primary["decision_action_presentations"] = ("presentation_id", "presentation_slot")
+        if version >= 7:
+            primary["execution_runtime_metadata"] = ("execution_epoch",)
         for table, columns in required.items():
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = {row["name"] for row in rows}
@@ -659,6 +679,15 @@ class PermissionAuthority:
                 != "".join(_DECISION_PRESENTATIONS_SCHEMA.split()).casefold()
             ):
                 raise ValueError("permission ledger presentation constraints are incomplete")
+        if version >= 7:
+            table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_runtime_metadata'"
+            ).fetchone()
+            if table is None or not isinstance(table["sql"], str) or (
+                "".join(table["sql"].split()).casefold()
+                != "".join(_RUNTIME_METADATA_SCHEMA.split()).casefold()
+            ):
+                raise ValueError("permission runtime binding constraints are incomplete")
         index = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_pending_request'"
         ).fetchone()
@@ -674,7 +703,7 @@ class PermissionAuthority:
     def _initialize(self) -> None:
         with self._transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, 3, 4, 5, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -736,6 +765,9 @@ class PermissionAuthority:
             if version == 5:
                 connection.execute(_DECISION_PRESENTATIONS_SCHEMA)
                 version = 6
+            if version == 6:
+                connection.execute(_RUNTIME_METADATA_SCHEMA)
+                version = 7
             if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
             self._validate_schema(connection, _SCHEMA_VERSION)
@@ -901,6 +933,144 @@ class PermissionAuthority:
                 raise PermissionDenied("task is terminal")
             self._insert_binding(connection, context)
 
+    def register_runtime_context(self, context: ExecutionContext, *, run_guard) -> RuntimeExecutionBinding:
+        """Record the real HER Turn only inside a current canonical PAO claim."""
+        from orchestrator.permissions.pao_run_fence import PaoRunFence
+
+        if not isinstance(run_guard, PaoRunFence) or run_guard.binding.context != context:
+            raise PermissionDenied("a matching canonical PAO Run guard is required")
+        binding = run_guard.binding
+        expected = (
+            context.execution_epoch, context.turn_id, binding.request_id,
+            binding.fencing_token, binding.worker_id,
+        )
+        # Lock order is PAO -> permission ledger, as in guarded file dispatch.
+        # There is no human wait or external transport inside either lock.
+        with run_guard(context), self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context)
+            row = connection.execute(
+                "SELECT execution_epoch,turn_id,pao_request_id,fencing_token,worker_id "
+                "FROM execution_runtime_metadata WHERE execution_epoch=?",
+                (context.execution_epoch,),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != expected:
+                    raise OperationConflict("runtime execution metadata is immutable")
+                return binding
+            connection.execute(
+                "INSERT INTO execution_runtime_metadata VALUES(?,?,?,?,?)", expected,
+            )
+            self._event(connection, context.task_id, "runtime_registered", context.execution_epoch, now)
+        return binding
+
+    def rebind_parked_requests(self, context: ExecutionContext, *, run_guard):
+        """Adopt only never-started requests after their old executor is fenced."""
+        from orchestrator.permissions.pao_run_fence import PaoRunFence
+
+        if not isinstance(run_guard, PaoRunFence) or run_guard.binding.context != context:
+            raise PermissionDenied("canonical PAO adoption binding is required")
+        with run_guard(context):
+            with self._transaction() as connection:
+                now = self._now(connection)
+                self._context(connection, context)
+                if connection.execute(
+                    "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                    (context.task_id,),
+                ).fetchone() is not None:
+                    raise PermissionDenied("task requires operation reconciliation")
+                rows = connection.execute(
+                    "SELECT * FROM access_requests WHERE task_id=? AND run_id=? AND state='pending' "
+                    "AND execution_epoch!=?", (context.task_id, context.run_id, context.execution_epoch),
+                ).fetchall()
+                rebound = []
+                for row in rows:
+                    prior = connection.execute(
+                        "SELECT state FROM execution_bindings WHERE execution_epoch=?", (row["execution_epoch"],),
+                    ).fetchone()
+                    if prior is None or prior["state"] != "fenced":
+                        raise OperationConflict("request belongs to another active execution")
+                    if row["expires_at"] <= now:
+                        connection.execute(
+                            "UPDATE access_requests SET state='expired' WHERE request_id=?", (row["request_id"],),
+                        )
+                        self._event(connection, context.task_id, "request_expired", row["request_id"], now)
+                        continue
+                    if scope_digest(_load_scopes(row["scopes_json"])) != row["scope_digest"]:
+                        raise OperationConflict("parked request scope changed")
+                    if row["operation_id"]:
+                        operation = connection.execute(
+                            "SELECT * FROM pending_operations WHERE operation_id=?", (row["operation_id"],),
+                        ).fetchone()
+                        if (operation is None or operation["task_id"] != context.task_id
+                                or operation["run_id"] != context.run_id or operation["state"] != "waiting"
+                                or operation["arguments_digest"] != row["arguments_digest"]):
+                            raise OperationConflict("parked operation cannot be adopted")
+                        connection.execute(
+                            "UPDATE pending_operations SET execution_epoch=? WHERE operation_id=?",
+                            (context.execution_epoch, row["operation_id"]),
+                        )
+                    connection.execute(
+                        "UPDATE access_requests SET execution_epoch=?,context_generation=?,revision=revision+1 "
+                        "WHERE request_id=?",
+                        (context.execution_epoch, context.context_generation, row["request_id"]),
+                    )
+                    self._snapshot_request(connection, row["request_id"], now)
+                    self._event(connection, context.task_id, "request_rebound", row["request_id"], now)
+                    rebound.append(row["request_id"])
+                return tuple(rebound)
+
+    def get_request_runtime_binding(
+        self, subject: PermissionSubject, request_id: str,
+    ) -> RuntimeExecutionBinding:
+        """Private control-plane lookup; never infer a missing claim or Turn."""
+        _nonempty(request_id, "request_id")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            rows = self._session_request_rows(connection, subject, request_id=request_id)
+            if not rows:
+                raise PermissionDenied("permission request is unavailable")
+            self._session_request_view(rows[0], now)
+            row = rows[0]
+            runtime = connection.execute(
+                "SELECT b.worker_generation,b.backend_id,b.executor_id,b.policy_revision,"
+                "m.turn_id,m.pao_request_id,m.fencing_token,m.worker_id "
+                "FROM execution_bindings b JOIN execution_runtime_metadata m "
+                "ON m.execution_epoch=b.execution_epoch WHERE b.execution_epoch=?",
+                (row["execution_epoch"],),
+            ).fetchone()
+            if runtime is None:
+                raise PermissionDenied("canonical runtime metadata is unavailable")
+            context = ExecutionContext(
+                instance_id=subject.instance_id, owner_id=subject.owner_id, agent_id=subject.agent_id,
+                task_id=row["task_id"], run_id=row["run_id"], session_id=subject.session_id,
+                turn_id=runtime["turn_id"], worker_generation=runtime["worker_generation"],
+                context_generation=row["context_generation"], execution_epoch=row["execution_epoch"],
+                backend_id=runtime["backend_id"], executor_id=runtime["executor_id"],
+                policy_revision=runtime["policy_revision"],
+            )
+            self._context(connection, context, active=False)
+            return RuntimeExecutionBinding(
+                context, runtime["pao_request_id"], runtime["fencing_token"], runtime["worker_id"],
+            )
+
+    def get_presented_decision_action(
+        self, context: ExecutionContext, request_id: str, presentation_id: str, presentation_slot: str,
+    ) -> DecisionAction | None:
+        """Inspect an exact previously issued choice, including committed retries."""
+        for value in (request_id, presentation_id, presentation_slot):
+            _nonempty(value, "presentation binding")
+        with self._transaction() as connection:
+            self._now(connection)
+            self._context(connection, context, active=False)
+            self._request_for_task(connection, context.task_id, request_id)
+            row = connection.execute(
+                "SELECT a.* FROM decision_actions a JOIN decision_action_presentations p "
+                "ON p.action_id=a.action_id WHERE p.presentation_id=? AND p.presentation_slot=? "
+                "AND a.request_id=?", (presentation_id, presentation_slot, request_id),
+            ).fetchone()
+            return _action_from(row) if row is not None else None
+
     @staticmethod
     def _stop_epoch_resources(connection: sqlite3.Connection, epoch: str) -> None:
         # A prepared runner may still exist. Its reservation is retained until
@@ -938,6 +1108,11 @@ class PermissionAuthority:
             binding = self._binding(connection, context, active=False)
             if task["state"] != "paused" or binding["state"] != "active":
                 raise PermissionDenied("task or execution cannot resume")
+            if connection.execute(
+                "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                (context.task_id,),
+            ).fetchone() is not None:
+                raise PermissionDenied("task requires operation reconciliation")
             connection.execute(
                 "UPDATE permission_tasks SET state='active',revision=revision+1 WHERE task_id=?",
                 (context.task_id,),
@@ -1054,6 +1229,11 @@ class PermissionAuthority:
         with self._transaction() as connection:
             now = self._now(connection)
             self._context(connection, context)
+            if connection.execute(
+                "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                (context.task_id,),
+            ).fetchone() is not None:
+                raise PermissionDenied("task requires operation reconciliation")
             if request_key is not None:
                 prior_key = connection.execute(
                     "SELECT * FROM request_idempotency WHERE task_id=? AND request_key=?",
@@ -1736,6 +1916,32 @@ class PermissionAuthority:
                 return replace(lease, status="expired")
             return lease
 
+    def get_session_decision_binding(self, subject: PermissionSubject, action_id: str):
+        """Resolve an issued action within a current frontend subject."""
+        _nonempty(action_id, "action_id")
+        with self._transaction() as connection:
+            self._now(connection)
+            row = connection.execute(
+                "SELECT request_id FROM decision_actions WHERE action_id=?", (action_id,),
+            ).fetchone()
+            if row is None or not self._session_request_rows(
+                connection, subject, request_id=row["request_id"],
+            ):
+                raise InvalidDecision("decision action is unavailable")
+            request_id = row["request_id"]
+        return self.get_request_runtime_binding(subject, request_id)
+
+    @property
+    def max_lease_seconds(self) -> int:
+        return self._max_lease
+
+    def verified_decision_receipt(self, reference: str) -> DecisionReceipt:
+        """Verify a private receipt without consuming it or granting rights."""
+        proof = self._verifier.verify(reference)
+        if not isinstance(proof, DecisionReceipt):
+            raise InvalidDecision("a verified decision receipt is required")
+        return proof
+
     def decide(
         self, reference: str, *, approved_scopes: Iterable[Scope], action_id: str | None = None,
     ) -> PermissionLease | None:
@@ -1919,9 +2125,16 @@ class PermissionAuthority:
             and (row["status"] != "reserved" or row["reserved_claim"] == claim_id)
         ]
 
-    @classmethod
+    def _configured_scopes(self, context: ExecutionContext) -> tuple[Scope, ...]:
+        if self._baseline_resolver is None:
+            return ()
+        try:
+            return canonical_scope_set(self._baseline_resolver(context))
+        except Exception as exc:
+            raise PermissionDenied("configured baseline policy is unavailable") from exc
+
     def _covering_leases(
-        cls,
+        self,
         connection: sqlite3.Connection,
         context: ExecutionContext,
         now: float,
@@ -1930,11 +2143,14 @@ class PermissionAuthority:
         operation_id: str | None,
         claim_id: str | None = None,
     ) -> tuple[str, ...] | None:
-        rows = cls._valid_leases(connection, context, now, operation_id=operation_id, claim_id=claim_id)
+        rows = self._valid_leases(connection, context, now, operation_id=operation_id, claim_id=claim_id)
+        configured = self._configured_scopes(context)
         selected: set[str] = set()
         for required in scopes:
             for action in required.actions:
                 single = Scope(required.kind, required.resource, (action,), required.normalization_version)
+                if any(scope_covers(grant, single) for grant in configured):
+                    continue
                 match = next((row for row in rows if any(
                     scope_covers(grant, single) for grant in _load_scopes(row["scopes_json"])
                 )), None)
@@ -1951,6 +2167,11 @@ class PermissionAuthority:
             task = self._task(connection, context, active=False)
             binding = self._binding(connection, context, active=False)
             if task["state"] != "active" or binding["state"] != "active":
+                return False
+            if connection.execute(
+                "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                (context.task_id,),
+            ).fetchone() is not None:
                 return False
             return self._covering_leases(
                 connection, context, now, normalized, operation_id=operation_id
@@ -1981,6 +2202,11 @@ class PermissionAuthority:
                 raise OperationConflict("operation is already bound or has begun")
             if operation is not None:
                 self._require_prior_execution_fenced(connection, operation, context)
+            if connection.execute(
+                "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                (context.task_id,),
+            ).fetchone() is not None:
+                raise PermissionDenied("task requires operation reconciliation")
             leases = self._covering_leases(
                 connection, context, now, normalized, operation_id=operation_id
             )
@@ -2154,11 +2380,11 @@ class PermissionAuthority:
                 lease_ids = json.loads(claim["lease_ids_json"])
             except (TypeError, ValueError) as exc:
                 raise PermissionDenied("claim lease bindings are invalid") from exc
-            if (not isinstance(lease_ids, list) or not lease_ids
+            if (not isinstance(lease_ids, list)
                     or any(not isinstance(item, str) or not item for item in lease_ids)
                     or len(lease_ids) != len(set(lease_ids))):
                 raise PermissionDenied("claim lease bindings are invalid")
-            granted = []
+            granted = list(self._configured_scopes(context))
             for lease_id in lease_ids:
                 lease = connection.execute(
                     "SELECT * FROM permission_leases WHERE lease_id=?", (lease_id,)
@@ -2518,7 +2744,13 @@ class PermissionAuthority:
             self._now(connection)
             task = self._task(connection, context, active=False)
             binding = self._binding(connection, context, active=False)
-            return ExecutionStatus(task["state"], binding["state"])
+            task_state = task["state"]
+            if task_state in {"active", "paused"} and connection.execute(
+                "SELECT 1 FROM pending_operations WHERE task_id=? AND state='unknown' LIMIT 1",
+                (context.task_id,),
+            ).fetchone() is not None:
+                task_state = "recovering"
+            return ExecutionStatus(task_state, binding["state"])
 
     def find_operation_for_task(
         self, context: ExecutionContext, operation_id: str

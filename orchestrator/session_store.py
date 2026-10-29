@@ -8773,6 +8773,13 @@ class SessionStore:
                     and not user_stopped
                 ):
                     continue
+                if not user_stopped and connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_run_parks'",
+                ).fetchone() is not None:
+                    from orchestrator.permissions.parking import PermissionParkingStore
+
+                    if PermissionParkingStore.recoverable(connection, run):
+                        continue
                 terminal_state = "stopped" if user_stopped else "interrupted"
                 error_code = (
                     "user_stop" if user_stopped else "runtime_restart_interrupted"
@@ -8888,7 +8895,7 @@ class SessionStore:
     def hold_active_run(
         self, *, run_id: str, owner_id: str, agent_id: str, session_id: str,
         request_id: str, context_generation: int, fencing_token: int, worker_id: str,
-    ) -> Iterator[None]:
+    ) -> Iterator[sqlite3.Connection]:
         """Serialize a short trusted effect with stop and Run-generation changes.
 
         This only verifies PAO Run facts. It does not authenticate a caller or
@@ -8922,7 +8929,7 @@ class SessionStore:
                 row["state"] != "running", row["session_status"] != "active",
             )):
                 raise StaleFencingToken("Run execution is no longer current")
-            yield
+            yield connection
 
     def get_run(self, run_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         clauses = ["r.run_id = ?", "s.instance_id = ?"]

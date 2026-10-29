@@ -3133,6 +3133,7 @@ class OpenRouterAdapter(BaseBackend):
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
         provider_call_context: Mapping[str, Any] | None = None,
+        before_tool_dispatch: Callable[[], None] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         effect_facts: list[dict[str, Any]] = []
@@ -3324,6 +3325,11 @@ class OpenRouterAdapter(BaseBackend):
                     "content": result_text,
                 })
                 continue
+
+            if getattr(self.tool_registry, "permission_durable_wait", False):
+                if before_tool_dispatch is None or self._provider_context_observer is None:
+                    raise ProviderContextObserverError("managed Tool dispatch requires a durable pending boundary")
+                before_tool_dispatch()
 
             # Execute only after atomically claiming this Tool ID.
             claim_id = str(tc_id or "")
@@ -3979,6 +3985,7 @@ class OpenRouterAdapter(BaseBackend):
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
+        resume_pending_tools: bool = False,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
@@ -4090,6 +4097,28 @@ class OpenRouterAdapter(BaseBackend):
                 native_local_refs = set()
                 all_media_native = False
 
+            if resume_pending_tools:
+                from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+                if continuation_messages is None or not getattr(self.tool_registry, "permission_durable_wait", False):
+                    raise ProviderContextObserverError("pending Tool recovery requires a managed checkpoint")
+                unfinished = pending_tool_calls(messages)
+                recovery_result = _APIResult("", unfinished, "tool_calls")
+                tool_effect_facts.extend(await self._run_tool_calls(
+                    unfinished, messages, on_stream_event,
+                    provider_call_context={"provider_request_id": request_id},
+                    before_tool_dispatch=lambda: self._observe_provider_context(
+                        boundary="pending_tool_batch", messages=messages, request_id=request_id,
+                        result=recovery_result, provider_request_id="",
+                    ),
+                ))
+                completed_tool_calls.extend(
+                    {"id": call["id"], "name": call["function"]["name"]} for call in unfinished
+                )
+                self._observe_provider_context(
+                    boundary="completed_tool_batch", messages=messages, request_id=request_id,
+                    result=recovery_result, provider_request_id="",
+                )
             initial_provider_recovery_kind = (
                 "provider_fallback_same_model"
                 if continuation_messages is not None
@@ -4850,6 +4879,13 @@ class OpenRouterAdapter(BaseBackend):
                                 "provider_request_id", ""
                             ),
                         },
+                        **({
+                            "before_tool_dispatch": lambda: self._observe_provider_context(
+                                boundary="pending_tool_batch", messages=messages,
+                                request_id=request_id, result=result,
+                                provider_request_id=str(last_provider_call_record.get("provider_request_id", "")),
+                            ),
+                        } if getattr(self.tool_registry, "permission_durable_wait", False) else {}),
                     )
                 )
                 completed_tool_calls.extend(

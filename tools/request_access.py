@@ -146,6 +146,7 @@ class PermissionAgentTools:
         *,
         cwd: Path,
         requestable_scopes: tuple[Scope, ...],
+        durable_wait: bool = False,
     ) -> None:
         methods = ("request_access", "get_request", "get_lease_for_task", "revoke")
         if not isinstance(context, ExecutionContext) or not all(
@@ -155,6 +156,9 @@ class PermissionAgentTools:
         directory = Path(cwd)
         if not directory.is_absolute():
             raise ValueError("trusted working directory must be absolute")
+        if type(durable_wait) is not bool or (durable_wait and not callable(getattr(authority, "evaluate", None))):
+            raise ValueError("durable requests require the authoritative evaluation port")
+        self._durable_wait = durable_wait
         self._authority = authority
         self._context = context
         self._cwd = directory.resolve(strict=False)
@@ -216,6 +220,18 @@ class PermissionAgentTools:
                 raise
             except (ValueError, OperationConflict) as exc:
                 raise PermissionToolError("invalid or conflicting access request") from exc
+            if self._durable_wait and request.state not in {"denied", "withdrawn"}:
+                covered = await asyncio.to_thread(self._authority.evaluate, self._context, scopes)
+                if covered:
+                    view = _request_view(request)
+                    view["status"] = "granted_existing"
+                    return view
+                if request.state in {"decided", "expired", "granted_existing"}:
+                    request = await asyncio.to_thread(
+                        self._authority.request_access, self._context, scopes,
+                        purpose=item["reason"], suggested_lifetime=duration["mode"],
+                        suggested_seconds=duration["max_seconds"],
+                    )
             return _request_view(request)
 
         if name == "get_access_status":

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from orchestrator.permissions.authority import PermissionDenied
-from orchestrator.permissions.models import ExecutionContext
+from orchestrator.permissions.models import ExecutionContext, RuntimeExecutionBinding
 from orchestrator.session_store import SessionConflict, SessionStore
 
 
@@ -39,6 +39,12 @@ class PaoRunFence:
         self._fencing_token = fencing_token
         self._worker_id = worker_id
         self._generation = generation
+
+    @property
+    def binding(self) -> RuntimeExecutionBinding:
+        return RuntimeExecutionBinding(
+            self._context, self._request_id, self._fencing_token, self._worker_id,
+        )
 
     @contextmanager
     def __call__(self, context: ExecutionContext) -> Iterator[None]:
