@@ -56,11 +56,13 @@ class InstalledExecution:
         self._cleanup_lock = asyncio.Lock()
         self._inference_digest, self._inference = None, None
         self._inference_lock, self._configuration_tasks = asyncio.Lock(), set()
+        self._callbacks = None
 
     def attach_callbacks(self, descriptor):
         from orchestrator.permissions.her_callbacks import CallbackClient
 
         callbacks = CallbackClient(descriptor)
+        self._callbacks = callbacks
         self.channel._checkpoint = callbacks.checkpoint
         self.channel._audit = lambda record: callbacks.audit(self.binding, record)
 
@@ -142,7 +144,11 @@ class InstalledExecution:
     async def run_restricted_her(self, command):
         if self.policy.settings.requested_level is not PermissionLevel.L2 or self.factory.runner is None:
             raise PermissionDenied("this Run has no qualified restricted HER host")
-        result = await self.factory.runner.run_her(self, command)
+        if self._callbacks is None:
+            raise PermissionDenied("the actual HER continuation owner is unavailable")
+        recovery = await self._callbacks.recovery(self.binding)
+        self.channel.seed_trusted_recovery(recovery)
+        result = await self.factory.runner.run_her(self, {**command, "recovery": recovery})
         evidence = self.channel._models.usage_receipts()
         return {**result, "provider_evidence": evidence,
                  "accounting_epoch": self.binding.context.execution_epoch,
@@ -219,6 +225,7 @@ class InstalledExecutorFactory:
                 binding, authority=self.authority, run_guard=guard, registry=registry,
                 model_broker=_NoModelTransport(), checkpoint_writer=self.checkpoint_writer,
                 audit_writer=self.audit_writer,
+                require_checkpoints=policy.settings.requested_level is PermissionLevel.L2,
             )
             address = r"\\.\pipe\LOCAL\HASHI.Permissions.execution." + uuid4().hex
             executor = InstalledExecution(self, binding, policy, channel, None, address)

@@ -18,6 +18,8 @@ from orchestrator.permissions.descriptors import ToolDescriptor, _arguments_dige
 from orchestrator.permissions.models import ExecutionContext, Scope
 from orchestrator.permissions.windows_file_supervisor import _render_read
 from orchestrator.permissions.windows_process import ProcessObservation, observe_original_process_stopped
+from orchestrator.permissions.windows_jobs import WindowsJob
+from orchestrator.permissions.windows_job_security import private_job_name
 
 
 def _encoded(value):
@@ -26,10 +28,10 @@ def _encoded(value):
 
 class PhysicalFileJournal:
     def __init__(self, path, *, artifact_root, authority, results, issuer,
-                 observe_stopped=observe_original_process_stopped):
+                 observe_stopped=observe_original_process_stopped, recover_job=WindowsJob.recover_stop):
         self.path, self.root = Path(path), Path(artifact_root).resolve()
         self.authority, self.results, self.issuer = authority, results, issuer
-        self._observe_stopped = observe_stopped
+        self._observe_stopped, self._recover_job = observe_stopped, recover_job
         with self._connection() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS physical_files(
                 claim_id TEXT PRIMARY KEY, generation TEXT NOT NULL,
@@ -49,19 +51,17 @@ class PhysicalFileJournal:
         finally:
             connection.close()
 
-    def record(self, *, context, operation_id, descriptor, arguments, cwd, claim_id,
-               observation, plan_path, plan_digest, max_processes):
-        if (not isinstance(observation, ProcessObservation) or observation.creation_time_100ns <= 0
-                or not observation.atomic_job or max_processes != 1
-                or not isinstance(claim_id, str) or len(claim_id) != 32):
-            raise ValueError("a fixed single-process helper and observed creation identity are required")
+    def reserve(self, *, context, operation_id, descriptor, arguments, cwd, claim_id,
+                owner_sid, plan_path, plan_digest):
+        job_name = private_job_name(claim_id)
         plan = Path(plan_path).resolve()
         if not plan.is_relative_to(self.root) or plan.name != "plan.json":
             raise ValueError("the helper plan is outside its protected artifact root")
         payload = {
-            "version": 1, "context": asdict(context), "operation_id": operation_id,
+            "version": 2, "context": asdict(context), "operation_id": operation_id,
             "descriptor": asdict(descriptor), "arguments": arguments, "cwd": str(cwd),
-            "claim_id": claim_id, "observation": asdict(observation), "max_processes": 1,
+            "claim_id": claim_id, "observation": None, "max_processes": 1,
+            "job_name": job_name, "owner_sid": owner_sid,
             "plan": str(plan), "plan_digest": plan_digest,
         }
         data = _encoded(payload)
@@ -71,7 +71,38 @@ class PhysicalFileJournal:
                 (claim_id, self.authority._service_generation, data, sha256(data).hexdigest()),
             )
 
-    def stopped(self, claim_id):
+        return job_name
+
+    def observe_process(self, claim_id, observation, *, max_processes):
+        if (not isinstance(observation, ProcessObservation) or observation.creation_time_100ns <= 0
+                or not observation.atomic_job or max_processes != 1):
+            raise ValueError("a fixed single-process helper and observed creation identity are required")
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM physical_files WHERE claim_id=?", (claim_id,)).fetchone()
+            if row is None or row["state"] != "open" or sha256(row["payload"]).hexdigest() != row["digest"]:
+                raise ValueError("physical reservation changed")
+            payload = json.loads(row["payload"])
+            if payload["observation"] is not None or payload["owner_sid"] != observation.user_sid:
+                raise ValueError("physical process was already bound or belongs to another account")
+            payload["observation"] = asdict(observation)
+            data = _encoded(payload)
+            connection.execute("UPDATE physical_files SET payload=?,digest=? WHERE claim_id=?",
+                               (data, sha256(data).hexdigest(), claim_id))
+
+    def record(self, *, observation, max_processes, **arguments):
+        self.reserve(owner_sid=observation.user_sid, **arguments)
+        self.observe_process(arguments["claim_id"], observation, max_processes=max_processes)
+
+    def stopped(self, claim_id, *, observed_stop=False):
+        if not observed_stop:
+            with self._connection() as connection:
+                row = connection.execute("SELECT * FROM physical_files WHERE claim_id=?", (claim_id,)).fetchone()
+                if row is None or sha256(row["payload"]).hexdigest() != row["digest"]:
+                    raise ValueError("physical reservation changed")
+                value = json.loads(row["payload"])
+            proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=1)
+            if not isinstance(proof, dict) or proof.get("zero_job") is not True:
+                raise OSError("reserved Job cleanup remains unverified")
         with self._connection() as connection:
             connection.execute("UPDATE physical_files SET state='stopped' WHERE claim_id=? AND state='open'",
                                (claim_id,))
@@ -94,7 +125,9 @@ class PhysicalFileJournal:
                 if sha256(row["payload"]).hexdigest() != row["digest"]:
                     raise ValueError("physical helper evidence is damaged")
                 payload = json.loads(row["payload"])
-                if payload["claim_id"] != row["claim_id"] or payload["max_processes"] != 1:
+                if (payload.get("version") != 2 or payload["claim_id"] != row["claim_id"]
+                        or payload["max_processes"] != 1
+                        or payload["job_name"] != private_job_name(row["claim_id"])):
                     raise ValueError("physical helper binding changed")
                 result.append((row["state"], payload, row["digest"]))
             return result
@@ -102,9 +135,13 @@ class PhysicalFileJournal:
     def reconcile(self):
         """Read original PID identity and fixed result artifacts; never execute."""
         for state, value, evidence_digest in self.pending():
-            observation = ProcessObservation(**value["observation"])
-            if state != "stopped" and self._observe_stopped(observation) is not True:
-                continue
+            observation = ProcessObservation(**value["observation"]) if value["observation"] is not None else None
+            if state != "stopped":
+                proof = self._recover_job(value["job_name"], value["owner_sid"], max_processes=1)
+                if not isinstance(proof, dict) or proof.get("zero_job") is not True:
+                    continue
+                if observation is not None and self._observe_stopped(observation) is not True:
+                    continue
             self._reconcile_stopped(value, evidence_digest)
 
     def _reconcile_stopped(self, value, evidence_digest):
@@ -126,6 +163,8 @@ class PhysicalFileJournal:
             # preassigned claim was never committed. It cannot have been resumed.
             self._state(value["claim_id"], "finished")
             return
+        if value["observation"] is None:
+            raise ValueError("a committed claim has no physical process observation")
         status = self.authority.operation_status_for_task(context, value["operation_id"])
         plan_path = Path(value["plan"]).resolve()
         if not plan_path.is_relative_to(self.root) or plan_path.name != "plan.json":
@@ -171,7 +210,7 @@ class PhysicalFileJournal:
                 context, claim.claim_id, receipt_reference=self.issuer.issue_stop(context, claim.claim_id, {
                     "original_process_stopped": True, "pid": value["observation"]["process_id"],
                     "creation_time_100ns": value["observation"]["creation_time_100ns"],
-                    "single_process_job": True, "journal_digest": evidence_digest,
+                    "single_process_job": True, "job_name": value["job_name"], "journal_digest": evidence_digest,
                     "plan_digest": value["plan_digest"],
                 }),
             )

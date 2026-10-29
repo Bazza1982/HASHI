@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import inspect
+import json
 
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.continuation import PermissionPark
@@ -15,7 +16,7 @@ EXECUTION_METHODS = frozenset({"tool_execute", "provider_call", "provider_checkp
 
 class PermissionExecutionChannel:
     def __init__(self, binding, *, authority, run_guard, registry, model_broker,
-                 checkpoint_writer, audit_writer):
+                 checkpoint_writer, audit_writer, require_checkpoints=False):
         if (not isinstance(binding, RuntimeExecutionBinding) or not isinstance(run_guard, PaoRunFence)
                 or run_guard.binding != binding or not isinstance(registry, ManagedToolRegistry)
                 or not registry.permission_durable_wait or not callable(checkpoint_writer)
@@ -26,6 +27,8 @@ class PermissionExecutionChannel:
         self._checkpoint, self._audit = checkpoint_writer, audit_writer
         self._closed, self._parked = False, False
         self._completed_tool_calls = set()
+        self._require_checkpoints = bool(require_checkpoints)
+        self._pending_calls, self._ready_provider = {}, None
 
     def _current(self):
         if self._closed or self._parked:
@@ -41,6 +44,10 @@ class PermissionExecutionChannel:
 
     async def tool_execute(self, *, tool_name, arguments, tool_call_id):
         self._current()
+        if self._require_checkpoints:
+            saved = self._pending_calls.get(tool_call_id)
+            if saved != (tool_name, json.dumps(arguments, sort_keys=True, separators=(",", ":"), allow_nan=False)):
+                raise PermissionDenied("the Tool call has no exact durable pending boundary")
         try:
             result = await self.registry.execute(tool_name, arguments, tool_call_id)
         except PermissionPark as park:
@@ -50,10 +57,17 @@ class PermissionExecutionChannel:
 
         if isinstance(result, ToolResult):
             self._completed_tool_calls.add((tool_name, tool_call_id))
+            self._pending_calls.pop(tool_call_id, None)
         return result
 
     async def provider_call(self, *, engine, model, payload, use_stream):
         self._current()
+        if self._require_checkpoints:
+            ready = (engine, model, json.dumps(payload.get("messages"), sort_keys=True,
+                                              separators=(",", ":"), allow_nan=False))
+            if self._ready_provider != ready:
+                raise PermissionDenied("model transport has no exact durable ready boundary")
+            self._ready_provider = None
         return await self._models.provider_call(engine=engine, model=model, payload=payload, use_stream=use_stream)
 
     async def provider_checkpoint(self, *, checkpoint):
@@ -65,7 +79,36 @@ class PermissionExecutionChannel:
         if inspect.isawaitable(result):
             result = await result
         self._current()
+        self._accept_checkpoint(checkpoint)
         return result
+
+    def seed_trusted_recovery(self, checkpoint):
+        """Private assembly method; deliberately absent from execution RPC."""
+        self._current()
+        if checkpoint is None:
+            self._pending_calls, self._ready_provider = {}, None
+        else:
+            self._accept_checkpoint(checkpoint)
+
+    def _accept_checkpoint(self, checkpoint):
+        if self._require_checkpoints:
+            pending, ready = {}, None
+            if checkpoint.get("boundary") == "pending_tool_batch":
+                from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+                for call in pending_tool_calls(checkpoint["messages"]):
+                    function = call["function"]
+                    arguments = function.get("arguments") or {}
+                    if isinstance(arguments, str):
+                        arguments = json.loads(arguments)
+                    pending[call["id"]] = (function["name"], json.dumps(
+                        arguments, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                    ))
+            elif checkpoint.get("boundary") == "ready_provider_request":
+                ready = (checkpoint["provider"], checkpoint["model"], json.dumps(
+                    checkpoint["messages"], sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ))
+            self._pending_calls, self._ready_provider = pending, ready
 
     async def audit_record(self, *, record):
         self._current()

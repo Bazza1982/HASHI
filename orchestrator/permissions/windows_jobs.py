@@ -1,7 +1,8 @@
 """Owned native Windows Job: containment from creation and verified tree stop.
 
-The Job is unnamed, never inherited by an execution host and never permits
-breakaway. Callers pass its handle only as a creation attribute. A successful
+The Job is never inherited by an execution host and never permits breakaway.
+An installed journal can reserve a private owner-protected name for crash
+recovery; ordinary callers keep unnamed Jobs. Handles pass only as a creation attribute. A successful
 root-process exit is not proof that the Job's descendants have stopped.
 """
 from __future__ import annotations
@@ -10,6 +11,9 @@ import ctypes
 from ctypes import wintypes
 import os
 import time
+import threading
+
+from orchestrator.permissions.windows_job_security import create_private_job, open_private_job
 
 
 class JobControlError(OSError):
@@ -50,31 +54,45 @@ class _Accounting(ctypes.Structure):
     ]
 
 
+def _job_kernel():
+    if os.name != "nt":
+        raise JobControlError("native Windows is required")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel.SetInformationJobObject.restype = wintypes.BOOL
+    kernel.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+    ]
+    kernel.QueryInformationJobObject.restype = wintypes.BOOL
+    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel.IsProcessInJob.restype = wintypes.BOOL
+    kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.TerminateJobObject.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    return kernel
+
+
 class WindowsJob:
-    def __init__(self, *, max_processes=None) -> None:
+    _recovery_owners = {}
+    _recovery_lock = threading.RLock()
+
+    def __init__(self, *, max_processes=None, name=None, owner_sid=None) -> None:
         if max_processes is not None and (type(max_processes) is not int or max_processes <= 0):
             raise ValueError("a positive explicit Job process limit is required")
         if os.name != "nt":
             raise JobControlError("native Windows is required")
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-        ]
-        kernel.SetInformationJobObject.restype = wintypes.BOOL
-        kernel.QueryInformationJobObject.argtypes = [
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
-        ]
-        kernel.QueryInformationJobObject.restype = wintypes.BOOL
-        kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
-        kernel.IsProcessInJob.restype = wintypes.BOOL
-        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        kernel.TerminateJobObject.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel.CloseHandle.restype = wintypes.BOOL
+        kernel = _job_kernel()
         self._kernel = kernel
-        self._handle = kernel.CreateJobObjectW(None, None)
+        if (name is None) != (owner_sid is None):
+            raise ValueError("a recoverable Job requires both its name and owner SID")
+        self.name, self.owner_sid = name, owner_sid
+        self._handle = (kernel.CreateJobObjectW(None, None) if name is None
+                        else create_private_job(kernel, name, owner_sid))
         if not self._handle:
             raise JobControlError(ctypes.get_last_error(), "cannot create execution Job")
         self._stopped = False
@@ -100,6 +118,46 @@ class WindowsJob:
                 raise JobControlError(ctypes.get_last_error(), "unverified Job handle cleanup")
             self._handle = None
             raise
+
+    @classmethod
+    def recover_stop(cls, name, owner_sid, *, max_processes=1, timeout_ms=4500):
+        """Stop only a reserved, owner-verified original Job; absence is kernel evidence."""
+        with cls._recovery_lock:
+            key = (name, owner_sid)
+            owner = cls._recovery_owners.get(key)
+            if owner is None:
+                kernel = _job_kernel()
+                handle = open_private_job(kernel, name, owner_sid)
+                if handle is None:
+                    return {"job_name": name, "zero_job": True, "absent": True}
+                owner = cls.__new__(cls)
+                owner._kernel, owner._handle, owner._stopped = kernel, handle, False
+                owner.name, owner.owner_sid, owner.max_processes = name, owner_sid, max_processes
+                cls._recovery_owners[key] = owner
+            observed = _ExtendedLimit()
+            if not owner._kernel.QueryInformationJobObject(
+                owner.handle, 9, ctypes.byref(observed), ctypes.sizeof(observed), None,
+            ):
+                raise JobControlError("the reserved Job limits could not be observed")
+            if (observed.basic.flags & 0x3800) != 0x2000 or (
+                not observed.basic.flags & 0x8 or observed.basic.active_process_limit != max_processes
+            ):
+                # A crash can occur after CreateJobObject but before limits
+                # are installed. Only the kernel's never-assigned count can
+                # prove that such a reservation owned no process at all.
+                accounting = _Accounting()
+                if not owner._kernel.QueryInformationJobObject(
+                    owner.handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None,
+                ) or accounting.total_processes or accounting.active_processes:
+                    raise JobControlError("the reserved Job has unverified containment limits")
+                if not owner._kernel.CloseHandle(owner.handle):
+                    raise JobControlError("empty reserved Job cleanup remains unverified")
+                owner._handle, owner._stopped = None, True
+                cls._recovery_owners.pop(key, None)
+                return {"job_name": name, "zero_job": True, "unstarted_job": True}
+            owner.stop(timeout_ms=timeout_ms)
+            cls._recovery_owners.pop(key, None)
+            return {"job_name": name, "zero_job": True, "absent": False}
 
     @property
     def handle(self):

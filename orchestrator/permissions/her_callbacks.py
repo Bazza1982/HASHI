@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
@@ -21,7 +22,7 @@ from orchestrator.permissions.wire import PermissionServiceRouter
 
 
 class WorkerHerCallbacks:
-    METHODS = frozenset({"provider_checkpoint", "audit_record"})
+    METHODS = frozenset({"provider_checkpoint", "audit_record", "recovery_context"})
 
     def __init__(self, controller):
         self.controller = controller
@@ -37,6 +38,15 @@ class WorkerHerCallbacks:
         with guard(binding.context):
             pass
         return turn, guard
+
+    async def recovery_context(self, *, binding):
+        turn, guard = self._turn(binding)
+        # Only open_turn can populate this field after the PAO resume ticket
+        # has adopted the exact private context. The host supplies no snapshot.
+        result = copy.deepcopy(turn.recovery)
+        with guard(binding.context):
+            pass
+        return result
 
     async def provider_checkpoint(self, *, binding, checkpoint):
         turn, guard = self._turn(binding)
@@ -96,6 +106,9 @@ class CallbackClient:
                 descriptor["public_key"], validate=True,
             )), methods=WorkerHerCallbacks.METHODS,
         )
+
+    async def recovery(self, binding):
+        return await self.client.call_async("recovery_context", {"binding": binding})
 
     async def checkpoint(self, binding, checkpoint):
         return await self.client.call_async("provider_checkpoint", {"binding": binding, "checkpoint": checkpoint})

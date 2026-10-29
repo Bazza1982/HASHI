@@ -5,6 +5,7 @@ never starts HASHI, a Worker, another account or an executor during import.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 from uuid import uuid4
 
@@ -35,11 +36,14 @@ class PermissionServiceApplication:
             owner_bindings=self.owners, settings=settings,
         )
         self._management, self._endpoints, self._started = management, [], False
+        self._maintenance_stop, self._maintenance_task = asyncio.Event(), None
+        self._recovery_error = None
+        self._closed = False
         self.pao_router = PermissionServiceRouter(self, methods=PAO_METHODS)
         self.control_router = PermissionServiceRouter(self, methods=CONTROL_METHODS)
 
     async def start(self, endpoints):
-        if self._started or not isinstance(endpoints, tuple) or len(endpoints) != 2:
+        if self._closed or self._started or not isinstance(endpoints, tuple) or len(endpoints) != 2:
             raise ValueError("one PAO and one FC endpoint are required")
         self._endpoints = list(endpoints)
         try:
@@ -49,13 +53,37 @@ class PermissionServiceApplication:
             for endpoint in endpoints:
                 await endpoint.start()
             self._started = True
+            if callable(reconcile):
+                self._maintenance_task = asyncio.create_task(self._maintain(reconcile))
         except BaseException:
             await self.close()
             raise
 
+    async def _maintain(self, reconcile):
+        while not self._maintenance_stop.is_set():
+            try:
+                await reconcile()
+                self._recovery_error = None
+            except Exception as error:
+                self._recovery_error = type(error).__name__
+            try:
+                await asyncio.wait_for(self._maintenance_stop.wait(), timeout=1)
+            except TimeoutError:
+                pass
+
     async def close(self):
         self._started = False
+        self._closed = True
         failures = []
+        self._maintenance_stop.set()
+        if self._maintenance_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._maintenance_task), timeout=5)
+                self._maintenance_task = None
+            except Exception as error:
+                # Do not drop a still-running physical observer or release its
+                # installation lock while it could still settle a receipt.
+                failures.append(error)
         for binding in tuple(self.runs._active.values()):
             try:
                 await self.runs.close_execution(binding=binding)
@@ -67,12 +95,14 @@ class PermissionServiceApplication:
                 await closer()
             except BaseException as error:
                 failures.append(error)
+        retained_endpoints = []
         for endpoint in reversed(self._endpoints):
             try:
                 await endpoint.close()
             except BaseException as error:
                 failures.append(error)
-        self._endpoints.clear()
+                retained_endpoints.append(endpoint)
+        self._endpoints = list(reversed(retained_endpoints))
         if failures:
             raise OSError("permission service cleanup is unverified") from failures[0]
         lock = getattr(self, "_installation_lock", None)
@@ -84,7 +114,8 @@ class PermissionServiceApplication:
         if instance_id != self.store.instance_id or not self._started:
             raise PermissionDenied("permission service is not ready for this instance")
         return {"instance_id": self.store.instance_id, "generation": self.generation,
-                "state": "ready", "levels": list(self.levels)}
+                "state": "ready", "levels": list(self.levels),
+                "recovery_pending": self._recovery_error is not None, "execution_contract": 2}
 
     async def open_execution(self, **arguments):
         callbacks = arguments.pop("callbacks", None)

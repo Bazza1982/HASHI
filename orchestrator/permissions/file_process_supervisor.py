@@ -21,7 +21,9 @@ from orchestrator.permissions.windows_file_binding import (
     BoundWindowsCreate, BoundWindowsRead, open_bound_read, open_bound_write,
 )
 from orchestrator.permissions.windows_file_supervisor import _render_read
-from orchestrator.permissions.windows_process import inheritable_handle_copy, launch_suspended
+from orchestrator.permissions.windows_process import (
+    WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended,
+)
 
 
 class WindowsFileProcessSupervisor:
@@ -113,25 +115,27 @@ class WindowsFileProcessSupervisor:
                     os.fsync(stream.fileno())
                 if sha256(self._entry.read_bytes()).hexdigest() != self._entry_digest:
                     raise PermissionDenied("qualified file helper changed")
+                claim_options, job_name = {}, None
+                journal = getattr(self, "_journal", None)
+                if journal is not None:
+                    preassigned = uuid4().hex
+                    job_name = journal.reserve(
+                        context=context, operation_id=operation_id, descriptor=descriptor,
+                        arguments=frozen, cwd=self._cwd, claim_id=preassigned, owner_sid=self._sid,
+                        plan_path=plan_path, plan_digest=sha256(encoded).hexdigest(),
+                    )
+                    resource["journal_claim"] = preassigned
+                    claim_options["prepared_claim_id"] = preassigned
                 owned = launch_suspended(
                     executable=self._executable,
                     arguments=["-I", "-S", "-B", str(self._entry), str(plan_path), sha256(encoded).hexdigest()],
                     cwd=folder, environment=self._environment, expected_user_sid=self._sid,
-                    executable_digest=self._executable_digest, inherited_handles=(copy_handle,), max_processes=1,
+                    executable_digest=self._executable_digest, inherited_handles=(copy_handle,),
+                    max_processes=1, job_name=job_name,
                 )
                 resource.update(process=owned, bound=bound, transfer_kernel=copy_kernel, transfer=copy_handle)
-                claim_options = {}
-                journal = getattr(self, "_journal", None)
                 if journal is not None:
-                    preassigned = uuid4().hex
-                    journal.record(
-                        context=context, operation_id=operation_id, descriptor=descriptor,
-                        arguments=frozen, cwd=self._cwd, claim_id=preassigned, observation=owned.observation,
-                        plan_path=plan_path, plan_digest=sha256(encoded).hexdigest(),
-                        max_processes=owned._job.max_processes,
-                    )
-                    resource["journal_claim"] = preassigned
-                    claim_options["prepared_claim_id"] = preassigned
+                    journal.observe_process(preassigned, owned.observation, max_processes=owned._job.max_processes)
                 with self._guard(context):
                     if self._closed or self._validate(context, scope) is not True:
                         raise PermissionDenied("file execution policy changed before start")
@@ -167,7 +171,9 @@ class WindowsFileProcessSupervisor:
                                         result_digest=receipt.result_digest)
                 resource["plan_digest"] = sha256(encoded).hexdigest()
                 return receipt
-            except BaseException:
+            except BaseException as error:
+                if isinstance(error, WindowsProcessCleanupFailed):
+                    resource["launch_failure"] = error
                 # A failed ResumeThread may already have started. Inspect the
                 # authoritative operation; never release once by a local flag.
                 if claim is not None:
@@ -198,6 +204,11 @@ class WindowsFileProcessSupervisor:
         # Native waits run off the service loop so revocation/other Jobs remain
         # responsive. Concurrent shutdown and Tool completion share this owner.
         async with resource["lock"]:
+            failure = resource.get("launch_failure")
+            if failure is not None:
+                cleanup = asyncio.create_task(asyncio.to_thread(failure.retry_cleanup))
+                await asyncio.shield(cleanup)
+                resource.pop("launch_failure", None)
             owned = resource.get("process")
             if owned is not None:
                 stop = asyncio.create_task(asyncio.to_thread(owned.stop, timeout_ms=4500))
@@ -230,7 +241,7 @@ class WindowsFileProcessSupervisor:
                 resource["stop_recorded"] = True
             journal = getattr(self, "_journal", None)
             if journal is not None and resource.get("journal_claim"):
-                journal.stopped(resource["journal_claim"])
+                journal.stopped(resource["journal_claim"], observed_stop=owned is not None)
                 if claim is not None and self._authority.operation_state(operation_id) in {"succeeded", "failed", "waiting"}:
                     journal.finished(resource["journal_claim"])
             if self._active.get(operation_id) is resource:

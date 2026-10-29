@@ -250,7 +250,7 @@ def inheritable_handle_copy(handle):
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),
-                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None):
+                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None, job_name=None):
     kernel, security = _api()
     executable, cwd = Path(executable), Path(cwd)
     if (not executable.is_absolute() or not cwd.is_absolute() or not cwd.is_dir()
@@ -265,7 +265,9 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             or any(not isinstance(key, str) or not key or "=" in key or "\0" in key
                    or not isinstance(value, str) or "\0" in value for key, value in environment.items())):
         raise ValueError("a complete sanitized environment is required")
-    process, job, sid, null_handle = _Process(), WindowsJob(max_processes=max_processes), _PTR(), None
+    process, job, sid, null_handle = _Process(), WindowsJob(
+        max_processes=max_processes, name=job_name, owner_sid=expected_user_sid if job_name else None,
+    ), _PTR(), None
     attributes, initialized, transferred = None, False, False
     cleanup_failure, cleanup_cause = None, None
     try:
@@ -354,16 +356,23 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             if cleanup_error is not None:
                 cleanup_failure, cleanup_cause = WindowsProcessCleanupFailed(process, job, kernel), cleanup_error
             else:
-                if process.thread:
-                    kernel.CloseHandle(process.thread)
-                if process.process:
-                    kernel.CloseHandle(process.process)
+                for name in ("thread", "process"):
+                    handle = getattr(process, name)
+                    if handle:
+                        if kernel.CloseHandle(handle):
+                            setattr(process, name, None)
+                        else:
+                            cleanup_failure = WindowsProcessCleanupFailed(process, job, kernel)
+                            cleanup_cause = ctypes.WinError(ctypes.get_last_error())
         if initialized:
             kernel.DeleteProcThreadAttributeList(attributes)
         if sid:
             kernel.LocalFree(sid)
         if null_handle and null_handle != ctypes.c_void_p(-1).value:
-            kernel.CloseHandle(null_handle)
+            if not kernel.CloseHandle(null_handle):
+                cleanup_failure = cleanup_failure or WindowsProcessCleanupFailed(process, job, kernel)
+                cleanup_failure._null_handle = null_handle
+                cleanup_cause = ctypes.WinError(ctypes.get_last_error())
         if cleanup_failure is not None:
             raise cleanup_failure from cleanup_cause
 
@@ -373,17 +382,23 @@ class WindowsProcessCleanupFailed(OSError):
 
     def __init__(self, process, job, kernel):
         self._process, self._job, self._kernel = process, job, kernel
+        self._cleanup_lock = threading.RLock()
+        self._null_handle = None
         super().__init__("created process cleanup is unverified")
 
     def retry_cleanup(self):
-        if self._process.process and self._kernel.WaitForSingleObject(self._process.process, 0) != 0:
-            _checked(self._kernel.TerminateProcess(self._process.process, 1))
-            if self._kernel.WaitForSingleObject(self._process.process, 4500) != 0:
-                raise OSError("created process still has not stopped")
-        self._job.stop(timeout_ms=4500)
-        if self._process.thread:
-            self._kernel.CloseHandle(self._process.thread)
-            self._process.thread = None
-        if self._process.process:
-            self._kernel.CloseHandle(self._process.process)
-            self._process.process = None
+        with self._cleanup_lock:
+            if self._process.process and self._kernel.WaitForSingleObject(self._process.process, 0) != 0:
+                _checked(self._kernel.TerminateProcess(self._process.process, 1))
+                if self._kernel.WaitForSingleObject(self._process.process, 4500) != 0:
+                    raise OSError("created process still has not stopped")
+            self._job.stop(timeout_ms=4500)
+            if self._process.thread:
+                _checked(self._kernel.CloseHandle(self._process.thread))
+                self._process.thread = None
+            if self._process.process:
+                _checked(self._kernel.CloseHandle(self._process.process))
+                self._process.process = None
+            if self._null_handle:
+                _checked(self._kernel.CloseHandle(self._null_handle))
+                self._null_handle = None

@@ -21,7 +21,7 @@ from orchestrator.permissions.windows_process import ProcessObservation
 from tests.test_permission_pao_fence import setup_run
 
 
-def interrupted(tmp_path, *, raw_result=True, prepare=True):
+def interrupted(tmp_path, *, raw_result=True, prepare=True, record_process=True):
     _, _, _, _, context = setup_run(tmp_path)
     key = Ed25519PrivateKey.generate()
     issuer = SupervisorReceiptIssuer(key_id="fixedhelper", signing_key=key)
@@ -47,13 +47,18 @@ def interrupted(tmp_path, *, raw_result=True, prepare=True):
     journal = PhysicalFileJournal(
         tmp_path / "physical.sqlite", artifact_root=root, authority=old, results=results,
         issuer=issuer, observe_stopped=lambda observation: True,
+        recover_job=lambda *args, **kwargs: {"zero_job": True},
     )
     claim_id = "a" * 32
-    journal.record(
+    record = dict(
         context=context, operation_id="original-operation", descriptor=descriptor, arguments=arguments,
-        cwd=tmp_path, claim_id=claim_id, observation=observed, plan_path=plan_path,
-        plan_digest=sha256(plan_path.read_bytes()).hexdigest(), max_processes=1,
+        cwd=tmp_path, claim_id=claim_id, plan_path=plan_path,
+        plan_digest=sha256(plan_path.read_bytes()).hexdigest(),
     )
+    if record_process:
+        journal.record(**record, observation=observed, max_processes=1)
+    else:
+        journal.reserve(**record, owner_sid=observed.user_sid)
     if prepare:
         old.prepare(context, "original-operation", descriptor.arguments_digest, descriptor.scopes,
                     prepared_claim_id=claim_id)
@@ -66,6 +71,7 @@ def interrupted(tmp_path, *, raw_result=True, prepare=True):
     recovered = PhysicalFileJournal(
         tmp_path / "physical.sqlite", artifact_root=root, authority=current, results=results,
         issuer=issuer, observe_stopped=lambda observation: True,
+        recover_job=lambda *args, **kwargs: {"zero_job": True},
     )
     return current, context, claim_id, recovered, results, descriptor
 
@@ -111,6 +117,29 @@ def test_journal_before_prepare_does_not_invent_an_execution_claim(tmp_path):
     journal.reconcile()
     assert authority.resource_state(claim) is None
     assert not journal.pending()
+
+
+def test_reservation_before_process_registration_recovers_its_private_job_without_guessing_a_pid(tmp_path):
+    authority, _, claim, journal, _, _ = interrupted(
+        tmp_path, prepare=False, raw_result=False, record_process=False,
+    )
+    seen = []
+    def recovered(name, sid, **kwargs):
+        seen.append((name, sid, kwargs))
+        return {"zero_job": True}
+    journal._recover_job = recovered
+    journal.reconcile()
+    assert len(seen) == 1 and seen[0][0].endswith(claim)
+    assert authority.resource_state(claim) is None
+    assert not journal.pending()
+
+
+def test_unverified_job_stop_cannot_be_replaced_by_a_dead_root_pid(tmp_path):
+    authority, _, claim, journal, _, _ = interrupted(tmp_path)
+    journal._recover_job = lambda *args, **kwargs: {"zero_job": False}
+    journal.reconcile()
+    assert authority.resource_state(claim) != "stopped"
+    assert authority.operation_state("original-operation") == "unknown"
 
 
 def test_damaged_physical_evidence_cannot_release_a_claim(tmp_path):

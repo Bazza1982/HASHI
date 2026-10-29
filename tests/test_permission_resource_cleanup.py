@@ -8,6 +8,50 @@ import pytest
 from orchestrator.permissions.file_process_supervisor import WindowsFileProcessSupervisor
 
 
+
+@pytest.mark.asyncio
+async def test_failed_launch_cleanup_stays_owned_until_the_retained_failure_is_resolved():
+    class Failure:
+        fail = True
+        def retry_cleanup(self):
+            if self.fail:
+                raise OSError("created handle is still unverified")
+    failure = Failure()
+    owner, resource = supervisor(None)
+    resource["launch_failure"] = failure
+    with pytest.raises(OSError):
+        await owner._cleanup("operation", resource)
+    assert owner._active["operation"]["launch_failure"] is failure
+    failure.fail = False
+    await owner._cleanup("operation", resource)
+    assert not owner._active
+
+
+def test_partial_launch_handle_close_failure_retains_the_exact_handle_for_retry(monkeypatch):
+    import ctypes
+
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 6, raising=False)
+    if not hasattr(ctypes, "WinError"):
+        monkeypatch.setattr(ctypes, "WinError", lambda code: OSError(code, "injected kernel failure"), raising=False)
+    from orchestrator.permissions.windows_process import WindowsProcessCleanupFailed
+
+    process = SimpleNamespace(process=34, thread=12)
+    closed = []
+    class Kernel:
+        def WaitForSingleObject(self, handle, delay):
+            return 0
+        def CloseHandle(self, handle):
+            closed.append(handle)
+            return len(closed) != 1
+    failure = WindowsProcessCleanupFailed(process, SimpleNamespace(stop=lambda **kwargs: None), Kernel())
+    with pytest.raises(OSError):
+        failure.retry_cleanup()
+    assert process.thread == 12 and process.process == 34
+    failure.retry_cleanup()
+    assert process.thread is None and process.process is None
+    assert closed == [12, 12, 34]
+
+
 def supervisor(process):
     owner = WindowsFileProcessSupervisor.__new__(WindowsFileProcessSupervisor)
     owner._active, owner._closed, owner._tasks = {}, False, set()

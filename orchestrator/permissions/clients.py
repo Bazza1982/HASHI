@@ -165,10 +165,19 @@ class RemoteRunExecutor:
             "pcm_input": runtime.pcm_input, "skills_catalogue": list(runtime.skills_catalogue),
             "recovery": recovery,
         }
-        response = await self._owner._client.call_async(
-            "run_her", {"binding": binding, "command": command},
-            on_event=getattr(runtime.delivery, "callback", None),
-        )
+        try:
+            response = await self._owner._client.call_async(
+                "run_her", {"binding": binding, "command": command},
+                on_event=getattr(runtime.delivery, "callback", None),
+            )
+        except OSError as error:
+            from orchestrator.permissions.execution_gate import GateResult
+
+            # Contract v2 forbids any Tool effect before its exact durable
+            # pending checkpoint. With no private boundary the original Turn
+            # is still business-unstarted, even if host creation was uncertain.
+            self._permission_prestart_failure = True
+            raise PermissionPark(GateResult("unavailable", "")) from error
         if not isinstance(response, dict) or response.get("state") not in {"completed", "parked"}:
             raise PermissionDenied("restricted HER result is unavailable")
         # The adapter owns usage projection; a host result cannot be treated as
@@ -198,7 +207,7 @@ class PermissionRunClient:
     async def qualify(self):
         result = await self._client.call_async("health", {"instance_id": self.store.instance_id})
         if (not isinstance(result, dict) or result.get("instance_id") != self.store.instance_id
-                or result.get("state") != "ready"
+                or result.get("state") != "ready" or result.get("execution_contract") != 2
                 or self.settings.requested_level.value not in result.get("levels", [])):
             raise PermissionDenied("requested permission controls are unavailable")
         self._health = result
