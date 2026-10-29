@@ -113,11 +113,11 @@ def access_snapshot(
         raise LookupError("Agent is missing or ambiguous")
     row = matches[0]
     canonical = str(row.get("name") or "").strip()
-    extra = row.get("extra")
-    if extra is None:
-        extra = {}
-    if not isinstance(extra, Mapping):
+    nested_extra = row.get("extra")
+    if nested_extra is not None and not isinstance(nested_extra, Mapping):
         raise ValueError("invalid Agent configuration")
+    # ConfigManager uses the flattened Agent fields when nested extra is empty.
+    extra = nested_extra if nested_extra else row
     primary = resolve_telegram_owner_id(global_config, secrets_doc)
     if primary is not None:
         primary = normalize_telegram_user_id(primary)
@@ -256,15 +256,19 @@ class TelegramAccessService:
                         and str(row.get("name") or "").strip().casefold()
                         == snapshot.agent_id.casefold()
                     )
-                    extra = dict(row.get("extra") or {})
+                    nested_extra = row.get("extra")
+                    nested_mode = bool(nested_extra)
+                    extra = dict(nested_extra) if nested_mode else row
                     legacy = _id_list(extra.get(LEGACY_AGENT_USERS_KEY), legacy_scalar=True)
                     if action == "remove" and actor in legacy:
                         legacy.remove(actor)
                         extra[LEGACY_AGENT_USERS_KEY] = legacy
                     # Keep new grants out of the legacy field: an older Worker
-                    # would otherwise treat them as its primary owner.
+                    # would otherwise treat them as its primary owner. Preserve
+                    # flattened settings instead of replacing them with extra.
                     extra[AGENT_USERS_KEY] = [user for user in target if user not in legacy]
-                    row["extra"] = extra
+                    if nested_mode:
+                        row["extra"] = extra
                 write_config_json(self.config_path, config)
         except TelegramAccessError:
             raise

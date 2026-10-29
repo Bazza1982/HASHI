@@ -217,6 +217,34 @@ def test_new_scoped_grant_is_invisible_to_legacy_allowlists(tmp_path):
     assert 300 not in resolve_authorized_telegram_ids(extra, 42)
 
 
+@pytest.mark.parametrize("empty_extra", [False, True])
+def test_new_agent_grant_preserves_flattened_runtime_configuration(tmp_path, empty_extra):
+    from orchestrator.config import ConfigManager
+    from tests.test_config import _minimal_flex_agent, _write_base_files
+
+    agent = _minimal_flex_agent()
+    if empty_extra:
+        agent["extra"] = {}
+    agent["custom_setting"] = "keep"
+    agent["authorized_telegram_ids"] = [75]
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    _, before, _ = manager.load()
+    assert before[0].extra["custom_setting"] == "keep"
+    assert before[0].extra["authorized_telegram_ids"] == [75]
+
+    service = TelegramAccessService(config_path=config_path, secrets_path=secrets_path)
+    status = service.status("flexy")
+    assert status["agent_user_ids"] == ["75"]
+    service.change("flexy", expected_revision=status["revision"],
+                   scope="agent", action="add", user_id="300")
+    _, after, _ = manager.load()
+    assert after[0].extra["custom_setting"] == "keep"
+    assert after[0].extra["authorized_telegram_ids"] == [75]
+    assert after[0].extra["scoped_telegram_user_ids"] == [300]
+    assert service.status("flexy")["agent_user_ids"] == ["75", "300"]
+
+
 def test_removing_a_legacy_grant_also_removes_a_duplicate_new_grant(tmp_path):
     service, config_path, _ = _instance(tmp_path)
     config = read_config_json(config_path)

@@ -75,6 +75,11 @@ async def test_access_gate_requires_all_active_workers_and_no_legacy_grants(tmp_
     config["agents"][0]["extra"] = {"authorized_telegram_ids": [75]}
     write_config_json(config_path, config)
     assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
+    config = read_config_json(config_path)
+    config["agents"][0].pop("extra")
+    config["agents"][0]["authorized_telegram_ids"] = [75]
+    write_config_json(config_path, config)
+    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
 
 
 @pytest.mark.asyncio

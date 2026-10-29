@@ -70,7 +70,9 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
-from orchestrator.telegram_access import POLICY_VERSION, TelegramAccessError, TelegramAccessService
+from orchestrator.telegram_access import (
+    LEGACY_AGENT_USERS_KEY, POLICY_VERSION, TelegramAccessError, TelegramAccessService,
+)
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
     TelegramCredentialService,
@@ -5213,9 +5215,10 @@ class WorkbenchApiServer:
                     return False
                 # Old Workers cache this list and interpret it with legacy
                 # owner permissions; do not manage it across generations.
-                legacy = extra.get("authorized_telegram_ids")
-                if legacy is not None and legacy != []:
-                    return False
+                for source in (row, extra):
+                    legacy = source.get(LEGACY_AGENT_USERS_KEY)
+                    if legacy is not None and legacy != []:
+                        return False
                 if row.get("is_active", True) is not False:
                     active.add(name)
             runtimes = self._runtime_map()
