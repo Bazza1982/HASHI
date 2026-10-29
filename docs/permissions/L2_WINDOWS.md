@@ -221,6 +221,8 @@ Job Object 用于进程组、限制和清理，**不提供文件／网络／身�
 
 **退出条件：**WAC01、WAC02 的可执行验收计划齐备；不能仅以“AppContainer API 存在”结束 spike。
 
+**2026-10-29 局部实验（不视为 W01 通过）：**原生 Windows 11 build 26300 上，临时 AppContainer profile 的无 capability 进程通过实际 token 检查；受限进程可读取显式授权的临时文件，不能读取另一文件，对同一文件增加 ACL 后可以读取。测试文件自动清理，删除临时 profile 的 Windows API 返回成功。实验在当前 elevated 登录账户下创建临时 profile，偏离上述独立测试账户要求；后续正式平台实验必须使用独立测试账户。该结果不证明服务账户、LPAC、HERV3、网络、子进程回收或完整 L2 安全边界。实验脚本为 `scripts/permissions/windows_appcontainer_probe.py`；以后需明确提供独立测试账户的 SID，脚本核对当前 Windows token、非管理员组和测试账户名后才会创建临时 profile。
+
 ### W02 — 独立服务、测试安装和最小账户
 
 **输入：**W01 的平台组合与身份矩阵。
