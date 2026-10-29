@@ -248,6 +248,8 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                     agent_id=binding.agent,
                     message_id=menu.presentation_message_id,
                     text=menu.text,
+                    content_format=("telegram-html" if str(menu.parse_mode).casefold() == "html" else
+                                    "markdown" if str(menu.parse_mode).casefold().startswith("markdown") else "plain-text"),
                     message_context={
                         "command_ui": store.render(menu),
                         "frontend_presentation": store.message(menu)["presentation"],

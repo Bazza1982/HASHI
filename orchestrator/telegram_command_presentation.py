@@ -21,6 +21,13 @@ class _Query(_View):
 
     async def edit_message_text(self, text, **kwargs):
         parse_mode = str(kwargs.get("parse_mode") or "").casefold()
+        content_format = (
+            "telegram-html"
+            if parse_mode == "html"
+            else "markdown"
+            if parse_mode.startswith("markdown")
+            else "plain-text"
+        )
         context = runtime_delivery.telegram_presentation_context(
             text=text,
             content_format="telegram-html"
@@ -40,6 +47,7 @@ class _Query(_View):
             agent_id=self.runtime.name,
             message_id=self.reference["message_id"],
             text=text,
+            content_format=content_format,
             message_context=context,
         )
         return await self._wrapped.edit_message_text(text, **kwargs)

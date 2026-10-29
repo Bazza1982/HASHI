@@ -459,3 +459,63 @@ def test_command_input_is_redacted_and_atomic_with_reservation(
     rows = runtime.session_store.messages(metadata["session_id"], owner_id="user:7")
     assert [m["text"] for m in rows] == ["/status token=[redacted]"]
     assert "sensitive-fixture" not in str(rows)
+
+
+def test_legacy_menu_update_rebuilds_typed_actions_and_text_not_raw_html(
+    command_runtime,
+):
+    from orchestrator.command_interactions import Binding, Capture, MenuStore
+
+    runtime, metadata, _ = command_runtime
+    menus = MenuStore()
+    binding = Binding(
+        "COMMAND_TEST",
+        "fixture",
+        "7",
+        metadata["session_id"],
+        1,
+        "clientabcdefghijkl",
+        "bindingabcdefghijkl",
+    )
+    menu = menus.create(binding, "notify")
+    capture = Capture(menus, binding, "notify", lambda data: ("callback",))
+    capture._set(
+        menu,
+        "<b>ON</b>",
+        "HTML",
+        {"inline_keyboard": [[{"text": "Off", "callback_data": "notify:off"}]]},
+    )
+    published = runtime_session.publish_frontend_message(
+        runtime,
+        role="assistant",
+        text=menu.text,
+        source="test",
+        publication_id="legacy-menu",
+        surface="workbench",
+        channel_key="default",
+        explicit_session_id=metadata["session_id"],
+        content_format="telegram-html",
+        message_context={
+            "command_ui": menus.render(menu),
+            "frontend_presentation": menus.message(menu)["presentation"],
+        },
+    )
+    menu.revision += 1
+    capture._set(
+        menu,
+        "<b>OFF</b>",
+        "HTML",
+        {"inline_keyboard": [[{"text": "On", "callback_data": "notify:on"}]]},
+    )
+    updated = runtime.session_store.update_presentation_message(
+        session_id=metadata["session_id"],
+        owner_id="user:7",
+        agent_id="fixture",
+        message_id=published["message_id"],
+        text=menu.text,
+        message_context={"command_ui": menus.render(menu)},
+    )
+    assert (
+        updated["message_context"]["frontend_presentation"]["content_blocks"]
+        == menus.message(menu)["presentation"]["content_blocks"]
+    )

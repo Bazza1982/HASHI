@@ -4880,6 +4880,7 @@ class SessionStore:
         message_id: str,
         text: str,
         message_context: Mapping[str, Any],
+        content_format: str | None = None,
     ) -> dict[str, Any]:
         """Update one non-semantic UI row and make its revision poll-visible."""
 
@@ -4887,6 +4888,8 @@ class SessionStore:
         if not clean:
             raise ValueError("presentation message text is required")
         supplied_context = dict(message_context or {})
+        if content_format is not None and content_format not in {"plain-text", "markdown", "telegram-html"}:
+            raise ValueError("unsupported presentation content format")
         if (
             not supplied_context
             or set(supplied_context) - {"command_ui", "frontend_presentation", "frontend_connector_renditions"}
@@ -4942,21 +4945,15 @@ class SessionStore:
                 raise SessionNotFound("presentation message not found")
             context = _json_object(existing["message_context_json"])
             context.update(supplied_context)
-            if "frontend_presentation" not in supplied_context and isinstance(
-                context.get("frontend_presentation"), Mapping
-            ):
-                presentation = dict(context["frontend_presentation"])
-                blocks = [
-                    dict(item)
-                    for item in presentation.get("content_blocks") or []
-                    if isinstance(item, Mapping)
-                ]
-                for block in blocks:
-                    if block.get("type") == "text":
-                        block["text"] = clean
-                        break
-                presentation["content_blocks"] = blocks
-                context["frontend_presentation"] = presentation
+            if content_format is not None:
+                context["content_format"] = content_format
+            if "frontend_presentation" not in supplied_context:
+                from orchestrator.command_interactions import command_menu_presentation
+
+                context["frontend_presentation"] = command_menu_presentation(
+                    clean, str(context.get("content_format") or "plain-text"),
+                    supplied_context["command_ui"],
+                )
             # These invariants keep the row outside model history regardless of
             # what a Connector callback attempted to supply.
             context["presentation_only"] = True
