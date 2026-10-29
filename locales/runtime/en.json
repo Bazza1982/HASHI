@@ -4,6 +4,11 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "safety.title": "Permissions",
+    "safety.configured": "Configured level",
+    "safety.control_unknown": "Actual controls: not verified.",
+    "safety.config_unavailable": "Permission settings are unavailable; the level cannot be determined.",
+    "safety.action_unavailable": "Permission actions are unavailable. No permissions were granted or settings changed.",
     "forget.usage": "Use /forget 2h or /forget 3d. To resume interrupted work, use /forget resume.",
     "forget.unauthorized": "Forgetting requires an authenticated owner.",
     "forget.audit_unavailable": "The protected audit store is unavailable; forgetting did not start.",
@@ -2843,6 +2848,7 @@
     "ingress_confirmation.identity_mismatch": "This confirmation does not belong to this chat or message."
   },
   "commands": {
+    "safety": "View permission status",
     "askme": "Control question cards",
     "help": "Show help menu",
     "start": "Start another stopped agent",

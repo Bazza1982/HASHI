@@ -18,7 +18,7 @@ from orchestrator import ui_language
 
 logger = logging.getLogger("BridgeU.CommandRegistry")
 DEFAULT_PRIVATE_COMMAND_DIR = Path.home() / ".hashi" / "private_commands"
-NON_OVERRIDABLE_CORE_COMMANDS = frozenset({"queue", "wiki"})
+NON_OVERRIDABLE_COMMANDS = frozenset({"queue", "wiki", "safety"})
 
 CommandCallback = Callable[[Any, Any, Any], Awaitable[None]]
 
@@ -166,12 +166,12 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
         protected = {
             command.name
             for command in module_commands
-            if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS
+            if is_private and command.name in NON_OVERRIDABLE_COMMANDS
         }
         for command in module_commands:
-            if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS:
+            if is_private and command.name in NON_OVERRIDABLE_COMMANDS:
                 logger.debug(
-                    "Ignoring local extension override of protected core command %s from %s",
+                    "Ignoring local extension override of protected command %s from %s",
                     command.name,
                     _module_label(module),
                 )
@@ -204,7 +204,7 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
             )
         if protected and module_callbacks:
             logger.debug(
-                "Ignoring callbacks from local extension override of protected core command(s) %s in %s",
+                "Ignoring callbacks from local extension override of protected command(s) %s in %s",
                 ", ".join(sorted(protected)),
                 _module_label(module),
             )

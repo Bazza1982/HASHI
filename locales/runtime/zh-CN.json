@@ -4,6 +4,11 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "safety.title": "权限",
+    "safety.configured": "配置等级",
+    "safety.control_unknown": "实际控制状态：尚未验证。",
+    "safety.config_unavailable": "权限配置暂不可读，无法确定等级。",
+    "safety.action_unavailable": "权限操作暂不可用，未授予权限或更改设置。",
     "forget.usage": "用法：/forget 2h 或 /forget 3d；继续未完成的操作：/forget resume。",
     "forget.unauthorized": "遗忘操作需要经过身份验证的所有者。",
     "forget.audit_unavailable": "受保护的审计存储不可用，遗忘操作未开始。",
@@ -2843,6 +2848,7 @@
     "ingress_confirmation.identity_mismatch": "这条确认不属于当前聊天或原消息。"
   },
   "commands": {
+    "safety": "查看权限状态",
     "askme": "控制提问卡片",
     "help": "显示帮助菜单",
     "start": "启动其他已停止的代理",
