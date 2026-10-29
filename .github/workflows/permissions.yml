@@ -20,6 +20,8 @@ on:
       - "tests/test_permission_pao_fence.py"
       - "tests/test_session_store.py"
       - "tests/test_command_registry.py"
+      - "tests/test_command_presentation_recovery.py"
+      - "tests/test_command_menu_notify_integration.py"
       - "tests/test_permission_wait.py"
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
@@ -62,6 +64,8 @@ on:
       - "tests/test_permission_pao_fence.py"
       - "tests/test_session_store.py"
       - "tests/test_command_registry.py"
+      - "tests/test_command_presentation_recovery.py"
+      - "tests/test_command_menu_notify_integration.py"
       - "tests/test_permission_wait.py"
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
@@ -142,6 +146,8 @@ jobs:
           tests/test_permission_pao_fence.py
           tests/test_session_store.py
           tests/test_command_registry.py
+          tests/test_command_presentation_recovery.py
+          tests/test_command_menu_notify_integration.py
           tests/test_permission_wait.py
           tests/test_permission_execution_gate.py
           tests/test_permission_registry.py

@@ -101,14 +101,17 @@ async def test_status_does_not_disclose_configuration_to_an_unapproved_actor(tmp
 @pytest.mark.asyncio
 async def test_shared_frontend_command_projection_uses_existing_contract(tmp_path, monkeypatch):
     import orchestrator.command_registry as registry
+    from orchestrator.session_store import SessionStore
 
     monkeypatch.setattr(registry, "DEFAULT_PRIVATE_COMMAND_DIR", tmp_path / "no-private")
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", "")
     registry.invalidate_runtime_registry_cache()
     runtime, path = runtime_for(tmp_path, [{"name": "agent"}])
     before = path.read_bytes()
+    runtime.session_store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="TEST")
+    session = runtime.session_store.create_session(owner_id="user:7", agent_id="agent")
     metadata = {
-        "actor_id": 7, "instance_id": "TEST", "session_id": "sessionabcdefghijkl",
+        "actor_id": 7, "instance_id": "TEST", "session_id": session["session_id"],
         "context_generation": 1, "session_surface": "workbench", "session_channel_key": "default",
         "connection_binding": "bindingabcdefghijk", "owner_id": "user:7",
     }
@@ -122,4 +125,7 @@ async def test_shared_frontend_command_projection_uses_existing_contract(tmp_pat
     assert "权限" in result["messages"][-1]["text"]
     assert "<code>L0</code>" in result["messages"][-1]["text"]
     assert "尚未验证" in result["messages"][-1]["text"]
+    rows = runtime.session_store.messages(session["session_id"], owner_id="user:7")
+    assert any(row["text"] == result["messages"][-1]["text"] for row in rows)
+    assert all(not row["history_eligible"] for row in rows)
     assert path.read_bytes() == before
