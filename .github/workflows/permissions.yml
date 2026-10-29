@@ -20,6 +20,7 @@ on:
       - "tests/test_enterprise_identity.py"
       - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
+      - "tests/test_permission_windows_supervisor.py"
       - "tests/test_permission_test_identity.py"
       - "tests/test_permission_probe_staging.py"
       - "tests/test_permission_probe_process.py"
@@ -52,6 +53,7 @@ on:
       - "tests/test_enterprise_identity.py"
       - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
+      - "tests/test_permission_windows_supervisor.py"
       - "tests/test_permission_test_identity.py"
       - "tests/test_permission_probe_staging.py"
       - "tests/test_permission_probe_process.py"
@@ -103,7 +105,7 @@ jobs:
           tests/test_permission_agent_tools.py tests/test_permission_wait.py
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
           tests/test_permission_signed_receipts.py tests/test_permission_actions.py
-          tests/test_permission_windows_file_binding.py
+          tests/test_permission_windows_file_binding.py tests/test_permission_windows_supervisor.py
           tests/test_permissions_service_recovery.py
           tests/test_permissions_outcome_recovery.py
           tests/test_permissions_guarded_dispatch.py tests/test_permissions_result_store.py
@@ -128,6 +130,7 @@ jobs:
           tests/test_enterprise_identity.py
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
+          tests/test_permission_windows_supervisor.py
           tests/test_permissions_authority.py
           tests/test_permissions_service_recovery.py
           tests/test_permissions_outcome_recovery.py

@@ -431,3 +431,19 @@ def test_reopening_rejects_a_presentation_table_without_foreign_key(setup_action
     with pytest.raises(ValueError, match="presentation constraints are incomplete"):
         PermissionAuthority(authority.path, verifier=verifier,
                             clock=lambda: clock[0], monotonic=lambda: clock[0])
+
+
+def test_changed_request_scope_cannot_be_approved_under_the_old_digest(setup_actions, tmp_path):
+    import json
+    from dataclasses import asdict
+
+    authority, key, _, _, context, scope, request = setup_actions
+    action = _issue(authority, context, request, [scope])
+    wider = normalize_scope("file", str(tmp_path.parent), ["read", "write"], cwd=tmp_path)
+    with sqlite3.connect(authority.path) as connection:
+        connection.execute("UPDATE access_requests SET scopes_json=? WHERE request_id=?",
+                           (json.dumps([asdict(wider)]), request.request_id))
+    with pytest.raises(InvalidDecision, match="scope is unavailable or changed"):
+        authority.decide(_token(key, _receipt(action, context)), approved_scopes=[scope], action_id=action.action_id)
+    assert authority.decision_count(request.request_id) == 0
+    assert not authority.evaluate(context, [scope], operation_id="operation")

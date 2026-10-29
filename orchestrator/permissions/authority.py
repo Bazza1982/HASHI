@@ -1730,7 +1730,12 @@ class PermissionAuthority:
                 request["context_generation"] != proof.context_generation,
             )):
                 raise InvalidDecision("receipt does not bind the current request")
-            requested = _load_scopes(request["scopes_json"])
+            try:
+                requested = _load_scopes(request["scopes_json"])
+                if scope_digest(requested) != request["scope_digest"]:
+                    raise ValueError("request scope digest changed")
+            except (TypeError, ValueError, OSError, RuntimeError) as exc:
+                raise InvalidDecision("request scope is unavailable or changed") from exc
             if not all(any(scope_covers(parent, child) for parent in requested) for child in normalized):
                 raise InvalidDecision("approved scope exceeds the request")
             if proof.lifetime == "once" and not request["operation_id"]:
@@ -1898,6 +1903,30 @@ class PermissionAuthority:
             raise PermissionDenied("claim binding mismatch")
         return row
 
+    def cancel_prepared(self, context: ExecutionContext, claim_id: str) -> bool:
+        """Fence a prepared claim; only verified cleanup can release its reservation."""
+        _nonempty(claim_id, "claim_id")
+        with self._transaction() as connection:
+            now = self._now(connection)
+            self._context(connection, context, active=False)
+            claim = self._claim(connection, context, claim_id)
+            if claim["state"] == "cancelled":
+                return True
+            if claim["state"] != "prepared":
+                return False
+            operation = connection.execute(
+                "SELECT state FROM pending_operations WHERE operation_id=?", (claim["operation_id"],)
+            ).fetchone()
+            if operation is None or operation["state"] != "prepared":
+                raise OperationConflict("prepared claim and operation disagree")
+            connection.execute("UPDATE execution_claims SET state='cancelled' WHERE claim_id=?", (claim_id,))
+            connection.execute(
+                "UPDATE execution_resources SET state='stopping' WHERE claim_id=? AND state!='stopped'",
+                (claim_id,),
+            )
+            self._event(connection, context.task_id, "claim_cancelled", claim_id, now)
+            return True
+
     def start(self, context: ExecutionContext, claim_id: str) -> ExecutionClaim:
         _nonempty(claim_id, "claim_id")
         with self._transaction() as connection:
@@ -1908,6 +1937,15 @@ class PermissionAuthority:
                 raise PermissionDenied("claim was cancelled before start")
             if claim["state"] != "prepared":
                 raise OperationConflict("claim is no longer prepared")
+            operation = connection.execute(
+                "SELECT * FROM pending_operations WHERE operation_id=?", (claim["operation_id"],)
+            ).fetchone()
+            if operation is None or any((
+                operation["task_id"] != context.task_id, operation["run_id"] != context.run_id,
+                operation["execution_epoch"] != context.execution_epoch, operation["state"] != "prepared",
+                operation["scope_digest"] != scope_digest(_load_scopes(claim["scopes_json"])),
+            )):
+                raise OperationConflict("prepared claim and operation disagree")
             original = set(json.loads(claim["lease_ids_json"]))
             valid = self._covering_leases(
                 connection, context, now, _load_scopes(claim["scopes_json"]),
@@ -2257,10 +2295,19 @@ class PermissionAuthority:
                 return
             if receipt.expires_at <= now:
                 raise PermissionDenied("resource-stop evidence expired")
+            resource = connection.execute(
+                "SELECT state FROM execution_resources WHERE claim_id=?", (claim_id,)
+            ).fetchone()
+            if resource is None:
+                raise PermissionDenied("execution resource is unavailable")
             connection.execute(
                 "INSERT INTO resource_stop_receipts VALUES(?,?,?,?)",
                 (receipt.nonce, claim_id, proof_hash, now),
             )
+            if resource["state"] == "stopped":
+                # Record the distinct nonce, but never reapply old cleanup to a
+                # later claim of the same operation.
+                return
             connection.execute(
                 "UPDATE execution_resources SET state='stopped' WHERE claim_id=?", (claim_id,)
             )
@@ -2269,7 +2316,10 @@ class PermissionAuthority:
                 # receipt has proved its associated prepared resource stopped.
                 connection.execute(
                     "UPDATE pending_operations SET state='waiting' "
-                    "WHERE operation_id=? AND state='prepared'", (claim["operation_id"],),
+                    "WHERE operation_id=? AND state='prepared' AND NOT EXISTS "
+                    "(SELECT 1 FROM execution_claims c WHERE c.operation_id=? "
+                    "AND c.claim_id!=? AND c.state IN ('prepared','started'))",
+                    (claim["operation_id"], claim["operation_id"], claim_id),
                 )
                 connection.execute(
                     "UPDATE permission_leases SET status='active',reserved_claim=NULL "

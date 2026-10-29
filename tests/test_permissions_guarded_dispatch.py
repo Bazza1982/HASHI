@@ -1,6 +1,6 @@
 """The final application-level dispatch barrier serializes authority changes."""
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event
 
 import pytest
 
@@ -206,3 +206,100 @@ def test_separate_leases_can_cover_the_actions_of_one_operation(environment, tmp
     target = root / "combined.txt"
     assert dispatch(environment, claim, lambda: target.write_text("combined", encoding="utf-8")) == 8
     assert target.read_text(encoding="utf-8") == "combined"
+
+
+def test_cancelled_prepared_claim_releases_once_only_after_stop_proof(environment):
+    from orchestrator.permissions.authority import ResourceStopReceipt
+
+    authority, issuer, clock, context, scope, lease, claim = prepared(environment)
+    assert authority.cancel_prepared(context, claim.claim_id)
+    assert authority.cancel_prepared(context, claim.claim_id)
+    assert authority.get_lease(lease.lease_id).status == "reserved"
+    assert authority.resource_state(claim.claim_id) == "stopping"
+    with pytest.raises(PermissionDenied):
+        authority.start(context, claim.claim_id)
+    with pytest.raises(PermissionDenied):
+        authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference="unverified")
+    assert authority.get_lease(lease.lease_id).status == "reserved"
+    proof = ResourceStopReceipt(
+        nonce="stop", claim_id=claim.claim_id, instance_id=context.instance_id,
+        task_id=context.task_id, execution_epoch=context.execution_epoch, observer_id=context.executor_id,
+        evidence_digest="b" * 64, expires_at=clock.value + 30,
+    )
+    authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(proof))
+    assert authority.resource_state(claim.claim_id) == "stopped"
+    assert authority.get_lease(lease.lease_id).status == "active"
+    assert authority.operation_status_for_task(context, "operation").state == "waiting"
+    retry = authority.prepare(context, "operation", "a" * 64, [scope])
+    assert retry.claim_id != claim.claim_id
+
+
+def test_cancel_prepared_and_start_have_one_transactional_winner(environment):
+    authority, _, _, context, _, _, claim = prepared(environment)
+    barrier = Barrier(2)
+
+    def start():
+        barrier.wait()
+        try:
+            authority.start(context, claim.claim_id)
+            return "started"
+        except PermissionDenied:
+            return "denied"
+
+    def cancel():
+        barrier.wait()
+        return authority.cancel_prepared(context, claim.claim_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        started, cancelled = pool.submit(start), pool.submit(cancel)
+        outcome = (started.result(), cancelled.result())
+    assert outcome in {("started", False), ("denied", True)}
+
+
+def test_late_stop_receipt_for_old_claim_cannot_reset_a_new_prepared_claim(environment):
+    from dataclasses import replace
+    from orchestrator.permissions.authority import ResourceStopReceipt
+
+    authority, issuer, clock, context, scope, _, old = prepared(environment, lifetime="task")
+    authority.cancel_prepared(context, old.claim_id)
+    proof = ResourceStopReceipt(
+        nonce="stop-one", claim_id=old.claim_id, instance_id=context.instance_id,
+        task_id=context.task_id, execution_epoch=context.execution_epoch, observer_id=context.executor_id,
+        evidence_digest="b" * 64, expires_at=clock.value + 30,
+    )
+    authority.confirm_resource_stopped(context, old.claim_id, receipt_reference=issuer.publish_stop(proof))
+    new = authority.prepare(context, "operation", "a" * 64, [scope])
+    late = replace(proof, nonce="stop-two")
+    authority.confirm_resource_stopped(context, old.claim_id, receipt_reference=issuer.publish_stop(late))
+    assert authority.operation_status_for_task(context, "operation").state == "prepared"
+    with pytest.raises(OperationConflict):
+        authority.prepare(context, "operation", "a" * 64, [scope])
+    assert authority.start(context, new.claim_id).state == "started"
+
+
+def test_start_rejects_a_claim_whose_operation_state_disagrees(environment):
+    import sqlite3
+
+    authority, _, _, context, _, lease, claim = prepared(environment)
+    with sqlite3.connect(authority.path) as connection:
+        connection.execute("UPDATE pending_operations SET state='waiting' WHERE operation_id='operation'")
+    with pytest.raises(OperationConflict):
+        authority.start(context, claim.claim_id)
+    assert authority.get_lease(lease.lease_id).status == "reserved"
+
+
+def test_cleanup_after_expiry_never_revives_once_authorization(environment):
+    from orchestrator.permissions.authority import ResourceStopReceipt
+
+    authority, issuer, clock, context, scope, lease, claim = prepared(environment)
+    authority.cancel_prepared(context, claim.claim_id)
+    clock.value = lease.expires_at
+    proof = ResourceStopReceipt(
+        nonce="stop-after-expiry", claim_id=claim.claim_id, instance_id=context.instance_id,
+        task_id=context.task_id, execution_epoch=context.execution_epoch, observer_id=context.executor_id,
+        evidence_digest="b" * 64, expires_at=clock.value + 30,
+    )
+    authority.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(proof))
+    assert authority.get_lease_for_task(context, lease.lease_id).status == "expired"
+    with pytest.raises(PermissionDenied):
+        authority.prepare(context, "operation", "a" * 64, [scope])
