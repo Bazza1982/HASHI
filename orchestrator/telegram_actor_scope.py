@@ -99,6 +99,31 @@ def delivery_allowed(runtime: Any, *, owner_id: str | None, chat_id: Any) -> boo
         return False
 
 
+def workzone_owner(
+    runtime: Any, owner_id: str, *, require_global: bool = False
+) -> str | None:
+    """Resolve an authorized Telegram user's selected Agent Workzone owner."""
+    owner = str(owner_id or "").strip()
+    if not owner.startswith("telegram-user:"):
+        return owner or None
+    try:
+        _, actor_text, _fingerprint = owner.split(":")
+        actor = int(actor_text)
+        snapshot = runtime_snapshot(runtime)
+        scope = current_actor(runtime)
+        if (
+            actor not in snapshot.effective_user_ids
+            or actor == snapshot.primary_user_id
+            or owner != _delegated_owner(snapshot, actor)
+            or (scope is not None and scope.owner_id != owner)
+            or (require_global and actor not in snapshot.global_user_ids)
+        ):
+            return None
+        return snapshot.owner_scope_id
+    except (OSError, ValueError, TypeError, AttributeError, LookupError):
+        return None
+
+
 def _safevoice_callback_matches_chat(runtime: Any, data: str, chat_id: int) -> bool:
     parts = data.split(":", 2)
     if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no"}:

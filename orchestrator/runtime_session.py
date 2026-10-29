@@ -2177,6 +2177,11 @@ def agent_workzone_state(
         except (AttributeError, SessionNotFound):
             resolved_owner = ""
     resolved_owner = resolved_owner or owner_id(runtime)
+    from orchestrator.telegram_actor_scope import workzone_owner
+
+    resolved_owner = workzone_owner(runtime, resolved_owner)
+    if not resolved_owner:
+        return {"revision": 0, "slots": []}
     try:
         state = ensure_store(runtime).get_agent_workzone_set(
             owner_id=resolved_owner,

@@ -18,6 +18,8 @@ commands cannot use a chat-only grant to reach other Agents.
 Replacing the primary revokes previously granted global users. An additional
 actor's direct private Telegram chat must use its own Session owner scope; the
 existing primary owner scope and Workbench conversation remain unchanged.
+Authorized users inherit only the selected Agent's existing Workzone profile;
+global users may manage that profile, while Agent-only users cannot.
 
 The candidate contains a configuration service, actor-scope helpers, and initial
 delivery checks. New Workers use a revisioned policy marker to adopt saved grants

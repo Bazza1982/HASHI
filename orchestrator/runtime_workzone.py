@@ -92,10 +92,15 @@ def install_runtime_state(runtime: Any, state: Mapping[str, Any] | None) -> dict
 def agent_state(runtime: Any, *, owner_id: str | None = None) -> dict[str, Any]:
     from orchestrator import runtime_session
 
+    from orchestrator.telegram_actor_scope import workzone_owner
+
+    resolved_owner = workzone_owner(runtime, owner_id or runtime_session.owner_id(runtime))
+    if not resolved_owner:
+        return _empty_state()
     store = runtime_session.ensure_store(runtime)
     return normalize_workzone_state(
         store.get_agent_workzone_set(
-            owner_id=owner_id or runtime_session.owner_id(runtime),
+            owner_id=resolved_owner,
             agent_id=runtime.name,
         )
     )
@@ -706,8 +711,11 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         await runtime._reply_text(update, ui_language.tr("workzone.path_expired"))
         return True
     session = _current_session(runtime, update)
+    from orchestrator.telegram_actor_scope import workzone_owner
+
+    resolved_owner = workzone_owner(runtime, str(session["owner_id"]), require_global=True)
     if (
-        str(session["owner_id"]) != str(pending["owner_id"])
+        not resolved_owner or resolved_owner != str(pending["owner_id"])
         or str(runtime.name).lower() != str(pending["agent_id"])
     ):
         _clear_pending_path(runtime, update)
@@ -742,18 +750,18 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
     )
     if ticket.state == "completed":
         _clear_pending_path(runtime, update)
-        current = agent_state(runtime, owner_id=str(session["owner_id"]))
+        current = agent_state(runtime, owner_id=resolved_owner)
         await _reply_slot(runtime, update, current, pending["slot"])
         return True
     if ticket.state != "reserved":
         _clear_pending_path(runtime, update)
         await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
         return True
-    state = agent_state(runtime, owner_id=str(session["owner_id"]))
+    state = agent_state(runtime, owner_id=resolved_owner)
     try:
         after, deferred = await _save_path(
             runtime,
-            owner_id=str(session["owner_id"]),
+            owner_id=resolved_owner,
             state=state,
             slot_id=pending["slot"],
             raw_path=raw_path,
@@ -905,7 +913,17 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         return
     args = [str(item).strip() for item in (context.args or []) if str(item).strip()]
     session = _current_session(runtime, update)
-    resolved_owner = str(session["owner_id"])
+    from orchestrator.telegram_actor_scope import workzone_owner
+
+    resolved_owner = workzone_owner(runtime, str(session["owner_id"]), require_global=True)
+    if not resolved_owner:
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "telegram.scoped.chat_only", locale=ui_language.preferred_locale(runtime, update)
+            ),
+        )
+        return
     state = agent_state(runtime, owner_id=resolved_owner)
     if not runtime._backend_busy():
         install_runtime_state(runtime, state)
@@ -1121,7 +1139,17 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         return
     data = str(query.data or "")
     session = _current_session(runtime, update)
-    resolved_owner = str(session["owner_id"])
+    from orchestrator.telegram_actor_scope import workzone_owner
+
+    resolved_owner = workzone_owner(runtime, str(session["owner_id"]), require_global=True)
+    if not resolved_owner:
+        await query.answer(
+            ui_language.tr(
+                "telegram.scoped.chat_only", locale=ui_language.preferred_locale(runtime, update)
+            ),
+            show_alert=True,
+        )
+        return
     state = agent_state(runtime, owner_id=resolved_owner)
     if data == "wz:h":
         await query.answer()
