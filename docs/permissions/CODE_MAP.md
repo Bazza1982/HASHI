@@ -203,7 +203,8 @@
 | 权限服务 | 当前 `authority.py` 包含部分决策与 claim/start；派生授权和真实入口待实现 | 工具申请、/safety、执行器；L1/APPROVAL |
 | `orchestrator/permissions/task_binding.py`、`orchestrator/permissions/lifecycle.py` | PAO 任务归属、epoch、终结与精确代际接线 | PAO、HERV3、supervisor；CASE-LIFE |
 | `orchestrator/permissions/waiting.py` | 本地异步等待、权威状态重查、同 operation 与部分批准续等 | 已新增；尚未接入 HERV3，也不提供持久 continuation 或 park |
-| `orchestrator/permissions/execution_gate.py` | 内部受管执行协调、范围检查、等待、监督回执匹配及原操作结果恢复端口 | 已新增；仅与测试 supervisor 联调，恢复须校验旧代次、结果摘要和资源停止；真实结果存储/执行隔离未接线 |
+| `orchestrator/permissions/execution_gate.py` | 内部受管执行协调、范围检查、等待、监督回执匹配及原操作结果恢复端口 | 已新增；仅与测试 supervisor 联调，恢复须校验旧代次、结果摘要和资源停止；真实执行隔离未接线 |
+| `orchestrator/permissions/result_store.py` | 绑定任务与原操作的加密结果副本，拒绝篡改、覆盖和不一致恢复 | 已新增并在隔离测试中接到执行协调；可信密钥、目录 ACL、正式服务与实际运行接线仍待实现 |
 | `orchestrator/permissions/registry.py` | 受管 ToolRegistry 原型，保留旧 admission 并调用执行协调 | 仅隔离测试构造；未安装到实际后端，尚无可信执行服务 |
 | `orchestrator/permissions/signed_receipts.py` | 校验固定公钥签署的准确决定 | 仅验证签名和格式；真实人类认证、受保护签发及密钥部署仍待实现 |
 | `orchestrator/permissions/enterprise_decisions.py` | 以现有企业用户会话和已登记动作进行离线签发联调 | 原型未接线；session 本身不证明真人意图，凭据及 signer 的隔离部署仍待实现 |
