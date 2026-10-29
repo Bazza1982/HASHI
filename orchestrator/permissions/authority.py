@@ -1136,7 +1136,10 @@ class PermissionAuthority:
             return _request_from(self._request_for_task(connection, context.task_id, request_id))
 
     def decide(self, reference: str, *, approved_scopes: Iterable[Scope]) -> PermissionLease | None:
-        _nonempty(reference, "decision receipt reference")
+        try:
+            _nonempty(reference, "decision receipt reference", limit=16 * 1024)
+        except ValueError as exc:
+            raise InvalidDecision("invalid decision receipt reference") from exc
         proof = self._verifier.verify(reference)
         if not isinstance(proof, DecisionReceipt):
             raise InvalidDecision("trusted decision receipt unavailable")

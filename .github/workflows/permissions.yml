@@ -13,6 +13,7 @@ on:
       - "tests/test_permission_wait.py"
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
+      - "tests/test_permission_signed_receipts.py"
       - "tests/test_permissions_*.py"
       - "tests/test_config.py"
       - "tests/test_config_json.py"
@@ -35,6 +36,7 @@ on:
       - "tests/test_permission_wait.py"
       - "tests/test_permission_execution_gate.py"
       - "tests/test_permission_registry.py"
+      - "tests/test_permission_signed_receipts.py"
       - "tests/test_permissions_*.py"
       - "tests/test_config.py"
       - "tests/test_config_json.py"
@@ -77,6 +79,7 @@ jobs:
           scripts/permissions/windows_appcontainer_probe.py
           tests/test_permission_agent_tools.py tests/test_permission_wait.py
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
+          tests/test_permission_signed_receipts.py
           tests/test_permissions_config.py tests/test_permissions_descriptors.py
           tests/test_permissions_l0_baseline.py tests/test_permissions_models.py
           tests/test_permissions_requests.py tests/test_permissions_runtime_guard.py
@@ -89,6 +92,7 @@ jobs:
           tests/test_permission_wait.py
           tests/test_permission_execution_gate.py
           tests/test_permission_registry.py
+          tests/test_permission_signed_receipts.py
           tests/test_permissions_authority.py
           tests/test_permissions_config.py
           tests/test_permissions_descriptors.py
