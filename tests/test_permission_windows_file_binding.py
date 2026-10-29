@@ -143,8 +143,11 @@ async def test_authorized_operation_reads_the_bound_windows_file(tmp_path):
             del arguments
             with open_bound_read(descriptor.scopes[0]) as bound:
                 claim = authority.prepare(ctx, operation_id, descriptor.arguments_digest, descriptor.scopes)
-                authority.start(ctx, claim.claim_id)
-                result = bound.read(max_bytes=100).decode("utf-8")
+                result = authority.dispatch_guarded(
+                    ctx, claim.claim_id, operation_id=operation_id,
+                    arguments_digest=descriptor.arguments_digest, scopes=descriptor.scopes,
+                    effect=lambda: bound.read(max_bytes=100),
+                ).decode("utf-8")
             digest = sha256(result.encode("utf-8")).hexdigest()
             authority.finish(ctx, claim.claim_id, outcome="succeeded", result_digest=digest)
             return SupervisedResult(operation_id, descriptor.arguments_digest, "succeeded", digest, result)
@@ -331,8 +334,11 @@ async def test_authorized_operation_creates_the_bound_windows_file(tmp_path):
         async def execute(self, ctx, operation_id, descriptor, arguments):
             with open_bound_create(descriptor.scopes[0]) as bound:
                 claim = authority.prepare(ctx, operation_id, descriptor.arguments_digest, descriptor.scopes)
-                authority.start(ctx, claim.claim_id)
-                bound.commit(arguments["content"].encode("utf-8"))
+                authority.dispatch_guarded(
+                    ctx, claim.claim_id, operation_id=operation_id,
+                    arguments_digest=descriptor.arguments_digest, scopes=descriptor.scopes,
+                    effect=lambda: bound.commit(arguments["content"].encode("utf-8")),
+                )
             output = "created"
             digest = sha256(output.encode("utf-8")).hexdigest()
             authority.finish(ctx, claim.claim_id, outcome="succeeded", result_digest=digest)
@@ -369,3 +375,67 @@ def test_create_size_limit_and_single_use_are_fail_closed(tmp_path):
         with pytest.raises(FileBindingError, match="already used"):
             bound.commit(b"repeat")
     assert target.read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_revoked_queued_windows_create_cannot_write_the_bound_file(tmp_path):
+    import asyncio
+
+    from orchestrator.permissions.authority import PermissionAuthority
+    from orchestrator.permissions.execution_gate import PermissionExecutionGate
+    from orchestrator.permissions.models import ExecutionContext
+    from orchestrator.permissions.waiting import PermissionWaiter
+    from tests.test_permission_execution_gate import Issuer, find_pending
+
+    context = ExecutionContext(
+        instance_id="instance", owner_id="owner", agent_id="agent", task_id="task",
+        run_id="run", session_id="session", turn_id="turn", worker_generation="worker",
+        context_generation="generation", execution_epoch="epoch", backend_id="herv3",
+        executor_id="test-windows-creator", policy_revision=1,
+    )
+    issuer = Issuer()
+    authority = PermissionAuthority(
+        tmp_path / "ledger.sqlite", verifier=issuer, clock=lambda: 1000.0, monotonic=lambda: 1000.0
+    )
+    authority.open_task(context)
+    target = tmp_path / "queued.txt"
+    waiter = PermissionWaiter(authority, reconcile_seconds=0.02)
+    queued, release = asyncio.Event(), asyncio.Event()
+    claims = []
+
+    class TestSupervisor:
+        def supports(self, tool_name):
+            return tool_name == "file_write"
+
+        async def execute(self, ctx, operation_id, descriptor, arguments):
+            with open_bound_create(descriptor.scopes[0]) as bound:
+                claim = authority.prepare(ctx, operation_id, descriptor.arguments_digest, descriptor.scopes)
+                claims.append(claim.claim_id)
+                queued.set()
+                await release.wait()
+                authority.dispatch_guarded(
+                    ctx, claim.claim_id, operation_id=operation_id,
+                    arguments_digest=descriptor.arguments_digest, scopes=descriptor.scopes,
+                    effect=lambda: bound.commit(arguments["content"].encode("utf-8")),
+                )
+
+    ceiling = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+    gate = PermissionExecutionGate(
+        authority, waiter, TestSupervisor(), context=context, cwd=tmp_path,
+        read_roots=(tmp_path,), requestable_scopes=(ceiling,),
+    )
+    operation = asyncio.create_task(gate.execute(
+        "operation", "file_write", {"path": "queued.txt", "content": "must not appear"}, reason="report",
+    ))
+    request = await find_pending(authority, context)
+    facts = authority.operation_status_for_task(context, "operation")
+    lease = issuer.approve(authority, context, request, facts.arguments_digest)
+    waiter.notify()
+    await asyncio.wait_for(queued.wait(), 1)
+    authority.revoke(context, lease.lease_id)
+    release.set()
+    result = await asyncio.wait_for(operation, 1)
+    assert result.state == "unknown"
+    assert authority.resource_state(claims[0]) == "stopping"
+    assert authority.get_lease(lease.lease_id).status == "revoked"
+    assert not target.exists()

@@ -14,6 +14,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 import hashlib
+import inspect
 import json
 import math
 from pathlib import Path
@@ -1929,6 +1930,109 @@ class PermissionAuthority:
             )
             self._event(connection, context.task_id, "claim_started", claim_id, now)
             return ExecutionClaim(claim_id, claim["operation_id"], "started")
+
+    def dispatch_guarded(
+        self, context: ExecutionContext, claim_id: str, *, operation_id: str,
+        arguments_digest: str, scopes: Iterable[Scope], effect: Callable[[], object],
+    ) -> object:
+        """Run one short, trusted local effect under the authority write barrier.
+
+        The caller must already hold the actual resource and bind it to these
+        exact facts. The callback is trusted service code, never model input.
+        It must not call the authority, wait for a user, perform network I/O
+        or start a long-running operation. A blocked local call can delay
+        revocation. This is not an OS sandbox or an L2 service. A callback
+        failure leaves the started operation uncertain and never retries it.
+        """
+        _nonempty(claim_id, "claim_id")
+        _nonempty(operation_id, "operation_id")
+        _digest(arguments_digest, "arguments_digest")
+        deferred = (inspect.iscoroutinefunction, inspect.isgeneratorfunction, inspect.isasyncgenfunction)
+        if (not callable(effect)
+                or any(check(effect) or check(getattr(effect, "__call__", None)) for check in deferred)):
+            raise ValueError("a synchronous trusted effect is required")
+        normalized = canonical_scope_set(scopes)
+        required_digest = scope_digest(normalized)
+
+        def bound_claim(connection: sqlite3.Connection, state: str) -> sqlite3.Row:
+            self._context(connection, context)
+            claim = self._claim(connection, context, claim_id)
+            operation = connection.execute(
+                "SELECT * FROM pending_operations WHERE operation_id=?", (claim["operation_id"],)
+            ).fetchone()
+            if operation is None or any((
+                claim["operation_id"] != operation_id,
+                operation["task_id"] != context.task_id,
+                operation["run_id"] != context.run_id,
+                operation["execution_epoch"] != context.execution_epoch,
+                operation["arguments_digest"] != arguments_digest,
+                operation["scope_digest"] != required_digest,
+                _load_scopes(claim["scopes_json"]) != normalized,
+            )):
+                raise OperationConflict("claim does not bind these operation facts")
+            if claim["state"] == "cancelled":
+                raise PermissionDenied("claim was cancelled")
+            if claim["state"] != state or operation["state"] != state:
+                raise OperationConflict("claim is no longer in the expected state")
+            return claim
+
+        # Refuse mismatched facts without consuming an otherwise valid claim.
+        with self._transaction() as connection:
+            self._now(connection)
+            bound_claim(connection, "prepared")
+
+        # This durable transition is never repeated. A crash or rejected
+        # barrier after it stays uncertain until an independent reconciliation.
+        self.start(context, claim_id)
+
+        with self._transaction() as connection:
+            now = self._now(connection)
+            claim = bound_claim(connection, "started")
+            resource = connection.execute(
+                "SELECT state FROM execution_resources WHERE claim_id=?", (claim_id,)
+            ).fetchone()
+            if resource is None or resource["state"] != "running":
+                raise PermissionDenied("execution resource is no longer active")
+            try:
+                lease_ids = json.loads(claim["lease_ids_json"])
+            except (TypeError, ValueError) as exc:
+                raise PermissionDenied("claim lease bindings are invalid") from exc
+            if (not isinstance(lease_ids, list) or not lease_ids
+                    or any(not isinstance(item, str) or not item for item in lease_ids)
+                    or len(lease_ids) != len(set(lease_ids))):
+                raise PermissionDenied("claim lease bindings are invalid")
+            granted = []
+            for lease_id in lease_ids:
+                lease = connection.execute(
+                    "SELECT * FROM permission_leases WHERE lease_id=?", (lease_id,)
+                ).fetchone()
+                if lease is None or any((
+                    lease["task_id"] != context.task_id,
+                    lease["policy_revision"] != context.policy_revision,
+                    lease["expires_at"] <= now,
+                    lease["lifetime"] in {"once", "run"} and lease["run_id"] != context.run_id,
+                    lease["lifetime"] == "once" and lease["operation_id"] != operation_id,
+                    lease["lifetime"] == "once" and (
+                        lease["status"] != "consumed" or lease["reserved_claim"] != claim_id
+                    ),
+                    lease["lifetime"] != "once" and lease["status"] != "active",
+                )):
+                    raise PermissionDenied("permission changed before dispatch")
+                granted.extend(_load_scopes(lease["scopes_json"]))
+            for required in normalized:
+                for action in required.actions:
+                    single = Scope(required.kind, required.resource, (action,), required.normalization_version)
+                    if not any(scope_covers(grant, single) for grant in granted):
+                        raise PermissionDenied("claim no longer covers the requested action")
+            result = effect()
+            # A deferred object could run only after the authority lock closes.
+            if inspect.iscoroutine(result) or inspect.isgenerator(result):
+                result.close()
+            if type(result) not in (type(None), bool, int, float, str, bytes):
+                raise TypeError("guarded effect must return an immediate scalar")
+            if isinstance(result, float) and not math.isfinite(result):
+                raise TypeError("guarded effect result must be finite")
+            return result
 
     def finish(
         self,
