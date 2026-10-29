@@ -70,7 +70,7 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
-from orchestrator.telegram_access import TelegramAccessError, TelegramAccessService
+from orchestrator.telegram_access import POLICY_VERSION, TelegramAccessError, TelegramAccessService
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
     TelegramCredentialService,
@@ -5191,8 +5191,54 @@ class WorkbenchApiServer:
         )
 
     def _telegram_access_management_supported(self) -> bool:
-        """Keep management disabled until every delivery and generation gate is ready."""
-        return False
+        """Advertise access management only across compatible live Workers."""
+        try:
+            document = read_config_json(self.config_path)
+            rows = document.get("agents")
+            if not isinstance(rows, list) or not rows:
+                return False
+            active = set()
+            configured = set()
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    return False
+                name = str(row.get("name") or "").strip().casefold()
+                if not name or name in configured:
+                    return False
+                configured.add(name)
+                extra = row.get("extra")
+                if extra is None:
+                    extra = {}
+                if not isinstance(extra, Mapping):
+                    return False
+                # Old Workers cache this list and interpret it with legacy
+                # owner permissions; do not manage it across generations.
+                legacy = extra.get("authorized_telegram_ids")
+                if legacy is not None and legacy != []:
+                    return False
+                if row.get("is_active", True) is not False:
+                    active.add(name)
+            runtimes = self._runtime_map()
+            if not active or not active.issubset(runtimes) or not set(runtimes).issubset(configured):
+                return False
+            for runtime in runtimes.values():
+                if not getattr(runtime, "is_function_worker_proxy", False):
+                    return False
+                reader = getattr(runtime, "get_runtime_metadata", None)
+                metadata = reader() if callable(reader) else None
+                if not isinstance(metadata, Mapping):
+                    return False
+                protocol = metadata.get("telegram_scoped_access_protocol")
+                if (
+                    type(protocol) is not int or protocol != POLICY_VERSION
+                    or metadata.get("worker_phase") != "ACTIVE"
+                    or metadata.get("worker_accepting") is not True
+                ):
+                    return False
+            return True
+        except Exception:
+            # A missing or unreadable compatibility signal must fail closed.
+            return False
 
     def _telegram_access_denial(self, request):
         if (

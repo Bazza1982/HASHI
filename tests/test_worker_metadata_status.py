@@ -471,6 +471,22 @@ async def test_worker_projects_revisioned_workzone_support(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_worker_reports_scoped_telegram_access_capability(tmp_path):
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        deadline = asyncio.get_running_loop().time() + 1
+        while (
+            stack.handle.get_runtime_metadata().get("telegram_scoped_access_protocol") != 1
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert stack.handle.get_runtime_metadata()["telegram_scoped_access_protocol"] == 1
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projects_guarded_parked_store_capability(tmp_path):
     from orchestrator.parked_topics import ParkedTopicStore
 

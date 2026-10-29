@@ -23,23 +23,19 @@ global users may manage that profile, while Agent-only users cannot. Global
 users may explicitly address another Telegram chat through the normal send
 tools; ordinary replies and Agent-only deliveries remain bound to their own chat.
 
-The candidate contains a configuration service, actor-scope helpers, and initial
-delivery checks. New Workers use a revisioned policy marker to adopt saved grants
-without a restart and reject unreadable or unsupported policies. The primary
-proactive Telegram route also reads the current configured owner. The management
-API remains unavailable while generation compatibility is incomplete. Command
-routing, all streaming/audio
-and explicit-tool delivery paths, mixed Worker generations, and live Telegram
-acceptance remain unverified. New Agent-only grants use a separate configuration
-field so older Workers do not treat them as legacy users. Existing legacy grants
-remain visible to the new policy for compatibility. Older Workers interpret the
-legacy allowlist using their old Session and command rules and may retain a cached
-grant after it is removed. Qualification, fallback, and revocation across
-Worker generations therefore need an explicit compatibility fence before the
-management gate can open. The UI must not advertise this capability until
-those paths are enforced and tested together. An Agent's shared memory and tool
-permissions are distinct from its conversation scope; no sandbox guarantee
-follows from the Telegram grant.
+New Workers use a revisioned policy marker to adopt saved grants without a
+restart and reject unreadable or unsupported policies. The primary proactive
+Telegram route also reads the current configured owner. Management is advertised
+only when every active Agent has an accepting Worker supporting this policy and
+no Agent has a legacy per-Agent allowlist. Older Workers do not recognize the
+new grant fields; if one returns, management closes and its new-user access is
+unavailable until a compatible Worker is running. Existing legacy allowlists
+must be handled separately because older Workers can cache their previous grants.
+
+Scoped admission, Session ownership, Workzones and delivery have offline tests;
+live cross-generation adoption and real Telegram acceptance remain unverified.
+An Agent's shared memory and tool permissions are distinct from its conversation
+scope; no sandbox guarantee follows from the Telegram grant.
 
 ## 1. Definition
 
