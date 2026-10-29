@@ -21,6 +21,7 @@ from orchestrator.permissions.remote_registry import BrokeredToolRegistry
 PAO_METHODS = frozenset({
     "health", "open_execution", "execution_descriptor", "close_execution",
     "settle_run", "context_status", "request_state", "fence_context", "run_her", "configure_inference",
+    "operation_status",
 })
 CONTROL_METHODS = frozenset({
     "get_session_request", "list_session_requests", "withdraw_session_request",
@@ -90,6 +91,9 @@ class _AuthorityViews:
     def execution_status(self, context):
         return self._client.call("context_status", {"context": context})
 
+    def operation_status_for_task(self, context, operation_id):
+        return self._client.call("operation_status", {"context": context, "operation_id": operation_id})
+
     def get_request(self, context, request_id):
         return self._client.call("request_state", {"context": context, "request_id": request_id})
 
@@ -111,6 +115,7 @@ class RemoteRunExecutor:
         )
         self._execution_client = client
         self._stage_provider = None
+        self._permission_prestart_failure = False
         self.registry = BrokeredToolRegistry(
             client, definitions=descriptor["tool_definitions"],
             scratch_root=Path(owner.workspace_dir),
@@ -129,9 +134,16 @@ class RemoteRunExecutor:
         recovery = arguments.pop("permission_recovery", None)
         self._execution_client.idle_timeout_s = float(runtime.config.user_idle_timeout_s)
         self._owner._client.idle_timeout_s = float(runtime.config.user_idle_timeout_s)
-        public = await self._owner._client.call_async("configure_inference", {
-            "binding": binding, "config": pack(runtime.config),
-        })
+        try:
+            public = await self._owner._client.call_async("configure_inference", {
+                "binding": binding, "config": pack(runtime.config),
+            })
+        except OSError as error:
+            from orchestrator.permissions.continuation import PermissionPark
+            from orchestrator.permissions.execution_gate import GateResult
+
+            self._permission_prestart_failure = True
+            raise PermissionPark(GateResult("unavailable", "")) from error
         if self._stage_provider is not None:
             self._stage_provider.backend_manager = BrokeredProviderFactory(
                 self._execution_client, profile_config=public["profiles"],

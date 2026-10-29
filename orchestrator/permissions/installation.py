@@ -224,7 +224,8 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
     approval = Ed25519PrivateKey.from_private_bytes(key_bytes("approval_key", 32))
     transport = Ed25519PrivateKey.from_private_bytes(key_bytes("transport_key", 32))
     supervisor_key = Ed25519PrivateKey.from_private_bytes(key_bytes("supervisor_key", 32))
-    issuer = SupervisorReceiptIssuer(key_id=installation["supervisor_key_id"], signing_key=supervisor_key)
+    issuer = SupervisorReceiptIssuer(key_id=installation["supervisor_key_id"], signing_key=supervisor_key,
+                                     clock=lambda: policies.authority.observed_time())
     manager = ConfigManager(_path(installation["config_path"]), _path(installation["secrets_path"]),
                             bridge_home=_path(installation["bridge_home"]), code_root=code_root)
     global_config, _, _ = manager.load()
@@ -266,9 +267,15 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
                 or file_helper.entry_digest != capsule.file_digest(expected_entry)
                 or file_helper.environment != capsule.environment):
             raise PermissionDenied("the fixed helper does not match the qualified runtime capsule")
+        from orchestrator.permissions.physical_journal import PhysicalFileJournal
+
+        result_store = EncryptedResultStore(private / "results.sqlite", key=key_bytes("result_key", 32))
+        journal = PhysicalFileJournal(
+            private / "physical.sqlite", artifact_root=file_helper.private_root,
+            authority=authority, results=result_store, issuer=issuer,
+        )
         factory = InstalledExecutorFactory(
-            authority, store, helper=file_helper,
-            results=EncryptedResultStore(private / "results.sqlite", key=key_bytes("result_key", 32)),
+            authority, store, helper=file_helper, results=result_store, physical_journal=journal,
             stop_issuer=issuer, signing_key=transport, worker_sid=installation["worker_sid"],
             validate_resource=policies.validate, checkpoint_writer=checkpoint_writer or _CheckpointUnavailable(),
             audit_writer=audit_writer or _CheckpointUnavailable(), runner=runner,

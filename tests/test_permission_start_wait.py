@@ -68,6 +68,40 @@ def test_service_wait_survives_reconciliation_and_adopts_only_the_original_unsta
     assert not (tmp_path / "permissions.sqlite").exists()
 
 
+
+@pytest.mark.asyncio
+async def test_configure_service_outage_never_enters_the_her_execution_loop(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.her_v2.config import HERv2Config
+    from orchestrator.permissions.clients import RemoteRunExecutor
+    from orchestrator.permissions.continuation import PermissionPark
+
+    _, _, accepted, fence, context = setup_run(tmp_path)
+    binding = RuntimeExecutionBinding(context, accepted.request_id, fence, "INSTANCE:agent")
+    class Client:
+        async def call_async(self, method, arguments):
+            assert method == "configure_inference"
+            raise OSError("the service connection disappeared")
+    class Runtime:
+        config = HERv2Config.from_mapping({"main": {"provider": "deepseek", "model": "deepseek-v4-pro"}})
+        entered = False
+        async def run_turn(self, *args, **kwargs):
+            self.entered = True
+            pytest.fail("no inference or Tool loop may start without its frozen model capability")
+    executor = RemoteRunExecutor.__new__(RemoteRunExecutor)
+    executor.binding = binding
+    executor._owner = SimpleNamespace(_client=Client())
+    executor._execution_client = SimpleNamespace()
+    executor._level = "L1"
+    executor._permission_prestart_failure = False
+    runtime = Runtime()
+    with pytest.raises(PermissionPark) as parked:
+        await executor.run_her(runtime, "write report", accepted.request_id, binding=binding)
+    assert parked.value.result.state == "unavailable"
+    assert executor._permission_prestart_failure
+    assert not runtime.entered
+
+
 def test_user_stop_wins_over_waiting_service_recovery(tmp_path):
     store, _, context, _, _, waiting = setup_waiting(tmp_path)
     payload, = waiting.list_waiting("agent")

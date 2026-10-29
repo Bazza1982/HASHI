@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from uuid import uuid4
 
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.descriptors import describe_tool
@@ -26,12 +27,13 @@ from orchestrator.permissions.windows_process import inheritable_handle_copy, la
 class WindowsFileProcessSupervisor:
     def __init__(self, authority, *, cwd, read_roots, result_store, issue_stop, run_guard,
                  helper_executable, helper_entry, executable_digest, entry_digest,
-                 private_root, environment, expected_user_sid, validate_resource):
+                 private_root, environment, expected_user_sid, validate_resource, physical_journal=None):
         if (not isinstance(run_guard, PaoRunFence) or not callable(issue_stop)
                 or not callable(validate_resource) or os.name != "nt"):
             raise ValueError("a native trusted file supervisor is required")
         self._authority, self._guard, self._store = authority, run_guard, result_store
         self._stop_receipt, self._validate = issue_stop, validate_resource
+        self._journal = physical_journal
         self._cwd, self._roots = Path(cwd), tuple(Path(p) for p in read_roots)
         self._executable, self._entry = Path(helper_executable), Path(helper_entry)
         self._executable_digest, self._entry_digest = executable_digest, entry_digest
@@ -113,16 +115,28 @@ class WindowsFileProcessSupervisor:
                     raise PermissionDenied("qualified file helper changed")
                 owned = launch_suspended(
                     executable=self._executable,
-                    arguments=["-I", "-S", str(self._entry), str(plan_path), sha256(encoded).hexdigest()],
+                    arguments=["-I", "-S", "-B", str(self._entry), str(plan_path), sha256(encoded).hexdigest()],
                     cwd=folder, environment=self._environment, expected_user_sid=self._sid,
-                    executable_digest=self._executable_digest, inherited_handles=(copy_handle,),
+                    executable_digest=self._executable_digest, inherited_handles=(copy_handle,), max_processes=1,
                 )
                 resource.update(process=owned, bound=bound, transfer_kernel=copy_kernel, transfer=copy_handle)
+                claim_options = {}
+                journal = getattr(self, "_journal", None)
+                if journal is not None:
+                    preassigned = uuid4().hex
+                    journal.record(
+                        context=context, operation_id=operation_id, descriptor=descriptor,
+                        arguments=frozen, cwd=self._cwd, claim_id=preassigned, observation=owned.observation,
+                        plan_path=plan_path, plan_digest=sha256(encoded).hexdigest(),
+                        max_processes=owned._job.max_processes,
+                    )
+                    resource["journal_claim"] = preassigned
+                    claim_options["prepared_claim_id"] = preassigned
                 with self._guard(context):
                     if self._closed or self._validate(context, scope) is not True:
                         raise PermissionDenied("file execution policy changed before start")
                     claim = self._authority.prepare(
-                        context, operation_id, descriptor.arguments_digest, descriptor.scopes,
+                        context, operation_id, descriptor.arguments_digest, descriptor.scopes, **claim_options,
                     )
                     resource["claim"] = claim
                     # ResumeThread is the only effect inside the SQL barrier.
@@ -214,6 +228,11 @@ class WindowsFileProcessSupervisor:
                     resource["context"], claim.claim_id, receipt_reference=receipt,
                 )
                 resource["stop_recorded"] = True
+            journal = getattr(self, "_journal", None)
+            if journal is not None and resource.get("journal_claim"):
+                journal.stopped(resource["journal_claim"])
+                if claim is not None and self._authority.operation_state(operation_id) in {"succeeded", "failed", "waiting"}:
+                    journal.finished(resource["journal_claim"])
             if self._active.get(operation_id) is resource:
                 self._active.pop(operation_id)
 

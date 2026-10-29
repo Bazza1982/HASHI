@@ -61,6 +61,9 @@ class PermissionRunService:
             result = await result
         if result is not True:
             raise PermissionDenied("previous executor cleanup is unverified")
+        self._registries.pop(binding.context.execution_epoch, None)
+        if self._active.get(binding.context.run_id) == binding:
+            self._active.pop(binding.context.run_id, None)
 
     async def open_execution(self, *, request_id, run_id, owner_id, agent_id, session_id,
                              context_generation, fencing_token, worker_id, worker_generation,

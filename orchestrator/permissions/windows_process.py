@@ -57,6 +57,7 @@ class ProcessObservation:
     elevated: bool
     atomic_job: bool
     executable_digest: str
+    creation_time_100ns: int = 0
 
 
 def _api():
@@ -73,6 +74,9 @@ def _api():
         "CreateFileW": ([wintypes.LPCWSTR, _DWORD, _DWORD, ctypes.POINTER(_Attributes), _DWORD, _DWORD, _HANDLE], _HANDLE),
         "GetHandleInformation": ([_HANDLE, ctypes.POINTER(_DWORD)], wintypes.BOOL),
         "ResumeThread": ([_HANDLE], _DWORD),
+        "OpenProcess": ([_DWORD, wintypes.BOOL, _DWORD], _HANDLE),
+        "GetProcessTimes": ([_HANDLE, ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+                             ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME)], wintypes.BOOL),
         "WaitForSingleObject": ([_HANDLE, _DWORD], _DWORD),
         "GetExitCodeProcess": ([_HANDLE, ctypes.POINTER(_DWORD)], wintypes.BOOL),
         "CloseHandle": ([_HANDLE], wintypes.BOOL),
@@ -108,6 +112,35 @@ def _sid_text(pointer, kernel, security):
         kernel.LocalFree(ctypes.cast(value, wintypes.HLOCAL))
 
 
+def _creation_time(handle, kernel):
+    values = [wintypes.FILETIME() for _ in range(4)]
+    _checked(kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in values)))
+    return (int(values[0].dwHighDateTime) << 32) | int(values[0].dwLowDateTime)
+
+
+def observe_original_process_stopped(observation):
+    """Read only: a reused PID is never terminated or treated as the old process."""
+    if (not isinstance(observation, ProcessObservation) or type(observation.process_id) is not int
+            or not 0 < observation.process_id <= 0xFFFFFFFF or observation.creation_time_100ns <= 0):
+        raise ValueError("an actual PID and kernel creation observation are required")
+    kernel, _ = _api()
+    handle = kernel.OpenProcess(0x00100000 | 0x1000, False, observation.process_id)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error in {87, 1168}:
+            return True
+        raise ctypes.WinError(error)
+    try:
+        if _creation_time(handle, kernel) != observation.creation_time_100ns:
+            return True
+        state = kernel.WaitForSingleObject(handle, 0)
+        if state not in {0, 258}:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return state == 0
+    finally:
+        _checked(kernel.CloseHandle(handle))
+
+
 def _observe(process, kernel, security, job, digest):
     token = _HANDLE()
     _checked(security.OpenProcessToken(process.process, 0x0008, ctypes.byref(token)))
@@ -133,6 +166,7 @@ def _observe(process, kernel, security, job, digest):
             int(process.pid), user_sid, app_sid, capability_count,
             lpac,
             bool(ctypes.cast(data(20), ctypes.POINTER(_DWORD))[0]), job.contains(process.process), digest,
+            _creation_time(process.process, kernel),
         )
     finally:
         kernel.CloseHandle(token)
@@ -142,35 +176,39 @@ class OwnedWindowsProcess:
     def __init__(self, process, job, observation, kernel):
         self._process, self._job, self.observation, self._kernel = process, job, observation, kernel
         self._started, self._stopped = False, False
-        self._stop_lock = threading.Lock()
+        self._stop_lock = threading.RLock()
 
     @property
     def process_handle(self):
-        if self._stopped:
-            raise OSError("owned process is closed")
-        return int(self._process.process)
+        with self._stop_lock:
+            if self._stopped:
+                raise OSError("owned process is closed")
+            return int(self._process.process)
 
     def start(self):
-        if self._started or self._stopped or not self._job.contains(self._process.process):
-            raise OSError("owned process is not in a verified suspended state")
-        if self._kernel.ResumeThread(self._process.thread) == 0xFFFFFFFF:
-            raise ctypes.WinError(ctypes.get_last_error())
-        self._started = True
+        with self._stop_lock:
+            if self._started or self._stopped or not self._job.contains(self._process.process):
+                raise OSError("owned process is not in a verified suspended state")
+            if self._kernel.ResumeThread(self._process.thread) == 0xFFFFFFFF:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._started = True
 
     def poll(self):
-        if self._stopped:
-            return True
-        result = self._kernel.WaitForSingleObject(self._process.process, 0)
-        if result not in {0, 258}:
-            raise ctypes.WinError(ctypes.get_last_error())
-        return result == 0
+        with self._stop_lock:
+            if self._stopped or (not self._process.process and self._job.stopped):
+                return True
+            result = self._kernel.WaitForSingleObject(self._process.process, 0)
+            if result not in {0, 258}:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return result == 0
 
     def exit_code(self):
-        if self._stopped or not self.poll():
-            raise OSError("the owned process has not exited")
-        value = _DWORD()
-        _checked(self._kernel.GetExitCodeProcess(self._process.process, ctypes.byref(value)))
-        return int(value.value)
+        with self._stop_lock:
+            if self._stopped or not self.poll():
+                raise OSError("the owned process has not exited")
+            value = _DWORD()
+            _checked(self._kernel.GetExitCodeProcess(self._process.process, ctypes.byref(value)))
+            return int(value.value)
 
     def stop(self, *, timeout_ms=4500):
         with self._stop_lock:
@@ -179,8 +217,16 @@ class OwnedWindowsProcess:
             # This proves the whole Job empty, not merely the root PID exited.
             # On failure retain handles for later cleanup and report unknown.
             self._job.stop(timeout_ms=timeout_ms)
-            self._kernel.CloseHandle(self._process.thread)
-            self._kernel.CloseHandle(self._process.process)
+            errors = []
+            for name in ("thread", "process"):
+                handle = getattr(self._process, name)
+                if handle:
+                    if self._kernel.CloseHandle(handle):
+                        setattr(self._process, name, None)
+                    else:
+                        errors.append(ctypes.WinError(ctypes.get_last_error()))
+            if errors:
+                raise OSError("owned process handle cleanup is unverified") from errors[0]
             self._stopped = True
 
 
@@ -204,7 +250,7 @@ def inheritable_handle_copy(handle):
 def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                      environment: dict[str, str], expected_user_sid: str,
                      executable_digest: str, inherited_handles=(),
-                     appcontainer_sid: str | None = None, require_lpac=False):
+                     appcontainer_sid: str | None = None, require_lpac=False, max_processes=None):
     kernel, security = _api()
     executable, cwd = Path(executable), Path(cwd)
     if (not executable.is_absolute() or not cwd.is_absolute() or not cwd.is_dir()
@@ -219,7 +265,7 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             or any(not isinstance(key, str) or not key or "=" in key or "\0" in key
                    or not isinstance(value, str) or "\0" in value for key, value in environment.items())):
         raise ValueError("a complete sanitized environment is required")
-    process, job, sid, null_handle = _Process(), WindowsJob(), _PTR(), None
+    process, job, sid, null_handle = _Process(), WindowsJob(max_processes=max_processes), _PTR(), None
     attributes, initialized, transferred = None, False, False
     cleanup_failure, cleanup_cause = None, None
     try:

@@ -55,6 +55,7 @@ class InstalledExecution:
         self._closed = False
         self._cleanup_lock = asyncio.Lock()
         self._inference_digest, self._inference = None, None
+        self._inference_lock, self._configuration_tasks = asyncio.Lock(), set()
 
     def attach_callbacks(self, descriptor):
         from orchestrator.permissions.her_callbacks import CallbackClient
@@ -64,26 +65,32 @@ class InstalledExecution:
         self.channel._audit = lambda record: callbacks.audit(self.binding, record)
 
     async def configure_inference(self, config):
-        from orchestrator.permissions.host_protocol import pack
-        import json
-
-        self.channel._current()
-        digest = sha256(json.dumps(pack(config), separators=(",", ":")).encode()).hexdigest()
-        if self._inference_digest is not None:
-            if digest != self._inference_digest:
-                raise PermissionDenied("the Turn model capability is already frozen")
-            return self._inference
-        if self.factory.model_factory is None:
-            raise PermissionDenied("the selected model owner is unavailable")
-        models, public = await self.factory.model_factory.create(self.binding, config, self.channel._guard)
+        task = asyncio.current_task()
+        self._configuration_tasks.add(task)
         try:
-            self.channel._current()
-        except BaseException:
-            await models.close()
-            raise
-        self.channel._models = models
-        self._inference_digest, self._inference = digest, public
-        return public
+            async with self._inference_lock:
+                from orchestrator.permissions.host_protocol import pack
+                import json
+
+                self.channel._current()
+                digest = sha256(json.dumps(pack(config), separators=(",", ":")).encode()).hexdigest()
+                if self._inference_digest is not None:
+                    if digest != self._inference_digest:
+                        raise PermissionDenied("the Turn model capability is already frozen")
+                    return self._inference
+                if self.factory.model_factory is None:
+                    raise PermissionDenied("the selected model owner is unavailable")
+                models, public = await self.factory.model_factory.create(self.binding, config, self.channel._guard)
+                try:
+                    self.channel._current()
+                except BaseException:
+                    await models.close()
+                    raise
+                self.channel._models = models
+                self._inference_digest, self._inference = digest, public
+                return public
+        finally:
+            self._configuration_tasks.discard(task)
 
     def descriptor(self):
         self.channel._current()
@@ -94,8 +101,12 @@ class InstalledExecution:
     async def park(self):
         # A parked epoch can still receive a human decision, but it cannot
         # retain an executable host or in-flight provider/file resources.
-        await self._stop_host()
-        return await self.channel.park()
+        results = await asyncio.gather(self._stop_host(), self.channel.park(), return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors or any(result is not True for result in results):
+            raise OSError("parked execution cleanup is unverified") from (errors[0] if errors else None)
+        return True
+
 
     async def _stop_host(self):
         if self.policy.settings.requested_level is PermissionLevel.L2:
@@ -103,11 +114,19 @@ class InstalledExecution:
                 raise OSError("the Runner owner is unavailable")
             if await self.factory.runner.stop(self.binding) is not True:
                 raise OSError("restricted HER host cleanup is unverified")
+        return True
 
     async def close(self):
         async with self._cleanup_lock:
             if self._closed:
                 return True
+            configuring = tuple(task for task in self._configuration_tasks if task is not asyncio.current_task())
+            for task in configuring:
+                task.cancel()
+            if configuring:
+                _, pending = await asyncio.wait(configuring, timeout=5)
+                if pending:
+                    raise OSError("model configuration cleanup remains unverified")
             owners = [self._stop_host(), self.channel.close()]
             if self.endpoint is not None:
                 owners.append(self.endpoint.close())
@@ -134,9 +153,11 @@ class InstalledExecution:
 class InstalledExecutorFactory:
     """One central service owns all Run channels and supervisor signing keys."""
 
+    requires_callbacks = True
+
     def __init__(self, authority, run_store, *, helper, results, stop_issuer, signing_key,
                  worker_sid, validate_resource, checkpoint_writer, audit_writer, runner=None,
-                 policy_observer=None, model_factory=None):
+                 policy_observer=None, model_factory=None, physical_journal=None):
         helper.verify()
         if (not callable(validate_resource) or not callable(checkpoint_writer) or not callable(audit_writer)
                 or not callable(getattr(stop_issuer, "issue_stop", None))):
@@ -148,13 +169,17 @@ class InstalledExecutorFactory:
             validate_resource, checkpoint_writer, audit_writer,
         )
         self.runner, self._owned = runner, {}
+        self._closing, self._creates = False, set()
         self._policy_observer = policy_observer
         self.model_factory = model_factory
+        self.physical_journal = physical_journal
         self.public_key = base64.b64encode(signing_key.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw,
         )).decode("ascii")
 
     def executor_id(self, policy):
+        if self._closing:
+            raise PermissionDenied("the installed execution owner is closing")
         if policy.settings.requested_level is PermissionLevel.L2:
             if (self.runner is None or self.sid == self.worker_sid
                     or not self.runner.qualified_for(self.sid, self.worker_sid)):
@@ -162,58 +187,70 @@ class InstalledExecutorFactory:
         return self.issuer.key_id
 
     async def create(self, binding, policy):
-        self.helper.verify()
-        self.executor_id(policy)
-        if self._policy_observer is not None:
-            self._policy_observer(binding, policy)
-        guard = PaoRunFence(
-            self.store, context=binding.context, request_id=binding.request_id,
-            fencing_token=binding.fencing_token, worker_id=binding.worker_id,
-        )
-        options = dict(policy.registry_options)
-        roots = tuple(Path(path) for path in options.get("access_roots", (policy.cwd,)))
-        supervisor = WindowsFileProcessSupervisor(
-            self.authority, cwd=policy.cwd, read_roots=roots, result_store=self.results,
-            issue_stop=self.issuer.issue_stop, run_guard=guard,
-            helper_executable=self.helper.executable, helper_entry=self.helper.entry,
-            executable_digest=self.helper.executable_digest, entry_digest=self.helper.entry_digest,
-            private_root=self.helper.private_root, environment=self.helper.environment,
-            expected_user_sid=self.sid, validate_resource=self.validate_resource,
-        )
-        registry = ManagedToolRegistry(
-            allowed_tools=list(policy.allowed_tools), access_root=roots[0], workspace_dir=policy.cwd,
-            secrets={}, permission_authority=self.authority, permission_context=binding.context,
-            permission_supervisor=supervisor, requestable_scopes=policy.requestable_scopes,
-            durable_wait=True, **options,
-        )
-        channel = PermissionExecutionChannel(
-            binding, authority=self.authority, run_guard=guard, registry=registry,
-            model_broker=_NoModelTransport(), checkpoint_writer=self.checkpoint_writer,
-            audit_writer=self.audit_writer,
-        )
-        address = r"\\.\pipe\LOCAL\HASHI.Permissions.execution." + uuid4().hex
-        executor = InstalledExecution(self, binding, policy, channel, None, address)
-        self._owned[binding.context.execution_epoch] = executor
+        task = asyncio.current_task()
+        self._creates.add(task)
         try:
-            if policy.settings.requested_level is PermissionLevel.L2:
-                # Register ownership before preparing the suspended host: even
-                # a failed prepare can have native resources to reconcile.
-                peer = await self.runner.prepare(binding)
-            else:
-                peer = PipePeerPolicy(self.worker_sid)
-            executor.endpoint = PermissionEndpoint(
-                WindowsPipeListener(address, service_sid=self.sid, peer_policy=peer),
-                PermissionServiceRouter(channel, methods=EXECUTION_METHODS),
-                signing_key=self.key, service_generation=self.authority._service_generation,
+            self.helper.verify()
+            self.executor_id(policy)
+            if self._policy_observer is not None:
+                self._policy_observer(binding, policy)
+            guard = PaoRunFence(
+                self.store, context=binding.context, request_id=binding.request_id,
+                fencing_token=binding.fencing_token, worker_id=binding.worker_id,
             )
-            await executor.endpoint.start()
-            return executor
-        except BaseException:
-            await executor.close()
-            self._owned.pop(binding.context.execution_epoch, None)
-            raise
+            options = dict(policy.registry_options)
+            roots = tuple(Path(path) for path in options.get("access_roots", (policy.cwd,)))
+            supervisor = WindowsFileProcessSupervisor(
+                self.authority, cwd=policy.cwd, read_roots=roots, result_store=self.results,
+                issue_stop=self.issuer.issue_stop, run_guard=guard,
+                helper_executable=self.helper.executable, helper_entry=self.helper.entry,
+                executable_digest=self.helper.executable_digest, entry_digest=self.helper.entry_digest,
+                private_root=self.helper.private_root, environment=self.helper.environment,
+                expected_user_sid=self.sid, validate_resource=self.validate_resource,
+                physical_journal=self.physical_journal,
+            )
+            registry = ManagedToolRegistry(
+                allowed_tools=list(policy.allowed_tools), access_root=roots[0], workspace_dir=policy.cwd,
+                secrets={}, permission_authority=self.authority, permission_context=binding.context,
+                permission_supervisor=supervisor, requestable_scopes=policy.requestable_scopes,
+                durable_wait=True, **options,
+            )
+            channel = PermissionExecutionChannel(
+                binding, authority=self.authority, run_guard=guard, registry=registry,
+                model_broker=_NoModelTransport(), checkpoint_writer=self.checkpoint_writer,
+                audit_writer=self.audit_writer,
+            )
+            address = r"\\.\pipe\LOCAL\HASHI.Permissions.execution." + uuid4().hex
+            executor = InstalledExecution(self, binding, policy, channel, None, address)
+            self._owned[binding.context.execution_epoch] = executor
+            try:
+                if policy.settings.requested_level is PermissionLevel.L2:
+                    # Register ownership before preparing the suspended host: even
+                    # a failed prepare can have native resources to reconcile.
+                    peer = await self.runner.prepare(binding)
+                else:
+                    peer = PipePeerPolicy(self.worker_sid)
+                executor.endpoint = PermissionEndpoint(
+                    WindowsPipeListener(address, service_sid=self.sid, peer_policy=peer),
+                    PermissionServiceRouter(channel, methods=EXECUTION_METHODS),
+                    signing_key=self.key, service_generation=self.authority._service_generation,
+                )
+                await executor.endpoint.start()
+                return executor
+            except BaseException:
+                await executor.close()
+                self._owned.pop(binding.context.execution_epoch, None)
+                raise
+        finally:
+            self._creates.discard(task)
+
+    async def reconcile(self):
+        journal = getattr(self, "physical_journal", None)
+        if journal is not None:
+            await asyncio.to_thread(journal.reconcile)
 
     async def retire(self, binding):
+        await self.reconcile()
         executor = self._owned.get(binding.context.execution_epoch)
         if executor is None:
             # Service recovery may not invent a clean stop. A separate native
@@ -228,6 +265,14 @@ class InstalledExecutorFactory:
         return True
 
     async def close(self):
+        self._closing = True
+        creating = tuple(task for task in getattr(self, "_creates", ()) if task is not asyncio.current_task())
+        for task in creating:
+            task.cancel()
+        if creating:
+            _, pending = await asyncio.wait(creating, timeout=5)
+            if pending:
+                raise OSError("executor preparation cleanup remains unverified")
         results = await asyncio.gather(
             *(self.retire(executor.binding) for executor in tuple(self._owned.values())),
             return_exceptions=True,

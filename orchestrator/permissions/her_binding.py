@@ -85,8 +85,9 @@ class PermissionAgentController:
             claim = dict(request_id=request_id, run_id=run_id, owner_id=owner, agent_id=self.runtime.name,
                          session_id=run["session_id"], context_generation=run["context_generation"],
                          fencing_token=run["fencing_token"], worker_id=run["worker_id"])
-            self._unstarted[request_id] = (claim, adapter._session_coordinator, accepted)
-            raise PermissionStartWait(request_id) from error
+            signal = PermissionStartWait(request_id)
+            self._unstarted[request_id] = (claim, adapter._session_coordinator, accepted, None, signal)
+            raise signal from error
         execution = ManagedHerTurn(self, binding, self.service.execution_registry(binding),
                                    adapter=adapter, accepted=accepted)
         if accepted.duplicate and not accepted.duplicate_text:
@@ -119,6 +120,11 @@ class PermissionAgentController:
             raise PermissionDenied("a current managed continuation is required")
         recovery = coordinator.store.active_turn_recovery(accepted.session_id, accepted.turn_id)
         checkpoint = coordinator.store.provider_context_for_turn(accepted.session_id, accepted.turn_id)
+        if checkpoint is None and getattr(execution.executor, "_permission_prestart_failure", False):
+            from orchestrator.permissions.parking import _claims
+
+            self._unstarted[request_id] = (_claims(execution.binding), coordinator, accepted, execution.binding, signal)
+            return
         if (not recovery or not checkpoint or checkpoint.get("boundary") not in {
                     "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
                     "completed_provider_response",
@@ -133,15 +139,23 @@ class PermissionAgentController:
         self._signals[request_id] = (signal, execution.binding, reference, coordinator, accepted)
 
     async def park(self, item, signal):
-        if isinstance(signal, PermissionStartWait):
+        if isinstance(signal, PermissionStartWait) or item.request_id in self._unstarted:
             saved_start = self._unstarted.pop(item.request_id, None)
-            if saved_start is None or signal.request_id != item.request_id:
+            if saved_start is None or saved_start[4] is not signal:
                 return False
-            claim, coordinator, accepted = saved_start
+            claim, coordinator, accepted, binding, _ = saved_start
             self.start_waits.park(claim, item, {
                 "her_session_id": accepted.session_id, "turn_id": accepted.turn_id,
                 "execution_owner_id": coordinator.execution_owner["owner_id"],
             })
+            if binding is not None:
+                execution = self._turns.pop(item.request_id)
+                try:
+                    await execution.executor.park()
+                except OSError:
+                    # The durable wait exists. A new epoch still has to prove
+                    # old-resource retirement; this is not a clean-stop claim.
+                    self.runtime.error_logger.warning("Prestart executor cleanup remains unavailable")
             return True
         saved = self._signals.pop(item.request_id, None)
         if saved is None or saved[0] is not signal:
@@ -174,6 +188,7 @@ class PermissionAgentController:
             await self.service.settle_run(binding=execution.binding)
         else:
             await self.service.close_execution(binding=execution.binding)
+        self._owned_bindings.pop(execution.binding.context.execution_epoch, None)
 
     async def start(self):
         if self._wake_task is not None or self._closing:
@@ -241,6 +256,12 @@ class PermissionAgentController:
                     continue
                 ready = (status.binding_state == "fenced"
                          or payload["reason"] in {"unavailable", "permission_changed", "fenced"})
+                if not ready and payload["operation_id"]:
+                    read_operation = getattr(self.service.authority, "operation_status_for_task", None)
+                    if callable(read_operation):
+                        operation = read_operation(binding.context, payload["operation_id"])
+                        ready = (operation is not None and operation.state in {"succeeded", "failed"}
+                                 and operation.resource_state == "stopped")
                 if not ready and payload["request_id"]:
                     request = self.service.authority.get_request(binding.context, payload["request_id"])
                     ready = request.state in {"denied", "withdrawn", "expired", "decided", "granted_existing"}

@@ -83,29 +83,37 @@ class PermissionExecutionChannel:
         # resources without fencing its approval epoch until PAO adopts a new
         # executor. No further host calls are accepted on this parked channel.
         self._parked = True
-        await self._models.close()
-        supervisor = self.registry._permission_gate._supervisor
-        closer = getattr(supervisor, "close", None)
-        if not callable(closer):
-            raise OSError("parked supervisor cleanup is unavailable")
-        result = closer()
-        if inspect.isawaitable(result):
-            result = await result
-        return result is True
+        return await self._stop_resources()
 
     async def close(self):
         self._closed = True
-        self._authority.fence_execution(self.binding.context)
-        await self._models.close()
+        failure = None
+        try:
+            self._authority.fence_execution(self.binding.context)
+        except Exception as error:
+            failure = error
+        await self._stop_resources()
+        if failure is not None:
+            raise OSError("execution epoch fencing remains unverified") from failure
+        return True
+
+    async def _stop_resources(self):
+        import asyncio
+
         supervisor = self.registry._permission_gate._supervisor
         retire = getattr(supervisor, "close", None)
-        if not callable(retire):
-            raise OSError("supervisor cleanup is unavailable")
-        outcome = retire()
-        if inspect.isawaitable(outcome):
-            outcome = await outcome
-        if outcome is not True:
-            raise OSError("supervisor cleanup is unverified")
+        async def stop_files():
+            if not callable(retire):
+                raise OSError("supervisor cleanup is unavailable")
+            result = retire()
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not True:
+                raise OSError("supervisor cleanup is unverified")
+        results = await asyncio.gather(self._models.close(), stop_files(), return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise OSError("execution resource cleanup is unverified") from errors[0]
         return True
 
     def descriptor(self):

@@ -51,7 +51,9 @@ class _Accounting(ctypes.Structure):
 
 
 class WindowsJob:
-    def __init__(self) -> None:
+    def __init__(self, *, max_processes=None) -> None:
+        if max_processes is not None and (type(max_processes) is not int or max_processes <= 0):
+            raise ValueError("a positive explicit Job process limit is required")
         if os.name != "nt":
             raise JobControlError("native Windows is required")
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -79,8 +81,20 @@ class WindowsJob:
         try:
             limits = _ExtendedLimit()
             limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway flags.
+            if max_processes is not None:
+                limits.basic.flags |= 0x8  # ACTIVE_PROCESS
+                limits.basic.active_process_limit = max_processes
             if not kernel.SetInformationJobObject(self._handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
                 raise JobControlError(ctypes.get_last_error(), "cannot configure execution Job")
+            observed = _ExtendedLimit()
+            if not kernel.QueryInformationJobObject(
+                self._handle, 9, ctypes.byref(observed), ctypes.sizeof(observed), None,
+            ) or (observed.basic.flags & 0x3800) != 0x2000:
+                raise JobControlError("execution Job containment could not be observed")
+            if max_processes is not None and (not observed.basic.flags & 0x8
+                    or observed.basic.active_process_limit != max_processes):
+                raise JobControlError("execution Job process limit could not be observed")
+            self.max_processes = max_processes
         except BaseException:
             if not kernel.CloseHandle(self._handle):
                 raise JobControlError(ctypes.get_last_error(), "unverified Job handle cleanup")

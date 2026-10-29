@@ -43,6 +43,9 @@ class PermissionServiceApplication:
             raise ValueError("one PAO and one FC endpoint are required")
         self._endpoints = list(endpoints)
         try:
+            reconcile = getattr(self._factory, "reconcile", None)
+            if callable(reconcile):
+                await reconcile()
             for endpoint in endpoints:
                 await endpoint.start()
             self._started = True
@@ -92,6 +95,12 @@ class PermissionServiceApplication:
             if (not isinstance(callbacks, dict) or peer is None
                     or callbacks.get("process_id") != peer.process_id):
                 raise PermissionDenied("HER callback does not belong to the authenticated Worker")
+        if callbacks is None and getattr(self._factory, "requires_callbacks", False):
+            from orchestrator.permissions.models import PermissionLevel
+
+            policy = self.runs._policy(arguments["agent_id"], arguments["owner_id"], arguments["session_id"])
+            if policy.settings.requested_level is PermissionLevel.L2:
+                raise PermissionDenied("restricted HER requires its actual Worker callback owner")
         binding = await self.runs.open_execution(**arguments)
         if callbacks is not None:
             self.runs.execution_registry(binding).attach_callbacks(callbacks)
@@ -203,6 +212,10 @@ class PermissionServiceApplication:
         return await self._management.manage(
             subject, arguments, session_token=session_token, invocation_id=invocation_id,
         )
+
+    def operation_status(self, *, context, operation_id):
+        self._context(context)
+        return self.authority.operation_status_for_task(context, operation_id)
 
     def session_summary(self, *, subject):
         return self.authority.session_summary(subject)

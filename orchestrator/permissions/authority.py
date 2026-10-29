@@ -2355,7 +2355,12 @@ class PermissionAuthority:
         operation_id: str,
         arguments_digest: str,
         scopes: Iterable[Scope],
+        *,
+        prepared_claim_id: str | None = None,
     ) -> ExecutionClaim:
+        if prepared_claim_id is not None and (not isinstance(prepared_claim_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", prepared_claim_id) is None):
+            raise ValueError("a preassigned trusted claim identity must be a UUID hex")
         _nonempty(operation_id, "operation_id")
         _digest(arguments_digest, "arguments_digest")
         normalized = canonical_scope_set(scopes)
@@ -2384,7 +2389,9 @@ class PermissionAuthority:
             )
             if leases is None:
                 raise PermissionDenied("required scope is not currently granted")
-            claim_id = uuid4().hex
+            claim_id = prepared_claim_id or uuid4().hex
+            if connection.execute("SELECT 1 FROM execution_claims WHERE claim_id=?", (claim_id,)).fetchone():
+                raise OperationConflict("the physical claim identity is already bound")
             for lease_id in leases:
                 connection.execute(
                     "UPDATE permission_leases SET status='reserved',reserved_claim=? "
@@ -2928,6 +2935,26 @@ class PermissionAuthority:
                     "WHERE reserved_claim=? AND status='reserved'", (claim_id,),
                 )
             self._event(connection, context.task_id, "resource_stopped", claim_id, now)
+
+    def observed_time(self) -> float:
+        """Service clock for short authenticated receipts, including rollback floors."""
+        with self._transaction() as connection:
+            return self._now(connection)
+
+    def resource_claim_for_operation(self, context, operation_id, arguments_digest, *, claim_id=None):
+        """Private physical reconciliation lookup; no active grant is created."""
+        with self._transaction() as connection:
+            self._context(connection, context, active=False)
+            row = connection.execute(
+                "SELECT c.* FROM execution_claims c JOIN pending_operations o USING(operation_id) "
+                "WHERE c.task_id=? AND c.execution_epoch=? AND c.operation_id=? "
+                "AND o.task_id=? AND o.run_id=? AND o.arguments_digest=? AND (? IS NULL OR c.claim_id=?)",
+                (context.task_id, context.execution_epoch, operation_id, context.task_id,
+                 context.run_id, arguments_digest, claim_id, claim_id),
+            ).fetchall()
+            if len(row) > 1:
+                raise OperationConflict("physical operation has ambiguous claims")
+            return ExecutionClaim(row[0]["claim_id"], row[0]["operation_id"], row[0]["state"]) if row else None
 
     def unsettled_resources(self, context: ExecutionContext) -> tuple[str, ...]:
         """A retirement check, never an inferred stop receipt."""
