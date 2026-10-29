@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "orchestrator/permissions/**"
+      - "orchestrator/enterprise/identity.py"
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
       - "orchestrator/flexible_backend_manager.py"
@@ -15,6 +16,8 @@ on:
       - "tests/test_permission_registry.py"
       - "tests/test_permission_signed_receipts.py"
       - "tests/test_permission_actions.py"
+      - "tests/test_permission_enterprise_decisions.py"
+      - "tests/test_enterprise_identity.py"
       - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
       - "tests/test_permission_test_identity.py"
@@ -33,6 +36,7 @@ on:
   pull_request:
     paths:
       - "orchestrator/permissions/**"
+      - "orchestrator/enterprise/identity.py"
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
       - "orchestrator/flexible_backend_manager.py"
@@ -44,6 +48,8 @@ on:
       - "tests/test_permission_registry.py"
       - "tests/test_permission_signed_receipts.py"
       - "tests/test_permission_actions.py"
+      - "tests/test_permission_enterprise_decisions.py"
+      - "tests/test_enterprise_identity.py"
       - "tests/test_permission_capabilities.py"
       - "tests/test_permission_windows_file_binding.py"
       - "tests/test_permission_test_identity.py"
@@ -87,6 +93,7 @@ jobs:
       - name: Check focused code
         run: >-
           python -m ruff check orchestrator/permissions orchestrator/config.py
+          orchestrator/enterprise/identity.py tests/test_permission_enterprise_decisions.py
           adapters/her_v2_provider.py tools/request_access.py
           scripts/permissions/windows_appcontainer_probe.py
           scripts/permissions/windows_test_identity.py tests/test_permission_test_identity.py
@@ -116,6 +123,8 @@ jobs:
           tests/test_permission_probe_process.py
           tests/test_permission_capabilities.py
           tests/test_permission_actions.py
+          tests/test_permission_enterprise_decisions.py
+          tests/test_enterprise_identity.py
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
           tests/test_permissions_authority.py

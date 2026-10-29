@@ -269,3 +269,19 @@ def test_action_card_lifetime_is_bounded_by_the_request(setup_actions):
     assert action.expires_at == request.expires_at
     with pytest.raises(ValueError):
         _issue(authority, context, request, [scope], action_ttl_seconds=901)
+
+
+def test_committed_action_can_be_reconstructed_for_idempotent_replay(setup_actions):
+    authority, key, verifier, clock, context, scope, request = setup_actions
+    action = _issue(authority, context, request, [scope])
+    with pytest.raises(InvalidDecision):
+        authority.get_committed_decision_action(context, action.action_id)
+    reference = _token(key, _receipt(action, context))
+    lease = authority.decide(reference, approved_scopes=[scope], action_id=action.action_id)
+    clock[0] += 11
+    reopened = PermissionAuthority(authority.path, verifier=verifier,
+                                   clock=lambda: clock[0], monotonic=lambda: clock[0])
+    assert reopened.get_committed_decision_action(context, action.action_id) == action
+    assert reopened.decide(reference, approved_scopes=[scope], action_id=action.action_id) == lease
+    with pytest.raises(PermissionDenied):
+        reopened.get_committed_decision_action(replace(context, owner_id="other"), action.action_id)

@@ -1466,6 +1466,87 @@ class PermissionAuthority:
                 raise InvalidDecision("decision action scope is damaged")
             return result
 
+    def get_committed_decision_action(
+        self, context: ExecutionContext, action_id: str,
+    ) -> DecisionAction:
+        """Retrieve only an already-committed action for authenticated replay."""
+        _nonempty(action_id, "action_id")
+        with self._transaction() as connection:
+            self._now(connection)
+            self._context(connection, context, active=False)
+            action = connection.execute(
+                "SELECT * FROM decision_actions WHERE action_id=?", (action_id,)
+            ).fetchone()
+            if action is None:
+                raise PermissionDenied("decision action not found")
+            self._request_for_task(connection, context.task_id, action["request_id"])
+            snapshot = connection.execute(
+                "SELECT * FROM access_request_versions WHERE request_id=? AND revision=?",
+                (action["request_id"], action["request_revision"]),
+            ).fetchone()
+            decision = connection.execute(
+                "SELECT * FROM approval_decisions WHERE idempotency_key=?", (action_id,)
+            ).fetchone()
+            if snapshot is None or decision is None or any((
+                snapshot["run_id"] != context.run_id,
+                snapshot["session_id"] != context.session_id,
+                snapshot["context_generation"] != context.context_generation,
+                snapshot["execution_epoch"] != context.execution_epoch,
+                snapshot["policy_revision"] != context.policy_revision,
+                snapshot["scope_digest"] != action["requested_digest"],
+                (snapshot["operation_id"] or None) != action["operation_id"],
+                snapshot["arguments_digest"] != action["arguments_digest"],
+                decision["request_id"] != action["request_id"],
+                decision["request_revision"] != action["request_revision"],
+                decision["nonce"] != action["nonce"],
+                decision["choice"] != action["choice"],
+                decision["approved_scopes"] != action["approved_scopes"],
+            )):
+                raise InvalidDecision("committed decision action does not match")
+            result = _action_from(action)
+            if scope_digest(result.approved_scopes) != result.approved_digest:
+                raise InvalidDecision("decision action scope is damaged")
+            return result
+
+    def get_committed_decision_result(
+        self, context: ExecutionContext, action_id: str, *, principal_expires_at: float,
+    ) -> PermissionLease | None:
+        """Read the current outcome without creating another decision."""
+        if isinstance(principal_expires_at, bool) or not isinstance(principal_expires_at, (int, float)):
+            raise ValueError("invalid principal expiry")
+        try:
+            finite_expiry = math.isfinite(principal_expires_at)
+        except OverflowError as exc:
+            raise ValueError("invalid principal expiry") from exc
+        if not finite_expiry:
+            raise ValueError("invalid principal expiry")
+        action = self.get_committed_decision_action(context, action_id)
+        with self._transaction() as connection:
+            now = self._now(connection)
+            if principal_expires_at <= now:
+                raise PermissionDenied("principal session expired")
+            self._context(connection, context, active=False)
+            decision = connection.execute(
+                "SELECT * FROM approval_decisions WHERE idempotency_key=? AND nonce=? "
+                "AND request_id=? AND request_revision=?",
+                (action.action_id, action.nonce, action.request_id, action.request_revision),
+            ).fetchone()
+            if decision is None or decision["choice"] != action.choice:
+                raise InvalidDecision("committed decision action does not match")
+            row = connection.execute(
+                "SELECT * FROM permission_leases WHERE decision_id=?", (decision["decision_id"],)
+            ).fetchone()
+            if action.choice == "deny":
+                if row is not None:
+                    raise InvalidDecision("denied decision has an unexpected lease")
+                return None
+            if row is None:
+                raise InvalidDecision("approved decision has no lease")
+            lease = _lease_from(row)
+            if lease.status in {"active", "reserved"} and lease.expires_at <= now:
+                return replace(lease, status="expired")
+            return lease
+
     def decide(
         self, reference: str, *, approved_scopes: Iterable[Scope], action_id: str | None = None,
     ) -> PermissionLease | None:

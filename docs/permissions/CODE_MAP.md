@@ -206,6 +206,7 @@
 | `orchestrator/permissions/execution_gate.py` | 内部受管执行协调、范围检查、等待与监督回执匹配 | 已新增；通过独立 registry 原型与测试 supervisor 联调，不构成实际执行隔离 |
 | `orchestrator/permissions/registry.py` | 受管 ToolRegistry 原型，保留旧 admission 并调用执行协调 | 仅隔离测试构造；未安装到实际后端，尚无可信执行服务 |
 | `orchestrator/permissions/signed_receipts.py` | 校验固定公钥签署的准确决定 | 仅验证签名和格式；真实人类认证、受保护签发及密钥部署仍待实现 |
+| `orchestrator/permissions/enterprise_decisions.py` | 以现有企业用户会话和已登记动作进行离线签发联调 | 原型未接线；session 本身不证明真人意图，凭据及 signer 的隔离部署仍待实现 |
 | `orchestrator/permissions/windows_file_binding.py` | 持有本机路径组件与文件句柄，绑定读取及新建文件 | 原生 Windows 测试；不能覆盖既有文件，崩溃后暂存文件恢复未实现；不是授权、进程隔离或可部署 supervisor |
 | `orchestrator/permissions/backend_capabilities.py` | 从活动路径清单及绑定后端、执行器、服务代次和时效的观察结果保守派生覆盖；传播依赖与未受管通道 | 已新增纯投影与离线测试；真实可信证据、路径发现和 /safety 尚未接线；BACKEND |
 | `orchestrator/permissions/fc_bridge.py` | 私有 principal/receipt 与命令输入到权限服务的桥接 | 公共 FC Functions；CASE-FC |
