@@ -1,10 +1,12 @@
-"""Bind a Windows file path to held handles before a supervised read.
+"""Bind Windows file paths to held handles for supervised read or creation.
 
 This primitive is not an authorization check, sandbox, or process supervisor.
 The caller must use an already authorized immutable Scope, serialize the
 authority start/revoke barrier, and keep all returned handles private.
 Only local drive paths are supported; reparse points, hard links, UNC paths,
 and case-sensitive directories are rejected rather than guessed.
+Creation installs a new name only and never replaces existing files. A process
+crash can leave a temporary file; protected recovery has not been implemented.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from ctypes import wintypes
 import ntpath
 import os
 import re
+from uuid import uuid4
 
 from orchestrator.permissions.models import Scope
 
@@ -24,12 +27,16 @@ _OPEN_REPARSE_POINT = 0x00200000
 _OBJ_CASE_INSENSITIVE = 0x40
 _OBJ_DONT_REPARSE = 0x1000
 _NT_OPEN = 1
+_NT_CREATE = 2
 _NT_SYNCHRONOUS = 0x20
 _NT_DIRECTORY = 0x1
 _NT_NON_DIRECTORY = 0x40
 _DIRECTORY_ATTRIBUTE = 0x10
 _REPARSE_ATTRIBUTE = 0x400
 _CASE_SENSITIVE_INFO = 23
+_CREATE_ACCESS = 0x00110082  # SYNCHRONIZE | DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+_NT_RENAME_INFORMATION = 10
+_NT_DISPOSITION_INFORMATION = 13
 
 
 class FileBindingError(ValueError):
@@ -67,6 +74,13 @@ class _CaseSensitiveInfo(ctypes.Structure):
     _fields_ = [("flags", wintypes.ULONG)]
 
 
+class _RenameInformation(ctypes.Structure):
+    _fields_ = [
+        ("flags", wintypes.ULONG), ("root", wintypes.HANDLE),
+        ("name_bytes", wintypes.ULONG), ("name", wintypes.WCHAR * 1),
+    ]
+
+
 class _Windows:
     def __init__(self):
         if os.name != "nt":
@@ -95,6 +109,13 @@ class _Windows:
             ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
         ]
         self.kernel.ReadFile.restype = wintypes.BOOL
+        self.kernel.WriteFile.argtypes = [
+            wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+        ]
+        self.kernel.WriteFile.restype = wintypes.BOOL
+        self.kernel.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+        self.kernel.FlushFileBuffers.restype = wintypes.BOOL
         self.kernel.SetFilePointerEx.argtypes = [
             wintypes.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wintypes.DWORD,
         ]
@@ -108,6 +129,11 @@ class _Windows:
             wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG,
         ]
         self.nt.NtCreateFile.restype = ctypes.c_long
+        self.nt.NtSetInformationFile.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_IoStatus), ctypes.c_void_p,
+            wintypes.ULONG, ctypes.c_int,
+        ]
+        self.nt.NtSetInformationFile.restype = ctypes.c_long
 
     def open_root(self, root: str) -> int:
         # No FILE_SHARE_DELETE: opened path components cannot be renamed or
@@ -139,6 +165,62 @@ class _Windows:
             raise FileBindingError("cannot safely open approved path component")
         return handle.value
 
+    def create_temporary(self, parent: int, name: str) -> int:
+        buffer = ctypes.create_unicode_buffer(name)
+        length = len(name.encode("utf-16-le"))
+        string = _UnicodeString(length, length + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+        attributes = _ObjectAttributes(
+            ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(string),
+            _OBJ_CASE_INSENSITIVE | _OBJ_DONT_REPARSE, None, None,
+        )
+        handle = wintypes.HANDLE()
+        io = _IoStatus()
+        status = self.nt.NtCreateFile(
+            ctypes.byref(handle), _CREATE_ACCESS, ctypes.byref(attributes), ctypes.byref(io),
+            None, 0, 0, _NT_CREATE, _OPEN_REPARSE_POINT | _NT_SYNCHRONOUS | _NT_NON_DIRECTORY,
+            None, 0,
+        )
+        if status < 0 or not handle.value:
+            raise FileBindingError("cannot create a private temporary file")
+        return handle.value
+
+    def write_all(self, handle: int, data: bytes) -> None:
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset:offset + 65536]
+            buffer = ctypes.create_string_buffer(chunk)
+            count = wintypes.DWORD()
+            if not self.kernel.WriteFile(handle, buffer, len(chunk), ctypes.byref(count), None) or not count.value:
+                raise FileBindingError("cannot write temporary file")
+            offset += count.value
+        if not self.kernel.FlushFileBuffers(handle):
+            raise FileBindingError("cannot flush temporary file")
+
+    def rename_new(self, handle: int, parent: int, name: str) -> None:
+        encoded = name.encode("utf-16-le")
+        size = max(ctypes.sizeof(_RenameInformation), _RenameInformation.name.offset + len(encoded))
+        buffer = ctypes.create_string_buffer(size)
+        information = _RenameInformation.from_buffer(buffer)
+        information.flags = 0  # Never replace an existing entry.
+        information.root = parent
+        information.name_bytes = len(encoded)
+        ctypes.memmove(ctypes.addressof(buffer) + _RenameInformation.name.offset, encoded, len(encoded))
+        io = _IoStatus()
+        status = self.nt.NtSetInformationFile(
+            handle, ctypes.byref(io), buffer, size, _NT_RENAME_INFORMATION,
+        )
+        if status < 0:
+            raise FileBindingError("target exists or cannot be safely created")
+
+    def discard_temporary(self, handle: int) -> None:
+        disposition = ctypes.c_ubyte(1)
+        io = _IoStatus()
+        status = self.nt.NtSetInformationFile(
+            handle, ctypes.byref(io), ctypes.byref(disposition), 1, _NT_DISPOSITION_INFORMATION,
+        )
+        if status < 0:
+            raise FileBindingError("temporary file cleanup could not be confirmed")
+
     def check(self, handle: int, expected: str, *, directory: bool) -> None:
         info = _FileInformation()
         if not self.kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -166,22 +248,32 @@ class _Windows:
             raise FileBindingError("opened object differs from the approved path")
 
 
-class BoundWindowsRead:
-    """A held final handle plus every directory handle from its drive root."""
+def _close_handles(api: _Windows, handles: list[int]) -> None:
+    failed = False
+    while handles:
+        if not api.kernel.CloseHandle(handles.pop()):
+            failed = True
+    if failed:
+        raise FileBindingError("handle cleanup could not be confirmed")
 
+
+class _BoundHandles:
     def __init__(self, api: _Windows, handles: list[int]) -> None:
         self._api = api
         self._handles = handles
 
     def close(self) -> None:
-        while self._handles:
-            self._api.kernel.CloseHandle(self._handles.pop())
+        _close_handles(self._api, self._handles)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         self.close()
+
+
+class BoundWindowsRead(_BoundHandles):
+    """A held final handle plus every directory handle from its drive root."""
 
     def read(self, *, max_bytes: int) -> bytes:
         if not self._handles:
@@ -204,10 +296,46 @@ class BoundWindowsRead:
         raise FileBindingError("file exceeds the read limit")
 
 
-def open_bound_read(scope: Scope) -> BoundWindowsRead:
-    """Hold a safe file object; authorization must be checked by the caller."""
-    if not isinstance(scope, Scope) or scope.kind != "file" or "read" not in scope.actions:
-        raise FileBindingError("an approved read scope is required")
+class BoundWindowsCreate(_BoundHandles):
+    """A parent directory held stable until a new-only atomic rename."""
+
+    def __init__(self, api: _Windows, handles: list[int], directory: str, name: str) -> None:
+        super().__init__(api, handles)
+        self._directory = directory
+        self._name = name
+        self._used = False
+
+    def commit(self, data: bytes) -> None:
+        if not self._handles or self._used:
+            raise FileBindingError("create binding is closed or already used")
+        if not isinstance(data, bytes) or len(data) > 1024 * 1024:
+            raise FileBindingError("invalid file content or size")
+        self._used = True
+        parent = self._handles[-1]
+        name = ".hashi-permission-" + uuid4().hex + ".tmp"
+        temporary = self._api.create_temporary(parent, name)
+        expected = ntpath.join(self._directory, name)
+        try:
+            self._api.check(temporary, expected, directory=False)
+            self._api.write_all(temporary, data)
+            self._api.rename_new(temporary, parent, self._name)
+        except BaseException:
+            # If the rename outcome is uncertain, never delete a handle which
+            # might already refer to the user's target.
+            try:
+                self._api.check(temporary, expected, directory=False)
+                self._api.discard_temporary(temporary)
+            except Exception as cleanup_error:
+                raise FileBindingError("temporary file cleanup could not be confirmed") from cleanup_error
+            raise
+        finally:
+            if not self._api.kernel.CloseHandle(temporary):
+                raise FileBindingError("temporary handle cleanup could not be confirmed")
+
+
+def _path_parts(scope: Scope, required: frozenset[str]) -> tuple[str, list[str]]:
+    if not isinstance(scope, Scope) or scope.kind != "file" or not required.issubset(scope.actions):
+        raise FileBindingError("the required file scope is missing")
     drive, tail = ntpath.splitdrive(scope.resource)
     if not re.fullmatch(r"[a-zA-Z]:", drive) or not tail.startswith("\\"):
         raise FileBindingError("only absolute local drive paths are supported")
@@ -218,21 +346,45 @@ def open_bound_read(scope: Scope) -> BoundWindowsRead:
         for name in names
     ):
         raise FileBindingError("unsafe approved path component")
-    api = _Windows()
+    return drive, names
+
+
+def _open_parents(api: _Windows, drive: str, names: list[str]) -> tuple[list[int], str]:
     handles: list[int] = []
     try:
         current = drive + "\\"
         root = api.open_root(current)
         handles.append(root)
         api.check(root, current, directory=True)
-        for index, name in enumerate(names):
-            directory = index < len(names) - 1
-            child = api.open_child(handles[-1], name, directory=directory)
+        for name in names[:-1]:
+            child = api.open_child(handles[-1], name, directory=True)
             handles.append(child)
             current = ntpath.join(current, name)
-            api.check(child, current, directory=directory)
+            api.check(child, current, directory=True)
+        return handles, current
+    except Exception:
+        _close_handles(api, handles)
+        raise
+
+
+def open_bound_read(scope: Scope) -> BoundWindowsRead:
+    """Hold a safe file object; authorization must be checked by the caller."""
+    drive, names = _path_parts(scope, frozenset({"read"}))
+    api = _Windows()
+    handles, current = _open_parents(api, drive, names)
+    try:
+        child = api.open_child(handles[-1], names[-1], directory=False)
+        handles.append(child)
+        api.check(child, ntpath.join(current, names[-1]), directory=False)
         return BoundWindowsRead(api, handles)
     except Exception:
-        while handles:
-            api.kernel.CloseHandle(handles.pop())
+        _close_handles(api, handles)
         raise
+
+
+def open_bound_create(scope: Scope) -> BoundWindowsCreate:
+    """Bind a parent for new-file creation; caller must authorize before commit."""
+    drive, names = _path_parts(scope, frozenset({"create", "write"}))
+    api = _Windows()
+    handles, current = _open_parents(api, drive, names)
+    return BoundWindowsCreate(api, handles, current, names[-1])
