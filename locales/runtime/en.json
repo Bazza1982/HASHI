@@ -2291,6 +2291,7 @@
     "api.restart.setup_incomplete": "Restart setup incomplete.",
     "api.restart.requested": "🔄 Restart request accepted for {instance}. Workbench will disconnect; wait for it to reconnect and verify the instance status.",
     "api.restart.requested_short": "Restart requested.",
+    "api.restart.ack_unknown": "⚠️ HASHI cannot confirm the restart outcome. The independent Remote receipt may still complete; do not repeat the restart request.",
     "api.restart.unknown": "Unknown restart control.",
     "api.restart.failed": "❌ Restart failed: {reason}",
     "api.restart.failed_notice": "❌ {instance} could not restart. Please try again later.",

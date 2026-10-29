@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+from uuid import uuid4
 
 from orchestrator.chat_projection_transport import try_dispatch_chat_projection_transport
 from orchestrator.voice_confirmation_transport import (
@@ -80,6 +81,75 @@ class _CaptureStore:
 _LOCAL_OUTPUT_CAPTURE: ContextVar[Any] = ContextVar("local_command_output", default=None)
 
 
+class _PublishingCapture:
+    """Capture is a rendition of PAO Messages, never an alternate history."""
+
+    def __init__(self, runtime, store, update):
+        self.runtime, self.store, self.update = runtime, store, update
+        self.active = True
+        self.index = 0
+
+    async def capture_reply(self, text, **kwargs):
+        return await self.capture_send(self.update.effective_chat.id, text, **kwargs)
+
+    async def capture_send(self, chat_id, text, **kwargs):
+        from orchestrator import runtime_delivery, runtime_session
+        from orchestrator.frontend_connector_registry import canonical_connector_id, endpoint_id_for
+
+        if not self.active:
+            raise RuntimeError("local command output capture has ended")
+        if str(chat_id) != str(self.update.effective_chat.id):
+            raise ValueError("local command cannot redirect its presentation")
+        sent = await self.store.capture_send(chat_id, text, **kwargs)
+        parse_mode = str(kwargs.get("parse_mode") or "").casefold()
+        content_format = ("telegram-html" if parse_mode == "html" else
+                          "markdown" if parse_mode.startswith("markdown") else "plain-text")
+        context = getattr(sent, "_hashi_message_context", None)
+        if not isinstance(context, Mapping):
+            context = runtime_delivery.telegram_presentation_context(
+                text=text, content_format=content_format, presentation_channel="command",
+                reply_markup=kwargs.get("reply_markup"),
+            )
+        self.index += 1
+        publication = runtime_session.publish_frontend_message_for_update(
+            self.runtime, self.update, role="assistant", text=text,
+            source="frontend.command", publication_id=f"{self.update.update_id}:output:{self.index}",
+            content_format=content_format, message_context=context,
+        )
+        bind = getattr(sent, "_hashi_bind_presentation_message", None)
+        if callable(bind):
+            bind(publication)
+        connector = canonical_connector_id(publication["surface"], surface=publication["surface"],
+                                           ingress_transport=publication["surface"])
+        endpoint = endpoint_id_for(connector, ingress_transport=publication["surface"],
+                                   channel_key=publication["channel_key"])
+        store = runtime_session.ensure_store(self.runtime)
+        claims = store.claim_delivery_outbox(
+            session_id=publication["session_id"], owner_id=publication["owner_id"],
+            worker_id="local-command:" + self.update.update_id,
+            event_id=publication["delivery_event_id"], connector_id=connector,
+            endpoint_id=endpoint, limit=1,
+        )
+        for claim in claims:
+            # Only this local rendition is accepted. Configured mirrors retain
+            # their own outbox tasks; a synchronous HTTP result is not their proof.
+            store.record_frontend_delivery_receipt(
+                session_id=publication["session_id"], owner_id=publication["owner_id"],
+                receipt={"type": "hashi.delivery-receipt", "version": 1,
+                         "event_id": publication["delivery_event_id"], "endpoint_id": endpoint,
+                         "status": "accepted", "proof": None},
+            )
+            store.complete_delivery_outbox(outbox_id=claim["outbox_id"],
+                                          lease_token=claim["lease_token"], status="completed")
+        return sent
+
+
+def local_command_capture(runtime):
+    capture = _LOCAL_OUTPUT_CAPTURE.get()
+    return (capture[1] if capture is not None and capture[0] is runtime
+            and capture[1].active else None)
+
+
 @contextmanager
 def _capture_local_output(runtime, store):
     token = _LOCAL_OUTPUT_CAPTURE.set((runtime, store))
@@ -139,7 +209,7 @@ class _FakeUpdate:
         # Local command projections have no Telegram update number.  Preserve
         # the typed frontend invocation identity so each command response gets
         # its own stable Session presentation idempotency key.
-        self.update_id = metadata.get("frontend_invocation_id")
+        self.update_id = metadata.get("frontend_invocation_id") or "local_" + uuid4().hex
 
 
 def _trusted_command_session_metadata(
@@ -576,6 +646,8 @@ async def execute_local_command(
             command_line,
             session_metadata=local_session_metadata,
         )
+        publishing_capture = _PublishingCapture(runtime, store, update)
+        update.message._store = publishing_capture
         context = SimpleNamespace(
             args=args,
             source_channel=source_channel,
@@ -592,10 +664,10 @@ async def execute_local_command(
         async with lock:
             original_send_text = getattr(runtime, "_send_text", None)
             if original_send_text is not None:
-                runtime._send_text = store.capture_send
+                runtime._send_text = publishing_capture.capture_send
             try:
                 with (
-                    _capture_local_output(runtime, store),
+                    _capture_local_output(runtime, publishing_capture),
                     ui_language.language_scope(
                         runtime,
                         update,

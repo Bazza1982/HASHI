@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -2816,7 +2816,7 @@ class SessionStore:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
-                SELECT context_generation FROM sessions
+                SELECT * FROM sessions
                 WHERE session_id=? AND owner_id=? AND deleted_at IS NULL
                 """,
                 (identity[0], identity[1]),
@@ -2859,6 +2859,29 @@ class SessionStore:
                     encoded_invocation, now, now,
                 ),
             )
+            # The typed invocation already contains centrally redacted args.
+            # Native Telegram ingress records its own visible input. Actions
+            # edit an existing card and must not invent another user command.
+            if (invocation.get("connector_id") != "telegram"
+                    and not invocation.get("issued_action_id")
+                    and (invocation.get("authorization") or {}).get("decision") == "allowed"):
+                from orchestrator.frontend_projection import build_frontend_presentation_context
+
+                text = "/" + str(invocation["command"])
+                arguments = invocation.get("arguments") or []
+                if arguments:
+                    text += " " + " ".join(str(arg) for arg in arguments)
+                self.append_presentation_message(
+                    session_id=identity[0], owner_id=identity[1],
+                    agent_id=str(session["agent_id"]), role="user", text=text,
+                    source="frontend.command.input",
+                    idempotency_key="command-input:" + str(invocation["invocation_id"]),
+                    expected_context_generation=context_generation,
+                    message_context=build_frontend_presentation_context(
+                        text=text, content_format="plain-text", presentation_channel="command",
+                    ),
+                    _connection=connection,
+                )
         return {"state": "reserved", "replayed": False}
 
     def complete_frontend_command_invocation(
@@ -4641,6 +4664,8 @@ class SessionStore:
         content: Iterable[Mapping[str, Any]] | None = None,
         outbox: bool = False,
         delivery_route: Mapping[str, Any] | None = None,
+        expected_context_generation: int | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         """Persist frontend-visible standard content outside model history."""
 
@@ -4731,8 +4756,10 @@ class SessionStore:
         )
         message_id = "msg_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         now = _utc_now()
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._lock, (nullcontext(_connection) if _connection is not None
+                         else self._connection()) as connection:
+            if _connection is None:
+                connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
                 SELECT * FROM sessions
@@ -4743,6 +4770,9 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(str(session_id))
+            if (expected_context_generation is not None
+                    and int(session["context_generation"]) != int(expected_context_generation)):
+                raise SessionConflict("session context changed before frontend publication")
             existing = connection.execute(
                 "SELECT * FROM messages WHERE message_id = ?", (message_id,)
             ).fetchone()
@@ -4859,8 +4889,9 @@ class SessionStore:
         supplied_context = dict(message_context or {})
         if (
             not supplied_context
-            or set(supplied_context) - {"command_ui", "frontend_presentation"}
-            or not isinstance(supplied_context.get("command_ui"), Mapping)
+            or set(supplied_context) - {"command_ui", "frontend_presentation", "frontend_connector_renditions"}
+            or not (isinstance(supplied_context.get("command_ui"), Mapping)
+                    or isinstance(supplied_context.get("frontend_presentation"), Mapping))
             or (
                 "frontend_presentation" in supplied_context
                 and not isinstance(
@@ -13140,33 +13171,44 @@ class SessionStore:
     def resolve_frontend_transport_reference(
         self,
         *,
-        session_id: str,
+        session_id: str | None,
         owner_id: str,
         connector_id: str,
         endpoint_id: str,
         transport_message_id: str,
+        agent_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Resolve a quoted external message only in its owner and endpoint scope."""
 
-        resolved_session_id = str(session_id or "").strip()
+        resolved_session_id = str(session_id or "").strip() or None
         resolved_owner_id = str(owner_id or "").strip()
-        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        if resolved_session_id:
+            self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        elif not agent_id:
+            raise ValueError("transport lookup requires a Session or Agent scope")
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT ref.event_id, ref.message_id, message.role,
-                       message.text, message.created_at, message.visibility
+                       message.text, message.created_at, message.visibility,
+                       ref.session_id, message.context_generation
                 FROM frontend_transport_references AS ref
                 JOIN messages AS message
                   ON message.message_id=ref.message_id
                  AND message.session_id=ref.session_id
-                WHERE ref.session_id=? AND ref.owner_id=?
+                JOIN sessions AS s ON s.session_id=ref.session_id
+                WHERE (ref.session_id=? OR ? IS NULL) AND ref.owner_id=?
+                  AND s.instance_id=? AND (s.agent_id=? OR ? IS NULL)
                   AND ref.connector_id=? AND ref.endpoint_id=?
                   AND ref.transport_message_id=?
                 """,
                 (
                     resolved_session_id,
+                    resolved_session_id,
                     resolved_owner_id,
+                    self.instance_id,
+                    agent_id,
+                    agent_id,
                     str(connector_id or "").strip().casefold(),
                     str(endpoint_id or "").strip(),
                     str(transport_message_id or "").strip(),
@@ -13181,6 +13223,8 @@ class SessionStore:
         return {
             "event_id": str(row["event_id"]),
             "message_id": str(row["message_id"]),
+            **({"session_id": str(row["session_id"]),
+                "context_generation": int(row["context_generation"])} if resolved_session_id is None else {}),
             "role": str(row["role"]),
             "text": str(row["text"] or ""),
             "created_at": str(row["created_at"] or ""),

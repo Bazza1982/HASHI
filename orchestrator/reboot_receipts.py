@@ -207,6 +207,18 @@ def clean_origin(origin):
         legacy_actor = str(result.get("actor_id") or "")
         if legacy_actor.isdigit():
             result["owner_id"] = f"user:{legacy_actor}"
+    if origin.get("session_id") is not None:
+        session_id = origin["session_id"]
+        generation = origin.get("context_generation")
+        if (not isinstance(session_id, str) or not 1 <= len(session_id) <= 200
+                or not isinstance(generation, int) or isinstance(generation, bool) or generation < 1):
+            raise ValueError("Invalid reboot Conversation Session")
+        result.update(session_id=session_id, context_generation=generation,
+                      session_channel_key=str(origin.get("session_channel_key") or "default"))
+        if origin.get("delivery_route") is not None:
+            from orchestrator.frontend_delivery import normalize_run_delivery_route
+
+            result["delivery_route"] = normalize_run_delivery_route(origin["delivery_route"])
     return result
 
 

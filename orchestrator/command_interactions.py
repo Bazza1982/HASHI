@@ -313,7 +313,7 @@ class MenuStore:
                 else "plain-text",
             )
         ]
-        for row_index, row in enumerate(menu.rows):
+        for row_index, row in enumerate([] if menu.closed or deleted else menu.rows):
             for column_index, button in enumerate(row):
                 if not isinstance(button, Mapping) or bool(button.get("disabled")):
                     continue

@@ -138,7 +138,7 @@ class AgentMoveManager:
                     "delivery": {
                         "status": (
                             "pending"
-                            if (origin or {}).get("chat_id") is not None
+                            if (origin or {}).get("session_id") or (origin or {}).get("chat_id") is not None
                             else "not_requested"
                         ),
                         "attempts": 0,
@@ -159,7 +159,7 @@ class AgentMoveManager:
                         updated_at=utc_now_iso(),
                         instances=_json_mapping(instances, field="instances"),
                     )
-                    if (record.get("origin") or {}).get("chat_id") is not None:
+                    if (record.get("origin") or {}).get("session_id") or (record.get("origin") or {}).get("chat_id") is not None:
                         record["delivery"] = {"status": "pending", "attempts": 0, "next_attempt_at": 0.0}
                     directory[move_id] = record
                     self._write_operations_unlocked(directory, keep=move_id)
@@ -240,6 +240,21 @@ class AgentMoveManager:
         )
         self._update(package_id, delivery=delivery)
         origin = record.get("origin") or {}
+        if origin.get("session_id"):
+            from orchestrator.frontend_notice_delivery import deliver_notice
+
+            result = await deliver_notice(
+                self.kernel, agent_id=str(record.get("requested_by") or record.get("agent_id") or ""),
+                origin=origin, text=render_background_notice(record),
+                publication_id=f"agent-transfer:{package_id}:{record.get('status')}",
+                send_notice=send_runtime_notice,
+            )
+            if result.get("sent"):
+                delivery.update(status="sent", message_id=result.get("message_id"), sent_at=utc_now_iso())
+            elif attempts >= _MAX_DELIVERY_ATTEMPTS:
+                delivery["status"] = "exhausted"
+            self._update(package_id, delivery=delivery)
+            return
         result = await send_runtime_notice(
             self.kernel,
             source_agent=str(record.get("requested_by") or record.get("agent_id") or ""),

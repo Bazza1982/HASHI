@@ -158,20 +158,10 @@ async def _submit_transfer_completion(
         raise AgentMoveError(
             "persistent Agent move manager is unavailable; the source was not changed"
         )
-    query = getattr(update, "callback_query", None)
-    chat = getattr(update, "effective_chat", None) or getattr(query, "message", None)
-    user = getattr(query, "from_user", None) or getattr(update, "effective_user", None)
-    message = getattr(query, "message", None)
-    origin = {
-        "surface": "telegram",
-        "actor_id": getattr(user, "id", None),
-        "chat_id": getattr(chat, "id", None) or getattr(chat, "chat_id", None),
-        "thread_id": getattr(message, "message_thread_id", None),
-    }
-    origin = {key: value for key, value in origin.items() if value is not None}
-    locale = str(
-        getattr(getattr(runtime, "global_config", None), "ui_language", None) or ""
-    )
+    from orchestrator.runtime_reboot import origin_from_update
+
+    origin = origin_from_update(runtime, update)
+    locale = ui_language.preferred_locale(runtime, update)
     result = submit(package_id, instances, origin=origin, locale=locale)
     if asyncio.iscoroutine(result):
         result = await result

@@ -41,7 +41,7 @@ def _server(tmp_path: Path, runtime: _FakeRuntime) -> WorkbenchApiServer:
     config_path = tmp_path / "agents.json"
     config_path.write_text(json.dumps({"agents": [{"name": "hashiko"}]}), encoding="utf-8")
     runtime.global_config.bridge_home = tmp_path
-    global_config = SimpleNamespace()
+    global_config = SimpleNamespace(authorized_id=123, instance_id="NOTIFY_TEST", bridge_home=tmp_path, project_root=tmp_path)
     return WorkbenchApiServer(
         config_path=config_path,
         global_config=global_config,
@@ -61,6 +61,28 @@ async def test_admin_notify_sends_text_to_primary_chat(tmp_path):
     assert response.status == 200
     assert payload["ok"] is True
     assert runtime.sent == [{"chat_id": 123, "text": "restarted"}]
+
+
+@pytest.mark.asyncio
+async def test_session_notice_retries_after_ack_loss_without_telegram_or_default_fallback(tmp_path):
+    runtime = _FakeRuntime(locale="en")
+    server = _server(tmp_path, runtime)
+    server.global_config.authorized_id = 123
+    selected = server.session_store.create_session(owner_id="user:123", agent_id="hashiko")
+    origin = {"surface": "workbench", "owner_id": "user:123", "session_id": selected["session_id"],
+              "context_generation": 1, "session_channel_key": "default"}
+    request = _FakeRequest({"agent": "hashiko", "message_key": "api.restart.completed",
+        "message_args": {"instance": "PEER"}, "origin": origin, "ui_locale": "zh-CN",
+        "publication_id": "restart:fixture-1"})
+    # The first response may be lost. Retrying this publication cannot repeat a
+    # restart or create another Message, and needs no Telegram address.
+    for _ in range(2):
+        response = await server.handle_admin_notify(request)
+        assert response.status == 200, response.text
+    rows = server.session_store.messages(selected["session_id"], owner_id="user:123")
+    assert len(rows) == 1
+    assert "PEER 已重启并恢复在线" in rows[0]["text"]
+    assert not runtime.sent
 
 
 @pytest.mark.asyncio
