@@ -3,21 +3,17 @@
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit copies stay outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys deletion: authenticated management + current snapshot;
-  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
-  [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
+- Task/local /sys deletion needs authenticated management and a current snapshot;
+  exclude global/permanent prompts.
 
-- Legacy audio migration requires verified ownership and safe paths; PAO
-  settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
-  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
-  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
-- PAO strips internal control envelopes before judging deliverability. A result
-  containing only Memory+ state fails terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state and
-  evidence; cancellation, safety, transport, Provider and single-Tool limits
-  remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-- Agent Move checks mutable state at staging; after confirmation it is
-  forward-only and never rolls the target back. [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Legacy audio needs ownership/path proof; PAO settlement is cancellation-safe
+  and HERV3 checkpoint claims immutable. [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md).
+- PAO strips internal control envelopes before deliverability checks.
+  Memory+-only results fail terminally; typed audio remains deliverable.
+- HERV3 has no whole-Run size/time/call ceiling. Keep state/evidence; cancellation,
+  safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
+- Agent Move checks mutable staging state; confirmed moves go forward only.
+  Never roll the target back. [Move](HASHI_AGENT_MOVE_V1.md).
 - Image fallback: selected model, same-Provider visual model, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
@@ -29,19 +25,19 @@
 
 ## Authority and ownership
 
-PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones and
-delivery; HERV3 owns Engine Turns/model/tool loop/cost; Frontends authenticate and
-render. Use the narrowest Function/config owner. Core has no product policy or
-imports. Core changes require major-migration approval, version bump, label and
-independent review; flags grant nothing.
+PCM: Persona/Context/Memory. PAO: Agents/Sessions/Runs/jobs/Workzones/delivery.
+HERV3: Engine Turns/model/tool loop/cost. Frontends: authentication/rendering.
+Use the narrowest Function/config owner. Core has no product policy/imports;
+changes need major-migration approval, version bump, label and independent review.
+Flags grant nothing.
 
-Prove source, Worker adoption and delivery separately. Tools cannot edit/kill
-Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
-Worker; `max` replaces shared Functions/Workers, not Core/Remote. Code adopts by
-reboot, docs do not. Workbench preserves `AGENT_BUSY`; retry only before a durable
-receipt; `target_busy` stays pending. `max` rejects shared API/background work
-before and after fencing. [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
-[fail-fast](HASHI_REBOOT_RECEIPTS.md#shared-handoff-fail-fast-correction-2026-10-22).
+Prove source, Worker adoption and delivery separately. Tools cannot alter/kill
+Core/Python, read secrets or grant authority. `/reboot min|same`: one Worker;
+`max`: shared Functions/Workers, never Core/Remote. Code needs reboot; docs do not.
+Preserve `AGENT_BUSY`; retry only before durable receipt; `target_busy` stays
+pending. `max` rejects shared API/background work before/after fencing.
+[reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
+[fail-fast](HASHI_REBOOT_RECEIPTS.md).
 
 `hashi update` must adopt source, Core, Workers and Remote together or fail.
 
@@ -50,22 +46,21 @@ before and after fencing. [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md
 Isolated speech locks/runtimes/releases need separate proof:
 [dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
-Config owns identity, ports, Workzones, endpoints/models; exclude secrets and
-machine paths. Opt-ins use `allowed_backends`/runtime effort; shared compatibility
-uses the qualified registry. Unknown capability/price is neither unsupported nor
-zero; explicit choices persist. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md)
-without Engine grants.
+Config owns identity/ports/Workzones/endpoints/models; omit secrets/machine paths.
+Opt-ins: `allowed_backends`/runtime effort; shared compatibility: qualified registry.
+Unknown capability/price means neither unsupported nor zero. Persist explicit
+choices. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md), not Engine grants.
 
 Agent name/Emoji use revisioned config; refresh cannot undo durable success.
 
 Verified capabilities survive lookup failure until identity/source changes;
 pricing freshness is separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
-Portable has no credentials; PAO starts Workers. Wildcards grant permission, not
-capability; paths grant nothing. Workzones are Agent-scoped; busy Runs freeze
-active revisions while saved state stays visible. Windows rejects POSIX Workzones.
-A Browser Bridge disconnect never stops the shared Windows named-pipe listener.
-Keep experiments, secrets, media bytes and remote paths out of PCM/logs/chat/Git.
+Portable has no credentials; PAO starts Workers. Wildcards grant permission,
+not capability; paths grant nothing. Agent Workzones freeze active revisions for
+busy Runs; saved state stays visible. Windows rejects POSIX Workzones. Browser
+disconnects preserve the shared Windows named-pipe listener. Keep experiments,
+secrets, media bytes and remote paths out of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
@@ -161,16 +156,15 @@ without a model call or error. Workbench retains `voice_message` audio but hides
 its duplicate player/bubble; ordinary audio stays visible. Telegram uses its renderer.
 
 Phone binds the owner's foreground Conversation. Use dialogue-round HCC without
-raw metadata and bounded PCM/Conversation/job evidence, not scheduled prompts;
-lookups create no Run. Action snapshots/constraints survive reconnection with
-epoch-scoped authority; after checks, handoff freezes ID and ordered snapshot
-without authority. Hang-up restores history. Bounded cleanup verifies event IDs,
-not display text; exhaustion keeps context and allows the turn.
-PCM stores arrival bounds; HERV3 orders Turns by time, skips unused history. Functions
-own settings; open when ready.
-Failed PCM refresh allows only stop/inspect; Session fence/hang-up win. Preserve
-failure cause; resume at most five times, never retry uncertain writes. Verify
-acceptance/execution/playback/listening and source/adoption/device separately.
+raw metadata; bound PCM/Conversation/job evidence, never scheduled prompts.
+Lookups create no Run. Reconnection retains action snapshots/constraints and
+epoch-scoped authority. Checked handoffs freeze ID/ordered snapshot, not authority.
+Hang-up restores history. Bounded cleanup checks event IDs, not display text;
+exhaustion preserves context and permits the Turn. PCM bounds arrivals; HERV3
+orders Turns by time and skips unused history. Functions own settings; open when
+ready. Failed PCM refresh permits only stop/inspect; Session fence/hang-up win.
+Keep failure causes; resume at most five times, never retry uncertain writes.
+Prove acceptance/execution/playback/listening and source/adoption/device separately.
 See [PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
 [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 

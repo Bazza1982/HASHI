@@ -107,6 +107,12 @@ jobs:
             tests/test_service_manager_scheduler_lease.py \
             tests/test_workbench_enterprise_health.py \
             tests/test_workspace_state.py
+      - name: Run frontend Session discovery regressions
+        run: |
+          python -m pytest -q \
+            tests/test_workbench_primary_session_metadata.py \
+            tests/test_session_api.py \
+            tests/test_chat_projection_transport.py
       - name: Run Telegram activation and readiness regressions
         run: |
           python -m pytest -q \
