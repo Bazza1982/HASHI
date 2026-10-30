@@ -13,6 +13,36 @@ from orchestrator.background_jobs import BackgroundJobManager
 from tools.tool_audit import record_tool_action
 
 
+def test_diagnostics_search_older_request_evidence_without_claiming_safe_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_diagnostics, "_MAX_LOG_BYTES", 128)
+    record_tool_action(
+        workspace_dir=tmp_path, tool_name="file_write", tool_call_id="older-write",
+        arguments={"path": "result.txt"}, output="saved", is_error=False, duration_ms=1,
+        audit_context={"request_id": "req-older"},
+        details={"effect_receipt": {"kind": "write", "readback": True}},
+    )
+    with (tmp_path / "tool_action_audit.jsonl").open("a", encoding="utf-8") as stream:
+        for index in range(20):
+            stream.write(json.dumps({"request_id": "other", "tool_name": f"tool-{index}"}) + "\n")
+
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-older")
+
+    assert any(item["tool_call_id"] == "older-write" for item in report["tool_actions"])
+    assert report["safe_retry_evidence"]["status"] != "present"
+
+
+def test_diagnostics_mark_a_scan_limit_as_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_diagnostics, "_MAX_DIAGNOSTIC_SCAN_BYTES", 128, raising=False)
+    (tmp_path / "tool_action_audit.jsonl").write_text(
+        "".join(json.dumps({"request_id": "other", "padding": "x" * 50}) + "\n" for _ in range(10)),
+        encoding="utf-8",
+    )
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-target")
+    assert report["evidence"]["tool_log_suffix_truncated"] is True
+    assert report["reconciliation"]["evidence_limited"] is True
+    assert report["safe_retry_evidence"]["status"] != "present"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('job_query_fails', [False, True])
 async def test_effect_reconciliation_awaits_real_worker_facade_and_preserves_writes(tmp_path, job_query_fails):

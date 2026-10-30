@@ -123,10 +123,12 @@ class MultimodalContractError(ValueError):
         *,
         code: str = "INVALID_MULTIMODAL_CONTENT",
         attachment_id: str = "",
+        diagnostic: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(str(message))
         self.code = str(code or "INVALID_MULTIMODAL_CONTENT")
         self.attachment_id = str(attachment_id or "")
+        self.diagnostic = dict(diagnostic or {})
 
 
 @dataclass(frozen=True)
@@ -1365,6 +1367,7 @@ def _read_authorized_media(
                     f"attachment {attachment_id!r} size changed after intake",
                     code="MEDIA_INTEGRITY_CHANGED",
                     attachment_id=attachment_id,
+                    diagnostic={"phase": "read_media", "reason": "size_mismatch"},
                 )
             while True:
                 chunk = handle.read(1024 * 1024)
@@ -1376,6 +1379,7 @@ def _read_authorized_media(
                         f"attachment {attachment_id!r} size changed after intake",
                         code="MEDIA_INTEGRITY_CHANGED",
                         attachment_id=attachment_id,
+                        diagnostic={"phase": "read_media", "reason": "size_mismatch"},
                     )
                 digest_builder.update(chunk)
                 if len(signature_prefix) < 64:
@@ -1396,6 +1400,7 @@ def _read_authorized_media(
             f"attachment {attachment_id!r} size changed after intake",
             code="MEDIA_INTEGRITY_CHANGED",
             attachment_id=attachment_id,
+            diagnostic={"phase": "read_media", "reason": "size_mismatch"},
         )
     digest = digest_builder.hexdigest()
     if digest != str(part["sha256"]):
@@ -1403,6 +1408,7 @@ def _read_authorized_media(
             f"attachment {attachment_id!r} hash changed after intake",
             code="MEDIA_INTEGRITY_CHANGED",
             attachment_id=attachment_id,
+            diagnostic={"phase": "read_media", "reason": "hash_mismatch"},
         )
     if validate_signature:
         _validate_signature(

@@ -654,3 +654,10 @@ The frozen ancestor/file identities and intake hash are checked again at
 consumption. Unsupported platforms fail closed for outside-root grants.
 Released Codex voice transcripts retain the same-Run durable confirmation
 gate; ordinary audio and HER native input retain their existing routing.
+
+A safe-open OS failure is unavailable media, not proof of changed content.
+Grant/identity, length and digest mismatches remain integrity failures. Both
+fail closed, with sanitized phase, reason and numeric OS codes in diagnostics.
+Explicit request diagnostics scan a bounded older ledger window; any omitted,
+corrupt or uncertain evidence remains incomplete and cannot prove a safe retry.
+Development validation on HASHI5 is separate from Worker adoption and production.

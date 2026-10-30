@@ -42,13 +42,34 @@ _current: ContextVar[_ConsumptionScope | None] = ContextVar(
 )
 
 
-def _deny(attachment_id: str = "", *, integrity: bool = False):
+def _deny(attachment_id: str = "", *, integrity: bool = False,
+          reason: str = "authorization_rejected"):
     from orchestrator.multimodal_contract import MultimodalContractError
     raise MultimodalContractError(
         "Session attachment no longer matches the authorized current Run",
         code="MEDIA_INTEGRITY_CHANGED" if integrity else "MEDIA_PATH_NOT_AUTHORIZED",
         attachment_id=attachment_id,
+        diagnostic={"phase": "attachment_grant", "reason": reason},
     )
+
+
+def _unavailable(attachment_id: str, exc: OSError, *, phase: str):
+    from orchestrator.multimodal_contract import MultimodalContractError
+    diagnostic = {
+        "phase": phase,
+        "reason": "safe_open_failed",
+        "error_type": type(exc).__name__,
+    }
+    for field in ("errno", "winerror"):
+        value = getattr(exc, field, None)
+        if isinstance(value, int):
+            diagnostic[field] = value
+    raise MultimodalContractError(
+        "Session attachment could not be opened safely",
+        code="MEDIA_UNAVAILABLE",
+        attachment_id=attachment_id,
+        diagnostic=diagnostic,
+    ) from exc
 
 
 def _open_no_symlinks(path: Path, flags: int) -> tuple[int, tuple[tuple[str, int, int], ...]]:
@@ -168,16 +189,16 @@ def open_granted_media(part: Mapping[str, Any], flags: int) -> int | None:
     if (str(part["attachment_id"]) != grant.attachment_id
             or int(part["size_bytes"]) != grant.size_bytes
             or str(part["sha256"]) != grant.sha256):
-        _deny(grant.attachment_id, integrity=True)
+        _deny(grant.attachment_id, integrity=True, reason="grant_metadata_mismatch")
     try:
         fd, ancestors = _open_no_symlinks(path, flags)
-    except OSError:
-        _deny(grant.attachment_id, integrity=True)
+    except OSError as exc:
+        _unavailable(grant.attachment_id, exc, phase="read_grant")
     observed = os.fstat(fd)
     if (ancestors != grant.ancestors or not stat.S_ISREG(observed.st_mode)
             or (int(observed.st_dev), int(observed.st_ino)) != (grant.device, grant.inode)):
         os.close(fd)
-        _deny(grant.attachment_id, integrity=True)
+        _deny(grant.attachment_id, integrity=True, reason="grant_identity_mismatch")
     return fd
 
 
@@ -221,10 +242,10 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
         return ()
     attachment_id = str(parts[0]["attachment_id"])
     if store is None:
-        _deny(attachment_id)
+        _deny(attachment_id, reason="store_unavailable")
     agent = str(getattr(manager.config, "name", "")).lower()
     if str(getattr(runtime, "name", "")).lower() != agent:
-        _deny(attachment_id)
+        _deny(attachment_id, reason="agent_mismatch")
     try:
         run = store.get_run_by_request(request_id, agent_id=agent)
         session = store.get_session(run["session_id"], agent_id=agent, include_deleted=False)
@@ -234,25 +255,29 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
             "hashi_fencing_token": run["fencing_token"], "owner_id": session["owner_id"],
             "context_generation": run["context_generation"],
         }
-        if (run["state"] != "running" or run["context_generation"] != session["context_generation"]
-                or any(str(meta.get(key)) != str(value) for key, value in expected.items())):
-            _deny(attachment_id)
+        if run["state"] != "running":
+            _deny(attachment_id, reason="run_not_running")
+        if run["context_generation"] != session["context_generation"]:
+            _deny(attachment_id, reason="generation_mismatch")
+        for key, value in expected.items():
+            if str(meta.get(key)) != str(value):
+                _deny(attachment_id, reason=f"run_metadata_{key}_mismatch")
         message = store.get_message(run["user_message_id"], session_id=run["session_id"], owner_id=session["owner_id"])
         if (message["run_id"] != run["run_id"] or message["role"] != "user"
                 or message["context_generation"] != run["context_generation"]):
-            _deny(attachment_id)
+            _deny(attachment_id, reason="message_scope_mismatch")
         references = {str(block.get("attachment_id")) for block in message["content"]
                       if block.get("type") in {"attachment", "media", "audio"}}
         grants = []
         for part in parts:
             attachment_id = str(part["attachment_id"])
             if attachment_id not in references:
-                _deny(attachment_id)
+                _deny(attachment_id, reason="message_reference_missing")
             with store._lock, store._connection() as connection:
                 row = connection.execute("SELECT * FROM session_attachments WHERE attachment_id=? AND session_id=? AND owner_id=? AND state='committed'",
                     (attachment_id, run["session_id"], session["owner_id"])).fetchone()
             if row is None:
-                _deny(attachment_id)
+                _deny(attachment_id, reason="committed_attachment_missing")
             row = dict(row)
             if str(row["media_type"]).startswith("audio/"):
                 assets = store.audio_assets
@@ -261,16 +286,19 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
                     assets._authorize(raw, owner_id=session["owner_id"], session_id=run["session_id"])
                 storage_name = f"{row['asset_id']}.{raw['format']}"
                 if raw.get("asset_id") != row["asset_id"] or raw.get("storage_name") != storage_name:
-                    _deny(attachment_id)
+                    _deny(attachment_id, reason="audio_asset_mismatch")
                 path = assets.files_root / storage_name
             else:
                 path = store._validated_attachment_file(row)
             if secure_grants:
-                fd, ancestors = _open_no_symlinks(path, os.O_RDONLY)
+                try:
+                    fd, ancestors = _open_no_symlinks(path, os.O_RDONLY)
+                except OSError as exc:
+                    _unavailable(attachment_id, exc, phase="issue_grant")
                 try:
                     observed = os.fstat(fd)
                     if not stat.S_ISREG(observed.st_mode):
-                        _deny(attachment_id)
+                        _deny(attachment_id, reason="attachment_not_regular")
                 finally:
                     os.close(fd)
             else:
@@ -285,19 +313,25 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
             canonical = store.attachment_canonical_part(session_id=run["session_id"], owner_id=session["owner_id"],
                 attachment_id=attachment_id, item_index=part["item_index"])
             fields = ("attachment_id", "local_ref", "modality", "mime_type", "size_bytes", "sha256")
-            if (any(part[key] != canonical[key] for key in fields)
-                    or canonical["size_bytes"] != row["size_bytes"] or canonical["sha256"] != row["sha256"]
-                    or (part.get("modality") == "audio" and part.get("semantic_role") != canonical.get("semantic_role"))
-                    or str(path.absolute()) != canonical["local_ref"]):
-                _deny(attachment_id, integrity=True)
+            mismatched_fields = [key for key in fields if part[key] != canonical[key]]
+            if canonical["size_bytes"] != row["size_bytes"]:
+                mismatched_fields.append("stored_size")
+            if canonical["sha256"] != row["sha256"]:
+                mismatched_fields.append("stored_digest")
+            if part.get("modality") == "audio" and part.get("semantic_role") != canonical.get("semantic_role"):
+                mismatched_fields.append("semantic_role")
+            if str(path.absolute()) != canonical["local_ref"]:
+                mismatched_fields.append("storage_path")
+            if mismatched_fields:
+                _deny(attachment_id, integrity=True, reason=f"canonical_{mismatched_fields[0]}_mismatch")
             if secure_grants:
                 grants.append(AttachmentReadGrant(attachment_id, path.absolute(), int(observed.st_dev), int(observed.st_ino),
                     int(row["size_bytes"]), str(row["sha256"]), ancestors))
         return tuple(grants)
     except MultimodalContractError:
         raise
-    except (SessionStoreError, AudioAssetError, OSError, ValueError, KeyError, TypeError):
-        _deny(attachment_id)
+    except (SessionStoreError, AudioAssetError, OSError, ValueError, KeyError, TypeError) as exc:
+        _deny(attachment_id, reason=f"grant_resolution_{type(exc).__name__}")
 
 
 async def released_codex_voice_input(manager: Any, request_id: str, prompt: str, content):

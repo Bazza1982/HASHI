@@ -1,5 +1,8 @@
 # HASHI Agent FYI
 
+- Session media distinguishes safe-open failure from changed content; bounded
+  diagnostics stay conservative. [contract](HASHI_PCM_SYSTEM_DESIGN.md#current-run-attachment-consumption-on-windows-and-posix).
+
 - 权限与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
