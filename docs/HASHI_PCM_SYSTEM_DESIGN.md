@@ -661,3 +661,14 @@ fail closed, with sanitized phase, reason and numeric OS codes in diagnostics.
 Explicit request diagnostics scan a bounded older ledger window; any omitted,
 corrupt or uncertain evidence remains incomplete and cannot prove a safe retry.
 Development validation on HASHI5 is separate from Worker adoption and production.
+
+## External Agent document editing
+
+A management-authorized owner may export the selected Agent's canonical PCM
+document to an existing device application and explicitly import the edited
+file. The owning PCM Function validates the document and checks the original
+content revision under the existing writer lock before publication. A changed
+document is never overwritten, and an uncertain response is not retried
+automatically. The transfer does not grant a filesystem path or choose another
+Agent. Running requests keep their admitted context; later assemblies read PCM
+again. Development validation, Worker adoption and frontend use are distinct.

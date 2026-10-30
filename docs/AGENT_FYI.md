@@ -1,7 +1,7 @@
 # HASHI Agent FYI
 
-- Session media distinguishes safe-open failure from changed content; bounded
-  diagnostics stay conservative. [contract](HASHI_PCM_SYSTEM_DESIGN.md#current-run-attachment-consumption-on-windows-and-posix).
+- Session media errors and external Agent.md edits fail closed; edited documents
+  use revision checks. [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - 权限与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
