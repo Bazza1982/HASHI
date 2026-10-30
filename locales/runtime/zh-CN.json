@@ -85,6 +85,8 @@
     "safety.maximum_seconds": "从批准时起最多 {value} 秒，任务提前结束即归还。",
     "safety.decision_denied": "已拒绝访问。已完成的成果会保留，受限步骤不会执行。",
     "safety.decision_rejected": "此连接暂不可批准权限，或申请已变化。本次未授予权限。",
+    "telegram.scoped.welcome": "您可以与此代理对话，请直接发送消息。",
+    "telegram.scoped.chat_only": "此账号可与此代理对话，命令功能仅供全局用户使用。",
     "forget.usage": "用法：/forget 2h 或 /forget 3d；继续未完成的操作：/forget resume。",
     "forget.unauthorized": "遗忘操作需要经过身份验证的所有者。",
     "forget.audit_unavailable": "受保护的审计存储不可用，遗忘操作未开始。",

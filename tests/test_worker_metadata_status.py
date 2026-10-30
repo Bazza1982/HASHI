@@ -451,6 +451,63 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
+async def test_worker_projects_revisioned_workzone_support(tmp_path):
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        old = await _wait_for_projection(stack, lambda row: row.get("workzone_revisioned_profile") is False)
+        assert old["workzone_revisioned_profile"] is False
+        stack.runtime.session_store = SimpleNamespace(
+            get_agent_workzone_set=lambda **_kwargs: None,
+            set_agent_workzone_slot=lambda **_kwargs: None,
+            delete_agent_workzone_slot=lambda **_kwargs: None,
+        )
+        stack.runtime._sync_workzone_to_backend_config = lambda: None
+        await stack.host.emit_metadata()
+        supported = await _wait_for_projection(stack, lambda row: row.get("workzone_revisioned_profile") is True)
+        assert supported["workzone_revisioned_profile"] is True
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
+async def test_worker_reports_scoped_telegram_access_capability(tmp_path):
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        deadline = asyncio.get_running_loop().time() + 1
+        while (
+            stack.handle.get_runtime_metadata().get("telegram_scoped_access_protocol") != 2
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert stack.handle.get_runtime_metadata()["telegram_scoped_access_protocol"] == 2
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
+async def test_worker_projects_guarded_parked_store_capability(tmp_path):
+    from orchestrator.parked_topics import ParkedTopicStore
+
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        await stack.host.emit_metadata()
+        first = await _wait_for_projection(
+            stack, lambda row: row.get("parked_topic_guarded_writes") is False,
+        )
+        assert first["parked_topic_guarded_writes"] is False
+        stack.runtime.parked_topics = ParkedTopicStore(stack.runtime.workspace_dir)
+        await stack.host.emit_metadata()
+        ready = await _wait_for_projection(
+            stack, lambda row: row.get("parked_topic_guarded_writes") is True,
+        )
+        assert ready["parked_topic_guarded_writes"] is True
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projection_reports_actual_agent_mode(tmp_path):
     stack = await _build_stack(tmp_path, outcome="success")
     try:

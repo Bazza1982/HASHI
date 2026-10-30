@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from orchestrator.bridge_memory import SysPromptManager, sys_prompt_deletion_revision
-from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.parked_topics import ParkedTopicStore, parked_topic_deletion_revision
 from orchestrator.workzone import load_workzone
 from tools.token_tracker import get_summary
 
@@ -78,7 +78,7 @@ def _system_prompt_overview(manager: Any, *, agent_name: str = '') -> dict[str, 
     }
 
 
-def _parked_topics_overview(store: Any) -> dict[str, Any]:
+def _parked_topics_overview(store: Any, *, agent_name: str = '') -> dict[str, Any]:
     topics = []
     for item in store.list_topics():
         followup = item.get("followup") if isinstance(item.get("followup"), dict) else {}
@@ -87,6 +87,7 @@ def _parked_topics_overview(store: Any) -> dict[str, Any]:
                 "slot": int(item.get("slot_id", 0) or 0),
                 "title": str(item.get("title") or ""),
                 "summary_short": str(item.get("summary_short") or ""),
+                "deletion_revision": parked_topic_deletion_revision(item, agent_name=agent_name),
                 "followup": {
                     "status": str(followup.get("status") or ""),
                     "attempts": int(followup.get("attempts", 0) or 0),
@@ -204,6 +205,8 @@ def build_agent_overview(
         "system_prompts": _system_prompt_overview(
             prompt_manager, agent_name=str(metadata.get("id") or metadata.get("name") or ""),
         ),
-        "parked_topics": _parked_topics_overview(parked_store),
+        "parked_topics": _parked_topics_overview(
+            parked_store, agent_name=str(metadata.get("id") or metadata.get("name") or ""),
+        ),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -96,9 +96,11 @@ Workbench can replace an individual Agent's Bot token from **Manage Agents →
 Manage → Telegram**. HASHI returns only configured status and an opaque
 revision, validates a submitted token with Telegram `getMe`, and publishes it
 with revision-checked private-file replacement. Shared credential references
-and missing authorized-user configuration fail closed. A running Agent is not
-restarted automatically; apply the new token by restarting that Agent when it
-is idle.
+and missing authorized-user configuration fail closed. When the Agent is running,
+HASHI attempts an Agent-scoped activation after saving. If the Agent is busy or
+activation is unavailable, the saved credential stays pending. A connected
+status requires an authorized Telegram user and both live transport directions;
+it does not establish that a real user's round trip has succeeded.
 
 Replacing the human Telegram account is a separate instance lifecycle. HASHI
 requires a recent runtime-observed direct private-chat binding, preserves the

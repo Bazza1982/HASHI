@@ -1,32 +1,32 @@
 # HASHI Agent FYI
 
-- 权限边界与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
+- 权限与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys deletion: authenticated management + current snapshot;
-  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
-  [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
+- Task/local /sys + parked deletion: authenticated, revision-checked;
+  /sys excludes global/permanent, parked needs guarded Worker, keeps chat.
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
 - Legacy audio migration needs verified ownership/safe paths; PAO settlement
-  is cancellation-safe; HERV3 checkpoint claims stay immutable.
+  is cancellation-safe; HERV3 checkpoint claims are immutable.
   [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
 - PAO strips internal control envelopes before delivery checks. Memory+-only
   results fail terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state/evidence;
+- HERV3 has no whole-run size/time/call ceiling. Preserve state/evidence;
   cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
-  snapshots, resumable retries, no Move-only gates/source lifecycle writes.
+  snapshots, resumable retries; no Move-only gates/source lifecycle writes.
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).
-- Image fallback: selected model, same-Provider visual model, LAN Compute;
+- Image fallback: selected model, same-Provider vision, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
   fallback. [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
 - Call frames are input-only/cleared camera-off; LAN targets are literal private
   IPv4 without redirects. Preview is not Agent vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
-- Tool screenshots use provider-native image input, never Base64 text. Ollama
+- Tool screenshots use provider-native images, never Base64 text. Ollama
   behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
 ## Authority and ownership
@@ -45,28 +45,29 @@ pending. `max` rejects shared API/background work before/after fencing.
 [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
 [fail-fast](HASHI_REBOOT_RECEIPTS.md).
 
-`hashi update` must adopt source, Core, Workers and Remote together or fail.
+`hashi update` adopts source, Core, Workers and Remote together or fails.
 
 ## Configuration, identity, and persistence
 
-Isolated speech locks/runtimes/releases need separate proof:
-[dependencies](DEPENDENCIES.md).
+Prove isolated speech locks/runtimes/releases separately:
+[dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
 Config owns identity/ports/Workzones/endpoints/models; omit secrets/machine paths.
 Opt-ins: `allowed_backends`/runtime effort; shared compatibility: qualified registry.
 Unknown capability/price means neither unsupported nor zero. Persist explicit
 choices. HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md), not Engine grants.
 
-Agent name/Emoji use revisioned config; refresh cannot undo durable success.
+Agent name/Emoji use revisioned config; refresh cannot undo a durable save.
 
 Verified capabilities survive lookup failure until identity/source changes;
 pricing freshness is separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
 Portable has no credentials; PAO starts Workers. Wildcards grant permission,
-not capability; paths grant nothing. Agent Workzones freeze active revisions for
-busy Runs; saved state stays visible. Windows rejects POSIX Workzones. Browser
-disconnects preserve the shared Windows named-pipe listener. Keep experiments,
-secrets, media bytes and remote paths out of PCM/logs/chat/Git.
+not capability; paths grant nothing. Workzone Frontend edits use Agent-scoped
+revisions; admitted Runs keep their snapshots and saved state stays visible. Windows
+rejects POSIX Workzones. Browser disconnects preserve the shared Windows
+named-pipe listener. Keep experiments, secrets, media bytes and remote paths out
+of PCM/logs/chat/Git.
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
@@ -112,15 +113,17 @@ Scheduler/recovery/`/bg`: Agent-owned hidden Session; separate execution/deliver
 receipts, each final once. `/bg` freezes admission; schedules imply no chat.
 `/delay` and interactive `/loop` retain context.
 
-Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
-Bounded polls preserve pending updates.
+Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+Telegram readiness requires separate Bot-bound app/ingress and a user;
+activation is Agent-only. Bounded polls preserve pending updates.
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery
 
 Retired Gemini CLI: use Antigravity; retain history/usage and qualified Gemini
-models, not an account ban. [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
+models; no account ban. [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
 
-Public HERV3 is `her-v3`; `her-v2` is compatibility only. Telegram cards show
+HERV3: `her-v3`; `her-v2` is compatibility only. Telegram cards show
 the public ID. JEV defaults off.
 Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
 counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
@@ -133,7 +136,7 @@ Chat-only has no tools. `/fallback`: `OFF` default; `RETRY` waits 60/180/300
 or longer `Retry-After`; `ASK` fails closed; `AUTO` uses exact routes. A pauses
 after effects; B resumes the original Engine Session, never replay/retarget.
 PAO—not HERV3—switches to Codex; counts/costs accumulate. Phone/call/voice
-never long-retry or fallback. See [policy](HASHI_MODEL_FALLBACK_POLICY.md).
+never long-retry or fallback. [policy](HASHI_MODEL_FALLBACK_POLICY.md).
 
 ## UI, media, and Phone
 

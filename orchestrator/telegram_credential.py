@@ -34,6 +34,7 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
+from orchestrator.telegram_configuration_lock import telegram_configuration_lock
 from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
@@ -308,9 +309,10 @@ class TelegramCredentialService:
         receiver_adopted = bool(expected_bot and ingress.get("bot_fingerprint") == expected_bot)
         inbound = bool(live and adopted and receiver_adopted and ingress.get("running") and ingress.get("connected"))
         outbound = bool(live and adopted and metadata.get("telegram_outbound_connected"))
-        ready = inbound and outbound
+        ready = inbound and outbound and context.authorized_user_configured
         activation_status = (
             "unconfigured" if not context.configured else
+            "user_required" if not context.authorized_user_configured else
             "inactive" if not runtime_active else
             "connected" if ready else
             "connecting" if adopted and receiver_adopted and live and ingress.get("running") else "pending"
@@ -505,7 +507,7 @@ class TelegramCredentialService:
         try:
             # Freeze the Agent-to-secret mapping while the credential document
             # performs its own optimistic, serialized publication.
-            with file_write_lock(self.config_path):
+            with telegram_configuration_lock(self.secrets_path), file_write_lock(self.config_path):
                 latest_config = read_config_json(self.config_path)
                 if latest_config.revision != context.config_revision:
                     raise TelegramCredentialError(

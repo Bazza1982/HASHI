@@ -386,6 +386,10 @@ def _record_standard_telegram_receipt(
     )
 
 
+class TelegramAccessRevoked(RuntimeError):
+    """A delegated Telegram grant no longer permits this delivery."""
+
+
 async def _send_standard_event_media_to_telegram(
     runtime: Any,
     *,
@@ -498,6 +502,13 @@ async def _send_standard_event_media_to_telegram(
             method = runtime.app.bot.send_document
             field = "document"
         try:
+            from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
+
+            if not delivery_allowed(
+                runtime, owner_id=owner_id, chat_id=chat_id,
+                explicit_recipient=explicit_telegram_purpose(purpose),
+            ):
+                raise TelegramAccessRevoked()
             with upload_path.open("rb") as handle:
                 kwargs[field] = handle
                 sent_message = await method(**kwargs)
@@ -934,6 +945,24 @@ async def _send_long_message_transport(
         return 0.0, 0
 
     async def _send_or_skip(**kwargs) -> bool:
+        from orchestrator.telegram_actor_scope import (
+            current_actor, delivery_allowed, explicit_telegram_purpose,
+        )
+
+        actor = current_actor(runtime)
+        effective_owner = frontend_owner_id or (actor.owner_id if actor else None)
+        if not effective_owner and request_id:
+            from orchestrator.runtime_session import request_metadata
+
+            effective_owner = str(request_metadata(runtime, request_id).get("owner_id") or "").strip() or None
+        if not delivery_allowed(
+            runtime, owner_id=effective_owner, chat_id=chat_id,
+            explicit_recipient=explicit_telegram_purpose(purpose),
+        ):
+            record_delivery("blocked", disposition="telegram_access_revoked")
+            if outbox_outcome is not None:
+                outbox_outcome["status"] = "unknown" if accepted_message_ids else "suppressed"
+            return False
         try:
             sent_message = await runtime.app.bot.send_message(**kwargs)
             message_id = getattr(sent_message, "message_id", None)
@@ -1214,6 +1243,20 @@ async def dispatch_claimed_telegram_event(
 ) -> tuple[float, int]:
     """Render one already-claimed standard FC Event through Telegram."""
 
+    from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
+
+    if not delivery_allowed(
+        runtime, owner_id=frontend_owner_id, chat_id=chat_id,
+        explicit_recipient=explicit_telegram_purpose(purpose),
+    ):
+        store.complete_delivery_outbox(
+            outbox_id=str(claim["outbox_id"]),
+            lease_token=str(claim["lease_token"]),
+            status="suppressed",
+            error_code="telegram_access_revoked",
+        )
+        return 0.0, 0
+
     from orchestrator.frontend_connector_registry import require_connector_event
     from orchestrator.frontend_dispatch import project_claimed_frontend_event
 
@@ -1289,6 +1332,7 @@ async def dispatch_claimed_telegram_event(
                 delivery_mode=delivery_mode,
                 parse_mode=canonical_parse_mode,
                 error_context=error_context,
+                frontend_owner_id=str(frontend_owner_id),
                 # One combined receipt is persisted only after every ordered
                 # media effect has completed under this same outbox lease.
                 skip_local_capture=True,
@@ -1301,7 +1345,7 @@ async def dispatch_claimed_telegram_event(
                 status = (
                     "unknown"
                     if raw_status == "unknown" or accepted_effects
-                    else "failed"
+                    else "suppressed" if raw_status == "suppressed" else "failed"
                 )
                 _record_standard_telegram_receipt(
                     store,
@@ -1309,7 +1353,7 @@ async def dispatch_claimed_telegram_event(
                     owner_id=str(frontend_owner_id),
                     event_id=str(claim["event_id"]),
                     endpoint_id=str(claim["endpoint_id"]),
-                    status=status,
+                    status="skipped" if status == "suppressed" else status,
                     message_ids=message_ids,
                 )
                 store.complete_delivery_outbox(
@@ -1371,10 +1415,13 @@ async def dispatch_claimed_telegram_event(
         except Exception as media_error:
             message_ids = list(outcome.get("accepted_message_ids") or ())
             accepted_effects = int(outcome.get("accepted_effect_count") or 0)
+            revoked = isinstance(media_error, TelegramAccessRevoked)
             status = (
-                "failed"
-                if isinstance(media_error, BadRequest) and not accepted_effects
-                else "unknown"
+                ("unknown" if accepted_effects else "suppressed")
+                if revoked else (
+                    "failed" if isinstance(media_error, BadRequest) and not accepted_effects
+                    else "unknown"
+                )
             )
             _record_standard_telegram_receipt(
                 store,
@@ -1382,7 +1429,7 @@ async def dispatch_claimed_telegram_event(
                 owner_id=str(frontend_owner_id),
                 event_id=str(claim["event_id"]),
                 endpoint_id=str(claim["endpoint_id"]),
-                status=status,
+                status="skipped" if status == "suppressed" else status,
                 message_ids=message_ids,
                 attachment_receipts=list(outcome.get("attachment_receipts") or ()),
             )
@@ -1390,9 +1437,11 @@ async def dispatch_claimed_telegram_event(
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
-                error_code=f"telegram_media_{status}",
+                error_code="telegram_access_revoked" if revoked else f"telegram_media_{status}",
             )
             claim_terminal = True
+            if revoked:
+                return max(0.0, monotonic() - send_started), accepted_effects
             raise
 
         message_ids.extend(media_message_ids)
@@ -1496,6 +1545,31 @@ async def send_long_message(
         from orchestrator import runtime_session
         from orchestrator.frontend_connector_registry import endpoint_id_for
 
+        from orchestrator.telegram_actor_scope import (
+            current_actor, delivery_allowed, explicit_telegram_purpose,
+        )
+
+        actor = current_actor(runtime)
+        delivery_owner = (
+            frontend_owner_id
+            or str(runtime_session.request_metadata(runtime, request_id).get("owner_id") or "").strip()
+            or (actor.owner_id if actor else "")
+        )
+        scoped_publication: dict[str, Any] = {}
+        if delivery_owner.startswith("telegram-user:"):
+
+            session = runtime_session.request_session_id(runtime, request_id)
+            if (
+                not delivery_allowed(
+                    runtime, owner_id=delivery_owner, chat_id=chat_id,
+                    explicit_recipient=explicit_telegram_purpose(purpose),
+                )
+                or (session is None and (actor is None or actor.owner_id != delivery_owner))
+            ):
+                return 0.0, 0
+            scoped_publication = {"explicit_owner_id": delivery_owner}
+            if session is not None:
+                scoped_publication["explicit_session_id"] = session
         channel = (
             "meter"
             if "meter" in purpose
@@ -1528,6 +1602,7 @@ async def send_long_message(
                 else "plain-text"
             ),
             presentation_channel=channel,
+            **scoped_publication,
         )
         endpoint_id = endpoint_id_for(
             "telegram",
@@ -1611,7 +1686,7 @@ async def send_long_message(
     ):
         return 0.0, 1
 
-    from orchestrator.runtime_session import claim_run_delivery_outbox, ensure_store, owner_id
+    from orchestrator.runtime_session import claim_run_delivery_outbox, ensure_store, request_owner_id
 
     worker_id = f"fc-telegram-{getattr(runtime, 'name', 'agent')}-{uuid4().hex}"
     claim_result = claim_run_delivery_outbox(
@@ -1620,8 +1695,13 @@ async def send_long_message(
         surface="telegram",
         channel_key=str(chat_id),
         worker_id=worker_id,
+        **({"explicit_owner_id": frontend_owner_id} if frontend_owner_id else {}),
     )
     if claim_result is None:
+        # Delegated conversations must not bypass their frozen, scoped outbox.
+        resolved_owner = frontend_owner_id or request_owner_id(runtime, request_id)
+        if resolved_owner.startswith("telegram-user:"):
+            return 0.0, 0
         # A legacy or non-Session message still uses the compatibility adapter.
         return await _send_long_message_transport(
             runtime,
@@ -1651,7 +1731,7 @@ async def send_long_message(
         chat_id=chat_id,
         store=store,
         claim=claim,
-        frontend_owner_id=owner_id(runtime),
+        frontend_owner_id=frontend_owner_id or request_owner_id(runtime, request_id),
         request_id=request_id,
         purpose=purpose,
         delivery_mode=delivery_mode,

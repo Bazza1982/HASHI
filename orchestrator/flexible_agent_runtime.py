@@ -507,8 +507,17 @@ class FlexibleAgentRuntime:
         return persisted or 0
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
-        if user_id is None:
+        if user_id is None or isinstance(user_id, bool):
             return False
+        from orchestrator.telegram_actor_scope import scoped_access_enabled
+
+        if scoped_access_enabled(self):
+            from orchestrator.telegram_actor_scope import runtime_snapshot
+
+            try:
+                return user_id in runtime_snapshot(self).effective_user_ids
+            except (OSError, ValueError, TypeError, LookupError):
+                return False
         return user_id in self._authorized_telegram_ids
 
     def _init_command_policy(self):
@@ -2077,6 +2086,16 @@ class FlexibleAgentRuntime:
         chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
         if chat_id is None:
             raise ValueError("frontend reply has no registered connector endpoint")
+        from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+
+        actor = current_actor(self)
+        delivery_owner = (
+            getattr(update, "_hashi_session_owner_id", None)
+            or (actor.owner_id if actor is not None else None)
+            or runtime_session.request_owner_id(self, request_id)
+        )
+        if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+            return None
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -2086,6 +2105,8 @@ class FlexibleAgentRuntime:
                 text=text,
             ):
                 return None
+        if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+            return None
         publication = None
         claim = None
         # Connector delivery is fail-closed around the durable FC boundary.
@@ -2169,6 +2190,15 @@ class FlexibleAgentRuntime:
                     send_kwargs["reply_markup"] = canonical_markup
                 elif reply_markup is None:
                     send_kwargs.pop("reply_markup", None)
+            if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+                if claim is not None:
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]),
+                        lease_token=str(claim["lease_token"]),
+                        status="suppressed",
+                        error_code="telegram_access_revoked",
+                    )
+                return None
             sent = await update.message.reply_text(send_text, **send_kwargs)
             presentation_context = getattr(sent, "_hashi_message_context", None)
             if publication is not None and claim is not None:
@@ -2280,6 +2310,21 @@ class FlexibleAgentRuntime:
         purpose = kwargs.pop("_purpose", "send")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
         raise_delivery_error = bool(kwargs.pop("_raise_delivery_error", False))
+        from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+
+        delivery_owner = runtime_session.request_owner_id(self, request_id)
+        scoped_publication: dict[str, Any] = {}
+        if delivery_owner.startswith("telegram-user:"):
+            actor = current_actor(self)
+            session_id = runtime_session.request_session_id(self, request_id)
+            if (
+                not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id)
+                or (session_id is None and (actor is None or actor.owner_id != delivery_owner))
+            ):
+                return None
+            scoped_publication = {"explicit_owner_id": delivery_owner}
+            if session_id is not None:
+                scoped_publication["explicit_session_id"] = session_id
         parse_mode = str(kwargs.get("parse_mode") or "").strip().casefold()
         content_format = (
             "telegram-html"
@@ -2311,6 +2356,8 @@ class FlexibleAgentRuntime:
                 text=text,
             ):
                 return None
+        if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+            return None
         publication = None
         claim = None
         runtime_session.ensure_store(self)
@@ -2330,6 +2377,7 @@ class FlexibleAgentRuntime:
                 content_format=content_format,
                 presentation_channel=presentation_channel,
                 message_context=standard_message_context,
+                **scoped_publication,
             )
             from orchestrator.frontend_connector_registry import endpoint_id_for
 
@@ -2380,6 +2428,15 @@ class FlexibleAgentRuntime:
                     send_kwargs["reply_markup"] = canonical_markup
                 elif reply_markup is None:
                     send_kwargs.pop("reply_markup", None)
+            if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+                if claim is not None:
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]),
+                        lease_token=str(claim["lease_token"]),
+                        status="suppressed",
+                        error_code="telegram_access_revoked",
+                    )
+                return None
             sent = await self.app.bot.send_message(
                 chat_id=chat_id,
                 text=send_text,
@@ -12078,6 +12135,14 @@ class FlexibleAgentRuntime:
                 else:
                     text = "Still running — I'll message you when done! 📬"
 
+            from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+
+            actor = current_actor(self)
+            owner = runtime_session.request_metadata(self, request_id).get("owner_id")
+            if not delivery_allowed(
+                self, owner_id=owner or (actor.owner_id if actor else None), chat_id=chat_id
+            ):
+                return
             try:
                 await self.app.bot.edit_message_text(
                     chat_id=chat_id,
@@ -12151,6 +12216,15 @@ class FlexibleAgentRuntime:
         digest = ActivityDigest(started_at=started)
         locale = ui_language.preferred_locale(self, actor_id=chat_id)
 
+        def _display_allowed() -> bool:
+            from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+
+            actor = current_actor(self)
+            owner = runtime_session.request_metadata(self, request_id).get("owner_id")
+            return delivery_allowed(
+                self, owner_id=owner or (actor.owner_id if actor else None), chat_id=chat_id
+            )
+
         def _build_display() -> str:
             elapsed = max(0, int(time.monotonic() - started))
             return _streaming_status_to_html(
@@ -12165,6 +12239,10 @@ class FlexibleAgentRuntime:
 
         async def _rollover_placeholder(text: str) -> bool:
             nonlocal current_message, last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
+            if not _display_allowed():
+                display_disabled = True
+                dirty = False
+                return False
             try:
                 from orchestrator.frontend_connector_registry import (
                     require_connector_presentation_override,
@@ -12211,6 +12289,10 @@ class FlexibleAgentRuntime:
 
         async def _edit_placeholder():
             nonlocal last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
+            if not _display_allowed():
+                display_disabled = True
+                dirty = False
+                return
             if not bool(getattr(self, "_verbose", True)):
                 dirty = False
                 return

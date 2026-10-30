@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from orchestrator import admin_local_testing, command_registry, ui_language
+from orchestrator import admin_local_testing, command_registry, runtime_session, ui_language
 from orchestrator.command_interaction_bridge import dispatch_command_interaction
 from orchestrator.commands import telegram as telegram_command_module
 from orchestrator.command_ui import DIVIDER
@@ -76,11 +76,13 @@ class TelegramCommandMenuIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 _is_authorized_user=lambda actor: actor == 7,
                 _is_command_allowed=lambda name: name == "telegram",
             )
+            session = runtime_session.ensure_store(runtime).create_session(
+                owner_id="owner-a", agent_id=runtime.name)
             metadata = {
                 "actor_id": 7,
                 "instance_id": "TELEGRAM_MENU_TEST",
-                "session_id": "test-session",
-                "context_generation": 1,
+                "session_id": session["session_id"],
+                "context_generation": session["context_generation"],
                 "session_surface": "workbench",
                 "session_channel_key": "default",
                 "connection_binding": "bindingabcdefghijk",
@@ -144,7 +146,7 @@ class TelegramCommandMenuIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(action_invocation["command"], "telegram")
                 self.assertEqual(action_invocation["issued_action_id"], button)
                 self.assertEqual(action_invocation["revision"], action["revision"])
-                self.assertEqual(action_invocation["session_id"], "test-session")
+                self.assertEqual(action_invocation["session_id"], session["session_id"])
                 self.assertEqual(action_invocation["context_generation"], 1)
                 self.assertTrue(action_invocation["actor_digest"].startswith("sha256:"))
                 self.assertEqual(mirror_enabled(root, "owner-a"), False)

@@ -7,6 +7,41 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-10-30 Telegram user access (HASHI3 foundation only)
+
+PAO's intended authorization is additive: the configured primary and other
+global Telegram user IDs may access every Agent; additional Agent-scoped IDs
+may access only their selected Agent. Grant changes are revision checked.
+New Agent-scoped users receive chat and conversation-confirmation controls.
+Legacy allowlist users retain their previous owner Session and command access
+until removed. Management commands are for global and legacy users. Direct Telegram management
+commands cannot use a chat-only grant to reach other Agents.
+Replacing the primary revokes previously granted global users. An additional
+new actor's direct private Telegram chat uses its own Session owner scope; the
+existing primary owner scope and Workbench conversation remain unchanged.
+Authorized users inherit the selected Agent's existing Workzone profile; global
+and legacy users may manage it, while new Agent-only users cannot. Global users
+may explicitly address another Telegram chat through the normal send tools;
+new delegated users' ordinary replies remain bound to their own chat.
+
+New Workers adopt saved grants without a restart and reject unreadable or
+unsupported policies. Agent-local changes require an accepting compatible Worker
+only for that Agent and activate its own policy marker. Global changes require
+compatible active Workers and compatible Workers for every legacy allowlist
+holder, because older Workers may cache prior grants. The API reports global
+availability separately and rechecks it when a global change is requested.
+Legacy grants remain until explicitly removed. An old or stopped Worker does not
+prevent managing another compatible Agent. Agent grants preserve flattened and
+nested configuration layouts. The primary proactive Telegram route reads the
+current configured owner. User and Bot credential transactions share an outer
+lock before revision-checked writes.
+
+Scoped admission, Session ownership, Workzones and delivery have offline tests.
+The user reports that prior Telegram live testing passed; the later per-Agent
+availability correction has not been live-tested.
+An Agent's shared memory and tool permissions are distinct from its conversation
+scope; no sandbox guarantee follows from the Telegram grant.
+
 ## 1. Definition
 
 Device Tool request IDs are deterministically scoped to the canonical request,
@@ -244,14 +279,22 @@ or overwrite a Run whose execution ownership has already advanced.
 Workzone configuration is Agent control state, not Conversation Session state.
 `/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
 the current Agent Workzone revision into each admitted Run so an in-flight Run
-cannot observe a later menu change. Legacy Session Workzone rows remain inert
-compatibility records and are not silently migrated or merged.
+cannot observe a later menu change. Schema migration may promote one legacy
+Session snapshot into an empty Agent profile; afterward legacy rows remain inert
+and are not merged into the profile.
 
 Configuration mutations may commit while Runs are active or queued. Every Run
 already admitted keeps its frozen snapshot, while the next admission after the
 commit reads the new revision. PAO defers runtime, Tool-root, and Engine-session
 activation to a Run boundary. Explicit Workzone `reload`/`reset` remains
 idle-only because it immediately resets the selected Engine Session.
+
+Owner-authorized Frontends may add, replace, or detach a specific Agent Workzone
+with the displayed revision. PAO checks the revision in the same transaction as
+the write; a conflict never overwrites another change. Path validation uses the
+existing platform and duplicate rules. Detaching never deletes directory contents.
+The HASHI3 Function-layer implementation has offline validation; live Worker
+adoption and user acceptance remain separate, unverified steps.
 
 A live phone call is another transport bound to the same Conversation Session.
 Each role-labelled transcript fragment is durable PAO Session evidence as it

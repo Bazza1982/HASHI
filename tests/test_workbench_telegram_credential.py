@@ -299,6 +299,50 @@ async def test_status_requires_current_bot_and_both_live_directions(
 
 
 @pytest.mark.asyncio
+async def test_live_transport_requires_an_authorized_user_before_reporting_ready(tmp_path):
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    server = _server(tmp_path, verifier=None, runtime_active=True, authorized_id=0)
+    fingerprint = telegram_bot_fingerprint(OLD_TOKEN)
+    server.orchestrator.runtimes[0].get_runtime_metadata = lambda: {
+        "online": True,
+        "telegram_bot_fingerprint": fingerprint,
+        "telegram_outbound_connected": True,
+        "telegram_ingress": {"running": True, "connected": True, "bot_fingerprint": fingerprint},
+    }
+    response = await server.handle_admin_agent_telegram_credential(
+        _Request(headers={"X-Workbench-Token": ADMIN_TOKEN})
+    )
+    payload = json.loads(response.text)
+    assert payload["inbound_connected"] is True
+    assert payload["outbound_connected"] is True
+    assert payload["authorized_user_configured"] is False
+    assert payload["bidirectional_ready"] is False
+    assert payload["activation_status"] == "user_required"
+    assert payload["activation_required"] is None
+
+
+@pytest.mark.asyncio
+async def test_missing_user_does_not_attempt_agent_activation(tmp_path, monkeypatch):
+    from orchestrator import workbench_api
+
+    server = _server(tmp_path, verifier=None, runtime_active=True, authorized_id=0)
+    calls = []
+    async def activation(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("activation should not be attempted without an authorized user")
+    monkeypatch.setattr(workbench_api, "try_execute_slash_command_text", activation)
+    revision = server.telegram_credential_service.status("lily")["credential_revision"]
+    result = {"agent_id": "lily", "credential_revision": revision}
+    await server._activate_saved_telegram_credential(
+        _Request(headers={"X-Workbench-Token": ADMIN_TOKEN}), result
+    )
+    assert result["activation_status"] == "user_required"
+    assert result["bidirectional_ready"] is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_replace_preserves_explicit_runtime_principals_on_secret_write(
     tmp_path,
     monkeypatch,

@@ -70,6 +70,9 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
+from orchestrator.telegram_access import (
+    LEGACY_AGENT_USERS_KEY, SCOPED_ACCESS_PROTOCOL_VERSION, TelegramAccessError, TelegramAccessService,
+)
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
     TelegramCredentialService,
@@ -436,6 +439,9 @@ class WorkbenchApiServer:
             verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
             private_full_control_sids=remote_runtime_sids,
         )
+        self.telegram_access_service = TelegramAccessService(
+            config_path=self.config_path, secrets_path=secrets_path,
+        )
         self._agent_config_lock = asyncio.Lock()
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
@@ -725,6 +731,14 @@ class WorkbenchApiServer:
             "/api/admin/add-agent", self.handle_admin_add_agent
         )
         self.app.router.add_get(
+            "/api/admin/agents/{agent_id}/telegram-access",
+            self.handle_admin_agent_telegram_access,
+        )
+        self.app.router.add_put(
+            "/api/admin/agents/{agent_id}/telegram-access",
+            self.handle_admin_agent_telegram_access_change,
+        )
+        self.app.router.add_get(
             "/api/admin/agents/{agent_id}/telegram-credential",
             self.handle_admin_agent_telegram_credential,
         )
@@ -944,6 +958,17 @@ class WorkbenchApiServer:
         self.app.router.add_post(
             "/api/agents/{name}/system-prompts/{slot}/delete-if-unchanged",
             self.handle_agent_sys_prompt_conditional_delete,
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/parked-topics/{slot}/delete-if-unchanged",
+            self.handle_agent_parked_topic_conditional_delete,
+        )
+        self.app.router.add_put(
+            "/api/agents/{name}/workzones/{slot}", self.handle_agent_workzone_set,
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/workzones/{slot}/delete-if-unchanged",
+            self.handle_agent_workzone_delete,
         )
         self.app.router.add_patch(
             "/api/agents/{name}/metadata", self.handle_agent_metadata
@@ -5167,6 +5192,128 @@ class WorkbenchApiServer:
             status=int(outcome.get("status", 201)),
         )
 
+    def _telegram_access_management_supported(self, agent_id: str, *, global_change: bool = False) -> bool:
+        """Check the exact Agent; global changes require every affected Worker."""
+        try:
+            document = read_config_json(self.config_path)
+            rows = document.get("agents")
+            if not isinstance(rows, list) or not rows:
+                return False
+            active, configured, legacy_holders = set(), set(), set()
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    return False
+                name = str(row.get("name") or "").strip().casefold()
+                if not name or name in configured:
+                    return False
+                configured.add(name)
+                extra = row.get("extra")
+                if extra is None:
+                    extra = {}
+                if not isinstance(extra, Mapping):
+                    return False
+                if any(source.get(LEGACY_AGENT_USERS_KEY) not in (None, [])
+                       for source in (row, extra)):
+                    legacy_holders.add(name)
+                if row.get("is_active", True) is not False:
+                    active.add(name)
+            target = str(agent_id or "").strip().casefold()
+            runtimes = self._runtime_map()
+            if target not in configured or target not in runtimes:
+                return False
+
+            def compatible(runtime):
+                if not getattr(runtime, "is_function_worker_proxy", False):
+                    return False
+                reader = getattr(runtime, "get_runtime_metadata", None)
+                metadata = reader() if callable(reader) else None
+                if not isinstance(metadata, Mapping):
+                    return False
+                protocol = metadata.get("telegram_scoped_access_protocol")
+                return (
+                    type(protocol) is int and protocol == SCOPED_ACCESS_PROTOCOL_VERSION
+                    and metadata.get("worker_phase") == "ACTIVE"
+                    and metadata.get("worker_accepting") is True
+                )
+
+            if not compatible(runtimes[target]):
+                return False
+            if not global_change:
+                return True
+            # A legacy holder may later return with an old cached allowlist.
+            required = active | legacy_holders
+            if not required.issubset(runtimes) or not set(runtimes).issubset(configured):
+                return False
+            return all(compatible(runtime) for runtime in runtimes.values())
+        except Exception:
+            # A missing or unreadable compatibility signal must fail closed.
+            return False
+
+    def _telegram_access_denial(self, request, *, global_change: bool = False):
+        if (
+            (not self._is_governed_profile() and not self.admin_token)
+            or not self._check_admin_auth(request)
+        ):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "admin_auth_failed"}, status=403
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        if not self._telegram_access_management_supported(agent_id, global_change=global_change):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "telegram_access_unavailable"}, status=501
+            )
+        return None
+
+    async def handle_admin_agent_telegram_access(self, request):
+        denied = self._telegram_access_denial(request)
+        if denied is not None:
+            return denied
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        try:
+            snapshot = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
+        except TelegramAccessError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code
+            )
+        return self._telegram_credential_response(
+            {"ok": True, "management_supported": True,
+             "global_management_supported": self._telegram_access_management_supported(
+                 agent_id, global_change=True), **snapshot}
+        )
+
+    async def handle_admin_agent_telegram_access_change(self, request):
+        denied = self._telegram_access_denial(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict) or set(payload) != {
+            "expected_revision", "scope", "action", "user_id"
+        }:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "invalid_request"}, status=400
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        if payload["scope"] == "global":
+            denied = self._telegram_access_denial(request, global_change=True)
+            if denied is not None:
+                return denied
+        try:
+            snapshot = await asyncio.to_thread(
+                self.telegram_access_service.change, agent_id, **payload
+            )
+        except TelegramAccessError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code
+            )
+        return self._telegram_credential_response(
+            {"ok": True, "management_supported": True,
+             "global_management_supported": self._telegram_access_management_supported(
+                 agent_id, global_change=True), **snapshot}
+        )
+
     def _telegram_credential_response(self, payload: dict, *, status: int = 200):
         return web.json_response(
             payload,
@@ -5201,7 +5348,9 @@ class WorkbenchApiServer:
             for key in ("activation_status", "activation_required", "inbound_connected",
                         "outbound_connected", "bidirectional_ready"):
                 result[key] = status[key]
-            if status["activation_status"] in {"inactive", "connected", "connecting"}:
+            if status["activation_status"] in {
+                "inactive", "connected", "connecting", "user_required"
+            }:
                 return
             runtime = self._runtime_map().get(result["agent_id"].casefold())
             owner = self._v1_owner_id(request)
@@ -5761,6 +5910,161 @@ class WorkbenchApiServer:
                 return web.json_response({"ok": False, "error": "management access required"}, status=403)
         return None
 
+    @staticmethod
+    def _workzone_profile_ready(runtime, metadata: dict) -> bool:
+        return bool(
+            runtime is not None and metadata.get("online") is True
+            and metadata.get("workzone_revisioned_profile") is True
+        )
+
+    async def handle_agent_workzone_set(self, request):
+        return await self._handle_agent_workzone_mutation(request, removing=False)
+
+    async def handle_agent_workzone_delete(self, request):
+        return await self._handle_agent_workzone_mutation(request, removing=True)
+
+    async def _handle_agent_workzone_mutation(self, request, *, removing: bool):
+        """Publish one confirmed Agent Workzone profile revision through PAO."""
+        from orchestrator import runtime_workzone
+        from orchestrator.workzone import configured_workzone_slot, normalize_workzone_state
+
+        name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(name.casefold())
+        row = next((item for item in self._load_agent_rows() if item.get("name") == name), None)
+        if runtime is None or row is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        metadata = self._metadata_for_agent(row, runtime)
+        if not self._workzone_profile_ready(runtime, metadata):
+            return web.json_response({"ok": False, "error_code": "workzone_unavailable"}, status=503)
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if removing and (not isinstance(payload, dict)
+                         or payload.get("authorization") != "explicit_user_authorization"):
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        if not isinstance(payload, dict) or not re.fullmatch(r"(?:main|[1-9])", slot):
+            return web.json_response({"ok": False, "error_code": "invalid_target"}, status=400)
+        expected = payload.get("expected_revision")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+        if removing:
+            if set(payload) != {"expected_revision", "authorization"}:
+                return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+        else:
+            raw_path = payload.get("path")
+            if (set(payload) != {"expected_revision", "mode", "path"}
+                or not isinstance(payload.get("mode"), str)
+                or payload["mode"] not in {"add", "replace"}
+                or not isinstance(raw_path, str) or not raw_path.strip()
+                or len(raw_path) > 4096 or re.search(r"[\x00-\x1f\x7f]", raw_path)):
+                return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+
+        state = normalize_workzone_state(
+            self.session_store.get_agent_workzone_set(owner_id=owner, agent_id=name)
+        )
+        if int(state["revision"]) != expected:
+            return web.json_response({"ok": False, "error_code": "workzone_revision_conflict"}, status=409)
+        current = configured_workzone_slot(state, slot)
+        if not removing and payload["mode"] == "add" and current is not None:
+            return web.json_response({"ok": False, "error_code": "workzone_slot_occupied"}, status=409)
+        if (removing or payload.get("mode") == "replace") and current is None:
+            return web.json_response({"ok": False, "error_code": "workzone_slot_missing"}, status=409)
+        if not removing:
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error_code": "workzone_unavailable"}, status=503)
+            try:
+                _, path = runtime_workzone.validate_workzone_path(
+                    state=state, slot_id=slot, raw_path=raw_path,
+                    project_root=Path(self.global_config.project_root), workspace_dir=Path(workspace),
+                )
+            except (ValueError, OSError):
+                return web.json_response({"ok": False, "error_code": "workzone_path_invalid"}, status=400)
+        try:
+            if removing:
+                updated = self.session_store.delete_agent_workzone_slot(
+                    owner_id=owner, agent_id=name, slot_id=slot,
+                    expected_revision=expected, source="frontend_workzone",
+                )
+            else:
+                updated = self.session_store.set_agent_workzone_slot(
+                    owner_id=owner, agent_id=name, slot_id=slot, path=str(path),
+                    enabled=True if payload["mode"] == "add" else None,
+                    expected_revision=expected, source="frontend_workzone",
+                )
+        except SessionConflict:
+            return web.json_response({"ok": False, "error_code": "workzone_revision_conflict"}, status=409)
+        except Exception:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        return web.json_response({
+            "ok": True, "agent": name, "slot": slot,
+            "revision": int(updated["revision"]), "activation": "next_request",
+        }, headers={"Cache-Control":"no-store"})
+
+    @staticmethod
+    def _parked_topic_guarded_writes_ready(runtime, metadata: dict) -> bool:
+        if runtime is None or metadata.get("online") is not True:
+            return False
+        store = getattr(runtime, "parked_topics", None)
+        return callable(getattr(store, "delete_if_unchanged", None)) or (
+            metadata.get("parked_topic_guarded_writes") is True
+        )
+
+    async def handle_agent_parked_topic_conditional_delete(self, request):
+        """Remove only the confirmed parked record, never the conversation."""
+        from orchestrator.parked_topics import ParkedTopicConflict, ParkedTopicStore
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, agent_name)
+        if denied is not None:
+            return denied
+        runtime = self._runtime_map().get(agent_name.casefold())
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        slot = str(request.match_info.get("slot") or "")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        revision = payload.get("expected_revision")
+        if (set(payload) != {"authorization", "expected_revision"}
+            or not re.fullmatch(r"[1-9][0-9]{0,15}", slot) or int(slot) > 9007199254740991
+            or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)):
+            return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
+
+        row = next((item for item in self._load_agent_rows() if item.get("name") == agent_name), None)
+        if row is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        metadata = self._metadata_for_agent(row, runtime)
+        if not self._parked_topic_guarded_writes_ready(runtime, metadata):
+            return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+        store = getattr(runtime, "parked_topics", None)
+        if not callable(getattr(store, "delete_if_unchanged", None)):
+            workspace = str(metadata.get("workspace_dir") or "").strip()
+            if not workspace:
+                return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+            store = ParkedTopicStore(Path(workspace))
+        canonical_agent = str(getattr(runtime, "name", agent_name))
+        try:
+            store.delete_if_unchanged(int(slot), expected_revision=revision, agent_name=canonical_agent)
+        except (ParkedTopicConflict, ConfigConflictError):
+            return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        except ConfigDurabilityError:
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
+        except (OSError, ValueError):
+            return web.json_response({"ok": False, "error_code": "parked_topics_unavailable"}, status=503)
+        return web.json_response({"ok": True, "agent": canonical_agent, "slot": int(slot)})
+
     async def handle_agent_sys_prompt_conditional_delete(self, request):
         """Clear a local PCM slot only if it still matches the confirmed view."""
         from orchestrator.bridge_memory import (
@@ -5847,9 +6151,17 @@ class WorkbenchApiServer:
             runtime=runtime,
             desired_workzone_state=desired_workzone_state,
         )
-        if not self._can_view_deletion_revision(request, name):
+        if (self._workzone_profile_ready(runtime, metadata)
+            and self._guard_agent_management_access(request, name) is None
+            and int(overview["workzone"]["revision"]) == int(desired_workzone_state["revision"])):
+            overview["workzone"]["management_supported"] = True
+        can_view_revisions = self._can_view_deletion_revision(request, name)
+        if not can_view_revisions:
             for slot in overview.get("system_prompts", {}).get("slots", []):
                 slot.pop("deletion_revision", None)
+        if not can_view_revisions or not self._parked_topic_guarded_writes_ready(runtime, metadata):
+            for topic in overview.get("parked_topics", {}).get("topics", []):
+                topic.pop("deletion_revision", None)
         response = web.json_response({"ok": True, "overview": overview})
         response.headers["Cache-Control"] = "no-store"
         return response

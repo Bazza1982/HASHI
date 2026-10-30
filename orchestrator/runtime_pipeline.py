@@ -2039,6 +2039,17 @@ async def answer_preview_loop(
             preview_disabled = True
             dirty = False
             return
+        from orchestrator.telegram_actor_scope import delivery_allowed
+
+        if not delivery_allowed(
+            runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+        ):
+            preview_disabled = True
+            dirty = False
+            if stream_state is not None:
+                stream_state.failed = True
+                stream_state.failure_reason = "telegram_access_revoked"
+            return
         text = _preview_text()
         if len(text.strip()) < min_chars:
             return
@@ -2217,6 +2228,12 @@ def wrap_her_persona_stream(
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
+        from orchestrator.telegram_actor_scope import delivery_allowed
+
+        if not delivery_allowed(
+            runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+        ):
+            return False
         from orchestrator.native_audio_delivery import (
             audio_parts,
             dispatch_persisted_audio_event,
@@ -2401,6 +2418,12 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose="her_control")
 
     async def _initial_resolution_presenter(event):
+        from orchestrator.telegram_actor_scope import delivery_allowed
+
+        if not delivery_allowed(
+            runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+        ):
+            return False
         target_event_id = str(
             getattr(event, "target_event_id", "") or ""
         ).strip()
@@ -2608,6 +2631,12 @@ def wrap_her_persona_stream(
 
 
 async def _send_live_verbose_placeholder(runtime, item):
+    from orchestrator.telegram_actor_scope import delivery_allowed
+
+    if not delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    ):
+        return None
     try:
         from orchestrator.frontend_connector_registry import (
             require_connector_presentation_override,
@@ -2624,6 +2653,10 @@ async def _send_live_verbose_placeholder(runtime, item):
         ):
             return None
         text, parse_mode = runtime.get_progress_placeholder()
+        if not delivery_allowed(
+            runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+        ):
+            return None
         message = await runtime.app.bot.send_message(
             chat_id=item.chat_id,
             text=text,
@@ -2820,6 +2853,11 @@ async def setup_interactive_feedback(
     delivery_requested = (
         not item.silent and item.deliver_to_telegram and not is_call_request(item)
     )
+    from orchestrator.telegram_actor_scope import delivery_allowed
+
+    delivery_requested = delivery_requested and delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    )
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
     typing_delivery_enabled = (
@@ -2877,7 +2915,9 @@ async def setup_interactive_feedback(
                 runtime.telegram_logger.warning(
                     f"Skipping placeholder for {item.request_id} — delivery blocked"
                 )
-            else:
+            elif delivery_allowed(
+                runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+            ):
                 placeholder_started = time.monotonic()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
@@ -2906,7 +2946,12 @@ async def setup_interactive_feedback(
         except Exception as e:
             runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
-        delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
+        delivery_blocked = (
+            telegram_delivery_failover.is_delivery_blocked(runtime)
+            or not delivery_allowed(
+                runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+            )
+        )
         typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
         verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
@@ -3116,6 +3161,16 @@ async def finalize_streamed_answer(
     if stream_state is None:
         return StreamFinalization(streamed=False, final_delivered=False, fallback_required=True)
 
+    from orchestrator.telegram_actor_scope import delivery_allowed
+
+    if not delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    ):
+        return StreamFinalization(
+            streamed=stream_state.has_text, final_delivered=False,
+            fallback_required=True, error="telegram_access_revoked",
+        )
+
     # A text preview cannot settle an Event that also carries canonical media.
     # Remove the ephemeral placeholder and let the FC adapter claim and render
     # the complete ordered Event under one durable outbox lease.
@@ -3164,6 +3219,9 @@ async def finalize_streamed_answer(
             f"fc-telegram-stream-{getattr(runtime, 'name', 'agent')}-"
             f"{item.request_id}"
         ),
+        **({"explicit_owner_id": item.owner_id}
+           if str(getattr(item, "owner_id", "") or "").startswith("telegram-user:")
+           else {}),
     )
     claim = None
     if claim_result is not None:
@@ -3201,6 +3259,21 @@ async def finalize_streamed_answer(
         )
 
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
+    if not delivery_allowed(
+        runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
+    ):
+        if claim is not None:
+            runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status="suppressed",
+                error_code="telegram_access_revoked",
+            )
+        return StreamFinalization(
+            streamed=stream_state.has_text, final_delivered=False,
+            fallback_required=claim is None, error="telegram_access_revoked",
+        )
+
     max_chars = int(extra.get("answer_stream_max_chars", 3400))
     first_chunk = (final_text or "")[:max_chars]
     continuation = (final_text or "")[max_chars:]
@@ -3218,6 +3291,9 @@ async def finalize_streamed_answer(
                 text=continuation,
                 request_id=item.request_id,
                 purpose="response_continuation",
+                **({"frontend_owner_id": item.owner_id}
+                   if str(getattr(item, "owner_id", "") or "").startswith("telegram-user:")
+                   else {}),
             )
             if continuation_chunks <= 0:
                 raise RuntimeError("Telegram continuation was not accepted")
@@ -3225,7 +3301,7 @@ async def finalize_streamed_answer(
             runtime_session.record_frontend_delivery_receipt(
                 runtime,
                 session_id=str(claim["session_id"]),
-                owner_id=runtime_session.owner_id(runtime),
+                owner_id=runtime_session.owner_id(runtime, getattr(item, "owner_id", None)),
                 receipt={
                     "type": "hashi.delivery-receipt",
                     "version": 1,
@@ -3318,6 +3394,9 @@ async def handle_empty_success_response(runtime, item) -> None:
             request_id=item.request_id,
             purpose="error",
             frontend_outbox=True,
+            **({"frontend_owner_id": item.owner_id}
+               if str(getattr(item, "owner_id", "") or "").startswith("telegram-user:")
+               else {}),
         )
         delivered = chunk_count > 0
     runtime_cross_session.record_turn_result(
@@ -4446,6 +4525,9 @@ async def handle_backend_error(
             purpose="error",
             error_context=failure_context,
             frontend_outbox=True,
+            **({"frontend_owner_id": item.owner_id}
+               if str(getattr(item, "owner_id", "") or "").startswith("telegram-user:")
+               else {}),
         )
     except asyncio.CancelledError:
         raise
@@ -4872,6 +4954,9 @@ async def handle_success_delivery(
                     purpose="response",
                     frontend_outbox=True,
                     include_canonical_text=native_policy != "audio_only",
+                    **({"frontend_owner_id": item.owner_id}
+                       if str(getattr(item, "owner_id", "") or "").startswith("telegram-user:")
+                       else {}),
                 )
                 receipt_disposition = (
                     "transport_delivered"

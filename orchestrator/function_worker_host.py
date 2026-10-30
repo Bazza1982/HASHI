@@ -935,6 +935,7 @@ class FunctionWorkerHost:
         from orchestrator.runtime_transfer import transfer_redirect_snapshot
         from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
         from orchestrator.runtime_execution import queue_reasons
+        from orchestrator.telegram_access import SCOPED_ACCESS_PROTOCOL_VERSION
 
         result = dict(runtime.get_runtime_metadata())
         agent_mode = str(
@@ -1006,6 +1007,14 @@ class FunctionWorkerHost:
                 "session_id": str(runtime.session_id_dt),
                 "worker_pid": os.getpid(),
                 "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
+                "telegram_scoped_access_protocol": SCOPED_ACCESS_PROTOCOL_VERSION,
+                "parked_topic_guarded_writes": callable(
+                    getattr(getattr(runtime, "parked_topics", None), "delete_if_unchanged", None)
+                ),
+                "workzone_revisioned_profile": all(
+                    callable(getattr(getattr(runtime, "session_store", None), name, None))
+                    for name in ("get_agent_workzone_set", "set_agent_workzone_slot", "delete_agent_workzone_slot")
+                ) and callable(getattr(runtime, "_sync_workzone_to_backend_config", None)),
                 "worker_nonce": self.nonce,
                 "worker_phase": self.phase,
                 "worker_accepting": self.accepting,
@@ -1481,7 +1490,13 @@ class FunctionWorkerHost:
                     "runtime.telegram_update requires an update object"
                 )
             update = Update.de_json(dict(update_payload), runtime.app.bot)
-            await runtime.app.process_update(update)
+            from orchestrator.telegram_actor_scope import scoped_access_enabled
+            if scoped_access_enabled(runtime):
+                from orchestrator.telegram_actor_scope import process_telegram_update
+
+                await process_telegram_update(runtime, update)
+            else:
+                await runtime.app.process_update(update)
             await self.emit_metadata()
             return True
         if method == "runtime.enqueue_api_text":
