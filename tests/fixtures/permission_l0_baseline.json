@@ -1,0 +1,37 @@
+{
+  "baseline_commit": "d2a6f36d4597181800c2eb671381a1079a872bae",
+  "description": "Observed on Windows with Python 3.12, using a deterministic provider and real local tool dispatch. No permission service is created.",
+  "observation": {
+    "audit": [
+      {
+        "status": "success",
+        "tool": "file_write"
+      },
+      {
+        "status": "success",
+        "tool": "file_read"
+      },
+      {
+        "status": "failed",
+        "tool": "shell"
+      }
+    ],
+    "denial_disposition": "denied",
+    "denial_error": true,
+    "file_contents": "baseline data",
+    "file_read_contains": true,
+    "file_read_error": false,
+    "file_write_error": false,
+    "prompt_system": "b8f37d87a1168f267a11bbfeb308913c9eb8614924e0bd613104e0b692caf270",
+    "prompt_user": "26a175e108f700030e24b654e71896667fff3a4fcbc80d62eed6d50d300d838c",
+    "provider_calls": 1,
+    "schemas": "126822111abadba577e8f45d595102afffe569b42cfed2b49425bc99225f6033",
+    "stage": "direct",
+    "terminal": "COMPLETED",
+    "tool_names": [
+      "file_read",
+      "file_write",
+      "file_list"
+    ]
+  }
+}

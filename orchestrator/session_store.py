@@ -8773,6 +8773,13 @@ class SessionStore:
                     and not user_stopped
                 ):
                     continue
+                if not user_stopped and connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_run_parks'",
+                ).fetchone() is not None:
+                    from orchestrator.permissions.parking import PermissionParkingStore
+
+                    if PermissionParkingStore.recoverable(connection, run):
+                        continue
                 terminal_state = "stopped" if user_stopped else "interrupted"
                 error_code = (
                     "user_stop" if user_stopped else "runtime_restart_interrupted"
@@ -8883,6 +8890,46 @@ class SessionStore:
                 reconciled_ids,
             ).fetchall()
         return [self._run_dict(row) for row in result]
+
+    @contextmanager
+    def hold_active_run(
+        self, *, run_id: str, owner_id: str, agent_id: str, session_id: str,
+        request_id: str, context_generation: int, fencing_token: int, worker_id: str,
+    ) -> Iterator[sqlite3.Connection]:
+        """Serialize a short trusted effect with stop and Run-generation changes.
+
+        This only verifies PAO Run facts. It does not authenticate a caller or
+        make a slow/blocking effect safely cancellable. Callers must not hold
+        this transaction while waiting for a human or an external service.
+        """
+        for value in (run_id, owner_id, agent_id, session_id, request_id, worker_id):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("complete Run binding is required")
+        if (type(context_generation) is not int or context_generation <= 0
+                or type(fencing_token) is not int or fencing_token <= 0):
+            raise ValueError("positive Run and context fences are required")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT r.run_id, r.request_id, r.session_id, r.agent_id,
+                          r.context_generation AS run_generation, r.fencing_token,
+                          r.worker_id, r.state, s.instance_id, s.owner_id,
+                          s.agent_id AS session_agent, s.status AS session_status,
+                          s.context_generation AS session_generation
+                   FROM runs r JOIN sessions s ON s.session_id = r.session_id
+                   WHERE r.run_id = ? AND s.instance_id = ?""",
+                (run_id, self.instance_id),
+            ).fetchone()
+            if row is None or any((
+                row["run_id"] != run_id, row["request_id"] != request_id,
+                row["session_id"] != session_id, row["owner_id"] != owner_id,
+                row["agent_id"] != agent_id.lower(), row["session_agent"] != agent_id.lower(),
+                row["run_generation"] != context_generation, row["session_generation"] != context_generation,
+                row["fencing_token"] != fencing_token, row["worker_id"] != worker_id,
+                row["state"] != "running", row["session_status"] != "active",
+            )):
+                raise StaleFencingToken("Run execution is no longer current")
+            yield connection
 
     def get_run(self, run_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         clauses = ["r.run_id = ?", "s.instance_id = ?"]

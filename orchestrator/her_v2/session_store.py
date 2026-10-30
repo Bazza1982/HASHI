@@ -1296,11 +1296,22 @@ class HerSessionStore:
         if clean_boundary not in {
             "completed_tool_batch",
             "completed_provider_response",
+            "pending_tool_batch",
+            "ready_provider_request",
         }:
             raise HerSessionStoreError(
                 "invalid_provider_context",
                 "Provider context must end at a complete response or Tool batch.",
             )
+        if clean_boundary == "pending_tool_batch":
+            from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+            try:
+                pending_tool_calls(messages)
+            except (TypeError, ValueError) as exc:
+                raise HerSessionStoreError(
+                    "invalid_provider_context", "Pending Tool continuation is incomplete or ambiguous.",
+                ) from exc
         if any(not isinstance(item, Mapping) for item in messages):
             raise HerSessionStoreError(
                 "invalid_provider_context",
@@ -1401,10 +1412,22 @@ class HerSessionStore:
                     or stored_producer_digest != producer_claim_digest
                     or stored_producer_claim != canonical_producer_claim
                 ):
-                    raise HerSessionStoreError(
-                        "provider_context_producer_conflict",
-                        "An existing provider checkpoint cannot be relabelled by another PAO attempt.",
-                    )
+                    adopted = None
+                    if connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='her_permission_continuations'",
+                    ).fetchone() is not None:
+                        adopted = connection.execute(
+                            "SELECT 1 FROM her_permission_continuations WHERE session_id=? AND turn_id=? "
+                            "AND source_context_digest=? AND source_producer_digest=? "
+                            "AND target_producer_digest=? AND execution_owner_id=?",
+                            (session_id, turn_id, digest, stored_producer_digest,
+                             producer_claim_digest, execution_owner_id),
+                        ).fetchone()
+                    if adopted is None:
+                        raise HerSessionStoreError(
+                            "provider_context_producer_conflict",
+                            "An existing provider checkpoint cannot be relabelled by another PAO attempt.",
+                        )
                 return self._provider_context_metadata(
                     context_metadata, digest=digest
                 )
@@ -1475,6 +1498,149 @@ class HerSessionStore:
                     (now, session_id, turn_id, execution_owner_id),
                 )
         return self._provider_context_metadata(context_metadata, digest=digest)
+
+    def mark_permission_waiting(self, *, session_id: str, turn_id: str,
+                                execution_owner_id: str, expected_digest: str):
+        """Mark an exact pending boundary after PAO has durably parked its Run."""
+        with self._transaction() as connection:
+            turn = connection.execute(
+                "SELECT * FROM her_turns WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+            ).fetchone()
+            recovery = connection.execute(
+                "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?",
+                (session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
+            self._assert_execution_owner(dict(turn), execution_owner_id)
+            if (turn["status"] not in {"active", "waiting_permission"} or recovery is None
+                    or recovery["provider_context_digest"] != expected_digest
+                    or _object(recovery["provider_context_json"]).get("boundary") not in {
+                        "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
+                        "completed_provider_response",
+                    }):
+                raise HerSessionStoreError("permission_park_conflict", "Pending Tool context changed.")
+            connection.execute(
+                "UPDATE her_turns SET status='waiting_permission',execution_lease_updated_at=? "
+                "WHERE session_id=? AND turn_id=?", (_utc_now(), session_id, turn_id),
+            )
+
+    def adopt_unstarted_permission_turn(self, ticket, *, execution_owner):
+        """Adopt an accepted Turn that has no Provider or business boundary."""
+        from orchestrator.permissions.start_wait import PermissionStartTicket
+
+        if not isinstance(ticket, PermissionStartTicket):
+            raise HerSessionStoreError("permission_resume_untrusted", "Canonical PAO start continuation is required.")
+        owner_id, pid = str(execution_owner.get("owner_id") or ""), execution_owner.get("pid")
+        if not owner_id or type(pid) is not int or pid <= 0:
+            raise HerSessionStoreError("execution_owner_conflict", "Current execution owner is required.")
+        with ticket.hold() as proof:
+            reference = proof["reference"]
+            session_id, turn_id = reference["her_session_id"], reference["turn_id"]
+            with self._transaction() as connection:
+                turn = connection.execute(
+                    "SELECT * FROM her_turns WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+                ).fetchone()
+                recovery = connection.execute(
+                    "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+                ).fetchone()
+                if (turn is None or turn["request_id"] != ticket.binding.request_id
+                        or turn["status"] not in {"active", "failed", "waiting_permission"}
+                        or turn["execution_owner_id"] not in {reference["execution_owner_id"], owner_id}
+                        or (recovery is not None and (
+                            recovery["provider_context_digest"]
+                            or _array(recovery["tool_receipts_json"]) or _array(recovery["side_effects_json"])
+                        ))):
+                    raise HerSessionStoreError("permission_resume_conflict", "The accepted Turn is no longer unstarted.")
+                connection.execute(
+                    "UPDATE her_turns SET status='active',execution_owner_id=?,execution_owner_pid=?,"
+                    "execution_owner_started_at=?,execution_lease_updated_at=?,completed_at=NULL,error_text='' "
+                    "WHERE session_id=? AND turn_id=?",
+                    (owner_id, pid, str(execution_owner.get("started_at") or ""), _utc_now(), session_id, turn_id),
+                )
+                self._next_event(
+                    connection, session_id=session_id,
+                    event_id=f"{turn_id}:permission-start:{ticket.binding.fencing_token}",
+                    kind="permission_start_adopted", payload={
+                        "turn_id": turn_id, "run_id": ticket.binding.context.run_id,
+                        "producer_fence": proof["claim"]["fencing_token"],
+                        "resume_fence": ticket.binding.fencing_token,
+                    },
+                )
+
+    def adopt_permission_turn(self, ticket, *, execution_owner: Mapping[str, Any]):
+        """Adopt one exact parked batch through the canonical PAO resume fence."""
+        from orchestrator.permissions.parking import PermissionResumeTicket
+        from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+        if not isinstance(ticket, PermissionResumeTicket):
+            raise HerSessionStoreError("permission_resume_untrusted", "Canonical PAO continuation is required.")
+        owner_id = str(execution_owner.get("owner_id") or "")
+        pid = execution_owner.get("pid")
+        if not owner_id or type(pid) is not int or pid <= 0:
+            raise HerSessionStoreError("execution_owner_conflict", "Current execution owner is required.")
+        with ticket.hold() as proof:
+            reference = proof["checkpoint"]
+            session_id, turn_id = reference["her_session_id"], reference["turn_id"]
+            with self._transaction() as connection:
+                turn = connection.execute(
+                    "SELECT * FROM her_turns WHERE session_id=? AND turn_id=?", (session_id, turn_id),
+                ).fetchone()
+                recovery = connection.execute(
+                    "SELECT * FROM her_active_turn_recovery WHERE session_id=? AND turn_id=?",
+                    (session_id, turn_id),
+                ).fetchone()
+                if (turn is None or recovery is None or turn["status"] not in {"active", "failed", "waiting_permission"}
+                        or turn["request_id"] != ticket.binding.request_id
+                        or proof["binding"]["context"]["turn_id"] != turn_id
+                        or reference["digest"] != recovery["provider_context_digest"]):
+                    raise HerSessionStoreError("permission_resume_conflict", "Parked provider context changed.")
+                metadata = _object(recovery["provider_context_json"])
+                if metadata.get("boundary") not in {
+                    "pending_tool_batch", "ready_provider_request", "completed_tool_batch",
+                    "completed_provider_response",
+                }:
+                    raise HerSessionStoreError("permission_resume_conflict", "A complete provider boundary is required.")
+                context = self._read_segmented_provider_context(
+                    connection, session_id=session_id, turn_id=turn_id, metadata=metadata,
+                    expected_digest=reference["digest"],
+                )
+                if metadata["boundary"] == "pending_tool_batch":
+                    pending_tool_calls(context["messages"])
+                source = self._normalise_run_claim(reference.get("producer_run_claim"))
+                stored = _object(recovery["provider_context_producer_claim_json"])
+                current = self._normalise_run_claim(proof["_current_run_claim"])
+                if (source is None or current is None or source != stored
+                        or _digest(stored) != recovery["provider_context_producer_claim_digest"]
+                        or source["run_id"] != current["run_id"]
+                        or source["request_id"] != current["request_id"]
+                        or source["input_digest"] != current["input_digest"]
+                        or current["state_revision"] <= source["state_revision"]
+                        or current["state"] != "running"):
+                    raise HerSessionStoreError("permission_resume_conflict", "PAO continuation provenance changed.")
+                connection.execute("""CREATE TABLE IF NOT EXISTS her_permission_continuations(
+                    session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                    source_context_digest TEXT NOT NULL, source_producer_digest TEXT NOT NULL,
+                    target_producer_digest TEXT NOT NULL, execution_owner_id TEXT NOT NULL,
+                    PRIMARY KEY(session_id,turn_id,target_producer_digest)
+                )""")
+                connection.execute(
+                    "INSERT INTO her_permission_continuations VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(session_id,turn_id,target_producer_digest) DO NOTHING",
+                    (session_id, turn_id, reference["digest"], _digest(source), _digest(current), owner_id),
+                )
+                now = _utc_now()
+                connection.execute(
+                    "UPDATE her_turns SET status='active',execution_owner_id=?,execution_owner_pid=?,"
+                    "execution_owner_started_at=?,execution_lease_updated_at=?,completed_at=NULL,error_text='' "
+                    "WHERE session_id=? AND turn_id=?",
+                    (owner_id, pid, str(execution_owner.get("started_at") or ""), now, session_id, turn_id),
+                )
+                connection.execute(
+                    "UPDATE her_active_turn_recovery SET status='active',recovery_disposition='PERMISSION_PENDING_BATCH',"
+                    "updated_at=? WHERE session_id=? AND turn_id=?", (now, session_id, turn_id),
+                )
+                return context
 
     def provider_context_for_turn(
         self, session_id: str, turn_id: str

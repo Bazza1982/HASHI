@@ -799,7 +799,7 @@ def her_v2_route_text(
 
 def backend_switch_notice_text(
     *, backend: str, model: str, mode: str, provider: str | None,
-    effort: str | None, with_context: bool,
+    effort: str | None, with_context: bool, permission_status: Any | None = None,
 ) -> str:
     """Plain result for command consumers; selection menus use HTML cards."""
     lines = [_tr("backend.switch.success", backend=backend)]
@@ -814,6 +814,10 @@ def backend_switch_notice_text(
     ])
     if effort:
         lines.append(f"{_tr('common.effort')}: {effort}")
+    if permission_status is not None:
+        from orchestrator.permissions.presentation import backend_permission_notice
+
+        lines.append(backend_permission_notice(permission_status))
     return "\n".join(lines)
 
 

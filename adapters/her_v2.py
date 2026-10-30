@@ -1851,6 +1851,7 @@ class HERv2Adapter(BaseBackend):
         wip_parity: dict[str, Any] = {}
         canonical_recovery_context: dict[str, Any] | None = None
         private_provider_context: dict[str, Any] | None = None
+        permission_execution = None
         pcm_runtime_context: dict[str, Any] = {}
         if (
             not self._initialized
@@ -1971,6 +1972,12 @@ class HERv2Adapter(BaseBackend):
                     },
                 )
             self._session_id = fixed_turn.session_id
+            permission_owner = getattr(self._runtime_context(), "permission_runs", None)
+            if permission_owner is not None and not fixed_turn.duplicate_text:
+                permission_execution = await permission_owner.open_turn(self, fixed_turn, request_id)
+                if permission_execution.recovery is not None or permission_execution.resumed_unstarted:
+                    private_provider_context = permission_execution.recovery
+                    fixed_turn = replace(self._session_coordinator.accept(prompt), duplicate=False)
             if fixed_turn.duplicate:
                 if fixed_turn.duplicate_text:
                     return BackendResponse(
@@ -2258,6 +2265,8 @@ class HERv2Adapter(BaseBackend):
                 ),
                 recovery=private_provider_context,
             )
+        if permission_execution is not None:
+            permission_execution.bind_provider(provider)
         runtime_config = replace(
             turn_config,
             # The shared /timeout command is idle-only.  Bind its live value
@@ -2467,13 +2476,20 @@ class HERv2Adapter(BaseBackend):
             self._canonical_active_turns[request_ref] = fixed_turn
         self._active_runtimes[request_id] = runtime
         try:
-            result = await runtime.run_turn(
-                prompt,
-                request_id,
-                effort=effort_resolution.effective,
-                request_content=request_content,
-                request_mode=str(request_meta.get("request_mode") or "text"),
-            )
+            if permission_execution is not None:
+                result = await permission_execution.run(
+                    runtime, prompt, request_id, effort=effort_resolution.effective,
+                    request_content=request_content,
+                    request_mode=str(request_meta.get("request_mode") or "text"),
+                )
+            else:
+                result = await runtime.run_turn(
+                    prompt,
+                    request_id,
+                    effort=effort_resolution.effective,
+                    request_content=request_content,
+                    request_mode=str(request_meta.get("request_mode") or "text"),
+                )
         except asyncio.CancelledError:
             try:
                 self._persist_fixed_provider_usage(
@@ -2495,6 +2511,14 @@ class HERv2Adapter(BaseBackend):
                     )
             raise
         except BaseException as exc:
+            if permission_execution is not None and permission_execution.owner.is_park(exc):
+                self._persist_fixed_provider_usage(
+                    accepted=fixed_turn, provider=provider, turn_config=turn_config,
+                )
+                permission_execution.owner.capture(
+                    request_id, exc, self._session_coordinator, fixed_turn,
+                )
+                raise
             usage_error_text = ""
             try:
                 self._persist_fixed_provider_usage(

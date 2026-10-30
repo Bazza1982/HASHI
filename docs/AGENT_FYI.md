@@ -1,21 +1,22 @@
 # HASHI Agent FYI
 
+- 权限边界与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
+
 - `/forget` removes traceable period data; untraceable summaries may remain.
-  Audit copies stay outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
+  Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
 - Task/local /sys deletion: authenticated management + current snapshot;
   exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
   [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
-- Legacy audio migration requires verified ownership and safe paths; PAO
-  settlement is cancellation-safe and HERV3 checkpoint claims are immutable.
+- Legacy audio migration needs verified ownership/safe paths; PAO settlement
+  is cancellation-safe; HERV3 checkpoint claims stay immutable.
   [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
-- PAO strips internal control envelopes before judging deliverability. A result
-  containing only Memory+ state fails terminally; typed audio remains deliverable.
-- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state and
-  evidence; cancellation, safety, transport, Provider and single-Tool limits
-  remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- PAO strips internal control envelopes before delivery checks. Memory+-only
+  results fail terminally; typed audio remains deliverable.
+- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state/evidence;
+  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
 - Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
   snapshots, resumable retries, no Move-only gates/source lifecycle writes.
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -339,23 +340,44 @@ class IdentityService:
             )
         return Session(id=session_id, user_id=user_id, token=token, expires_at=expires_at, created_at=now)
 
+    @staticmethod
+    def _active_session_row(con, token: str):
+        return con.execute(
+            """
+            SELECT users.*, sessions.expires_at AS session_expires_at
+            FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token_hash = ?
+              AND sessions.revoked_at IS NULL
+              AND sessions.expires_at > ?
+              AND users.status = 'active'
+            """,
+            (_hash_secret(token), _utc_now_iso()),
+        ).fetchone()
+
     def get_session_user(self, token: str) -> User | None:
-        token_hash = _hash_secret(token)
-        now = _utc_now_iso()
         with self.store.connect() as con:
-            row = con.execute(
-                """
-                SELECT users.*
-                FROM sessions
-                JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token_hash = ?
-                  AND sessions.revoked_at IS NULL
-                  AND sessions.expires_at > ?
-                  AND users.status = 'active'
-                """,
-                (token_hash, now),
-            ).fetchone()
+            row = self._active_session_row(con, token)
         return _user_from_row(row) if row else None
+
+    @contextmanager
+    def hold_active_session(self, token: str):
+        """Keep session revocation ordered with a short trusted decision.
+
+        The caller must acquire this guard before the permission ledger lock.
+        It yields only identity and expiry, never the bearer token.
+        """
+        con = self.store.connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = self._active_session_row(con, token)
+            yield (_user_from_row(row), row["session_expires_at"]) if row else None
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     def revoke_session(self, token: str) -> bool:
         with self.store.connect() as con:

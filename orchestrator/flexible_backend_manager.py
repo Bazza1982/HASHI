@@ -42,6 +42,7 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
+    public_backend_engine,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.v3_config import (
@@ -1360,6 +1361,54 @@ class FlexibleBackendManager:
             if str(name).strip() and isinstance(profile, dict)
         }
 
+    def _agent_permission_settings(self):
+        """Read the one Agent setting without constructing any permission service."""
+        raw = getattr(self.config, "permission_settings", None)
+        present = getattr(self.config, "permission_settings_present", False) or raw is not None
+        extra = dict(getattr(self.config, "extra", None) or {})
+        if getattr(self.config, "permission_settings_conflict", False):
+            raise ValueError("conflicting permission settings")
+        if "permission_settings" in extra:
+            if present:
+                raise ValueError("conflicting permission settings")
+            raw = extra.pop("permission_settings")
+            present = True
+        if not present:
+            return None, extra
+        if raw is None:
+            raise ValueError("invalid permission settings")
+        from orchestrator.permissions.models import PermissionSettings
+
+        try:
+            return PermissionSettings.from_mapping(raw), extra
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid permission settings") from exc
+
+    def permission_status(self):
+        """Read fresh installed controls, retaining unmanaged compatibility paths."""
+        settings, _ = self._agent_permission_settings()
+        if settings is None or settings.requested_level.value == "L0":
+            return None
+        from orchestrator.permissions.backend_capabilities import BackendPermissionStatus
+
+        backend = self.current_backend
+        engine = str(getattr(getattr(backend, "config", None), "engine", "") or self.config.active_backend)
+        state = "unmanaged" if backend is not None and canonical_backend_engine(engine) != HER_V2_ENGINE else "unavailable"
+        reports = ()
+        if state != "unmanaged":
+            owner = getattr(getattr(self, "runtime", None), "permission_service_client", None)
+            reader = getattr(owner, "actual_controls", None)
+            if callable(reader):
+                try:
+                    reports = tuple(reader())
+                    if reports:
+                        state = "managed"
+                except (OSError, ValueError):
+                    reports = ()
+        return BackendPermissionStatus(
+            settings.requested_level, public_backend_engine(engine), state, reports,
+        )
+
     def _build_adapter_config(
         self,
         engine: str,
@@ -1368,8 +1417,19 @@ class FlexibleBackendManager:
         target_model: str | None = None,
         target_provider: str | None = None,
         apply_persisted_timeout: bool = True,
+        _permission_provider: bool = False,
     ) -> AgentConfig:
-        agent_extra = dict(getattr(self.config, "extra", None) or {})
+        settings, agent_extra = self._agent_permission_settings()
+        if "permission_settings" in backend_cfg_raw:
+            raise ValueError("permission settings must belong to the Agent")
+        # The user's third-party Engine remains selectable with an explicit
+        # unmanaged coverage notice. Native HASHI tool paths cannot claim a
+        # requested level until their trusted executor is installed.
+        if (settings is not None and settings.requested_level.value != "L0"
+                and (canonical_backend_engine(engine) == HER_V2_ENGINE or _permission_provider)):
+            owner = getattr(getattr(self, "runtime", None), "permission_service_client", None)
+            if owner is None or not owner.permits_native(engine, provider=_permission_provider):
+                raise ValueError("requested permission controls are not yet available")
         backend_extra = dict(backend_cfg_raw)
         backend_extra.pop("engine", None)
         backend_extra.pop("model", None)
@@ -1623,6 +1683,7 @@ class FlexibleBackendManager:
             backend_cfg_raw,
             target_model=target_model,
             apply_persisted_timeout=False,
+            _permission_provider=herv3_provider,
         )
         if engine == "her-v2":
             # One-shot internal sidecars are not agent runs. Keep globally
@@ -1988,7 +2049,15 @@ class FlexibleBackendManager:
             if self.global_config and self.global_config.authorized_id:
                 enriched_secrets["_authorized_telegram_id"] = str(self.global_config.authorized_id)
 
-            registry = ToolRegistry(
+            registry_class = ToolRegistry
+            permission_settings, _ = self._agent_permission_settings()
+            if (permission_settings is not None and permission_settings.requested_level.value != "L0"
+                    and canonical_backend_engine(adapter_cfg.engine) == HER_V2_ENGINE):
+                from orchestrator.permissions.registry import ManagedCatalogueRegistry
+
+                registry_class = ManagedCatalogueRegistry
+                enriched_secrets = {}
+            registry = registry_class(
                 allowed_tools=allowed,
                 access_root=access_roots[0],
                 workspace_dir=workspace_dir,
@@ -2102,6 +2171,10 @@ class FlexibleBackendManager:
             if supports_sessions and not await candidate.handle_new_session():
                 raise RuntimeError("Target backend could not start a new session")
 
+            controller = getattr(getattr(self, "runtime", None), "permission_runs", None)
+            fence_previous = getattr(controller, "before_backend_switch", None)
+            if callable(fence_previous):
+                await fence_previous(target_engine)
             previous_backend = self.current_backend
             previous_engine = self.config.active_backend
             previous_model = self._active_model_override

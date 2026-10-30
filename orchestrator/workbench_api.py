@@ -453,6 +453,10 @@ class WorkbenchApiServer:
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self._device_capability_topology_task: asyncio.Task | None = None
         self.identity_service = self._build_identity_service()
+        if getattr(self.global_config, "permission_service", None) is not None:
+            from orchestrator.permissions.bootstrap import bind_frontend
+
+            bind_frontend(self)
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
@@ -2123,6 +2127,11 @@ class WorkbenchApiServer:
         return getattr(wa, "_client", None) is not None
 
     async def start(self):
+        if getattr(self.global_config, "permission_frontend", None) is not None:
+            from orchestrator.permissions.frontend_transition import build_frontend_transition
+
+            self._permission_transition_endpoint = build_frontend_transition(self)
+            await self._permission_transition_endpoint.start()
         await asyncio.to_thread(self.session_store.cleanup_attachments)
         await asyncio.to_thread(self.session_store.cleanup_audio_assets)
         await self.live_voice_manager.start()
@@ -2445,6 +2454,9 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        permission_endpoint = getattr(self, "_permission_transition_endpoint", None)
+        if permission_endpoint is not None:
+            await permission_endpoint.close()
         if self._device_capability_topology_task is not None:
             self._device_capability_topology_task.cancel()
             await asyncio.gather(
@@ -2486,6 +2498,10 @@ class WorkbenchApiServer:
             await asyncio.to_thread(close_transfer_store)
 
     async def handle_auth_login(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "login")
         if not self._is_governed_profile():
             return web.json_response(
                 {
@@ -2551,6 +2567,10 @@ class WorkbenchApiServer:
         )
 
     async def handle_auth_logout(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "logout")
         if not self._is_governed_profile():
             return web.json_response({"ok": True})
         if self.identity_service is None:
@@ -2569,6 +2589,10 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, "revoked": revoked})
 
     async def handle_auth_me(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "me")
         if not self._is_governed_profile():
             return web.json_response(
                 {"ok": True, "profile": "personal", "user": {"role": "owner"}}
@@ -9161,9 +9185,17 @@ class WorkbenchApiServer:
                     },
                     status=409,
                 )
-            result = await command_interaction_bridge.dispatch_command_interaction(
-                runtime, operation, metadata
-            )
+            result = None
+            if getattr(self, "permission_control", None) is not None:
+                from orchestrator.permissions.frontend_binding import dispatch_permission_operation
+
+                result = await dispatch_permission_operation(
+                    self, request, runtime, operation, metadata,
+                )
+            if result is None:
+                result = await command_interaction_bridge.dispatch_command_interaction(
+                    runtime, operation, metadata
+                )
             response = dict(result) if isinstance(result, Mapping) else {
                 "ok": False,
                 "error_code": "command_invocation_response_invalid",
@@ -13200,17 +13232,25 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            chat_id=chat_id,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.admin_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                chat_id=chat_id,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.admin_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status)
@@ -13246,16 +13286,24 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.agent_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.agent_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status_code = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status_code)

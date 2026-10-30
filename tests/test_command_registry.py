@@ -150,7 +150,7 @@ def test_private_command_override_is_debug_not_warning(
     assert "intentionally overridden" in matching[-1].message
 
 
-@pytest.mark.parametrize("protected_command", ["queue", "wiki"])
+@pytest.mark.parametrize("protected_command", ["queue", "wiki", "safety"])
 def test_protected_core_command_reports_structured_notice_without_warning(
     monkeypatch,
     tmp_path,
@@ -189,7 +189,7 @@ def test_protected_core_command_reports_structured_notice_without_warning(
     command_records = [
         record
         for record in caplog.records
-        if f"protected core command {protected_command}" in record.message
+        if f"protected command {protected_command}" in record.message
     ]
     callback_records = [
         record
@@ -197,11 +197,11 @@ def test_protected_core_command_reports_structured_notice_without_warning(
         if "callbacks from local extension override" in record.message
     ]
     assert [record.message for record in command_records] == [
-        f"Ignoring local extension override of protected core command "
+        f"Ignoring local extension override of protected command "
         f"{protected_command} from {module_name}"
     ]
     assert [record.message for record in callback_records] == [
-        f"Ignoring callbacks from local extension override of protected core "
+        f"Ignoring callbacks from local extension override of protected "
         f"command(s) {protected_command} in {module_name}"
     ]
     assert all(
