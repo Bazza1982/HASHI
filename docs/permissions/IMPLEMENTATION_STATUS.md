@@ -34,6 +34,7 @@
 - Worker 用量先持久化、跨 epoch 保留原阶段/ID；脚本原结果在 profile 清理失败时保留；旧物理行失败不跳过其他行；已完成旧快照不依赖已删除 plan。
 - 新增固定 capability 后，额外网络 SID、被替换 SID、旧零 capability profile 和 bool 伪装 count 均在执行前拒绝。
 - PR #118 P1 基础权限回归：同一组 18 项安装策略→factory→registry→authority 集成用例在 6756cf43 为 8 failed / 10 passed，修复后 18 passed。覆盖基础独有、申请独有、重叠、分 action、禁止范围；入场/排队/prepare 后改策略及最终 start 撤权均无文件副作用。原生 launcher/IPC 与后端配置输入为注入边界，不宣称 OS 组件资格。
+- Windows CI 捕获旧恢复用例在结果核对阶段超过 1 秒 watchdog；同一提交的另一套 Windows 检查及本地组合通过。该恢复 helper 的 watchdog 调为 5 秒，仍保留授权、结果摘要、epoch 栅栏及只执行一次的全部断言；产品期限和超时不变。
 - CI 范围来自 permissions workflow 的完整 permission/直接旧合同组合；共享运行接线另跑仓库规范 curated core gate。Core 保护和 whitespace 必须通过。不默认跑全库、不用 mock 宣称 OS 通过，不将重叠分组数量相加。
 
 ## 当前 profile 与采用边界

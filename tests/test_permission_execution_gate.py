@@ -290,7 +290,8 @@ async def _complete_recoverable_operation(environment, tmp_path, *, confirm_stop
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    assert (await asyncio.wait_for(task, 1)).state == ("succeeded" if confirm_stop else "unknown")
+    # Watchdog for a stuck workflow, not a one-second SQLite/runner latency contract.
+    assert (await asyncio.wait_for(task, 5)).state == ("succeeded" if confirm_stop else "unknown")
     return authority, issuer, context, gate, supervisor, arguments, request
 
 
