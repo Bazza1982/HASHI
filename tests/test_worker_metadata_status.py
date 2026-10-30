@@ -477,11 +477,11 @@ async def test_worker_reports_scoped_telegram_access_capability(tmp_path):
         await stack.host.emit_metadata()
         deadline = asyncio.get_running_loop().time() + 1
         while (
-            stack.handle.get_runtime_metadata().get("telegram_scoped_access_protocol") != 1
+            stack.handle.get_runtime_metadata().get("telegram_scoped_access_protocol") != 2
             and asyncio.get_running_loop().time() < deadline
         ):
             await asyncio.sleep(0.01)
-        assert stack.handle.get_runtime_metadata()["telegram_scoped_access_protocol"] == 1
+        assert stack.handle.get_runtime_metadata()["telegram_scoped_access_protocol"] == 2
     finally:
         await _close_stack(stack)
 

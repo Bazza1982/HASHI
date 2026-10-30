@@ -71,7 +71,7 @@ from orchestrator.config_json import (
     read_config_json,
 )
 from orchestrator.telegram_access import (
-    LEGACY_AGENT_USERS_KEY, POLICY_VERSION, TelegramAccessError, TelegramAccessService,
+    LEGACY_AGENT_USERS_KEY, SCOPED_ACCESS_PROTOCOL_VERSION, TelegramAccessError, TelegramAccessService,
 )
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
@@ -5192,15 +5192,14 @@ class WorkbenchApiServer:
             status=int(outcome.get("status", 201)),
         )
 
-    def _telegram_access_management_supported(self) -> bool:
-        """Advertise access management only across compatible live Workers."""
+    def _telegram_access_management_supported(self, agent_id: str, *, global_change: bool = False) -> bool:
+        """Check the exact Agent; global changes require every affected Worker."""
         try:
             document = read_config_json(self.config_path)
             rows = document.get("agents")
             if not isinstance(rows, list) or not rows:
                 return False
-            active = set()
-            configured = set()
+            active, configured, legacy_holders = set(), set(), set()
             for row in rows:
                 if not isinstance(row, Mapping):
                     return False
@@ -5213,18 +5212,17 @@ class WorkbenchApiServer:
                     extra = {}
                 if not isinstance(extra, Mapping):
                     return False
-                # Old Workers cache this list and interpret it with legacy
-                # owner permissions; do not manage it across generations.
-                for source in (row, extra):
-                    legacy = source.get(LEGACY_AGENT_USERS_KEY)
-                    if legacy is not None and legacy != []:
-                        return False
+                if any(source.get(LEGACY_AGENT_USERS_KEY) not in (None, [])
+                       for source in (row, extra)):
+                    legacy_holders.add(name)
                 if row.get("is_active", True) is not False:
                     active.add(name)
+            target = str(agent_id or "").strip().casefold()
             runtimes = self._runtime_map()
-            if not active or not active.issubset(runtimes) or not set(runtimes).issubset(configured):
+            if target not in configured or target not in runtimes:
                 return False
-            for runtime in runtimes.values():
+
+            def compatible(runtime):
                 if not getattr(runtime, "is_function_worker_proxy", False):
                     return False
                 reader = getattr(runtime, "get_runtime_metadata", None)
@@ -5232,18 +5230,26 @@ class WorkbenchApiServer:
                 if not isinstance(metadata, Mapping):
                     return False
                 protocol = metadata.get("telegram_scoped_access_protocol")
-                if (
-                    type(protocol) is not int or protocol != POLICY_VERSION
-                    or metadata.get("worker_phase") != "ACTIVE"
-                    or metadata.get("worker_accepting") is not True
-                ):
-                    return False
-            return True
+                return (
+                    type(protocol) is int and protocol == SCOPED_ACCESS_PROTOCOL_VERSION
+                    and metadata.get("worker_phase") == "ACTIVE"
+                    and metadata.get("worker_accepting") is True
+                )
+
+            if not compatible(runtimes[target]):
+                return False
+            if not global_change:
+                return True
+            # A legacy holder may later return with an old cached allowlist.
+            required = active | legacy_holders
+            if not required.issubset(runtimes) or not set(runtimes).issubset(configured):
+                return False
+            return all(compatible(runtime) for runtime in runtimes.values())
         except Exception:
             # A missing or unreadable compatibility signal must fail closed.
             return False
 
-    def _telegram_access_denial(self, request):
+    def _telegram_access_denial(self, request, *, global_change: bool = False):
         if (
             (not self._is_governed_profile() and not self.admin_token)
             or not self._check_admin_auth(request)
@@ -5251,7 +5257,8 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": "admin_auth_failed"}, status=403
             )
-        if not self._telegram_access_management_supported():
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        if not self._telegram_access_management_supported(agent_id, global_change=global_change):
             return self._telegram_credential_response(
                 {"ok": False, "error_code": "telegram_access_unavailable"}, status=501
             )
@@ -5269,7 +5276,9 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
         return self._telegram_credential_response(
-            {"ok": True, "management_supported": True, **snapshot}
+            {"ok": True, "management_supported": True,
+             "global_management_supported": self._telegram_access_management_supported(
+                 agent_id, global_change=True), **snapshot}
         )
 
     async def handle_admin_agent_telegram_access_change(self, request):
@@ -5287,6 +5296,10 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": "invalid_request"}, status=400
             )
         agent_id = str(request.match_info.get("agent_id") or "").strip()
+        if payload["scope"] == "global":
+            denied = self._telegram_access_denial(request, global_change=True)
+            if denied is not None:
+                return denied
         try:
             snapshot = await asyncio.to_thread(
                 self.telegram_access_service.change, agent_id, **payload
@@ -5296,7 +5309,9 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
         return self._telegram_credential_response(
-            {"ok": True, "management_supported": True, **snapshot}
+            {"ok": True, "management_supported": True,
+             "global_management_supported": self._telegram_access_management_supported(
+                 agent_id, global_change=True), **snapshot}
         )
 
     def _telegram_credential_response(self, payload: dict, *, status: int = 200):

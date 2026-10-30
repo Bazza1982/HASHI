@@ -28,13 +28,13 @@ async def test_access_api_is_admin_only_and_disabled_until_runtime_is_ready(tmp_
 
 
 @pytest.mark.asyncio
-async def test_access_gate_requires_all_active_workers_and_no_legacy_grants(tmp_path):
+async def test_global_access_gate_requires_all_active_workers(tmp_path):
     from types import SimpleNamespace
     from orchestrator.config_json import write_config_json
 
     server = _server(tmp_path, verifier=None, runtime_active=True, shared=True)
     headers = {"X-Workbench-Token": ADMIN_TOKEN}
-    def worker(name, protocol=1, phase="ACTIVE", accepting=True):
+    def worker(name, protocol=2, phase="ACTIVE", accepting=True):
         return SimpleNamespace(
             name=name, is_function_worker_proxy=True,
             get_runtime_metadata=lambda: {
@@ -43,9 +43,12 @@ async def test_access_gate_requires_all_active_workers_and_no_legacy_grants(tmp_
             },
         )
     server.orchestrator.runtimes = [worker("lily")]
-    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
+    response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    assert response.status == 200
+    assert json.loads(response.text)["global_management_supported"] is False
     server.orchestrator.runtimes.append(worker("momo", protocol=0))
-    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
+    response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    assert response.status == 200
 
     server.orchestrator.runtimes[1] = worker("momo")
     response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
@@ -74,17 +77,18 @@ async def test_access_gate_requires_all_active_workers_and_no_legacy_grants(tmp_
     config = read_config_json(config_path)
     config["agents"][0]["extra"] = {"authorized_telegram_ids": [75]}
     write_config_json(config_path, config)
-    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
+    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 200
     config = read_config_json(config_path)
     config["agents"][0].pop("extra")
     config["agents"][0]["authorized_telegram_ids"] = [75]
     write_config_json(config_path, config)
-    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 501
+    assert (await server.handle_admin_agent_telegram_access(_Request(headers=headers))).status == 200
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_protocol,phase,accepting", [
-    (True, "ACTIVE", True), (1, "DRAINING", True), (1, "ACTIVE", False)
+    (True, "ACTIVE", True), (1, "ACTIVE", True),
+    (2, "DRAINING", True), (2, "ACTIVE", False)
 ])
 async def test_access_gate_rejects_ambiguous_or_unavailable_workers(
     tmp_path, bad_protocol, phase, accepting
@@ -115,7 +119,7 @@ async def test_workbench_grants_and_revocations_reach_the_selected_worker(tmp_pa
     from tests.test_telegram_actor_scope import instance, update
 
     server = _server(tmp_path, verifier=None, runtime_active=True, shared=True)
-    metadata = {"telegram_scoped_access_protocol": 1,
+    metadata = {"telegram_scoped_access_protocol": 2,
                 "worker_phase": "ACTIVE", "worker_accepting": True}
     server.orchestrator.runtimes = [
         SimpleNamespace(name=name, is_function_worker_proxy=True,
@@ -188,7 +192,7 @@ async def test_workbench_grants_and_revocations_reach_the_selected_worker(tmp_pa
 @pytest.mark.asyncio
 async def test_access_api_uses_scoped_revision_and_rejects_stale_or_invalid_writes(tmp_path, monkeypatch):
     server = _server(tmp_path, verifier=None)
-    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda: True)
+    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda *_args, **_kwargs: True)
     headers = {"X-Workbench-Token": ADMIN_TOKEN}
     status = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
     data = json.loads(status.text)
@@ -220,14 +224,14 @@ async def test_access_api_uses_scoped_revision_and_rejects_stale_or_invalid_writ
 async def test_missing_admin_token_does_not_grant_access_management(tmp_path, monkeypatch):
     server = _server(tmp_path, verifier=None)
     server.admin_token = ""
-    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda: True)
+    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda *_args, **_kwargs: True)
     response = await server.handle_admin_agent_telegram_access(_Request())
     assert response.status == 403
 
 @pytest.mark.asyncio
 async def test_api_can_configure_first_and_additional_users_without_overwriting_secrets(tmp_path, monkeypatch):
     server = _server(tmp_path, verifier=None, authorized_id=0, shared=True)
-    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda: True)
+    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda *_args, **_kwargs: True)
     headers = {"X-Workbench-Token": ADMIN_TOKEN}
     before_secrets = (tmp_path / "secrets.json").read_bytes()
 
@@ -249,3 +253,61 @@ async def test_api_can_configure_first_and_additional_users_without_overwriting_
     assert momo["agent_user_ids"] == []
     assert read_config_json(tmp_path / "agents.json")["global"]["owner_scope_id"] == "user:0"
     assert (tmp_path / "secrets.json").read_bytes() == before_secrets
+
+
+@pytest.mark.asyncio
+async def test_agent_access_is_independent_of_stopped_agent_and_preserves_legacy_grants(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.config_json import write_config_json
+
+    server = _server(tmp_path, verifier=None, runtime_active=True, shared=True)
+    config_path = tmp_path / 'agents.json'
+    config = read_config_json(config_path)
+    config['agents'][0]['extra'] = {'authorized_telegram_ids': [75]}
+    config['agents'][1]['extra'] = {'authorized_telegram_ids': [300]}
+    # Even an inactive legacy holder must not return with a stale owner grant.
+    config['agents'][1]['is_active'] = False
+    write_config_json(config_path, config)
+    def worker(name, protocol=2):
+        return SimpleNamespace(name=name, is_function_worker_proxy=True,
+            get_runtime_metadata=lambda: {'telegram_scoped_access_protocol': protocol,
+                                          'worker_phase': 'ACTIVE', 'worker_accepting': True})
+    server.orchestrator.runtimes = [worker('lily')]
+    headers = {'X-Workbench-Token': ADMIN_TOKEN}
+    response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    assert response.status == 200
+    state = json.loads(response.text)
+    assert state['agent_user_ids'] == ['75']
+    assert state['global_management_supported'] is False
+    changed = await server.handle_admin_agent_telegram_access_change(_Request(
+        headers=headers, payload={'expected_revision': state['revision'], 'scope': 'agent',
+                                  'action': 'add', 'user_id': '200'}))
+    assert changed.status == 200
+    state = json.loads(changed.text)
+    assert state['agent_user_ids'] == ['75', '200']
+    config = read_config_json(config_path)
+    assert config['agents'][0]['extra']['authorized_telegram_ids'] == [75]
+    assert config['agents'][1]['extra']['authorized_telegram_ids'] == [300]
+    assert config['agents'][0]['extra']['telegram_scoped_access_version'] == 1
+    assert 'telegram_scoped_access_version' not in config['global']
+    before = config_path.read_bytes()
+    blocked = await server.handle_admin_agent_telegram_access_change(_Request(
+        headers=headers, payload={'expected_revision': state['revision'], 'scope': 'global',
+                                  'action': 'add', 'user_id': '900'}))
+    assert blocked.status == 501
+    assert config_path.read_bytes() == before
+    server.orchestrator.runtimes.append(worker('momo', protocol=1))
+    response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    assert json.loads(response.text)['global_management_supported'] is False
+    server.orchestrator.runtimes[1] = worker('momo')
+    response = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    state = json.loads(response.text)
+    assert state['global_management_supported'] is True
+    changed = await server.handle_admin_agent_telegram_access_change(_Request(
+        headers=headers, payload={'expected_revision': state['revision'], 'scope': 'global',
+                                  'action': 'add', 'user_id': '900'}))
+    assert changed.status == 200
+    assert json.loads(changed.text)['global_user_ids'] == ['42', '900']
+    config = read_config_json(config_path)
+    assert config['agents'][0]['extra']['authorized_telegram_ids'] == [75]
+    assert config['agents'][1]['extra']['authorized_telegram_ids'] == [300]

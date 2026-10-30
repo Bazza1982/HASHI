@@ -935,7 +935,7 @@ class FunctionWorkerHost:
         from orchestrator.runtime_transfer import transfer_redirect_snapshot
         from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
         from orchestrator.runtime_execution import queue_reasons
-        from orchestrator.telegram_access import POLICY_VERSION
+        from orchestrator.telegram_access import SCOPED_ACCESS_PROTOCOL_VERSION
 
         result = dict(runtime.get_runtime_metadata())
         agent_mode = str(
@@ -1007,7 +1007,7 @@ class FunctionWorkerHost:
                 "session_id": str(runtime.session_id_dt),
                 "worker_pid": os.getpid(),
                 "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
-                "telegram_scoped_access_protocol": POLICY_VERSION,
+                "telegram_scoped_access_protocol": SCOPED_ACCESS_PROTOCOL_VERSION,
                 "parked_topic_guarded_writes": callable(
                     getattr(getattr(runtime, "parked_topics", None), "delete_if_unchanged", None)
                 ),

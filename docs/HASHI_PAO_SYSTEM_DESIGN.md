@@ -12,31 +12,33 @@
 PAO's intended authorization is additive: the configured primary and other
 global Telegram user IDs may access every Agent; additional Agent-scoped IDs
 may access only their selected Agent. Grant changes are revision checked.
-Agent-scoped users receive chat and conversation-confirmation controls, while
-management commands remain reserved for global users. Direct Telegram management
+New Agent-scoped users receive chat and conversation-confirmation controls.
+Legacy allowlist users retain their previous owner Session and command access
+until removed. Management commands are for global and legacy users. Direct Telegram management
 commands cannot use a chat-only grant to reach other Agents.
 Replacing the primary revokes previously granted global users. An additional
-actor's direct private Telegram chat must use its own Session owner scope; the
+new actor's direct private Telegram chat uses its own Session owner scope; the
 existing primary owner scope and Workbench conversation remain unchanged.
-Authorized users inherit only the selected Agent's existing Workzone profile;
-global users may manage that profile, while Agent-only users cannot. Global
-users may explicitly address another Telegram chat through the normal send
-tools; ordinary replies and Agent-only deliveries remain bound to their own chat.
+Authorized users inherit the selected Agent's existing Workzone profile; global
+and legacy users may manage it, while new Agent-only users cannot. Global users
+may explicitly address another Telegram chat through the normal send tools;
+new delegated users' ordinary replies remain bound to their own chat.
 
-New Workers use a revisioned policy marker to adopt saved grants without a
-restart and reject unreadable or unsupported policies. The primary proactive
-Telegram route also reads the current configured owner. Management is advertised
-only when every active Agent has an accepting Worker supporting this policy and
-no Agent has a legacy per-Agent allowlist. Older Workers do not recognize the
-new grant fields; if one returns, management closes and its new-user access is
-unavailable until a compatible Worker is running. Existing legacy allowlists
-must be handled separately because older Workers can cache their previous grants.
-Agent grants preserve both flattened and nested instance configuration layouts.
-Telegram user and Bot credential transactions share an outer lock before their
-revision-checked configuration writes, avoiding opposing lock order.
+New Workers adopt saved grants without a restart and reject unreadable or
+unsupported policies. Agent-local changes require an accepting compatible Worker
+only for that Agent and activate its own policy marker. Global changes require
+compatible active Workers and compatible Workers for every legacy allowlist
+holder, because older Workers may cache prior grants. The API reports global
+availability separately and rechecks it when a global change is requested.
+Legacy grants remain until explicitly removed. An old or stopped Worker does not
+prevent managing another compatible Agent. Agent grants preserve flattened and
+nested configuration layouts. The primary proactive Telegram route reads the
+current configured owner. User and Bot credential transactions share an outer
+lock before revision-checked writes.
 
-Scoped admission, Session ownership, Workzones and delivery have offline tests;
-live cross-generation adoption and real Telegram acceptance remain unverified.
+Scoped admission, Session ownership, Workzones and delivery have offline tests.
+The user reports that prior Telegram live testing passed; the later per-Agent
+availability correction has not been live-tested.
 An Agent's shared memory and tool permissions are distinct from its conversation
 scope; no sandbox guarantee follows from the Telegram grant.
 

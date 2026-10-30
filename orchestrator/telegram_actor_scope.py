@@ -51,7 +51,21 @@ def scoped_access_enabled(runtime: Any) -> bool:
         global_config = document.get("global")
         if not isinstance(global_config, Mapping):
             return True
-        return POLICY_VERSION_KEY in global_config
+        if POLICY_VERSION_KEY in global_config:
+            return True
+        rows = document.get("agents")
+        name = str(getattr(runtime, "name", "") or "").strip().casefold()
+        if not isinstance(rows, list) or not name:
+            return True
+        matches = [row for row in rows if isinstance(row, Mapping)
+                   and str(row.get("name") or "").strip().casefold() == name]
+        if len(matches) != 1:
+            return True
+        row = matches[0]
+        extra = row.get("extra")
+        if extra is not None and not isinstance(extra, Mapping):
+            return True
+        return POLICY_VERSION_KEY in (extra if extra else row)
     except (OSError, ValueError, TypeError):
         return True
 
@@ -211,13 +225,24 @@ async def process_telegram_update(
         if actor not in snapshot.effective_user_ids:
             return False
         is_primary = actor == snapshot.primary_user_id
-        if not is_primary and (
+        is_legacy = not is_primary and actor in snapshot.legacy_user_ids
+        if not is_primary and not is_legacy and (
             str(getattr(chat, "type", "")) != "private" or chat_id != actor
         ):
             return False
-        owner = snapshot.owner_scope_id if is_primary else _delegated_owner(snapshot, actor)
+        owner = (snapshot.owner_scope_id if is_primary or is_legacy
+                 else _delegated_owner(snapshot, actor))
         if expected_owner_id is not None and owner != expected_owner_id:
             return False
+        if is_legacy:
+            # Existing Agent allowlists used the owner's Session and command
+            # authority. Preserve those grants until explicitly removed.
+            token = _current_actor.set(None)
+            try:
+                await runtime.app.process_update(update)
+            finally:
+                _current_actor.reset(token)
+            return True
         scope = TelegramActorScope(
             runtime=runtime,
             user_id=actor,

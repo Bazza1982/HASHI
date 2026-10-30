@@ -118,5 +118,14 @@ jobs:
           python -m pytest -q \
             tests/test_worker_metadata_status.py \
             tests/test_workbench_telegram_credential.py \
+            tests/test_workbench_telegram_access.py \
+            tests/test_telegram_access.py \
+            tests/test_telegram_access_runtime.py \
+            tests/test_telegram_access_delivery.py \
+            tests/test_telegram_access_media_tool.py \
+            tests/test_telegram_access_workzone.py \
+            tests/test_telegram_actor_scope.py \
+            tests/test_telegram_scoped_delivery.py \
+            tests/test_telegram_configuration_concurrency.py \
             tests/test_function_worker_quiesce.py \
             tests/test_telegram_ingress.py

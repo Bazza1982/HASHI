@@ -33,6 +33,7 @@ MAX_TELEGRAM_USERS_PER_SCOPE = 500
 GLOBAL_USERS_KEY = "authorized_telegram_user_ids"
 POLICY_VERSION_KEY = "telegram_scoped_access_version"
 POLICY_VERSION = 1
+SCOPED_ACCESS_PROTOCOL_VERSION = 2
 LEGACY_AGENT_USERS_KEY = "authorized_telegram_ids"
 AGENT_USERS_KEY = "scoped_telegram_user_ids"
 _REVISION = re.compile(r"^[0-9a-f]{64}$")
@@ -83,6 +84,7 @@ class TelegramAccessSnapshot:
     global_user_ids: tuple[int, ...]
     agent_user_ids: tuple[int, ...]
     owner_scope_id: str
+    legacy_user_ids: tuple[int, ...]
 
     @property
     def effective_user_ids(self) -> frozenset[int]:
@@ -119,6 +121,11 @@ def access_snapshot(
         raise ValueError("invalid Agent configuration")
     # ConfigManager uses the flattened Agent fields when nested extra is empty.
     extra = nested_extra if nested_extra else row
+    if POLICY_VERSION_KEY in extra and (
+        type(extra[POLICY_VERSION_KEY]) is not int
+        or extra[POLICY_VERSION_KEY] != POLICY_VERSION
+    ):
+        raise ValueError("unsupported Agent Telegram access policy")
     primary = resolve_telegram_owner_id(global_config, secrets_doc)
     if primary is not None:
         primary = normalize_telegram_user_id(primary)
@@ -140,6 +147,7 @@ def access_snapshot(
         global_user_ids=tuple(global_users),
         agent_user_ids=tuple(agent_users),
         owner_scope_id=resolve_owner_scope_id(global_config, primary),
+        legacy_user_ids=tuple(legacy_agent_users),
     )
 
 
@@ -237,9 +245,9 @@ class TelegramAccessService:
                     target.remove(actor)
 
                 global_config = config["global"]
-                # Persist activation with the first grant in the same atomic write.
-                global_config[POLICY_VERSION_KEY] = POLICY_VERSION
                 if scope == "global":
+                    # Global changes activate the policy across all Agents.
+                    global_config[POLICY_VERSION_KEY] = POLICY_VERSION
                     if snapshot.primary_user_id is None:
                         global_config["owner_scope_id"] = snapshot.owner_scope_id
                         global_config["telegram_owner_id"] = actor
@@ -260,6 +268,8 @@ class TelegramAccessService:
                     nested_extra = row.get("extra")
                     nested_mode = bool(nested_extra)
                     extra = dict(nested_extra) if nested_mode else row
+                    # A local grant activates only this Agent's policy.
+                    extra[POLICY_VERSION_KEY] = POLICY_VERSION
                     legacy = _id_list(extra.get(LEGACY_AGENT_USERS_KEY), legacy_scalar=True)
                     if action == "remove" and actor in legacy:
                         legacy.remove(actor)

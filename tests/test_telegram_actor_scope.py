@@ -17,7 +17,7 @@ def instance(tmp_path):
         "global": {"telegram_owner_id": 42, "owner_scope_id": "user:42",
                    "authorized_telegram_user_ids": [100]},
         "agents": [
-            {"name": "lily", "extra": {"authorized_telegram_ids": [200]}},
+            {"name": "lily", "extra": {"scoped_telegram_user_ids": [200]}},
             {"name": "momo", "extra": {}},
         ],
     })
@@ -160,3 +160,19 @@ async def test_claimed_response_is_suppressed_after_revocation(tmp_path):
         "outbox_id": "ob", "lease_token": "lease",
         "status": "suppressed", "error_code": "telegram_access_revoked",
     }]
+
+
+@pytest.mark.asyncio
+async def test_legacy_grant_retains_original_session_and_group_access(tmp_path):
+    runtime, observations, config_path = instance(tmp_path)
+    config = read_config_json(config_path)
+    config['agents'][0]['extra'] = {'authorized_telegram_ids': [200]}
+    write_config_json(config_path, config)
+    assert await process_telegram_update(runtime, update(200, chat_id=-100, chat_type='group'))
+    assert observations == [(200, 'user:42')]
+    assert not await process_telegram_update(runtime, update(200), expected_owner_id='other-owner')
+    config = read_config_json(config_path)
+    config['agents'][0]['extra']['authorized_telegram_ids'] = []
+    write_config_json(config_path, config)
+    assert not await process_telegram_update(runtime, update(200))
+    assert len(observations) == 1

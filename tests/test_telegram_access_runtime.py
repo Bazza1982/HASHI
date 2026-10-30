@@ -225,3 +225,73 @@ async def test_scoped_start_welcomes_user_without_starting_other_agents(tmp_path
     assert runtime._reply_text.await_count == 1
     assert runtime._reply_text.await_args.args[0] is local
     assert "发送消息" in runtime._reply_text.await_args.args[1]
+
+
+def test_local_policy_marker_does_not_activate_another_agents_legacy_policy(tmp_path):
+    from orchestrator.telegram_access import TelegramAccessService
+    from orchestrator.telegram_actor_scope import scoped_access_enabled
+
+    runtime, _, config_path = instance(tmp_path)
+    service = TelegramAccessService(config_path=config_path,
+                                    secrets_path=runtime.global_config.secrets_path)
+    initial = service.status('lily')
+    service.change('lily', expected_revision=initial['revision'],
+                   scope='agent', action='add', user_id='201')
+    assert scoped_access_enabled(runtime)
+    config = read_config_json(config_path)
+    assert 'telegram_scoped_access_version' not in config['global']
+    runtime.name = 'momo'
+    assert not scoped_access_enabled(runtime)
+
+
+@pytest.mark.parametrize("invalid_version", [None, True, "1", 2])
+def test_runtime_fails_closed_for_invalid_local_policy(tmp_path, invalid_version):
+    runtime, _, config_path = instance(tmp_path)
+    runtime._authorized_telegram_ids = (42,)
+    config = read_config_json(config_path)
+    config["agents"][0]["extra"]["telegram_scoped_access_version"] = invalid_version
+    write_config_json(config_path, config)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_legacy_authority_and_revokes_it_when_removed(tmp_path, monkeypatch):
+    from telegram import Update
+    from orchestrator.telegram_access import TelegramAccessService
+
+    runtime, observations, config_path = instance(tmp_path)
+    config = read_config_json(config_path)
+    config["agents"][0]["extra"]["authorized_telegram_ids"] = [75]
+    write_config_json(config_path, config)
+    runtime._authorized_telegram_ids = (42, 75)
+    runtime._reply_text = AsyncMock()
+    runtime.app.bot = object()
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = runtime
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.emit_metadata = AsyncMock()
+    service = TelegramAccessService(config_path=config_path,
+                                    secrets_path=runtime.global_config.secrets_path)
+    state = service.status("lily")
+    state = service.change("lily", expected_revision=state["revision"],
+                           scope="agent", action="add", user_id="201")
+
+    legacy = update(75, chat_id=-99, chat_type="group")
+    legacy.message = legacy.effective_message = SimpleNamespace(text="/status")
+    selected = [legacy]
+    monkeypatch.setattr(Update, "de_json", lambda payload, bot: selected[0])
+    await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert observations == [(75, "user:42")]
+
+    selected[0] = update(201)
+    selected[0].message = selected[0].effective_message = SimpleNamespace(text="/status")
+    await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert observations == [(75, "user:42")]
+    assert runtime._reply_text.await_count == 1
+
+    service.change("lily", expected_revision=state["revision"],
+                   scope="agent", action="remove", user_id="75")
+    selected[0] = legacy
+    await host.handle_request("runtime.telegram_update", {"update": {}})
+    assert observations == [(75, "user:42")]
