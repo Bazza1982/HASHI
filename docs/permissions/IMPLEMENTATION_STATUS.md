@@ -8,6 +8,8 @@
 
 2026-10-31 HASHI3 L1 实测发现并修复模型工厂写入 Adapter 只读超时属性的问题，改走既有配置超时合同。真实 Adapter 回归同组测试旧代码 2 failed / 2 passed，修复后 4 passed；直接模型/超时/L0 消费组合 18 passed。本项离线修复不代表完整 L1 前端实测通过，实际采用与后续问题记入当轮证据及共享白板。
 
+L1 后续真实审批测试证实：应用令牌不能代替人类会话，测试人类账户能批准并撤销指定 lease；但续跑时重新装配的上下文触发旧事件编号冲突。运行日志现按真实 ExecutionEpoch 区分新事件，原 Run/Turn/operation 与物理用量身份保留，同 epoch 的不可变事实检查继续拒绝冲突。接入 canonical observer 的两项私有 IPC 组合回归从 2 failed 变为 2 passed；完整权限/直接合同组合 616 passed，HERV3/最小 Core/Function 合同 24 passed；实体续跑与实际前端仍待本轮复验。
+
 ## 当前实现
 
 | 部分 | 实际行为 |

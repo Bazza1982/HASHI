@@ -1,6 +1,7 @@
 # HASHI Agent FYI
 
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
+  续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
   完整 L1 前端实测仍独立验收。[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
