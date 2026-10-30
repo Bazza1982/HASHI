@@ -28,6 +28,7 @@ from orchestrator.function_worker_supervisor import (
 )
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -337,6 +338,12 @@ async def _build_stack(tmp_path: Path, *, outcome: str):
     host._bridge_request_completions(runtime)
 
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        authorized_id=7, deployment_profile="personal",
+    )
+    server.session_store = SessionStore(
+        tmp_path / "sessions.sqlite3", instance_id="fixture",
+    )
     server._runtime_map = lambda: {runtime.name: handle}
     server._load_agent_rows = lambda *, include_inactive=False: [
         {"name": runtime.name, "is_active": True}
