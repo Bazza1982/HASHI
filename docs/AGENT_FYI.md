@@ -92,6 +92,7 @@ retain partial uncertainty; join Tool/job diagnostics.
 Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home can read them.
 Session retention deletes them.
+Access failures differ from integrity mismatches; diagnostics omit paths.
 
 Telegram proactive routes: owner-only; revalidate actor/egress after restart.
 Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain

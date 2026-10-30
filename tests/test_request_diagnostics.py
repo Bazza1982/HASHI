@@ -63,6 +63,42 @@ async def test_effect_reconciliation_awaits_real_worker_facade_and_preserves_wri
     assert summary['evidence_limited'] is job_query_fails
 
 
+def test_media_reason_survives_terminal_projection_without_private_data(tmp_path):
+    response = BackendResponse(
+        text="", duration_ms=1, is_success=False, error_code="MEDIA_UNAVAILABLE",
+        stream_metadata={
+            "attachment_id": "att_1234",
+            "media_diagnostic": {"phase": "read_grant", "reason": "safe_open_failed",
+                                 "error_type": "PermissionError", "errno": 13,
+                                 "path": "private document content"},
+        },
+    )
+    fields = runtime_pipeline.backend_diagnostic_fields(response)
+    assert fields["media_diagnostic"] == {
+        "attachment_id": "att_1234", "phase": "read_grant", "reason": "safe_open_failed",
+        "error_type": "PermissionError", "errno": 13,
+    }
+    local_log = runtime_pipeline.backend_failure_diagnostics(response)
+    assert local_log["media_diagnostic"] == fields["media_diagnostic"]
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        _runtime(tmp_path), "req-media", {"success": False, **fields},
+    )
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-media")
+    assert report["terminal"]["media_diagnostic"] == fields["media_diagnostic"]
+    assert "private document content" not in json.dumps(report)
+
+
+def test_media_diagnostic_rejects_private_identifiers_and_invalid_fields():
+    from orchestrator.media_diagnostics import sanitize_media_diagnostic
+
+    assert sanitize_media_diagnostic({"phase": "read_grant", "reason": "C:\\private\\file"}) == {}
+    assert sanitize_media_diagnostic(
+        {"phase": "read_grant", "reason": "safe_open_failed", "errno": True,
+         "winerror": 2**40, "error_type": "private document"},
+        attachment_id="C:\\private\\file",
+    ) == {"phase": "read_grant", "reason": "safe_open_failed"}
+
+
 def test_no_change_and_missing_or_corrupt_evidence_are_distinct(tmp_path):
     (tmp_path/'tool_action_audit.jsonl').write_text(json.dumps({'request_id':'req-no-change',
         'tool_name':'apply_patch', 'tool_call_id':'patch-1', 'status':'started'}) + '\n', encoding='utf-8')

@@ -657,7 +657,8 @@ gate; ordinary audio and HER native input retain their existing routing.
 
 A safe-open OS failure is unavailable media, not proof of changed content.
 Grant/identity, length and digest mismatches remain integrity failures. Both
-fail closed, with sanitized phase, reason and numeric OS codes in diagnostics.
+fail closed, with sanitized phase, reason and numeric OS codes in the error log
+and per-request diagnostics; file paths and contents are not included.
 Explicit request diagnostics scan a bounded older ledger window; any omitted,
 corrupt or uncertain evidence remains incomplete and cannot prove a safe retry.
 Development validation on HASHI5 is separate from Worker adoption and production.
