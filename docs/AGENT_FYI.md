@@ -1,19 +1,25 @@
 # HASHI Agent FYI
 
+- 权限边界与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
+
 - `/forget` removes traceable period data; untraceable summaries may remain.
-  Audit copies stay outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
+  Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys deletion needs authenticated management and a current snapshot;
-  exclude global/permanent prompts.
+- Task/local /sys deletion: authenticated management + current snapshot;
+  exclude global/permanent prompts. [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
+  [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
-- Legacy audio needs ownership/path proof; PAO settlement is cancellation-safe
-  and HERV3 checkpoint claims immutable. [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md).
-- PAO strips internal control envelopes before deliverability checks.
-  Memory+-only results fail terminally; typed audio remains deliverable.
-- HERV3 has no whole-Run size/time/call ceiling. Keep state/evidence; cancellation,
-  safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
-- Agent Move checks mutable staging state; confirmed moves go forward only.
-  Never roll the target back. [Move](HASHI_AGENT_MOVE_V1.md).
+- Legacy audio migration needs verified ownership/safe paths; PAO settlement
+  is cancellation-safe; HERV3 checkpoint claims stay immutable.
+  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
+- PAO strips internal control envelopes before delivery checks. Memory+-only
+  results fail terminally; typed audio remains deliverable.
+- HERV3 has no artificial whole-run size/time/call ceiling. Preserve state/evidence;
+  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
+  snapshots, resumable retries, no Move-only gates/source lifecycle writes.
+  [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback: selected model, same-Provider visual model, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 - Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
@@ -44,7 +50,7 @@ pending. `max` rejects shared API/background work before/after fencing.
 ## Configuration, identity, and persistence
 
 Isolated speech locks/runtimes/releases need separate proof:
-[dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
+[dependencies](DEPENDENCIES.md).
 
 Config owns identity/ports/Workzones/endpoints/models; omit secrets/machine paths.
 Opt-ins: `allowed_backends`/runtime effort; shared compatibility: qualified registry.
@@ -83,32 +89,31 @@ Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home can read them.
 Session retention deletes them.
 
-Telegram proactive routes are owner-only; actor/egress revalidate after restart.
-Only the owner's same-ID private chat may bind. `/askme` controls instance and
-Agent cards; off asks in plain text. Cards offer original-task continuation and
-Agent stop. Question `unknown` neither cancels nor retries; Codex expiry preserves
-authenticated partial answers. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
-and [questions](HASHI_RUN_QUESTIONS.md).
+Telegram proactive routes: owner-only; revalidate actor/egress after restart.
+Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain
+text. Offer original-task continuation/Agent stop. `unknown` never cancels/retries;
+Codex expiry keeps authenticated partial answers.
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md), [questions](HASHI_RUN_QUESTIONS.md).
 
-CURRENT MESSAGE CONTEXT separates source, assurance, authority and destination;
-only current successful private_authorization grants scope. HChat separates
-claimed sender/verified peer/relay/target; cross-instance needs authenticated Remote. See
+CURRENT MESSAGE CONTEXT separates source/assurance/authority/destination.
+Only successful current private_authorization grants scope. HChat separates
+claimed sender/verified peer/relay/target; cross-instance requires authenticated
 [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
-PAO freezes destinations before PCM and owns ingress/routing/idempotency; FC owns
-presentation/receipts. Sent needs a receipt and failure wins. Prose grants no
-authority; only saved non-action completions may replay.
+PAO freezes destinations before PCM; owns ingress/routing/idempotency. FC owns
+presentation/receipts. Sent requires receipt; failure wins. Prose grants nothing.
+Replay only saved non-action completions.
 
-Network frontends preserve send time. PAO admits Workbench/Telegram within 30/60
-seconds; stale input needs durable confirmation. TUI exemptions need signed local
-evidence; `/hchat` needs reverse-route correlation. HASHI3 is not production.
+Keep frontend send times. PAO admits Workbench/Telegram within 30/60 seconds;
+stale input needs durable confirmation. TUI exemptions need signed local proof;
+`/hchat` needs reverse-route correlation. HASHI3 is not production.
 
-Scheduler/recovery and `/bg` use an Agent-owned hidden Session; separate
-execution/delivery/receipts and show each final once. `/bg` freezes admission;
-schedules get no implicit chat; `/delay` and interactive `/loop` retain context.
+Scheduler/recovery/`/bg`: Agent-owned hidden Session; separate execution/delivery/
+receipts, each final once. `/bg` freezes admission; schedules imply no chat.
+`/delay` and interactive `/loop` retain context.
 
 Telegram: separate Bot-bound app/ingress readiness; Agent-only activation.
-Bounded polls preserve pending updates. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+Bounded polls preserve pending updates.
 
 ## Engine, tools, and recovery
 
@@ -165,8 +170,8 @@ orders Turns by time and skips unused history. Functions own settings; open when
 ready. Failed PCM refresh permits only stop/inspect; Session fence/hang-up win.
 Keep failure causes; resume at most five times, never retry uncertain writes.
 Prove acceptance/execution/playback/listening and source/adoption/device separately.
-See [PCM](HASHI_PCM_SYSTEM_DESIGN.md), [PAO](HASHI_PAO_SYSTEM_DESIGN.md),
-[handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
 and remain owner-admitted during active Runs. `/new` preserves history; PAO owns
@@ -190,8 +195,7 @@ AgentPresence is owner-scoped/default-off; HASHI authenticates and freezes the
 Agent/Conversation. Only PAO-admitted human/client input triggers owner-route
 feedback; AP-local input never echoes. `/phone` sends scoped leave/return; AP
 owns presentation, HASHI services/voices. Ingress fails closed; surfaces stay
-independent. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
-[input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
+independent. See [input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See
