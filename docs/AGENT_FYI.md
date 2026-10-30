@@ -1,6 +1,6 @@
 # HASHI Agent FYI
 
-- 权限接线与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
+- 权限边界与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

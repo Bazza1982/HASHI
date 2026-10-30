@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from orchestrator.permissions.authority import PermissionDenied
-from orchestrator.permissions.models import ExecutionContext, PermissionLevel, PermissionSettings, RuntimeExecutionBinding
+from orchestrator.permissions.models import ExecutionContext, PermissionLevel, PermissionSettings, RuntimeExecutionBinding, Scope
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.parking import PermissionParkingStore
 from orchestrator.session_store import SessionStore, TERMINAL_RUN_STATES
@@ -22,13 +22,16 @@ class ManagedRunPolicy:
     requestable_scopes: tuple
     allowed_tools: tuple[str, ...]
     registry_options: dict
+    baseline_scopes: tuple[Scope, ...] = ()
 
     def __post_init__(self):
         if (not isinstance(self.settings, PermissionSettings)
                 or self.settings.requested_level is PermissionLevel.L0
                 or type(self.revision) is not int or self.revision < 1
                 or not isinstance(self.cwd, Path) or not self.cwd.is_absolute()
-                or not isinstance(self.allowed_tools, tuple) or not isinstance(self.registry_options, dict)):
+                or not isinstance(self.allowed_tools, tuple) or not isinstance(self.registry_options, dict)
+                or not isinstance(self.baseline_scopes, tuple) or not isinstance(self.requestable_scopes, tuple)
+                or any(not isinstance(scope, Scope) for scope in (*self.baseline_scopes, *self.requestable_scopes))):
             raise ValueError("a validated managed Run policy is required")
 
 

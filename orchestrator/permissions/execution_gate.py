@@ -1,6 +1,6 @@
 """Managed-operation coordination around an independently trusted supervisor.
 
-This internal gate is not installed in ToolRegistry or HERV3. The supervisor
+The installed managed registry uses this gate. The supervisor
 must hold and enforce the actual resource/start barrier and cleanup contract;
 an injected Python object or a ledger claim alone is not an OS boundary.
 """
@@ -18,7 +18,7 @@ from orchestrator.permissions.authority import (
     PermissionDenied,
 )
 from orchestrator.permissions.descriptors import ToolDescriptor, UnknownTool, describe_tool
-from orchestrator.permissions.models import ExecutionContext, Scope, canonical_scope_set, scope_covers, scope_digest
+from orchestrator.permissions.models import ExecutionContext, Scope, canonical_scope_set, scope_digest, uncovered_scope_actions
 from orchestrator.permissions.waiting import PermissionWaiter, WaitAuthority
 
 
@@ -68,6 +68,7 @@ class PermissionExecutionGate:
         cwd: Path,
         read_roots: tuple[Path, ...],
         requestable_scopes: tuple[Scope, ...],
+        baseline_scopes: tuple[Scope, ...] = (),
         durable_control: bool = False,
     ) -> None:
         methods = (
@@ -94,6 +95,9 @@ class PermissionExecutionGate:
         self._cwd = directory.resolve(strict=False)
         self._read_roots = tuple(Path(root) for root in read_roots)
         self._requestable = canonical_scope_set(requestable_scopes)
+        # Eligibility is broader than approval authority. The ledger must still
+        # confirm actual baseline/lease coverage and recheck at the final start.
+        self._eligible = canonical_scope_set((*baseline_scopes, *self._requestable))
 
     async def execute(
         self,
@@ -157,10 +161,7 @@ class PermissionExecutionGate:
                 supported = validate_plan(descriptor, frozen_arguments) is True
         except Exception:
             return GateResult("unavailable", operation_id)
-        covered_by_policy = bool(descriptor.scopes) and all(
-            any(scope_covers(parent, required) for parent in self._requestable)
-            for required in descriptor.scopes
-        )
+        covered_by_policy = bool(descriptor.scopes) and not uncovered_scope_actions(self._eligible, descriptor.scopes)
         if existing is not None:
             if existing.state in {"succeeded", "failed"}:
                 if not supported or not covered_by_policy or existing.resource_state != "stopped":
@@ -186,6 +187,12 @@ class PermissionExecutionGate:
         request_id = ""
         if not covered:
             try:
+                # Baseline eligibility must never become a new approval limit.
+                outside_ceiling = uncovered_scope_actions(self._requestable, descriptor.scopes)
+                if outside_ceiling and await asyncio.to_thread(
+                    self._authority.evaluate, self._context, outside_ceiling, operation_id=operation_id,
+                ) is not True:
+                    return GateResult("permission_changed", operation_id)
                 request = await asyncio.to_thread(
                     self._authority.request_access, self._context, descriptor.scopes,
                     purpose=reason, operation_id=operation_id,

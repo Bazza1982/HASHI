@@ -36,6 +36,7 @@ class ManagedToolRegistry(ToolRegistry):
         permission_context: ExecutionContext,
         permission_supervisor: Any,
         requestable_scopes: tuple[Scope, ...],
+        baseline_scopes: tuple[Scope, ...] = (),
         durable_wait: bool = False,
         ordinary_questions: Any = None,
         credential_names: tuple[str, ...] = (),
@@ -69,7 +70,7 @@ class ManagedToolRegistry(ToolRegistry):
             permission_authority, self._permission_waiter, permission_supervisor,
             context=permission_context, cwd=self._permission_cwd,
             read_roots=self._permission_roots, requestable_scopes=requestable_scopes,
-            durable_control=durable_wait,
+            baseline_scopes=baseline_scopes, durable_control=durable_wait,
         )
 
     def is_allowed(self, tool_name: str) -> bool:

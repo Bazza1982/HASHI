@@ -167,7 +167,7 @@ jobs:
           tests/test_permissions_l0_baseline.py tests/test_permissions_models.py
           tests/test_permissions_requests.py tests/test_permissions_runtime_guard.py
           tests/test_permission_api_decisions.py
-          tests/test_permission_baseline.py
+          tests/test_permission_baseline.py tests/test_permission_baseline_execution.py
           tests/test_permission_decision_commands.py
           tests/test_permission_frontend_decisions.py
           tests/test_permission_her_adoption.py
@@ -251,7 +251,7 @@ jobs:
           tests/test_config.py
           tests/test_flexible_backend_state.py
           tests/test_permission_api_decisions.py
-          tests/test_permission_baseline.py
+          tests/test_permission_baseline.py tests/test_permission_baseline_execution.py
           tests/test_permission_decision_commands.py
           tests/test_permission_frontend_decisions.py
           tests/test_permission_her_adoption.py

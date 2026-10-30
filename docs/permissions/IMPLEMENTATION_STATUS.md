@@ -12,6 +12,7 @@
 | --- | --- |
 | L0 | 缺省及显式 L0 在最外层保留原执行路径，不创建权限服务、账本、租约或新工具；既有隐私与其他防护保留。 |
 | 权限权威 | PAO 单一 Task/Run/Turn/epoch；服务持有决定、范围、期限、once、派生、撤回与撤权事务。旧执行先失效，未知副作用保持原 operation ID。 |
+| 基础权限与申请上限 | 安装策略分别保留两种权威；基础已授权操作直接执行，缺少的 action 只在申请上限内批准。主动申请返回 granted_existing，当前策略与最终 start 仍重新校验。 |
 | 人类批准 | 独立人类登录与明确用户/PAO owner 关联；公共 /safety 及受签 action。原生命令必须关联原始外部身份，合成 API actor 与普通回答不授权。 |
 | 原运行续跑 | 现行 HERV3 singleloop 与精确 provider checkpoint；原 Run park，批准后新 epoch 恢复原待执行动作。服务故障不切到无约束执行。 |
 | 文件与 HTTP | 实际 Windows 文件对象绑定，固定 helper 与最后 start 栅栏；目录、搜索、严格补丁。HTTP 固定 DNS/目标，无自动重定向、环境代理或 cookie；具名凭证独立代理，GET URL 同样声明 send。 |
@@ -32,6 +33,7 @@
 - 共享原生命令通过真实私有服务批准；缺少身份关联、合成 API actor、PAO 面伪造登录及旧 Session 均拒绝。
 - Worker 用量先持久化、跨 epoch 保留原阶段/ID；脚本原结果在 profile 清理失败时保留；旧物理行失败不跳过其他行；已完成旧快照不依赖已删除 plan。
 - 新增固定 capability 后，额外网络 SID、被替换 SID、旧零 capability profile 和 bool 伪装 count 均在执行前拒绝。
+- PR #118 P1 基础权限回归：同一组 18 项安装策略→factory→registry→authority 集成用例在 6756cf43 为 8 failed / 10 passed，修复后 18 passed。覆盖基础独有、申请独有、重叠、分 action、禁止范围；入场/排队/prepare 后改策略及最终 start 撤权均无文件副作用。原生 launcher/IPC 与后端配置输入为注入边界，不宣称 OS 组件资格。
 - CI 范围来自 permissions workflow 的完整 permission/直接旧合同组合；共享运行接线另跑仓库规范 curated core gate。Core 保护和 whitespace 必须通过。不默认跑全库、不用 mock 宣称 OS 通过，不将重叠分组数量相加。
 
 ## 当前 profile 与采用边界

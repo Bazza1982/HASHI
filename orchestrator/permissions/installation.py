@@ -26,7 +26,7 @@ from orchestrator.permissions.authority import PermissionAuthority, PermissionDe
 from orchestrator.permissions.clients import settings_revision
 from orchestrator.permissions.configured_models import ConfiguredModelFactory
 from orchestrator.permissions.ipc_server import PermissionEndpoint
-from orchestrator.permissions.models import PermissionLevel, normalize_scope, scope_covers
+from orchestrator.permissions.models import PermissionLevel, normalize_scope, uncovered_scope_actions
 from orchestrator.permissions.native_factory import InstalledExecutorFactory, InstalledFileHelper
 from orchestrator.permissions.receipt_issuer import SupervisorReceiptIssuer
 from orchestrator.permissions.result_store import EncryptedResultStore
@@ -139,6 +139,8 @@ class InstancePolicies:
             "config_revision": snapshot.revision, "base_revision": self.installation.revision,
             "cwd": str(cwd), "roots": [str(root) for root in roots],
             "settings": asdict(snapshot.settings), "tools": allowed, "tool_options": tools,
+            "baseline_scopes": [asdict(scope) for scope in baseline],
+            "requestable_scopes": [asdict(scope) for scope in requestable],
             "protected": asdict(protected.policy), "network_digest": sha256(json.dumps(network, sort_keys=True).encode()).hexdigest(),
         }, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         revision = int(digest[:15], 16) + settings_revision(snapshot.settings)
@@ -150,6 +152,7 @@ class InstancePolicies:
              "network_options": network,
              "audit_context": {"agent_name": agent_id, "owner_id": owner_id,
                                "permission_policy_digest": digest, "global_config": global_config}},
+            baseline_scopes=baseline,
         )
 
     def freeze(self, binding, policy):
@@ -161,7 +164,7 @@ class InstancePolicies:
         policy = self(context.agent_id, context.owner_id, context.session_id)
         if policy.revision != context.policy_revision:
             raise PermissionDenied("permission policy changed")
-        return self._current[context.agent_id][1]
+        return policy.baseline_scopes
 
     def validate(self, context, scope):
         policy = self(context.agent_id, context.owner_id, context.session_id)
@@ -171,7 +174,7 @@ class InstancePolicies:
             return False
         if not current[4].permits(scope):
             return False
-        return any(scope_covers(parent, scope) for parent in (*current[1], *current[2]))
+        return not uncovered_scope_actions((*policy.baseline_scopes, *policy.requestable_scopes), (scope,))
 
 
 class _CheckpointUnavailable:

@@ -235,6 +235,7 @@ class InstalledExecutorFactory:
                 allowed_tools=list(policy.allowed_tools), access_root=roots[0], workspace_dir=policy.cwd,
                 secrets={}, permission_authority=self.authority, permission_context=binding.context,
                 permission_supervisor=supervisor, requestable_scopes=policy.requestable_scopes,
+                baseline_scopes=policy.baseline_scopes,
                 durable_wait=True, ordinary_questions=ScopedRunQuestions(self.store, binding, guard),
                 credential_names=tuple(getattr(supervisor, "credential_names", ())),
                 script_enabled=supervisor.supports("run_script"), **options,

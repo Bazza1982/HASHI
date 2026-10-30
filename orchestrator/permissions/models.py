@@ -257,6 +257,18 @@ def canonical_scope_set(scopes: Iterable[Scope]) -> tuple[Scope, ...]:
     return tuple(sorted(set(values), key=lambda scope: (scope.kind, scope.resource, scope.actions)))
 
 
+def uncovered_scope_actions(granted: Iterable[Scope], requested: Iterable[Scope]) -> tuple[Scope, ...]:
+    """Return uncovered individual actions without widening either scope set."""
+    parents = canonical_scope_set(granted)
+    missing = []
+    for required in canonical_scope_set(requested):
+        for action in required.actions:
+            single = Scope(required.kind, required.resource, (action,), required.normalization_version)
+            if not any(scope_covers(parent, single) for parent in parents):
+                missing.append(single)
+    return canonical_scope_set(missing)
+
+
 def scope_digest(scopes: Iterable[Scope]) -> str:
     normalized = canonical_scope_set(scopes)
     if not normalized:

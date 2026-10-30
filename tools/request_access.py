@@ -22,7 +22,7 @@ from orchestrator.permissions.models import (
     Scope,
     canonical_scope_set,
     normalize_scope,
-    scope_covers,
+    uncovered_scope_actions,
 )
 
 
@@ -198,8 +198,13 @@ class PermissionAgentTools:
         if name == "request_access":
             item = _exact_mapping(arguments, {"reason", "resources", "duration", "request_key"})
             scopes = self._parse_resources(item["resources"])
-            if not all(any(scope_covers(parent, required) for parent in self._requestable)
-                       for required in scopes):
+            # Existing rights do not enlarge the separate new-approval ceiling.
+            # Recheck every action outside it against the live authority.
+            outside_ceiling = uncovered_scope_actions(self._requestable, scopes)
+            if outside_ceiling and (
+                not callable(getattr(self._authority, "evaluate", None))
+                or await asyncio.to_thread(self._authority.evaluate, self._context, outside_ceiling) is not True
+            ):
                 return {"status": "unavailable"}
             duration = _exact_mapping(item["duration"], {"mode", "max_seconds"})
             if not isinstance(duration["mode"], str) or duration["mode"] not in {"run", "task", "ttl"}:
