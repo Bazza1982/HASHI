@@ -1968,7 +1968,9 @@ class WorkbenchApiServer:
         ) or (self.config_path.parent / agent_row["workspace_dir"])
         return workspace_dir / "transcript.jsonl"
 
-    def _metadata_for_agent(self, agent_row: dict, runtime) -> dict:
+    def _metadata_for_agent(
+        self, agent_row: dict, runtime, *, owner_id: str | None = None
+    ) -> dict:
         if runtime is not None:
             metadata = dict(runtime.get_runtime_metadata())
         else:
@@ -2109,6 +2111,19 @@ class WorkbenchApiServer:
             (),
         ):
             metadata["status"] = "stopped"
+        # Worker boot/thread identity is not the PAO Conversation Session.
+        # Publish the authenticated owner's current binding so browser caches
+        # cannot silently pin Chat to a previously visited Session.
+        metadata.pop("frontend_session_id", None)
+        metadata.pop("frontend_context_generation", None)
+        if owner_id is not None:
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner_id, agent_id=agent_row["name"],
+            )
+            metadata["frontend_session_id"] = session["session_id"]
+            metadata["frontend_context_generation"] = int(
+                session["context_generation"]
+            )
         return metadata
 
     def _is_whatsapp_available(self) -> bool:
@@ -5550,8 +5565,15 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "not authenticated"}, status=401
                 )
             agent_rows = self._filter_enterprise_agent_rows_for_user(user, agent_rows)
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated"}, status=401
+            )
         agents = [
-            self._metadata_for_agent(agent_row, runtime_map.get(agent_row["name"]))
+            self._metadata_for_agent(
+                agent_row, runtime_map.get(agent_row["name"]), owner_id=owner_id
+            )
             for agent_row in agent_rows
         ]
         return web.json_response({"ok": True, "agents": agents})

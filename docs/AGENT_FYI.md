@@ -79,10 +79,10 @@ fsynced candidate; permanent failure preserves state and never replays actions.
 
 ## Sessions, trust, and delivery
 
-PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider/frontend
-history is rebuildable. Preserve order; stage attachments atomically per Message/Run;
-never leak failed/cancelled assets. Telegram item proofs keep partial uncertainty.
-Diagnostics join Tool/job evidence.
+PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Rebuild frontend
+history from PAO; caches must match its current owner/Agent Session. Preserve
+order, atomic attachments and failed/cancelled-asset isolation. Telegram proofs
+retain partial uncertainty; join Tool/job diagnostics.
 
 Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home can read them.

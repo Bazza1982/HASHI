@@ -140,6 +140,24 @@ is primary now. A Connector that lacks this capability must report it as
 unavailable; it must not substitute a current-Session transcript and claim that
 the Agent-wide archive is complete.
 
+### Current conversation discovery and browser caches
+
+Ordinary Chat follows PAO's current primary Conversation Session for the
+authenticated owner and Agent. Agent discovery publishes `frontend_session_id`
+and `frontend_context_generation` from that binding on every read. Worker boot
+or Engine Session metadata cannot supply these fields. Existing Worker
+`session_id` and `context_generation` fields retain their runtime meaning.
+
+A browser may restore a cached conversation only when its Session matches the
+discovered current Conversation Session. Incompatible cached views must yield to
+a current-Session snapshot. Historical reads remain explicit, owner-scoped and
+read-only; they never change the primary binding.
+
+2026-10-30 operational scope: the user explicitly authorized this narrow hotfix
+directly on HASHI4's existing `main` checkout and reserved reboot for themselves.
+Offline validation and committed source do not prove running adoption; runtime
+and phone verification remain separate after the user's reboot and page refresh.
+
 Capability publication includes independent Session, Event, Control,
 Attachment, Approval and Fencing versions. Routes return
 `session_api_not_ready` until the complete qualification boundary is enabled.
