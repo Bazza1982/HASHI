@@ -1,10 +1,12 @@
 # 权限系统实施与证据状态
 
-更新日期：2026-10-30。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。施工仅在既有 HASHI3 权限工作区及 feature-permission-sys 分支。Core 与外部客户端边界不变。
+更新日期：2026-10-31。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。施工仅在既有 HASHI3 权限工作区及 feature-permission-sys 分支。Core 与外部客户端边界不变。
 
 本期源码已完成权限服务、真实 HERV3 接入、公共认证/审批、受控工具、媒体/原服务、计费与恢复接线。Windows 实体脚本的启动问题已经解决并通过组件资格。当前提交的最终回归、GitHub 检查及审阅状态以 PR #118 的最新提交为准；旧提交的绿色检查不能代替新版本。
 
 完整安装的 Windows WAC、实际前端验收及生产采用仍是独立交付事实。未完成这些组合验收的环境继续显示 partial/unknown，不显示整体 L2 已验证。此前分批结果与失败记录见 [历史](IMPLEMENTATION_HISTORY_20261030.md)；原始产品要求仍以 [PRD](PRD.md)、[ACCEPTANCE](ACCEPTANCE.md)、[Windows L2](L2_WINDOWS.md) 为准。
+
+2026-10-31 HASHI3 L1 实测发现并修复模型工厂写入 Adapter 只读超时属性的问题，改走既有配置超时合同。真实 Adapter 回归同组测试旧代码 2 failed / 2 passed，修复后 4 passed；直接模型/超时/L0 消费组合 18 passed。本项离线修复不代表完整 L1 前端实测通过，实际采用与后续问题记入当轮证据及共享白板。
 
 ## 当前实现
 
