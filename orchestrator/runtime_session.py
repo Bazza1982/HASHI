@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -728,6 +729,8 @@ def publish_frontend_message(
     content_format: str = "plain-text",
     presentation_channel: str = "command",
     message_context: Mapping[str, Any] | None = None,
+    expected_context_generation: int | None = None,
+    frozen_delivery_route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Commit a frontend event and endpoint task before the transport effect."""
 
@@ -744,7 +747,7 @@ def publish_frontend_message(
     store = ensure_store(runtime)
     resolved_owner = owner_id(runtime, explicit_owner_id)
     normalized_surface = str(surface or "").strip().casefold()
-    if normalized_surface in _SHARED_PRIMARY_SURFACES:
+    if normalized_surface in _SHARED_PRIMARY_SURFACES and explicit_session_id is None:
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
@@ -763,7 +766,7 @@ def publish_frontend_message(
         freeze_run_delivery_route,
     )
 
-    delivery_route = freeze_run_delivery_route(
+    delivery_route = frozen_delivery_route or freeze_run_delivery_route(
         message_source_id=normalized_surface,
         session_surface=normalized_surface,
         session_channel_key=str(channel_key),
@@ -790,6 +793,7 @@ def publish_frontend_message(
         message_context=canonical_message_context,
         outbox=True,
         delivery_route=delivery_route,
+        expected_context_generation=expected_context_generation,
     )
     return {
         **message,
@@ -1087,6 +1091,7 @@ def publish_frontend_message_for_update(
         content_format=content_format,
         presentation_channel=presentation_channel,
         message_context=message_context,
+        expected_context_generation=getattr(update, "_hashi_session_context_generation", None),
     )
 def record_frontend_message_for_update(
     runtime: Any,
@@ -1171,7 +1176,7 @@ def record_frontend_message(
         store = ensure_store(runtime)
         resolved_owner = owner_id(runtime, explicit_owner_id)
         normalized_surface = str(surface or "").strip().casefold()
-        if normalized_surface in _SHARED_PRIMARY_SURFACES:
+        if normalized_surface in _SHARED_PRIMARY_SURFACES and explicit_session_id is None:
             session = store.resolve_primary_session(
                 owner_id=resolved_owner,
                 agent_id=runtime.name,
@@ -1266,6 +1271,7 @@ def record_kernel_presentation_notice(
     text: str,
     idempotency_key: str,
     content_format: str = "telegram-html",
+    origin: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Persist a delivered lifecycle notice even while its Worker is replaced."""
 
@@ -1279,6 +1285,18 @@ def record_kernel_presentation_notice(
         if not isinstance(store, SessionStore):
             store = SessionStore.from_global_config(config)
         resolved_owner = SessionStore.owner_id_for(config)
+        if origin and origin.get("session_id"):
+            return publish_frontend_message(
+                SimpleNamespace(global_config=config, session_store=store, name=agent_id),
+                role="assistant", text=text, source="frontend.runtime_notice",
+                publication_id=idempotency_key, surface=str(origin["surface"]),
+                channel_key=str(origin.get("session_channel_key") or origin.get("chat_id") or "default"),
+                explicit_owner_id=str(origin.get("owner_id") or resolved_owner),
+                explicit_session_id=str(origin["session_id"]),
+                expected_context_generation=origin.get("context_generation"),
+                frozen_delivery_route=origin.get("delivery_route"),
+                content_format=content_format, presentation_channel="notification",
+            )
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=agent_id,

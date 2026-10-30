@@ -64,6 +64,7 @@ def reserve_frontend_command_invocation(
     context_generation: int,
     payload: Mapping[str, Any],
     invocation: Mapping[str, Any],
+    record_input: bool = False,
 ) -> FrontendCommandReservation:
     """Persist the command identity before a connector invokes its handler.
 
@@ -82,6 +83,7 @@ def reserve_frontend_command_invocation(
         context_generation=context_generation,
         payload=payload,
         invocation=invocation,
+        record_input=record_input,
     )
 
 
@@ -95,12 +97,16 @@ def reserve_frontend_command_in_store(
     context_generation: int,
     payload: Mapping[str, Any],
     invocation: Mapping[str, Any],
+    record_input: bool = False,
 ) -> FrontendCommandReservation:
     """Reserve a typed command/control against PAO's shared SessionStore.
 
     Lifecycle controls may target an Agent that has no running Worker, so this
     variant deliberately accepts the authoritative store instead of requiring
     a target runtime merely to locate it.
+
+    Only a validated user command ingress may opt into recording visible input;
+    a typed control or audit reservation is not itself a user slash command.
     """
 
     identity = {
@@ -124,6 +130,7 @@ def reserve_frontend_command_in_store(
         request_digest=digest,
         context_generation=context_generation,
         invocation=normalized_invocation,
+        record_input=record_input,
     )
     return FrontendCommandReservation(
         store=store,
@@ -357,6 +364,7 @@ async def execute_frontend_command_invocation(
         context_generation=context_generation,
         payload=payload,
         invocation=invocation,
+        record_input=True,
     )
 
     if ticket.state == "completed":

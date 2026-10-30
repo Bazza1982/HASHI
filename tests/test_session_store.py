@@ -2164,7 +2164,7 @@ def test_presentation_messages_are_visible_but_never_enter_model_history(tmp_pat
     assert visible[0]["message_context"]["presentation_only"] is True
 
 
-def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_path):
+def test_delivered_frontend_message_preserves_explicit_session_and_is_idempotent(tmp_path):
     store = _store(tmp_path)
     runtime = SimpleNamespace(
         name="lily",
@@ -2222,10 +2222,11 @@ def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_pa
         "session_id"
     ] == session["session_id"]
     visible = store.recent_visible_messages(
-        session["session_id"], owner_id="user:7"
+        stale["session_id"], owner_id="user:7"
     )
     assert [message["text"] for message in visible] == ["handoff prepared"]
     assert visible[0]["message_context"]["command_ui"] == message_context["command_ui"]
+    assert not store.recent_visible_messages(session["session_id"], owner_id="user:7")
 
 
 def test_workzone_slots_are_session_scoped_revisioned_and_snapshot_visible(tmp_path):

@@ -321,6 +321,8 @@ def restart_via_provider(
     requester_agent: str | None = None,
     request_source: str | None = None,
     timeout: int = remote_rescue.RESTART_REQUEST_TIMEOUT_SECONDS,
+    notify_origin: dict[str, Any] | None = None,
+    notify_locale: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Revalidate the provider immediately before issuing the destructive request."""
 
@@ -349,6 +351,8 @@ def restart_via_provider(
 
     if _normalize_instance(verified.get("target_instance")) != target:
         raise RestartProviderError("restart provider target changed during revalidation")
+    if notify_origin and not (verified.get("capabilities") or {}).get("restart_origin_delivery_v1"):
+        raise RestartProviderError("Remote must adopt restart_origin_delivery_v1 before a Session-bound restart")
 
     auth_kwargs = (
         _auth_kwargs(source_instance=source, hashi_root=hashi_root)
@@ -363,6 +367,7 @@ def restart_via_provider(
             "request_source": str(request_source or "").strip() or None,
             "notify_agent": str(requester_agent or "").strip() or None,
             "notify_via": str(request_source or "").strip() or None,
+            **({"notify_origin": notify_origin, "notify_locale": notify_locale} if notify_origin else {}),
         },
         timeout=timeout,
         root=hashi_root,

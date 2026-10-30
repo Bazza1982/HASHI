@@ -453,6 +453,10 @@ class WorkbenchApiServer:
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self._device_capability_topology_task: asyncio.Task | None = None
         self.identity_service = self._build_identity_service()
+        if getattr(self.global_config, "permission_service", None) is not None:
+            from orchestrator.permissions.bootstrap import bind_frontend
+
+            bind_frontend(self)
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
@@ -2138,6 +2142,11 @@ class WorkbenchApiServer:
         return getattr(wa, "_client", None) is not None
 
     async def start(self):
+        if getattr(self.global_config, "permission_frontend", None) is not None:
+            from orchestrator.permissions.frontend_transition import build_frontend_transition
+
+            self._permission_transition_endpoint = build_frontend_transition(self)
+            await self._permission_transition_endpoint.start()
         await asyncio.to_thread(self.session_store.cleanup_attachments)
         await asyncio.to_thread(self.session_store.cleanup_audio_assets)
         await self.live_voice_manager.start()
@@ -2460,6 +2469,9 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        permission_endpoint = getattr(self, "_permission_transition_endpoint", None)
+        if permission_endpoint is not None:
+            await permission_endpoint.close()
         if self._device_capability_topology_task is not None:
             self._device_capability_topology_task.cancel()
             await asyncio.gather(
@@ -2501,6 +2513,10 @@ class WorkbenchApiServer:
             await asyncio.to_thread(close_transfer_store)
 
     async def handle_auth_login(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "login")
         if not self._is_governed_profile():
             return web.json_response(
                 {
@@ -2566,6 +2582,10 @@ class WorkbenchApiServer:
         )
 
     async def handle_auth_logout(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "logout")
         if not self._is_governed_profile():
             return web.json_response({"ok": True})
         if self.identity_service is None:
@@ -2584,6 +2604,10 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, "revoked": revoked})
 
     async def handle_auth_me(self, request):
+        if not self._is_governed_profile() and getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_auth import handle
+
+            return await handle(self, request, "me")
         if not self._is_governed_profile():
             return web.json_response(
                 {"ok": True, "profile": "personal", "user": {"role": "owner"}}
@@ -9161,6 +9185,7 @@ class WorkbenchApiServer:
                 request_digest=request_digest,
                 context_generation=context_generation,
                 invocation=command_invocation,
+                record_input=True,
             )
             if reservation["state"] == "completed":
                 replay = dict(reservation["response"])
@@ -9182,9 +9207,17 @@ class WorkbenchApiServer:
                     },
                     status=409,
                 )
-            result = await command_interaction_bridge.dispatch_command_interaction(
-                runtime, operation, metadata
-            )
+            result = None
+            if getattr(self, "permission_control", None) is not None:
+                from orchestrator.permissions.frontend_binding import dispatch_permission_operation
+
+                result = await dispatch_permission_operation(
+                    self, request, runtime, operation, metadata,
+                )
+            if result is None:
+                result = await command_interaction_bridge.dispatch_command_interaction(
+                    runtime, operation, metadata
+                )
             response = dict(result) if isinstance(result, Mapping) else {
                 "ok": False,
                 "error_code": "command_invocation_response_invalid",
@@ -13221,17 +13254,25 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            chat_id=chat_id,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.admin_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                chat_id=chat_id,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.admin_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status)
@@ -13267,16 +13308,24 @@ class WorkbenchApiServer:
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
-        result = await execute_local_command(
-            runtime,
-            command,
-            session_metadata={
-                "connector_id": "backend_api",
-                "fc_compatibility_adapter_id": "backend_api.agent_command",
-                "_hashi_owner_id": owner_id,
-                **({"_hashi_forget_authenticated": True} if forget_command else {}),
-            },
-        )
+        result = None
+        if getattr(self, "permission_control", None) is not None:
+            from orchestrator.permissions.frontend_binding import try_permission_command
+
+            result = await try_permission_command(
+                self, request, runtime, command, owner_id=owner_id,
+            )
+        if result is None:
+            result = await execute_local_command(
+                runtime,
+                command,
+                session_metadata={
+                    "connector_id": "backend_api",
+                    "fc_compatibility_adapter_id": "backend_api.agent_command",
+                    "_hashi_owner_id": owner_id,
+                    **({"_hashi_forget_authenticated": True} if forget_command else {}),
+                },
+            )
         status_code = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status_code)
@@ -14864,6 +14913,17 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "admin auth failed"}, status=403
             )
         payload = await request.json() if request.can_read_body else {}
+        origin = payload.get("origin")
+        if origin is not None:
+            from orchestrator.reboot_receipts import clean_origin
+
+            try:
+                origin = clean_origin(origin)
+                publication_id = payload.get("publication_id")
+                if not origin.get("session_id") or not isinstance(publication_id, str) or not 1 <= len(publication_id) <= 200:
+                    raise ValueError("Session-bound notice identity is required")
+            except (ValueError, TypeError) as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
         agent_name = str(payload.get("agent") or payload.get("agentId") or "").strip()
         text = str(payload.get("text") or payload.get("message") or "").strip()
         message_key = str(payload.get("message_key") or "").strip()
@@ -14886,7 +14946,30 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "agent is required"}, status=400
             )
         runtime = self._runtime_map().get(agent_name)
-        if runtime is None:
+        if origin is not None:
+            # Admin transport authentication is not a substitute for the
+            # frozen PAO scope. No Worker is needed to publish into that scope.
+            owner = SessionStore.owner_id_for(self.global_config)
+            if origin.get("owner_id") != owner:
+                return web.json_response(
+                    {"ok": False, "error": "notice owner does not match"}, status=403
+                )
+            try:
+                session = self.session_store.get_session(
+                    origin["session_id"], owner_id=owner, agent_id=agent_name,
+                    include_deleted=False,
+                )
+            except SessionNotFound:
+                return web.json_response(
+                    {"ok": False, "error": "notice session not found"}, status=404
+                )
+            if (session["session_kind"] != SESSION_KIND_CONVERSATION
+                    or session["status"] != "active"
+                    or session["context_generation"] != origin["context_generation"]):
+                return web.json_response(
+                    {"ok": False, "error": "notice session context changed"}, status=409
+                )
+        elif runtime is None:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
@@ -14924,13 +15007,25 @@ class WorkbenchApiServer:
                 ).strip()[:500]
             text = tr(
                 message_key,
-                locale=preferred_locale(runtime),
+                locale=(normalize_locale(payload.get("ui_locale")) if origin else preferred_locale(runtime)),
                 **render_args,
             )
         if not text:
             return web.json_response(
                 {"ok": False, "error": "text is required"}, status=400
             )
+        if origin:
+            from html import escape
+            from orchestrator.frontend_notice_delivery import deliver_notice
+            from orchestrator.telegram_delivery_failover import send_runtime_notice
+
+            result = await deliver_notice(
+                self.orchestrator or self, agent_id=agent_name, origin=origin,
+                text=escape(text), publication_id=publication_id, send_notice=send_runtime_notice,
+            )
+            return web.json_response({"ok": bool(result.get("sent")), "agent": agent_name,
+                "message_id": result.get("message_id"), "delivery": result},
+                status=200 if result.get("sent") else 503)
         chat_id = payload.get("chat_id")
         if chat_id is None:
             primary_chat_id = getattr(runtime, "_primary_chat_id", None)

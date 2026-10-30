@@ -155,6 +155,8 @@ class GlobalConfig:
     xai_oauth: dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     her_providers: dict[str, Any] = field(default_factory=dict)
+    permission_service: dict[str, Any] | None = None
+    permission_frontend: dict[str, Any] | None = None
     enterprise_auth_providers: list[dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
     enterprise_scheduler_lease_enabled: bool = False
@@ -222,6 +224,9 @@ class FlexibleAgentConfig:
     extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
     telegram_mirror_policy: str = TELEGRAM_MIRROR_INHERIT
+    permission_settings: Any = field(default=None, repr=False)
+    permission_settings_present: bool = field(default=False, repr=False)
+    permission_settings_conflict: bool = field(default=False, repr=False)
 
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
@@ -727,6 +732,8 @@ class ConfigManager:
             xai_oauth=dict(g_raw.get("xai_oauth") or {}),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
             her_providers=dict(g_raw.get("her_providers") or {}),
+            permission_service=g_raw.get("permission_service"),
+            permission_frontend=g_raw.get("permission_frontend"),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
             enterprise_database_url=enterprise_database_url,
             enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,
@@ -822,7 +829,19 @@ class ConfigManager:
                 a_raw.pop("telegram_mirror_policy", TELEGRAM_MIRROR_INHERIT)
             )
 
+            permission_settings_present = "permission_settings" in a_raw
+            permission_settings = a_raw.pop("permission_settings", None)
+            permission_settings_conflict = False
             extra = a_raw.pop("extra", None) or a_raw or None
+            if isinstance(extra, dict) and "permission_settings" in extra:
+                extra = dict(extra)
+                nested_settings = extra.pop("permission_settings")
+                if permission_settings_present:
+                    permission_settings_conflict = True
+                else:
+                    permission_settings_present = True
+                    permission_settings = nested_settings
+                extra = extra or None
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
                 telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
@@ -830,6 +849,9 @@ class ConfigManager:
                 default_mode=default_mode, access_scope=access_scope, extra=extra,
                 project_root=code_root,
                 telegram_mirror_policy=telegram_mirror_policy,
+                permission_settings=permission_settings,
+                permission_settings_present=permission_settings_present,
+                permission_settings_conflict=permission_settings_conflict,
             )
             agents.append(cfg)
 

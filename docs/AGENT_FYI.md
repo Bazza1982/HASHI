@@ -117,9 +117,8 @@ Bounded polls preserve pending updates.
 
 ## Engine, tools, and recovery
 
-Gemini CLI is retired: reject it; use configured Antigravity and its model IDs.
-Preserve history/usage and qualified Gemini models; old-client rejection is not
-an account ban. See [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
+Retired Gemini CLI: use Antigravity; retain history/usage and qualified Gemini
+models, not an account ban. [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
 
 Public HERV3 is `her-v3`; `her-v2` is compatibility only. Telegram cards show
 the public ID. JEV defaults off.
@@ -173,9 +172,10 @@ Prove acceptance/execution/playback/listening and source/adoption/device separat
 See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session
-and remain owner-admitted during active Runs. `/new` preserves history; PAO owns
-Agent deletion/cleanup receipts.
+Command history redacts args; originals execute. PAO notices keep Session/locale
+without Workers; check scope, retry delivery only. Remote pages fairly; closed
+cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+`/new` preserves history; PAO owns Agent deletion.
 
 `/say` reads the latest final; `2`–`4` choose a count and `1-3` the latest
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
@@ -201,7 +201,7 @@ Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keep
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-[Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
+[Records](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.

@@ -34,6 +34,35 @@ from remote.terminal.executor import TerminalExecutor
 TOKEN = "shared-agent-move-secret"
 
 
+@pytest.mark.parametrize("schema_min,schema_max,compatible", [
+    (4, 5, True), (5, 9, True), (1, 1, True),
+    (6, 7, False), (5, 4, False), (0, 5, False),
+])
+def test_receiver_negotiates_overlapping_schemas_not_mandatory_schema_one(
+    monkeypatch, schema_min, schema_max, compatible,
+):
+    from orchestrator.agent_move import remote_client as owner
+
+    def request(url, **kwargs):
+        if url.endswith("/health"):
+            return {"instance": {"instance_id": "HASHI2"}}
+        return {
+            "capability": "agent_move_receive_v1", "instance_id": "HASHI2",
+            "authenticated_instance": "HASHI1", "authenticated_response_proof": True,
+            "package_encryption": [ENVELOPE_SCHEME], "schema_min": schema_min,
+            "schema_max": schema_max, "max_package_bytes": 1_000_000_000,
+        }
+
+    monkeypatch.setattr(owner, "_request_json", request)
+    args = ({"HASHI2": {"host": "127.0.0.1", "remote_port": 18800}}, "HASHI2")
+    if compatible:
+        client = owner.connect_agent_move_receiver(*args, source_instance="HASHI1", shared_token=TOKEN)
+        assert client.capabilities["schema_min"] == schema_min
+    else:
+        with pytest.raises(AgentMoveRemoteError):
+            owner.connect_agent_move_receiver(*args, source_instance="HASHI1", shared_token=TOKEN)
+
+
 def _write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -556,3 +585,43 @@ def test_streaming_client_uses_file_body_and_verifies_receiver_proof(tmp_path, m
     monkeypatch.setattr("orchestrator.agent_move.remote_client.urllib_request.urlopen", send)
     remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, receiver_capabilities(target))
     assert remote.stage(path, operation="move", target_agent_id="zelda")["status"] == "staged"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("tamper", [False, True])
+def test_clone_preflight_rejection_is_typed_only_with_authenticated_proof(tmp_path, monkeypatch, streaming, tamper):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from urllib.parse import urlsplit
+    from orchestrator.agent_move.package import CloneImportPreflightError
+    from orchestrator.agent_move.service import receiver_capabilities
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    data = json.loads((source / "agents.json").read_text())
+    data["agents"][0]["active_backend"] = "invalid-backend"
+    _write_json(source / "agents.json", data)
+    path = tmp_path / "rejected.hashi-agent"
+    create_agent_move_package(source, "zelda", path, operation="clone", transfer_mode="workspace")
+    receiver = _client(target)
+
+    def send(request, **kwargs):
+        url = urlsplit(request.full_url)
+        content = request.data.read() if hasattr(request.data, "read") else request.data
+        response = receiver.post(url.path + ("?" + url.query if url.query else ""), content=content, headers=dict(request.header_items()))
+        assert response.status_code == 400
+        body = response.json()
+        assert body["code"] == CloneImportPreflightError.code
+        if tamper:
+            body["error"] = "untrusted replacement"
+        raise HTTPError(request.full_url, 400, "Bad Request", {}, BytesIO(json.dumps(body).encode()))
+
+    monkeypatch.setattr("orchestrator.agent_move.remote_client.urllib_request.urlopen", send)
+    capabilities = receiver_capabilities(target)
+    if not streaming:
+        capabilities.pop("streaming_upload", None)
+    remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, capabilities)
+    with pytest.raises(AgentMoveRemoteError if tamper else CloneImportPreflightError):
+        remote.stage(path, operation="clone")
+    assert not list((target / "state/agent_moves/incoming").glob("*/state.json"))
+    assert json.loads((target / "agents.json").read_text())["agents"] == []

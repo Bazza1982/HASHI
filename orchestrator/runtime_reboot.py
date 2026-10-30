@@ -29,18 +29,41 @@ def origin_from_update(runtime, update):
     else:
         actor_text = str(actor_id or "")
         owner_id = f"user:{actor_text}" if actor_text.isdigit() else None
-    return {
+    origin = {
         "surface": getattr(update, "_hashi_session_surface", None) or "telegram",
         "owner_id": owner_id,
         "actor_id": actor_id,
         "chat_id": ui_language.chat_id_from_update(update),
         "thread_id": getattr(message, "message_thread_id", None),
     }
+    if runtime is not None and getattr(runtime, "name", None):
+        from orchestrator.frontend_delivery import (
+            configured_owner_mirror_destinations, freeze_run_delivery_route,
+        )
+
+        session = runtime_session.current_session_for_update(runtime, update)
+        origin.update(
+            session_id=session["session_id"], context_generation=session["context_generation"],
+            session_channel_key=str(getattr(update, "_hashi_session_channel_key", None)
+                                    or origin["chat_id"] or "default"),
+        )
+        origin["delivery_route"] = freeze_run_delivery_route(
+            message_source_id=origin["surface"], session_surface=origin["surface"],
+            session_channel_key=origin["session_channel_key"], chat_id=origin["chat_id"],
+            telegram_requested=origin["surface"] == "telegram",
+            additional_mirrors=configured_owner_mirror_destinations(
+                request_metadata={"owner_id": origin["owner_id"]},
+                state_root=getattr(runtime.global_config, "bridge_home", None),
+            ),
+        )
+    return origin
 
 
 async def latest(runtime, update):
     origin = origin_from_update(runtime, update)
-    return await runtime.orchestrator.reboot_status(**origin)
+    return await runtime.orchestrator.reboot_status(**{
+        key: origin[key] for key in ("surface", "owner_id", "actor_id", "chat_id", "thread_id")
+    })
 
 
 async def submit(runtime, update, *, mode, number=None, targets=None, query=None):

@@ -43,8 +43,20 @@ async def _dispatch_remote_restart(
     *,
     reason: str,
     request_source: str,
+    origin: dict[str, Any] | None = None,
+    locale: str | None = None,
 ) -> None:
     target = str(provider.get("target_instance") or "HASHI").upper()
+
+    async def notice(text, *, unconfirmed=False):
+        if origin:
+            from orchestrator.frontend_notice_delivery import publish_runtime_notice
+
+            await publish_runtime_notice(runtime, origin=origin, text=text,
+                publication_id=str(origin["notice_id"]) + (":unconfirmed" if unconfirmed else ""))
+        elif chat_id is not None:
+            await runtime._send_text(chat_id, text)
+
     try:
         try:
             code, payload = await asyncio.to_thread(
@@ -53,24 +65,24 @@ async def _dispatch_remote_restart(
                 reason=reason,
                 requester_agent=str(getattr(runtime, "name", "") or ""),
                 request_source=request_source,
+                **({"notify_origin": origin, "notify_locale": locale} if origin else {}),
                 timeout=25,
             )
         except Exception as exc:
             logger.warning("Trusted Remote restart request for %s failed: %s", target, exc)
-            if chat_id is not None:
-                await runtime._send_text(
-                    chat_id,
-                    ui_language.tr("api.restart.failed", reason=str(exc)),
-                )
+            if isinstance(exc, RestartProviderError):
+                await notice(ui_language.tr("api.restart.failed", locale=locale, reason=str(exc)))
+            else:
+                await notice(ui_language.tr("api.restart.ack_unknown", locale=locale), unconfirmed=True)
+            return
+        # New Remote owns a durable terminal notice independently of this
+        # Worker. Never race it with another default-address completion send.
+        if payload.get("notify_origin"):
             return
         if code != 0:
             detail = payload.get("error") or payload.get("detail") or "remote error"
             logger.warning("Trusted Remote restart rejected for %s: %s", target, detail)
-            if chat_id is not None:
-                await runtime._send_text(
-                    chat_id,
-                    ui_language.tr("api.restart.failed", reason=str(detail)),
-                )
+            await notice(ui_language.tr("api.restart.failed", locale=locale, reason=str(detail)))
             return
         verified, detail = legacy_restart._verified_restart_receipt(
             payload,
@@ -82,17 +94,10 @@ async def _dispatch_remote_restart(
                 target,
                 detail,
             )
-            if chat_id is not None:
-                await runtime._send_text(
-                    chat_id,
-                    ui_language.tr("api.restart.failed", reason=str(detail)),
-                )
+            await notice(ui_language.tr("api.restart.failed", locale=locale, reason=str(detail)))
             return
-        if chat_id is not None:
-            await runtime._send_text(
-                chat_id,
-                legacy_restart._restart_completed_text(payload),
-            )
+        with ui_language.language_scope(runtime, locale=locale):
+            await notice(legacy_restart._restart_completed_text(payload))
     finally:
         setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, False)
 
@@ -163,6 +168,13 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         return
 
     setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, True)
+    from orchestrator.runtime_reboot import origin_from_update
+    from uuid import uuid4
+
+    origin = origin_from_update(runtime, update)
+    origin.update(instance_id=local_instance, agent_id=runtime.name,
+                  notice_id="restart:" + str(getattr(update, "update_id", None) or uuid4().hex))
+    locale = ui_language.preferred_locale(runtime, update)
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     await runtime._reply_text(
         update,
@@ -176,6 +188,8 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             provider,
             reason=reason,
             request_source=request_source,
+            origin=origin,
+            locale=locale,
         )
     )
 

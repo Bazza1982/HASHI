@@ -51,6 +51,46 @@ async def _reply(replies, text, kwargs):
     replies.append({"text": text, **kwargs})
 
 
+@pytest.mark.asyncio
+async def test_clone_picker_includes_inactive_source_but_not_moved_source(tmp_path):
+    runtime = _runtime(tmp_path)
+    (tmp_path / "agents.json").write_text(json.dumps({"agents": [
+        {"name": "sleeping", "is_active": False},
+        {"name": "moved", "transfer_state": "moved_out_pending_reboot"},
+    ]}), encoding="utf-8")
+    await runtime_remote.clone_show_agent_picker(runtime, SimpleNamespace())
+    buttons = runtime.replies[-1]["reply_markup"].inline_keyboard
+    assert [button.callback_data for row in buttons for button in row] == ["clone:agent:sleeping"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,action", [
+    ("packaging", "refresh"), ("uploading", "refresh"),
+    ("staged_remote", "commit"), ("clone_activating", "commit"),
+    ("prepare_failed", "prepare"),
+    ("completed", None),
+])
+async def test_clone_reused_transaction_renders_appropriate_next_action(tmp_path, monkeypatch, status, action):
+    runtime = _runtime(tmp_path)
+    prepared = {
+        "package_id": "existing-clone", "operation": "clone", "status": status,
+        "agent_id": "zelda", "target_agent_id": "zelda_1",
+        "target_instance": "HASHI_TEST", "history_mode": "none", "reused": True,
+    }
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_clone", lambda *args, **kwargs: prepared)
+    await runtime_remote.do_clone(
+        runtime, SimpleNamespace(effective_chat=SimpleNamespace(id=1)), "zelda", "HASHI_TEST",
+        {"local": {"instance_id": "HASHI_TEST", "local": True}},
+    )
+    message = runtime.replies[-1]
+    markup = message.get("reply_markup")
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row] if markup else []
+    assert (f"clone:{action}:existing-clone" in callbacks) if action else not callbacks
+    if status in {"packaging", "uploading"}:
+        assert "clone:commit:existing-clone" not in callbacks
+    assert "❌" not in message["text"]
+
+
 def test_load_instances_reads_first_available_file(tmp_path):
     missing = tmp_path / "missing.json"
     path = tmp_path / "instances.json"
@@ -225,6 +265,42 @@ async def test_clone_requires_explicit_history_choice_and_carries_it_to_executio
 
     assert calls[0][0:2] == ("zelda", "HASHI_TEST")
     assert calls[0][2]["history_mode"] == "inherit_read_only"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("source_state", [(0, True), (2, False)])
+async def test_clone_snapshot_does_not_require_move_drain_preflight(
+    tmp_path,
+    monkeypatch,
+    source_state,
+    dry_run,
+):
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(
+        runtime_remote, "_move_preflight", AsyncMock(return_value=source_state)
+    )
+    result = {
+        "package_id": "clone-test",
+        "agent_id": "zelda",
+        "target_agent_id": "zelda_1",
+        "target_instance": "HASHI_TEST",
+        "history_mode": "none",
+    }
+    prepare = Mock(return_value=result)
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_clone", prepare)
+    monkeypatch.setattr(runtime_remote, "preview_outbound_clone", prepare)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
+    await runtime_remote.do_clone(
+        runtime,
+        update,
+        "zelda",
+        "HASHI_TEST",
+        {"HASHI_TEST": {"instance_id": "HASHI_TEST", "local": True, "active": True}},
+        dry_run=dry_run,
+    )
+    prepare.assert_called_once()
+    assert prepare.call_args.kwargs["history_mode"] == "none"
 
 
 @pytest.mark.asyncio

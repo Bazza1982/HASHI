@@ -139,6 +139,13 @@ async def _run_shutdown_step(
 
 async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
+    permission_settings = getattr(runtime.backend_manager, "_agent_permission_settings", None)
+    if callable(permission_settings):
+        settings, _ = permission_settings()
+        if settings is not None and settings.requested_level.value != "L0":
+            from orchestrator.permissions.bootstrap import bind_agent
+
+            await bind_agent(runtime)
     result = await runtime.backend_manager.initialize_active_backend()
     if result:
         if str(getattr(runtime.config, "active_backend", "")) == "her-v2":
@@ -177,12 +184,21 @@ async def initialize(runtime: Any) -> bool:
             )
         runtime_session.start_automatic_promotion(runtime)
         frontend_incremental_delivery.start_incremental_telegram_delivery(runtime)
+        permission_owner = getattr(runtime, "permission_runs", None)
+        if permission_owner is not None:
+            await permission_owner.start()
     return result
 
 
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
+    permission_owner = getattr(runtime, "permission_runs", None)
+    clean_permissions = True
+    if permission_owner is not None:
+        clean_permissions = await _run_shutdown_step(
+            runtime, permission_owner.close(), label="permission-epochs", timeout_s=5.0,
+        )
     promotion_task = getattr(runtime, "_session_promotion_task", None)
     if isinstance(promotion_task, asyncio.Task):
         clean_promotion = await _settle_shutdown_task(
@@ -222,7 +238,7 @@ async def shutdown(runtime: Any) -> None:
         runtime._scheduled_retry_tasks,
         label="retry-tasks",
     )
-    clean = clean_promotion and clean_incremental and clean_retry
+    clean = clean_permissions and clean_promotion and clean_incremental and clean_retry
     clean = (
         await _cancel_tasks(
             runtime,
@@ -749,7 +765,19 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                 )
         runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
         runtime.is_generating = False
+    except BaseException as exc:
+        permission_owner = getattr(runtime, "permission_runs", None)
+        if (permission_owner is None or not permission_owner.is_park(exc)
+                or not await permission_owner.park(item, exc)):
+            raise
     finally:
+        permission_owner = getattr(runtime, "permission_runs", None)
+        if permission_owner is not None and item is not None:
+            try:
+                await permission_owner.settle(item)
+            except Exception as permission_error:
+                runtime.error_logger.error("Permission settlement remains unverified: %s",
+                                           type(permission_error).__name__)
         if item is not None:
             runtime.is_generating = False
         if (

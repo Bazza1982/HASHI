@@ -15,7 +15,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -36,6 +36,7 @@ from orchestrator.config_json import (
     ConfigDocument,
     ConfigList,
     delete_config_json,
+    file_write_lock,
     new_config_json,
     read_managed_json,
     write_config_json,
@@ -45,7 +46,6 @@ from orchestrator.flexible_backend_registry import (
     migrate_provider_only_active_backend,
     normalize_allowed_backends,
 )
-from orchestrator.process_execution import process_is_alive
 from orchestrator.telegram_delivery_state import (
     adopt_transferred_state,
     retire_agent_state,
@@ -55,6 +55,7 @@ from orchestrator.session_store import SessionConflict, SessionStore
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
+    AGENT_ID_MAX_LENGTH,
     CONVERSATION_CONTINUITY_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     MAX_UNPACKED_BYTES,
@@ -65,6 +66,9 @@ from .package import (
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
+    CloneImportPreflightError,
+    normalize_agent_id,
+    configured_conversation_owner_id,
     decrypt_agent_secrets,
     detect_environment_kind,
     extract_agent_workspace,
@@ -150,16 +154,14 @@ def resolve_agent_transfer_target(
     transfer_operation = _normalize_operation(operation)
     if transfer_operation == "legacy_move":
         transfer_operation = "move"
-    source_name = validate_agent_id_for_platform(
-        source_agent_id,
-        target_platform or detect_environment_kind(),
-    )
+    platform = target_platform or detect_environment_kind()
+    source_name = normalize_agent_id(source_agent_id)
     occupied = _occupied_agent_ids(root)
     explicit = str(requested_agent_id or "").strip()
     if explicit:
         selected = validate_agent_id_for_platform(
             explicit,
-            target_platform or detect_environment_kind(),
+            platform,
         )
         collision = occupied.get(selected.casefold())
         if collision is not None:
@@ -167,13 +169,23 @@ def resolve_agent_transfer_target(
                 f"target Agent ID '{selected}' is already used by '{collision}'"
             )
     else:
-        selected = source_name
+        base = source_name
+        try:
+            selected = validate_agent_id_for_platform(base, platform)
+        except AgentMoveError:
+            if transfer_operation != "clone":
+                raise
+            # Source IDs are metadata, not target paths. A Unix Agent named
+            # CON.txt can be cloned to Windows with an explicit or safe auto ID.
+            base = f"clone_{source_name.rstrip('.')}"[:AGENT_ID_MAX_LENGTH]
+            selected = validate_agent_id_for_platform(base, platform)
         suffix = 0
         while selected.casefold() in occupied:
             suffix += 1
+            tail = f"_{suffix}"
             selected = validate_agent_id_for_platform(
-                f"{source_name}_{suffix}",
-                target_platform or detect_environment_kind(),
+                f"{base[:AGENT_ID_MAX_LENGTH - len(tail)]}{tail}",
+                platform,
             )
     return {
         "ok": True,
@@ -324,6 +336,11 @@ def stage_agent_move(
                     target_platform=target_kind,
                 )["target_agent_id"]
                 dormant = None
+            if transfer_operation == "clone":
+                _preflight_clone_import(
+                    root, package, target_agent_id=selected_agent_id,
+                    passphrase=secret_passphrase,
+                )
             record_dir.mkdir(parents=True, exist_ok=False)
             incomplete_record_dir = record_dir
             os.replace(upload, package_path)
@@ -1477,6 +1494,55 @@ def moved_agent_destination(
     }
 
 
+def _preflight_clone_import(
+    root: Path, package: AgentMoveArchive, *, target_agent_id: str,
+    passphrase: str | None,
+) -> None:
+    """Exercise the existing import rules without publishing target state.
+
+    Independent known configuration problems are reported together, before
+    showing a confirmation. Commit still checks revisions and ownership: a
+    competing writer after staging must never be overwritten.
+    """
+    values, mapping = _remap_agent_secrets(
+        decrypt_agent_secrets(package, passphrase),
+        source_agent_id=package.agent_id, target_agent_id=target_agent_id,
+    )
+    errors: list[str] = []
+    try:
+        _prepare_import_config(
+            root, package, target_agent_id=target_agent_id,
+            operation="clone", secret_key_mapping=mapping,
+        )
+    except (AgentMoveError, ValueError, TypeError) as exc:
+        errors.append(f"Agent configuration: {exc}")
+    try:
+        data = _load_json_or_default(root / "secrets.json", {})
+        if not isinstance(data, dict):
+            raise AgentMoveError("must contain a JSON object")
+        _merge_secrets_preview(data, values)
+    except (AgentMoveError, ValueError, TypeError) as exc:
+        errors.append(f"secrets.json: {exc}")
+    try:
+        data = _load_json_or_default(root / "tasks.json", {"version": 1, "heartbeats": [], "crons": [], "nudges": []})
+        if not isinstance(data, dict):
+            raise AgentMoveError("must contain a JSON object")
+        _merge_schedules(
+            data, package.schedules, package_id=package.package_id,
+            source_instance=str(package.manifest["source_instance"]),
+            source_agent_id=package.agent_id, target_agent_id=target_agent_id,
+        )
+    except (AgentMoveError, ValueError, TypeError) as exc:
+        errors.append(f"tasks.json: {exc}")
+    try:
+        data = _load_json_or_default(root / "agent_capabilities.json", {"agents": []})
+        _append_agent_capability(data, package.agent_capability, target_agent_id=target_agent_id, package_id=package.package_id)
+    except (AgentMoveError, ValueError, TypeError) as exc:
+        errors.append(f"agent_capabilities.json: {exc}")
+    if errors:
+        raise CloneImportPreflightError("clone target import preflight failed: " + "; ".join(errors))
+
+
 def _prepare_import_config(
     root: Path,
     package: AgentMoveArchive,
@@ -1604,6 +1670,17 @@ def _occupied_agent_ids(root: Path) -> dict[str, str]:
         name = str(row.get("name") or row.get("id") or "").strip()
         if name:
             occupied.setdefault(name.casefold(), name)
+    capabilities = _load_json_or_default(root / "agent_capabilities.json", {})
+    entries = capabilities.get("agents", []) if isinstance(capabilities, dict) else []
+    if isinstance(entries, dict):
+        for name in entries:
+            occupied.setdefault(str(name).casefold(), str(name))
+    elif isinstance(entries, list):
+        for row in entries:
+            if isinstance(row, dict):
+                name = str(row.get("name") or row.get("id") or "").strip()
+                if name:
+                    occupied.setdefault(name.casefold(), name)
     workspace_parent = root / "workspaces"
     if workspace_parent.is_dir():
         for workspace in workspace_parent.iterdir():
@@ -2006,7 +2083,7 @@ def _stage_warnings(
         )
     if credential_status.get("missing_keys"):
         warnings.append(
-            "target credentials are incomplete; activation will remain blocked"
+            "target credentials are incomplete; configure them before using dependent backends"
         )
     requested = str(
         package.access_requirements.get("access_scope") or "project"
@@ -2493,19 +2570,7 @@ def _configured_instance_id(root: Path) -> str:
 
 
 def _configured_session_owner_id(root: Path) -> str:
-    agents = _load_json(root / "agents.json")
-    global_config = agents.get("global") if isinstance(agents, Mapping) else {}
-    raw_owner = (global_config or {}).get("authorized_id") or 0
-    secrets = _load_json_or_default(root / "secrets.json", {})
-    if isinstance(secrets, Mapping):
-        raw_owner = secrets.get("authorized_telegram_id") or raw_owner
-    try:
-        owner_number = int(raw_owner)
-    except (TypeError, ValueError) as exc:
-        raise AgentMoveError("target authorized owner configuration is invalid") from exc
-    if owner_number <= 0:
-        raise AgentMoveError("target authorized conversation owner is not configured")
-    return f"user:{owner_number}"
+    return configured_conversation_owner_id(root, instance_role="target")
 
 
 def _session_store(root: Path) -> SessionStore:
@@ -2706,47 +2771,9 @@ def _normalize_instance(value: Any) -> str:
 
 @contextmanager
 def _mutation_lock(root: Path) -> Iterator[None]:
-    path = _move_root(root) / ".mutation.lock"
-    descriptor: int | None = None
-    for attempt in range(2):
+    with ExitStack() as locks:
         try:
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            break
-        except FileExistsError as exc:
-            if attempt == 0 and _orphaned_mutation_lock(path):
-                path.unlink(missing_ok=True)
-                continue
-            raise AgentMoveError(
-                "another Agent move mutation is already in progress"
-            ) from exc
-    if descriptor is None:  # pragma: no cover - the loop either opens or raises
-        raise AgentMoveError("could not acquire the Agent move mutation lock")
-    try:
-        os.write(descriptor, f"pid={os.getpid()} at={utc_now_iso()}\n".encode())
-        os.close(descriptor)
-        descriptor = None
+            locks.enter_context(file_write_lock(_move_root(root) / "mutation-journal"))
+        except TimeoutError as exc:
+            raise AgentMoveError("target transfer journal is busy; retry the saved transfer") from exc
         yield
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        path.unlink(missing_ok=True)
-
-
-def _orphaned_mutation_lock(path: Path) -> bool:
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-        pid_text = next(
-            (
-                part.removeprefix("pid=")
-                for part in content.split()
-                if part.startswith("pid=")
-            ),
-            "",
-        )
-        pid = int(pid_text)
-    except (OSError, TypeError, ValueError):
-        return False
-    return not process_is_alive(pid)
