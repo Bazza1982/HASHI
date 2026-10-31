@@ -11602,9 +11602,9 @@ class FlexibleAgentRuntime:
         return Path(self.global_config.project_root).expanduser().resolve()
 
     def _remote_config_snapshot(self) -> dict[str, Any]:
-        root = Path(self.global_config.project_root).expanduser().resolve()
         state_root = self._remote_state_root()
-        config_path = root / "remote" / "config.yaml"
+        root = state_root
+        config_path = state_root / "remote" / "config.yaml"
         agents_path = state_root / "agents.json"
         instances_path = state_root / "instances.json"
         data: dict[str, Any] = {}
@@ -11644,6 +11644,7 @@ class FlexibleAgentRuntime:
         return {
             "root": root,
             "state_root": state_root,
+            "code_root": Path(self.global_config.project_root).expanduser().resolve(),
             "port": ports[0],
             "ports": ports,
             "use_tls": bool(server.get("use_tls", True)),

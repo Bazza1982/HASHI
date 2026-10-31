@@ -5307,6 +5307,7 @@ class WorkbenchApiServer:
             if denied is not None:
                 return denied
         try:
+            previous = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
             snapshot = await asyncio.to_thread(
                 self.telegram_access_service.change, agent_id, **payload
             )
@@ -5314,6 +5315,20 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
+        # A Token may have been saved before the first authorized user. Finish
+        # the existing exact-Agent activation only when that prerequisite first
+        # becomes available; later access-list edits remain live policy changes.
+        if previous["primary_user_id"] is None and snapshot["primary_user_id"] is not None:
+            for target in self._runtime_map():
+                try:
+                    credential = self._telegram_credential_status(target)
+                    if credential["configured"] and credential["activation_status"] == "pending":
+                        await self._activate_saved_telegram_credential(request, credential)
+                except Exception as exc:
+                    # Access is already committed; a failed adoption must never
+                    # invite an automatic replay or roll back the user setting.
+                    logger.warning("Telegram activation after owner setup pending: agent=%s error_type=%s",
+                                   target, type(exc).__name__)
         return self._telegram_credential_response(
             {"ok": True, "management_supported": True,
              "global_management_supported": self._telegram_access_management_supported(

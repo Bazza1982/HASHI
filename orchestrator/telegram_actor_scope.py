@@ -94,6 +94,18 @@ def runtime_snapshot(runtime: Any) -> TelegramAccessSnapshot:
     return access_snapshot(config_doc, secrets_doc, str(getattr(runtime, "name", "")))
 
 
+def refresh_primary_user(runtime: Any) -> int | None:
+    """Refresh the compatibility actor projection from the current PAO policy.
+
+    Keep the stable PAO owner scope unchanged. Unreadable persisted policy
+    propagates to the authenticated caller, which must reject the command.
+    """
+    config = runtime.global_config
+    if getattr(config, "config_path", None):
+        config.authorized_id = runtime_snapshot(runtime).primary_user_id or 0
+    return getattr(config, "authorized_id", None)
+
+
 def explicit_telegram_purpose(purpose: str) -> bool:
     """Recognize the explicit notification tools, not ordinary replies."""
     name = str(purpose or "")

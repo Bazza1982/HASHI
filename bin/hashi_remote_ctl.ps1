@@ -4,6 +4,7 @@ param(
     [string]$Action = "status",
 
     [string]$HashiRoot,
+    [string]$CodeRoot,
     [string]$Python,
     [string]$TaskName,
     [string]$TaskUserId = $env:HASHI_REMOTE_TASK_USER,
@@ -20,6 +21,14 @@ if (-not $HashiRoot) {
     $HashiRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 }
 
+# The instance home owns identity, configuration and state. Program assets
+# may live in a separate checkout or installed distribution.
+if (-not $CodeRoot) {
+    $CodeRoot = $HashiRoot
+}
+$CodeRoot = [System.IO.Path]::GetFullPath($CodeRoot)
+$HashiRoot = [System.IO.Path]::GetFullPath($HashiRoot)
+
 if (-not $Python) {
     $VenvPython = Join-Path $HashiRoot ".venv\Scripts\python.exe"
     if (Test-Path $VenvPython) {
@@ -29,7 +38,7 @@ if (-not $Python) {
     }
 }
 
-$IdentityScript = Join-Path $HashiRoot "remote\supervisor_identity.py"
+$IdentityScript = Join-Path $CodeRoot "remote\supervisor_identity.py"
 if (-not (Test-Path $IdentityScript)) {
     throw "Missing supervisor identity helper: $IdentityScript"
 }
@@ -64,7 +73,12 @@ if ($SupervisorIdentity.workbench_port) {
     $ArgsList += @("--workbench-port", [string]$SupervisorIdentity.workbench_port)
 }
 $TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
-$RestartController = Join-Path $PSScriptRoot "hashi_restart_ctl.ps1"
+$RestartController = if ($CodeRoot.Equals($HashiRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    Join-Path $PSScriptRoot "hashi_restart_ctl.ps1"
+} else {
+    # A separate home needs its own configured cold-restart actuator.
+    Join-Path $HashiRoot "bin\hashi_restart_ctl.ps1"
+}
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
     $ArgsList += "--no-tls"
@@ -176,6 +190,7 @@ function Register-HashiRemoteSupervisor {
         "-File", "`"$TaskRunner`"",
         "-Python", "`"$Python`"",
         "-HashiRoot", "`"$HashiRoot`"",
+        "-CodeRoot", "`"$CodeRoot`"",
         "-LogPath", "`"$LogPath`""
     )
     if ($ArgsList.Count -gt 0) {
@@ -492,6 +507,21 @@ function Show-RemoteDoctor {
     } | Format-List
     if (-not $Acceptance.Accepted) {
         exit 2
+    }
+}
+
+# A same-named task can belong to a different home after an installation move.
+# Refuse to overwrite or control it until its ownership is reconciled.
+if ($Action -in @("register", "install", "enable", "disable", "unregister", "uninstall", "start", "stop", "restart")) {
+    $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -ne $ExistingTask) {
+        $ExistingRoot = [string](@($ExistingTask.Actions)[0].WorkingDirectory)
+        if ([string]::IsNullOrWhiteSpace($ExistingRoot) -or -not
+            ([System.IO.Path]::GetFullPath($ExistingRoot)).TrimEnd('\').Equals(
+                $HashiRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Refusing Remote task '$TaskName': its working directory does not match this instance home."
+        }
     }
 }
 

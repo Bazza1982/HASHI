@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+- Telegram Token and user IDs save independently; first-user setup completes
+  pending exact-Agent activation. Local command authorization reads the current
+  PAO policy without changing the stable owner scope. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
+- Windows Remote supervision keeps program assets separate from instance
+  configuration and outlives Function hot handoff. [Remote](HASHI_REMOTE_RESCUE_PROTOCOL.md).
+
 - Session media errors and external Agent.md edits fail closed; edited documents
   use revision checks. [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 

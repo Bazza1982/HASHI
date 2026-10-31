@@ -66,8 +66,17 @@ are not evidence that an already running shared Function has adopted them.
 ### Telegram credential activation (2026-10-28)
 
 The Frontend Connector owns Bot credential verification and connection facts;
-PAO owns the exact-Agent activation transaction. Saving a verified credential
-for a running Agent requests the existing targeted Worker switch automatically.
+PAO owns the exact-Agent activation transaction. Bot credentials and authorized
+user IDs are saved independently in either order. A verified Token without an
+authorized user stays saved with `activation_status=user_required`; it neither
+activates a Worker nor grants Telegram access. Establishing the first authorized
+user completes pending exact-Agent activation for already saved Tokens.
+Authenticated local command entry refreshes its compatibility actor from the
+current PAO-owned policy, retaining the stable owner scope and failing closed
+when that policy cannot be read. Clients report an access-policy denial rather
+than describing a supported command as unavailable in the interface.
+Saving a verified credential for a running Agent with an authorized user
+requests the existing targeted Worker switch automatically.
 A stopped Agent stays stopped. The save and activation outcomes are separate:
 busy, unavailable or unknown activation retains the committed credential,
 reports `activation_status=pending` with a safe error code, and never replays

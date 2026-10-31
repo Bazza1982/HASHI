@@ -548,10 +548,14 @@ async def execute_local_command(
     if projection is not None:
         return projection
     command_name, args = _split_command(command_line)
-    local_chat_id = (
-        chat_id if chat_id is not None else runtime.global_config.authorized_id
-    )
-    actor_id = getattr(runtime.global_config, "authorized_id", None)
+    from orchestrator.telegram_actor_scope import refresh_primary_user
+
+    try:
+        actor_id = refresh_primary_user(runtime)
+    except (OSError, ValueError, TypeError, LookupError):
+        return {"ok": False, "error_code": "command_menu_forbidden",
+                "error": "Current command authorization is unavailable."}
+    local_chat_id = chat_id if chat_id is not None else actor_id
     session = SlashCommandAuditSession(
         audit_path=_runtime_audit_path(runtime),
         agent=_runtime_agent_name(runtime),
