@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+- Fingerprint: default OFF; each Run freezes policy. Preserve committed writes
+  on evidence failures; repair evidence only. Native/supervised gaps and unsigned
+  exports stay explicit. [PAO decision](HASHI_FINGERPRINT.md).
+
 - Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；

@@ -112,6 +112,52 @@ class ConfigAdmin:
         # change raises ConfigConflictError rather than losing another update.
         return write_config_json(self.paths.config_path, raw_cfg)
 
+    def read_fingerprint_policy(self):
+        """Management read; never materializes defaults into configuration."""
+        from orchestrator.fingerprint.models import FingerprintPolicy, PolicySnapshot
+
+        raw = self.load_raw_config()
+        source = raw.get("global", {})
+        if not isinstance(source, dict):
+            raise ValueError("global settings must be an object")
+        policy = FingerprintPolicy.from_mapping(source.get("fingerprint", {}))
+        return PolicySnapshot(policy, raw.revision)
+
+    def write_fingerprint_policy(self, policy, *, expected_revision: str, actor_id: str, audit):
+        """Persist an already-authorized management decision, never a model tool."""
+        from dataclasses import asdict
+        from orchestrator.fingerprint.models import FingerprintPolicy, PolicySnapshot
+        from orchestrator.fingerprint.service import FingerprintAudit, FingerprintUnavailable
+
+        if not isinstance(policy, FingerprintPolicy) or not isinstance(actor_id, str) or not actor_id.strip():
+            raise ValueError("validated policy and authorized management actor required")
+        if not isinstance(expected_revision, str) or len(expected_revision) != 64:
+            raise ValueError("configuration revision required")
+        raw = self.load_raw_config()
+        if raw.revision != expected_revision:
+            raise ConfigConflictError("fingerprint settings changed; re-read before applying")
+        source = raw.setdefault("global", {})
+        if not isinstance(source, dict):
+            raise ValueError("global settings must be an object")
+        previous = FingerprintPolicy.from_mapping(source.get("fingerprint", {}))
+        writer = FingerprintAudit(audit)
+        change_id = str(uuid.uuid4())
+        prepared = writer.append("fingerprint_policy_prepared", {
+            "change_id": change_id, "actor_id": actor_id,
+            "before": previous.snapshot(), "after": policy.snapshot(),
+            "config_revision": expected_revision,
+        })
+        source["fingerprint"] = asdict(policy)
+        revision = self.write_raw_config(raw)
+        try:
+            writer.append("fingerprint_policy_changed", {
+                "change_id": change_id, "prepared_event_id": prepared, "actor_id": actor_id,
+                "before": previous.snapshot(), "after": policy.snapshot(), "config_revision": revision,
+            })
+        except FingerprintUnavailable as exc:
+            raise ConfigDurabilityError("fingerprint configuration committed; audit outcome unconfirmed; do not replay") from exc
+        return PolicySnapshot(policy, revision)
+
     @staticmethod
     def _permission_agent_row(raw: dict, agent_name: str) -> dict:
         if not isinstance(agent_name, str) or not agent_name.strip():

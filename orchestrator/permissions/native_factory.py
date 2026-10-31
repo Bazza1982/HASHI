@@ -217,6 +217,15 @@ class InstalledExecutorFactory:
                 fencing_token=binding.fencing_token, worker_id=binding.worker_id,
             )
             options = dict(policy.registry_options)
+            from orchestrator.fingerprint.models import FingerprintPolicy
+            admitted_run = self.store.get_run(binding.context.run_id, owner_id=binding.context.owner_id)
+            options["audit_context"] = {
+                **dict(options.get("audit_context") or {}),
+                "instance_id": binding.context.instance_id, "agent_name": binding.context.agent_id,
+                "hashi_session_id": binding.context.session_id, "hashi_run_id": binding.context.run_id,
+                "request_id": binding.request_id,
+                "fingerprint_policy": FingerprintPolicy.from_snapshot(admitted_run.get("fingerprint_policy")).snapshot(),
+            }
             roots = tuple(Path(path) for path in options.get("access_roots", (policy.cwd,)))
             supervisor = WindowsFileProcessSupervisor(
                 self.authority, cwd=policy.cwd, read_roots=roots, result_store=self.results,

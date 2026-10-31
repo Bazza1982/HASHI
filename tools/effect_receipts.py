@@ -113,6 +113,23 @@ def observe_tool_effect(*, tool_name: str, call_id: str, arguments: dict,
             return None
     if not kind:
         return None
+    return _render_effect(tool_name, call_id, kind, target, observed, digest)
+
+
+def observed_file_effect(tool_name: str, call_id: str, path: Path, data: bytes):
+    """Reuse lease-held Fingerprint bytes; do not reopen a post-lease target."""
+    if len(data) > 8 * 1024 * 1024:
+        return None
+    try:
+        observed = data.decode("utf-8")
+    except UnicodeError:
+        return None
+    return _render_effect(tool_name, call_id, "write", str(path), observed, hashlib.sha256(data).hexdigest())
+
+
+def _render_effect(tool_name, call_id, kind, target, observed, digest):
+    from tools.tool_audit import sanitize_value
+
     head = str(sanitize_value(observed[:600]))
     tail = str(sanitize_value(observed[-600:])) if len(observed) > 600 else ""
     return {"evidence_ref": f"tool:{call_id}:sha256:{digest}", "kind": kind,

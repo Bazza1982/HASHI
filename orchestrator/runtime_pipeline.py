@@ -3097,6 +3097,12 @@ async def setup_interactive_feedback(
     async def _canonical_stream_callback(event):
         terminal_console.record_stream_event(runtime.name, item.request_id, event)
         canonical_stream_batch.capture(event)
+        if getattr(event, "kind", None) == "file_edit":
+            try:
+                from orchestrator.fingerprint.coverage import observe_engine_event
+                await observe_engine_event(runtime, item, event)
+            except Exception:
+                runtime.error_logger.warning("Fingerprint Engine event evidence unavailable")
         if presentation_callback is not None:
             result = presentation_callback(event)
             if inspect.isawaitable(result):
