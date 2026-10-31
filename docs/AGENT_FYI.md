@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+- 个人 L1：用户点击现有前端按钮即作决定，无重复登录；待批自动弹窗。
+  PAO 保留范围、版本、时长、幂等与原操作续跑；governed/L2 不走此简化入口。
+  [决定](permissions/IMPLEMENTATION_DECISION_20261030.md#个人-l1-一键审批2026-10-31-用户修订)。
+
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
   续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
   完整 L1 前端实测仍独立验收。[状态](permissions/IMPLEMENTATION_STATUS.md)。

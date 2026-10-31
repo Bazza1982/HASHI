@@ -41,6 +41,7 @@ class PermissionServiceApplication:
             self.native_identities[key] = entry["user_id"]
         self.generation = uuid4().hex
         self.levels, self._factory = levels, executor_factory
+        self._policy_resolver = policy_resolver
         self.runs = PermissionRunService(
             authority, run_store, policy_resolver=policy_resolver, executor_factory=executor_factory,
         )
@@ -253,6 +254,38 @@ class PermissionServiceApplication:
             subject, arguments, session_token=session_token,
             invocation_id=invocation_id, connection_binding=connection_binding,
         )
+
+    def personal_l1_login(self, *, subject):
+        """Personal L1 assumes the explicit frontend click is the user's decision.
+
+        The private FC port follows normal transport authentication. Users do
+        not enter another password. This cooperative path is unavailable to L2.
+        """
+        from orchestrator.permissions.models import PermissionLevel, PermissionSubject
+        from orchestrator.permissions.run_service import ManagedRunPolicy
+
+        if not isinstance(subject, PermissionSubject) or "L1" not in self.levels:
+            raise PermissionDenied("personal button decisions require L1")
+        if subject.instance_id != self.store.instance_id:
+            raise PermissionDenied("personal frontend instance changed")
+        from orchestrator.session_store import SessionStoreError
+
+        try:
+            session = self.store.get_session(subject.session_id, owner_id=subject.owner_id, include_deleted=False)
+        except SessionStoreError as error:
+            raise PermissionDenied("personal frontend Session is unavailable") from error
+        if (session["agent_id"] != subject.agent_id or session["status"] != "active"
+                or str(session["context_generation"]) != subject.context_generation):
+            raise PermissionDenied("personal frontend Session changed")
+        policy = self._policy_resolver(subject.agent_id, subject.owner_id, subject.session_id)
+        if not isinstance(policy, ManagedRunPolicy) or policy.settings.requested_level is not PermissionLevel.L1:
+            raise PermissionDenied("personal button decisions require current L1 policy")
+        users = [key for key, owner in self.owners.items() if owner == subject.owner_id]
+        user = self.identity.get_user(users[0]) if len(users) == 1 else None
+        if user is None or user.status != "active":
+            raise PermissionDenied("personal permission owner is unavailable")
+        login = self.identity.create_session(user_id=user.id, ttl_seconds=60)
+        return {"session_token": login.token, "expires_at": login.expires_at}
 
     def native_login(self, *, subject, connector_id, actor_id, invocation_id):
         """Private FC attestation of an original, already authenticated command."""
