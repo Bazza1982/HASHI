@@ -2060,6 +2060,7 @@ class FlexibleAgentRuntime:
 
     async def _reply_text(self, update: Update, text: str, **kwargs):
         from orchestrator.admin_local_testing import local_command_capture
+        from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
 
         capture = local_command_capture(self)
         if capture is not None:
@@ -2160,6 +2161,7 @@ class FlexibleAgentRuntime:
             if not claims:
                 return None
             claim = claims[0]
+        send_not_submitted = False
         try:
             send_text = text
             send_kwargs = dict(kwargs)
@@ -2190,16 +2192,28 @@ class FlexibleAgentRuntime:
                     send_kwargs["reply_markup"] = canonical_markup
                 elif reply_markup is None:
                     send_kwargs.pop("reply_markup", None)
-            if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
-                if claim is not None:
-                    self.session_store.complete_delivery_outbox(
-                        outbox_id=str(claim["outbox_id"]),
-                        lease_token=str(claim["lease_token"]),
-                        status="suppressed",
-                        error_code="telegram_access_revoked",
-                    )
-                return None
-            sent = await update.message.reply_text(send_text, **send_kwargs)
+            # Retry only the send, under the same durable publication and lease.
+            # A timeout after writing may already have delivered: never replay it.
+            retry_delays = (0.25, 0.5)
+            for attempt in range(len(retry_delays) + 1):
+                if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+                    if claim is not None:
+                        self.session_store.complete_delivery_outbox(
+                            outbox_id=str(claim["outbox_id"]),
+                            lease_token=str(claim["lease_token"]),
+                            status="suppressed",
+                            error_code="telegram_access_revoked",
+                        )
+                    return None
+                send_not_submitted = False
+                try:
+                    sent = await update.message.reply_text(send_text, **send_kwargs)
+                    break
+                except Exception as exc:
+                    send_not_submitted = telegram_request_not_submitted(exc)
+                    if not send_not_submitted or attempt == len(retry_delays):
+                        raise
+                    await asyncio.sleep(retry_delays[attempt])
             presentation_context = getattr(sent, "_hashi_message_context", None)
             if publication is not None and claim is not None:
                 recorded = publication
@@ -2298,8 +2312,12 @@ class FlexibleAgentRuntime:
                 self.session_store.complete_delivery_outbox(
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
-                    status="unknown",
-                    error_code="telegram_reply_outcome_unknown",
+                    status="failed" if send_not_submitted else "unknown",
+                    error_code=(
+                        "telegram_reply_not_submitted"
+                        if send_not_submitted
+                        else "telegram_reply_outcome_unknown"
+                    ),
                 )
             self.telegram_logger.warning(f"Reply failed: {exc}")
             raise

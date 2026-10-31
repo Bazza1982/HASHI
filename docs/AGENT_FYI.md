@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+- Telegram command replies retry only proven pre-submission connect failures,
+  under the same delivery claim and current authorization; never replay the
+  command or retry an ambiguous send. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-command-reply-connection-recovery-2026-10-31).
+
 - Telegram Token and user IDs save independently; first-user setup completes
   pending exact-Agent activation. Local command authorization reads the current
   PAO policy without changing the stable owner scope. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
