@@ -737,6 +737,40 @@ async def test_bundled_remote_starts_outside_shared_process_group(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_windows_supervisor_uses_separate_code_and_instance_roots(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_lifecycle.sys, "platform", "win32")
+    home, code = tmp_path / "instance", tmp_path / "code"
+    home.mkdir()
+    (code / "bin").mkdir(parents=True)
+    (code / "bin" / "hashi_remote_ctl.ps1").write_text("# helper", encoding="utf-8")
+    (home / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "TEST"}}), encoding="utf-8",
+    )
+    calls = []
+    class Process:
+        returncode = 0
+        async def communicate(self):
+            return b"ready", b""
+    async def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Process()
+    monkeypatch.setattr(remote_lifecycle.asyncio, "create_subprocess_exec", run)
+    result = await remote_lifecycle.control_remote_supervisor(
+        home, action="start", code_root=code,
+    )
+    assert result["ok"] is True
+    assert result["service_name"] == "HashiRemote-test"
+    assert [args[6] for args, _ in calls] == [
+        str(code / "bin" / "hashi_remote_ctl.ps1"),
+        str(code / "bin" / "hashi_remote_ctl.ps1"),
+    ]
+    assert [args[7] for args, _ in calls] == ["status", "start"]
+    assert all(args[args.index("-HashiRoot") + 1] == str(home) for args, _ in calls)
+    assert all(args[args.index("-CodeRoot") + 1] == str(code) for args, _ in calls)
+    assert all(kwargs["cwd"] == str(home) for _, kwargs in calls)
+
+
+@pytest.mark.asyncio
 async def test_activate_remote_supervisor_uses_enable_action(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_lifecycle.sys, "platform", "linux")
     helper = tmp_path / "bin" / "hashi-remote-ctl.sh"
@@ -981,8 +1015,8 @@ async def test_startup_manager_uses_bridge_home_when_code_root_differs(
     code_root = tmp_path / "code"
     bridge_home = tmp_path / "instance"
 
-    async def fake_ensure(root):
-        calls.append(root)
+    async def fake_ensure(root, *, code_root=None):
+        calls.append((root, code_root))
         return {
             "ok": True,
             "action": "already_running",
@@ -1000,7 +1034,7 @@ async def test_startup_manager_uses_bridge_home_when_code_root_differs(
 
     await manager._ensure_remote_lifecycle()
 
-    assert calls == [bridge_home]
+    assert calls == [(bridge_home, code_root)]
 
 
 @pytest.mark.asyncio
@@ -1008,8 +1042,8 @@ async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
     calls = []
     portable_root = tmp_path / "data"
 
-    async def fake_ensure(root):
-        calls.append(root)
+    async def fake_ensure(root, *, code_root=None):
+        calls.append((root, code_root))
         return {"ok": True, "action": "already_running", "settings": SimpleNamespace(port=8766)}
 
     monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_ensure)
@@ -1024,4 +1058,4 @@ async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
 
     await manager._ensure_remote_lifecycle()
 
-    assert calls == [str(portable_root)]
+    assert calls == [(str(portable_root), tmp_path / "code")]

@@ -53,6 +53,19 @@ Run Hashi Remote under an OS-level supervisor:
 - Windows: Task Scheduler, NSSM, or a small persistent PowerShell service.
 - Development fallback: manually run `python -m remote --no-tls --hashi-root <repo>`.
 
+Windows supervisor control accepts a separate `CodeRoot` for installed program
+assets while `HashiRoot` remains the instance home owning identity, credentials,
+configuration, logs and health claims. The task runner imports that explicit
+program distribution and runs from the instance home. Function callers pass
+both roots; they never substitute a source checkout for instance configuration.
+A separate home without its own cold-restart actuator does not acquire one
+merely by registering the Limited Remote service. Credential provisioning checks
+the intended runtime user's ACL grant: an elevated read through Administrators
+does not prove that the Limited task can read the same file. The canonical
+private-file helper provisions only the writer and declared runtime principals.
+Remote supervision is
+independent of Function hot handoff and preserves the Remote process across it.
+
 HASHI may still start/stop Remote for convenience. Provider authorization uses
 live identity, trust, and capability evidence rather than launch mode.
 

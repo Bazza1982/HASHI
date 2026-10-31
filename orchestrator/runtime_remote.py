@@ -1847,7 +1847,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
 
     if arg == "off":
         state_path = remote_lifecycle.write_disabled_state(cfg["root"])
-        stopped = await remote_lifecycle.stop_remote(cfg["root"])
+        source_options = {"code_root": cfg["code_root"]} if cfg.get("code_root") else {}
+        stopped = await remote_lifecycle.stop_remote(cfg["root"], **source_options)
         if not stopped.get("ok"):
             await runtime._reply_text(
                 update,
@@ -1887,7 +1888,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         try:
-            started = await remote_lifecycle.ensure_remote_started(cfg["root"])
+            source_options = {"code_root": cfg["code_root"]} if cfg.get("code_root") else {}
+            started = await remote_lifecycle.ensure_remote_started(cfg["root"], **source_options)
         except Exception as exc:
             started = {
                 "ok": False,

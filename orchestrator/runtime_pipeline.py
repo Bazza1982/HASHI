@@ -3891,6 +3891,13 @@ def backend_diagnostic_fields(response: Any) -> dict[str, Any]:
     remember(response_ids, getattr(response, "provider_response_id", None))
     metadata = getattr(response, "stream_metadata", None)
     if isinstance(metadata, Mapping):
+        from orchestrator.media_diagnostics import sanitize_media_diagnostic
+
+        media = sanitize_media_diagnostic(
+            metadata.get("media_diagnostic"), attachment_id=metadata.get("attachment_id")
+        )
+        if media:
+            fields["media_diagnostic"] = media
         meter = metadata.get("meter")
         meter_map = dict(meter) if isinstance(meter, Mapping) else {}
         call_groups = [
@@ -4029,6 +4036,12 @@ def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
     metadata = getattr(response, "stream_metadata", None)
     if not isinstance(metadata, Mapping):
         return {}
+    from orchestrator.media_diagnostics import sanitize_media_diagnostic
+
+    media = sanitize_media_diagnostic(
+        metadata.get("media_diagnostic"), attachment_id=metadata.get("attachment_id")
+    )
+    media_fields = {"media_diagnostic": media} if media else {}
     her = metadata.get("her_v2")
     if isinstance(her, Mapping):
         chain = her.get("failure_chain")
@@ -4036,6 +4049,7 @@ def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
         details = primary.get("details") if isinstance(primary, Mapping) else None
         if isinstance(details, Mapping) and details:
             return {
+                **media_fields,
                 "primary_failure": dict(primary),
                 "recovery_decision": (
                     dict(chain.get("recovery_decision") or {})
@@ -4050,8 +4064,8 @@ def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
             }
     provider_http_failure = metadata.get("provider_http_failure")
     if isinstance(provider_http_failure, Mapping) and provider_http_failure:
-        return {"provider_http_failure": dict(provider_http_failure)}
-    return {}
+        return {**media_fields, "provider_http_failure": dict(provider_http_failure)}
+    return media_fields
 
 
 async def reconcile_backend_effects(
