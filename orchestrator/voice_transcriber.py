@@ -1,8 +1,8 @@
 """
-Local voice-to-text transcription using faster-whisper.
+Instance-configured Compute STT or isolated local faster-whisper transcription.
 
 Provides GPU-accelerated (CUDA) or CPU-based speech-to-text for all agents.
-Voice/audio messages from Telegram are transcribed locally before dispatch
+Voice/audio messages are transcribed through the selected service before dispatch
 to any backend, so every backend gets plain text regardless of whether it
 supports audio files natively.
 
@@ -23,6 +23,11 @@ import os
 from pathlib import Path
 
 from orchestrator import voice_transcription_worker
+from orchestrator.config_json import read_config_json
+from orchestrator.compute_services import (
+    ComputeReference, ComputeRequirements, ComputeServiceClient,
+    ComputeServiceDirectory, ComputeServicesConfig,
+)
 
 logger = logging.getLogger("VoiceTranscriber")
 
@@ -30,6 +35,18 @@ logger = logging.getLogger("VoiceTranscriber")
 DEFAULT_MODEL_SIZE = voice_transcription_worker.DEFAULT_MODEL_SIZE
 DEFAULT_LANGUAGE = None  # None = auto-detect
 EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
+
+
+def _transcription_configuration() -> tuple[Path, dict]:
+    root = Path(os.environ.get("BRIDGE_HOME") or os.environ.get("HASHI_SOURCE_ROOT")
+                or Path(__file__).resolve().parents[1])
+    try:
+        config = read_config_json(root / "state" / "platform" / "transcription.json")
+    except FileNotFoundError:
+        return root, {}
+    if config.get("provider", "local") not in {"local", "compute"}:
+        raise ValueError("transcription provider is unsupported")
+    return root, config
 
 
 def _external_python() -> str:
@@ -135,6 +152,9 @@ class VoiceTranscriber:
             return f"[Transcription error] File not found: {audio_path}"
 
         try:
+            root, config = _transcription_configuration()
+            if config.get("provider") == "compute":
+                return await self._transcribe_compute(audio_path, root, config)
             external_python = _external_python()
             if external_python:
                 return await self._transcribe_external(audio_path, external_python)
@@ -148,6 +168,40 @@ class VoiceTranscriber:
         except Exception as e:
             logger.error(f"Transcription failed for {audio_path}: {e}", exc_info=True)
             return f"[Transcription error] {e}"
+
+    async def _transcribe_compute(self, audio_path: Path, root: Path, config: dict) -> str:
+        reference = config.get("compute")
+        if not isinstance(reference, dict):
+            raise ValueError("transcription Compute reference is required")
+        selected = ComputeReference(**reference)
+        suffix = audio_path.suffix.casefold()
+        if suffix not in {".wav", ".ogg", ".mp3", ".m4a", ".webm", ".flac", ".mp4", ".aac"}:
+            raise ValueError("transcription audio format is unsupported")
+        # Bound the read as well as the HTTP upload, including files that grow.
+        with audio_path.open("rb") as handle:
+            audio = handle.read(8 * 1024 * 1024 + 1)
+        if not 1 <= len(audio) <= 8 * 1024 * 1024:
+            raise ValueError("transcription audio exceeds the service upload limit")
+        async with self._lock:
+            client = ComputeServiceClient()
+            directory = ComputeServiceDirectory(
+                ComputeServicesConfig(root / "compute_services.json"), client=client
+            )
+            refreshed = await directory.refresh()
+            resolved = refreshed.catalogue.resolve(
+                selected,
+                ComputeRequirements(
+                    input_modalities=frozenset({"audio"}),
+                    output_modalities=frozenset({"text"}),
+                    protocols=frozenset({"openai.audio.transcriptions"}),
+                    locations=frozenset({"local", "lan"}),
+                ),
+            )
+            result = await client.transcribe(
+                resolved, audio, filename="utterance" + suffix, language=self.language
+            )
+        logger.info("Compute transcription complete: %d chars", len(result["text"]))
+        return str(result["text"]).strip()
 
     def _detach_external_process(self):
         process = self._external_process

@@ -210,3 +210,15 @@ Edge/SAPI/Piper, omits Kokoro/Torch. See
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
+
+
+### 2026-10-31 — PAO Compute speech defaults
+
+Ordinary voice ingress can select an exact local/LAN Compute STT reference in
+revisioned instance transcription configuration; explicit selection fails
+closed and is reread for each request. The shared TTS catalogue supports an
+optional active `default_voice` for unsaved/future Agent selections, without
+enabling speech replies or overriding saved policy. OpenAI-compatible service
+input limits bound actual synthesis requests. Call remains a separate profile
+consumer of the same voice catalogue. These are Function/instance settings;
+Core, service origins and runtime adoption are separate evidence.

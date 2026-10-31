@@ -75,6 +75,7 @@ _OPENAI_SERVICE_FIELDS = frozenset(
         "request_options",
         "timeout_seconds",
         "max_response_bytes",
+        "max_input_chars",
         "pcm_sample_rate_hz",
     }
 )
@@ -345,6 +346,11 @@ def _validate_service(value: object) -> dict[str, object]:
     service["timeout_seconds"] = float(timeout)
     service["max_response_bytes"] = maximum
     service["pcm_sample_rate_hz"] = sample_rate
+    if "max_input_chars" in value:
+        limit = value["max_input_chars"]
+        if type(limit) is not int or not 1 <= limit <= 100000:
+            raise VoiceCatalogError("service max_input_chars is invalid")
+        service["max_input_chars"] = limit
     return service
 
 
@@ -398,7 +404,7 @@ def _read_document(path: Path, *, optional: bool) -> tuple[dict[str, object], st
             f"voice catalog is unreadable: {path.name}: {exc}"
         ) from exc
     payload = dict(document)
-    unsupported = set(payload) - {"version", "services", "voices"}
+    unsupported = set(payload) - {"version", "services", "voices", "default_voice"}
     if unsupported:
         raise VoiceCatalogError(
             f"voice catalog has unsupported fields: {', '.join(sorted(unsupported))}"
@@ -437,7 +443,9 @@ class VoiceCatalog:
         default_revision: str,
         instance_revision: str | None,
         platform: str,
+        default_voice: str | None = None,
     ) -> None:
+        self.default_voice = default_voice
         self._services = copy.deepcopy(dict(services))
         self.presets = copy.deepcopy(dict(presets))
         self.default_revision = str(default_revision)
@@ -538,6 +546,13 @@ class VoiceCatalog:
             if voice.get("style"):
                 preset["style"] = voice["style"]
             presets[voice_id] = preset
+        default_voice = instance_document.get(
+            "default_voice", default_document.get("default_voice")
+        )
+        if default_voice is not None and (
+            not isinstance(default_voice, str) or default_voice not in presets
+        ):
+            raise VoiceCatalogError("default voice must reference an active voice preset")
         for service_id, service in active_services.items():
             for language, alias in service.get("language_voices", {}).items():
                 preset = presets.get(alias)
@@ -550,6 +565,7 @@ class VoiceCatalog:
             default_revision=str(default_revision or "default"),
             instance_revision=revision,
             platform=selected_platform,
+            default_voice=default_voice,
         )
 
     @property

@@ -356,3 +356,87 @@ def test_catalog_rejects_unsafe_schema_without_rewriting_it(
         VoiceCatalog.load(instance_path=path, project_root=tmp_path)
 
     assert path.read_bytes() == original
+
+
+def test_instance_default_voice_is_inherited_without_enabling_automatic_speech(tmp_path):
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    payload["default_voice"] = "lan_amy"
+    _write_catalog(path, payload)
+    manager = VoiceManager(tmp_path / "future-agent", tmp_path / "media",
+                           catalog_path=path, project_root=tmp_path)
+    state = manager.get_state()
+    assert state["provider"] == "lan-kokoro"
+    assert state["voice_name"] == "af_amy"
+    assert state["provider_options"] == {"speed": 1.05}
+    assert state["enabled"] is False
+    assert state["native"]["mode"] == "off"
+    assert not manager.state_path.exists()
+    manager.set_rate(3)
+    assert manager.get_state()["voice_name"] == "af_amy"
+
+
+def test_saved_voice_selection_and_reply_policy_survive_instance_default(tmp_path):
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    payload["default_voice"] = "lan_amy"
+    _write_catalog(path, payload)
+    workspace = tmp_path / "existing-agent"
+    workspace.mkdir()
+    saved = {"provider": "windows", "voice_name": None, "rate": 2,
+             "enabled": True, "native": {"mode": "tts", "reply_trigger": "all"}}
+    _write_catalog(workspace / "voice_state.json", saved)
+    manager = VoiceManager(workspace, tmp_path / "media",
+                           catalog_path=path, project_root=tmp_path)
+    state = manager.get_state()
+    assert state["provider"] == "windows"
+    assert state["voice_name"] is None
+    assert state["provider_options"] == {}
+    assert state["rate"] == 2
+    assert state["enabled"] is True
+    assert state["native"]["mode"] == "tts"
+    assert state["native"]["reply_trigger"] == "all"
+    assert json.loads(manager.state_path.read_text()) == saved
+
+
+@pytest.mark.parametrize("selection", ["missing_voice", 17, {"voice": "lan_amy"}])
+def test_instance_default_voice_must_reference_an_available_preset(tmp_path, selection):
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    payload["default_voice"] = selection
+    _write_catalog(path, payload)
+    with pytest.raises(VoiceCatalogError, match="default voice"):
+        VoiceCatalog.load(instance_path=path, project_root=tmp_path)
+
+
+def test_unsaved_voice_defaults_refresh_when_instance_catalog_changes(tmp_path):
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    _write_catalog(path, payload)
+    manager = VoiceManager(tmp_path / "future-agent", tmp_path / "media",
+                           catalog_path=path, project_root=tmp_path)
+    assert manager.get_state()["provider"] != "lan-kokoro"
+    payload["default_voice"] = "lan_amy"
+    _write_catalog(path, payload)
+    assert manager.get_state()["provider"] == "lan-kokoro"
+
+@pytest.mark.asyncio
+async def test_catalog_service_input_limit_bounds_the_actual_speech_request(tmp_path, monkeypatch):
+    from orchestrator.tts_providers.openai_compatible import OpenAICompatibleTTSProvider
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    payload["services"][0]["max_input_chars"] = 20
+    _write_catalog(path, payload)
+    service = VoiceCatalog.load(instance_path=path, project_root=tmp_path).service("lan-kokoro")
+    provider = OpenAICompatibleTTSProvider(service_id="lan-kokoro", service=service)
+    submitted = {}
+    class Submitted(RuntimeError):
+        pass
+    async def request(body):
+        submitted.update(body)
+        raise Submitted()
+    monkeypatch.setattr(provider, "_request", request)
+    with pytest.raises(Submitted):
+        await provider.synthesize("Hello world. " * 120, tmp_path, "limit",
+                                  voice_name="af_amy", max_chars=1200)
+    assert 0 < len(submitted["input"]) <= 20
