@@ -131,29 +131,22 @@ function Protect-RemoteCredentialAccess {
     if (-not (Test-Path -LiteralPath $SecretsPath -PathType Leaf)) {
         return
     }
-    $CurrentSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    if ($CurrentSid.Equals(
-        [string]$Principal.Sid,
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        $Stream = $null
-        try {
-            $Share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-            $Stream = [System.IO.File]::Open(
-                $SecretsPath,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                $Share
-            )
-            return
-        } catch {
-            # The configured principal cannot read the credential yet. Continue
-            # into the explicit ACL provisioning path below.
-        } finally {
-            if ($null -ne $Stream) {
-                $Stream.Dispose()
+    # An elevated process can read through Administrators even when its
+    # Limited task, with the same user SID, cannot. Check the intended user's
+    # actual grant instead of treating an elevated read as runtime evidence.
+    try {
+        $Acl = Get-Acl -LiteralPath $SecretsPath
+        $Rules = $Acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+        foreach ($Rule in $Rules) {
+            if ([string]$Rule.IdentityReference.Value -eq [string]$Principal.Sid -and
+                $Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+                ($Rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq
+                    [System.Security.AccessControl.FileSystemRights]::FullControl) {
+                return
             }
         }
+    } catch {
+        # The canonical provisioning helper below reports any remaining error.
     }
     $PrivateFileTool = Join-Path (Split-Path -Parent $PSScriptRoot) "tools\private_files.py"
     if (-not (Test-Path -LiteralPath $PrivateFileTool -PathType Leaf)) {

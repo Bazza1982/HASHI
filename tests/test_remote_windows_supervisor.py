@@ -450,7 +450,11 @@ function Register-ScheduledTask {{ @{{}} }}
     assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
 
 
-def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_path):
+@pytest.mark.parametrize("admin_only_access", [False, True])
+def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_path, admin_only_access):
+    import ctypes
+    if admin_only_access and not ctypes.windll.shell32.IsUserAnAdmin():
+        pytest.skip("Elevated setup versus Limited runtime ACL boundary")
     root = tmp_path / "hashi protected secrets"
     remote = root / "remote"
     remote.mkdir(parents=True)
@@ -472,13 +476,31 @@ def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_p
         ROOT / "bin/hashi_remote_ctl.ps1",
         staged / "bin/hashi_remote_ctl.ps1",
     )
-    (staged / "tools/private_files.py").write_text(
-        "raise SystemExit('ACL_HELPER_CALLED')\n",
-        encoding="utf-8",
-    )
-
+    if admin_only_access:
+        shutil.copyfile(ROOT / "tools/private_files.py", staged / "tools/private_files.py")
+    else:
+        (staged / "tools/private_files.py").write_text(
+            "raise SystemExit('ACL_HELPER_CALLED')\n", encoding="utf-8",
+        )
+    observed = tmp_path / "acl-observed.json"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
+$Secrets = {_ps_string(root / 'secrets.json')}
+if ('{admin_only_access}' -eq 'True') {{
+    $Acl = New-Object System.Security.AccessControl.FileSecurity
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($SidText in @('S-1-5-18', 'S-1-5-32-544')) {{
+        $Sid = New-Object System.Security.Principal.SecurityIdentifier($SidText)
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'Allow')))
+    }}
+    Set-Acl -LiteralPath $Secrets -AclObject $Acl
+}} else {{
+    $Acl = Get-Acl -LiteralPath $Secrets
+    $Sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $Acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'Allow')))
+    Set-Acl -LiteralPath $Secrets -AclObject $Acl
+}}
+$Before = (Get-Acl -LiteralPath $Secrets).Sddl
 function Get-CimInstance {{ @() }}
 function Stop-ScheduledTask {{ param($TaskName) }}
 function Start-ScheduledTask {{ param($TaskName) }}
@@ -495,10 +517,21 @@ function Invoke-RestMethod {{
     }}
 }}
 & {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$After = Get-Acl -LiteralPath $Secrets
+$CurrentSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$Allowed = @($After.Access | Where-Object {{
+    [string]$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $CurrentSid -and
+    $_.AccessControlType -eq 'Allow' -and
+    ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl
+}}).Count -gt 0
+[pscustomobject]@{{before=$Before;after=$After.Sddl;allowed=$Allowed}} | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(observed)}
 """)
 
     assert result.returncode == 0, result.stderr
     assert "ACL_HELPER_CALLED" not in result.stderr
+    acl = json.loads(observed.read_text(encoding="utf-8-sig"))
+    assert acl["allowed"] is True
+    assert (acl["before"] != acl["after"]) is admin_only_access
 
 
 def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
