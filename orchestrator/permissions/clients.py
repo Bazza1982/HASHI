@@ -190,6 +190,13 @@ class RemoteRunExecutor:
         if self._level == "L1":
             # L1 preserves all existing HERV3 presentation, habits, companion
             # and accounting ports. Tools cross the central execution gate.
+            # A resumed execution can render fresh PCM while preserving its
+            # original Run, Turn and pending Tool IDs. Its runtime occurrences
+            # need distinct audit IDs; immutable facts still apply within an epoch.
+            scoped_audit = runtime.audit_log.for_execution_epoch(binding.context.execution_epoch)
+            runtime.audit_log = scoped_audit
+            if self._stage_provider is not None:
+                self._stage_provider.audit_log = scoped_audit
             return await runtime.run_turn(prompt, request_id, turn_id=binding.context.turn_id, **arguments)
         from orchestrator.permissions.host_protocol import unpack
         from orchestrator.permissions.continuation import PermissionPark
