@@ -1,19 +1,6 @@
 # HASHI Agent FYI
 
-- Telegram command replies retry only proven pre-submission connect failures,
-  under the same delivery claim and current authorization; never replay the
-  command or retry an ambiguous send. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-command-reply-connection-recovery-2026-10-31).
-
-- Telegram Token and user IDs save independently; first-user setup completes
-  pending exact-Agent activation. Native command entry reads current PAO policy;
-  bound shared FC captures retain their verified actor and stable owner scope.
-  [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
-- Windows Remote supervision keeps program assets separate from instance
-  configuration, verifies the Limited runtime user's credential grant, and
-  outlives Function hot handoff. [Remote](HASHI_REMOTE_RESCUE_PROTOCOL.md).
-
-- Session media errors and external Agent.md edits fail closed; edited documents
-  use revision checks. [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
+- Telegram独立保存/授权/回执、Remote目录/身份/监督、Agent.md版本/附件诊断：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)。
 
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
   续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
