@@ -673,3 +673,17 @@ document is never overwritten, and an uncertain response is not retried
 automatically. The transfer does not grant a filesystem path or choose another
 Agent. Running requests keep their admitted context; later assemblies read PCM
 again. Development validation, Worker adoption and frontend use are distinct.
+
+The Backend API dispatches both synchronous PCM reads and revision-checked
+replacements through `asyncio.to_thread`. File I/O and writer-lock waits stay
+off the API event loop, so an Agent document transaction cannot hold up unrelated
+API requests. Authorization, revision validation and publication rules are
+unchanged.
+
+The revision covers the entire canonical document, including HCC. If an HCC
+refresh changes only temporary context while the owner edits an exported copy,
+import deliberately returns HTTP 409 (`pcm_conflict`) and preserves the current
+document. This is a current usability limitation: reopen the latest document,
+review the refreshed context and reapply the intended edits before explicitly
+importing again. Automatic merging, ignoring HCC in the revision and automatic
+write retries are outside this change.

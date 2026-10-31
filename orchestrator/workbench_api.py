@@ -6157,7 +6157,7 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error_code": "pcm_unavailable"}, status=503)
         try:
             if request.method == "GET":
-                result = read_agent_pcm(workspace)
+                result = await asyncio.to_thread(read_agent_pcm, workspace)
             else:
                 chunks = bytearray()
                 async for chunk in request.content.iter_chunked(65536):
@@ -6170,7 +6170,9 @@ class WorkbenchApiServer:
                     payload = None
                 if not isinstance(payload, dict) or set(payload) != {"expected_revision", "content"}:
                     return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
-                result = replace_agent_pcm(workspace, payload["expected_revision"], payload["content"])
+                result = await asyncio.to_thread(
+                    replace_agent_pcm, workspace, payload["expected_revision"], payload["content"],
+                )
         except PCMValidationError as exc:
             status = 409 if exc.code == "pcm_conflict" else 413 if exc.code == "pcm_too_large" else 400
             if exc.code in {"pcm_unreadable", "pcm_missing", "pcm_symlink_forbidden"}:
