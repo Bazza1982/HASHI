@@ -5,8 +5,9 @@
   command or retry an ambiguous send. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-command-reply-connection-recovery-2026-10-31).
 
 - Telegram Token and user IDs save independently; first-user setup completes
-  pending exact-Agent activation. Local command authorization reads the current
-  PAO policy without changing the stable owner scope. [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
+  pending exact-Agent activation. Native command entry reads current PAO policy;
+  bound shared FC captures retain their verified actor and stable owner scope.
+  [Connector](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#telegram-credential-activation-2026-10-28).
 - Windows Remote supervision keeps program assets separate from instance
   configuration, verifies the Limited runtime user's credential grant, and
   outlives Function hot handoff. [Remote](HASHI_REMOTE_RESCUE_PROTOCOL.md).

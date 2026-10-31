@@ -551,7 +551,15 @@ async def execute_local_command(
     from orchestrator.telegram_actor_scope import refresh_primary_user
 
     try:
-        actor_id = refresh_primary_user(runtime)
+        # The shared command bridge has already bound and checked the actor
+        # before supplying its private capture. Re-resolving that identity
+        # through Telegram policy would mutate the FC permission projection.
+        # Native Worker entry still refreshes current policy and fails closed.
+        actor_id = (
+            getattr(runtime.global_config, "authorized_id", None)
+            if capture_store is not None
+            else refresh_primary_user(runtime)
+        )
     except (OSError, ValueError, TypeError, LookupError):
         return {"ok": False, "error_code": "command_menu_forbidden",
                 "error": "Current command authorization is unavailable."}

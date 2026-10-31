@@ -87,9 +87,12 @@ user IDs are saved independently in either order. A verified Token without an
 authorized user stays saved with `activation_status=user_required`; it neither
 activates a Worker nor grants Telegram access. Establishing the first authorized
 user completes pending exact-Agent activation for already saved Tokens.
-Authenticated local command entry refreshes its compatibility actor from the
-current PAO-owned policy, retaining the stable owner scope and failing closed
-when that policy cannot be read. Clients report an access-policy denial rather
+Native Worker command entry refreshes its compatibility actor from the current
+PAO-owned policy, retaining the stable owner scope and failing closed when that
+policy cannot be read. A shared FC command capture retains the actor already
+validated by its command binding; rendering must not reinterpret that identity
+through Telegram configuration or mutate the permission projection.
+Clients report an access-policy denial rather
 than describing a supported command as unavailable in the interface.
 Saving a verified credential for a running Agent with an authorized user
 requests the existing targeted Worker switch automatically.
