@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -161,6 +162,19 @@ class DurableAuditLog:
             self.fallback_path
         )
         self._lock = threading.Lock()
+        self._execution_epoch = ""
+
+    def for_execution_epoch(self, execution_epoch: str) -> "DurableAuditLog":
+        """Scope runtime occurrences while sharing the same durable writers and lock."""
+        if (not isinstance(execution_epoch, str) or not execution_epoch
+                or len(execution_epoch) > 512 or execution_epoch.strip() != execution_epoch
+                or any(ord(character) < 32 for character in execution_epoch)):
+            raise ValueError("a canonical execution epoch is required")
+        if self._execution_epoch and self._execution_epoch != execution_epoch:
+            raise ValueError("an audit scope cannot change execution epoch")
+        scoped = copy.copy(self)
+        scoped._execution_epoch = execution_epoch
+        return scoped
 
     @staticmethod
     def _read_ids(path: Path | None) -> set[str]:
@@ -204,6 +218,9 @@ class DurableAuditLog:
                 [turn_id, stage, role, event, str(attempt), str(plan_id or "")]
             )
             identifier = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+        if self._execution_epoch:
+            identifier = f"{identifier}:execution:{self._execution_epoch}"
+            payload = {**dict(payload or {}), "execution_epoch": self._execution_epoch}
         with self._lock:
             record = {
                 "format": "her-v2-audit-v1",
