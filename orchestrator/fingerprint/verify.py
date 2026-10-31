@@ -135,7 +135,7 @@ def inspect(path: Path, *, root: Path | None = None) -> dict:
     sidecar = path.with_name(path.name + ".hashi.json")
     if sidecar.exists():
         data = load_json(sidecar)
-        if data.get("kind") != "hashi-fingerprint-sidecar" or data.get("target") != path.name:
+        if data.get("kind") != "hashi-fingerprint-sidecar" or type(data.get("schema")) is not int or data.get("schema") != 1 or data.get("target") != path.name:
             raise ValueError("unrecognized sidecar")
         receipt = data["receipt"]
         check_receipt(receipt)

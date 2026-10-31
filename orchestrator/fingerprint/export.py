@@ -45,7 +45,7 @@ def export_bundle(root: Path, output: Path, *, relative: str | None = None, incl
     seen = set(reserved)
     for target in selected:
         folded = target.casefold()
-        if folded in seen or folded.startswith(".hashi-fingerprint/"):
+        if any(folded == other or folded.startswith(other + "/") or other.startswith(folded + "/") for other in seen) or folded.startswith(".hashi-fingerprint/"):
             raise ValueError("artifact collides with evidence bundle namespace")
         seen.add(folded)
     for target in selected:

@@ -21,15 +21,31 @@ from tests.test_fingerprint_admission import runtime_at
 AUTH = {"actor": "test", "purpose": "crash recovery verification", "allow_raw_audit": True}
 
 
+@pytest.mark.parametrize("fault", ["effect_renderer", "partial_marker"])
 @pytest.mark.asyncio
-async def test_after_write_effect_renderer_failure_preserves_business_success(tmp_path, monkeypatch):
+async def test_after_write_effect_renderer_failure_preserves_business_success(tmp_path, monkeypatch, fault):
     registry, store, work = registry_at(tmp_path)
     import tools.effect_receipts as effects
-    monkeypatch.setattr(effects, "observed_file_effect", lambda *a: (_ for _ in ()).throw(OSError("projection failed")))
-    result = await registry.execute("file_write", {"path": "saved.txt", "content": "once"}, tool_call_id="write")
+    if fault == "effect_renderer":
+        monkeypatch.setattr(effects, "observed_file_effect", lambda *a: (_ for _ in ()).throw(OSError("projection failed")))
+        name, content = "saved.txt", "once"
+    else:
+        from orchestrator.fingerprint import markers
+        def partial(path, observation, artifact_id):
+            path.write_bytes(b"partial-marker")
+            raise OSError("marker write interrupted")
+        monkeypatch.setattr(markers, "mark", partial)
+        name, content = "saved.py", "x=1\n"
+    result = await registry.execute("file_write", {"path": name, "content": content}, tool_call_id="write")
     assert not result.is_error
-    assert (work / "saved.txt").read_text() == "once"
-    assert result.details["fingerprint"]["effect_projection_status"] == "unavailable"
+    if fault == "effect_renderer":
+        assert (work / name).read_text() == content
+        assert result.details["fingerprint"]["effect_projection_status"] == "unavailable"
+    else:
+        assert (work / name).read_bytes() == b"partial-marker"
+        assert result.details["fingerprint"]["evidence_status"] == "pending_reconciliation"
+        assert result.details.get("effect_receipt") is None
+        assert result.details["fingerprint"]["after"]["state"] == "unknown"
     assert len(events(store, "fingerprint_prepared")) == 1
 
 
@@ -56,6 +72,7 @@ async def test_external_effect_mismatch_is_unattributed_and_does_not_inject_sour
     assert result.details["fingerprint"]["evidence_grade"] == "interval_observation"
     assert not result.details["fingerprint"]["coverage"]["expected_content_matches"]
     assert b"HASHI-Fingerprint:" not in (work / "code.py").read_bytes()
+    assert result.details.get("effect_receipt") is None
 
 
 @pytest.mark.asyncio
@@ -198,3 +215,40 @@ async def test_windows_exclusive_file_occupancy_blocks_before_business_write(tmp
     finally:
         kernel.CloseHandle(handle)
     assert path.read_text() == "keep"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_marker_retains_resource_lease_until_finalization(tmp_path, monkeypatch):
+    import threading
+    from orchestrator.fingerprint import markers
+    registry, store, work = registry_at(tmp_path)
+    second, _, _ = registry_at(tmp_path, agent="other")
+    entered, release = threading.Event(), threading.Event()
+    second_started = asyncio.Event()
+    real_mark = markers.mark
+    def held_mark(path, observation, artifact_id):
+        if not entered.is_set():
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test marker not released")
+        return real_mark(path, observation, artifact_id)
+    monkeypatch.setattr(markers, "mark", held_mark)
+    real_dispatch = second._dispatch_observed
+    async def track(*args, **kwargs):
+        second_started.set()
+        return await real_dispatch(*args, **kwargs)
+    monkeypatch.setattr(second, "_dispatch_observed", track)
+    first_task = asyncio.create_task(registry.execute("file_write", {"path": "shared.py", "content": "x=1\n"}, tool_call_id="first"))
+    assert await asyncio.to_thread(entered.wait, 3)
+    first_task.cancel()
+    other_task = asyncio.create_task(second.execute("file_write", {"path": "shared.py", "content": "x=2\n"}, tool_call_id="second"))
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(second_started.wait(), .5)
+        assert not first_task.done()
+    finally:
+        release.set()
+        results = await asyncio.gather(first_task, other_task, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert not results[1].is_error
+    assert (work / "shared.py").read_text().startswith("x=2\n")

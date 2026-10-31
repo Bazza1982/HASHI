@@ -127,3 +127,35 @@ async def test_malformed_index_and_zip_namespace_collisions_are_rejected(tmp_pat
     with pytest.raises(ValueError):
         export_bundle(work, tmp_path / "collision.zip", include_content=True)
     assert not (tmp_path / "collision.zip").exists()
+
+
+@pytest.mark.parametrize("schema", [9000, True])
+@pytest.mark.asyncio
+async def test_portable_top_level_schema_must_be_a_supported_integer(tmp_path, schema):
+    registry, store, work = registry_at(tmp_path)
+    await registry.execute("file_write", {"path": "data.json", "content": "{}"}, tool_call_id="call")
+    path = work / ".hashi-fingerprint/manifest.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["schema"] = schema
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        verify(work)
+    path.unlink()
+    receipt = next(iter(manifest["receipts"].values()))
+    from orchestrator.fingerprint.manifest import sidecar_for
+    companion = sidecar_for(work / "data.json", receipt)
+    companion["schema"] = schema
+    (work / "data.json.hashi.json").write_text(json.dumps(companion))
+    with pytest.raises(ValueError):
+        inspect(work / "data.json")
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_file_directory_collisions_with_reserved_bundle_entries(tmp_path):
+    registry, store, work = registry_at(tmp_path)
+    result = await registry.execute("file_write", {
+        "path": "FINGERPRINT_README.txt/child.json", "content": "{}"}, tool_call_id="call")
+    assert not result.is_error
+    with pytest.raises(ValueError):
+        export_bundle(work, tmp_path / "collision.zip", include_content=True)
+    assert not (tmp_path / "collision.zip").exists()

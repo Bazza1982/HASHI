@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 import uuid
 
-from .execution import Observation, observe, output_facts, target_for
+from .execution import Observation, observe, output_facts, target_for, finish_owned
 from .models import FileVersion, FingerprintPolicy, RunIdentity, relative_target
 from .runtime import context_identity, context_policy
 from .service import FingerprintAudit, utc_now
@@ -67,39 +67,44 @@ async def dispatch_shell(registry, tool_name, arguments, *, tool_call_id):
     except BaseException as exc:
         error = exc
         output, details, business = "", dict(getattr(exc, "hashi_tool_details", {}) or {}), "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
-    cleanup = details.get("foreground_cleanup") or {}
-    background_pending = (cleanup.get("group_alive") is True or cleanup.get("status") == "cleanup_failed"
-                          or cleanup.get("process_reaped") is False or "background_job_id" in details)
-    records = []
-    for (path, root, relative, root_id, artifact_id), before in observations:
+    async def finalize():
+        cleanup = details.get("foreground_cleanup") or {}
+        background_pending = (cleanup.get("group_alive") is True or cleanup.get("status") == "cleanup_failed"
+                              or cleanup.get("process_reaped") is False or "background_job_id" in details)
+        records = []
+        for (path, root, relative, root_id, artifact_id), before in observations:
+            try:
+                after = await asyncio.to_thread(observe, path)
+                if before.version == after.version:
+                    continue
+                record = await asyncio.to_thread(audit.record_operation,
+                    policy=policy, identity=identity, tool_call_id=call_id, tool_name=tool_name,
+                    artifact_id=artifact_id, root_id=root_id, relative_path=relative,
+                    action="delete" if after.version.state == "absent" else "create" if before.version.state == "absent" else "modify",
+                    before=before.version, after=after.version, business_status=business,
+                    operation_id=operation_id + "-" + uuid.uuid4().hex[:8],
+                    evidence_grade="interval_observation", marker_status="pending",
+                    coverage={"complete": False, "background_pending": background_pending,
+                              "attribution": "unknown", "scope": "configured targets only"})
+                # An uncertainty-labelled source index is allowed; never add an author comment.
+                from .manifest import project
+                await asyncio.to_thread(project, root, record, file_id=after.file_id)
+                records.append(record["event_id"])
+            except Exception:
+                gaps.append("observation_or_projection_unavailable")
+        window = {**prepared, "business_status": business, "evidence_status": evidence,
+            "observed_at": utc_now(), "receipt_event_ids": records,
+            "coverage_complete": False, "background_pending": background_pending}
         try:
-            after = await asyncio.to_thread(observe, path)
-            if before.version == after.version:
-                continue
-            record = await asyncio.to_thread(audit.record_operation,
-                policy=policy, identity=identity, tool_call_id=call_id, tool_name=tool_name,
-                artifact_id=artifact_id, root_id=root_id, relative_path=relative,
-                action="delete" if after.version.state == "absent" else "create" if before.version.state == "absent" else "modify",
-                before=before.version, after=after.version, business_status=business,
-                operation_id=operation_id + "-" + uuid.uuid4().hex[:8],
-                evidence_grade="interval_observation", marker_status="pending",
-                coverage={"complete": False, "background_pending": background_pending,
-                          "attribution": "unknown", "scope": "configured targets only"})
-            # An uncertainty-labelled source index is allowed; never add an author comment.
-            from .manifest import project
-            await asyncio.to_thread(project, root, record, file_id=after.file_id)
-            records.append(record["event_id"])
+            window["event_id"] = await asyncio.to_thread(audit.append, "fingerprint_execution_window", window,
+                                                         request_id=identity.request_id)
         except Exception:
-            gaps.append("observation_or_projection_unavailable")
-    window = {**prepared, "business_status": business, "evidence_status": evidence,
-        "observed_at": utc_now(), "receipt_event_ids": records,
-        "coverage_complete": False, "background_pending": background_pending}
-    try:
-        window["event_id"] = await asyncio.to_thread(audit.append, "fingerprint_execution_window", window,
-                                                     request_id=identity.request_id)
-    except Exception:
-        window["evidence_status"] = "pending_reconciliation"
-    details["fingerprint"] = window
+            window["evidence_status"] = "pending_reconciliation"
+        details["fingerprint"] = window
+
+    _unused, cancellation = await finish_owned(finalize())
+    if error is None and cancellation is not None:
+        error = cancellation
     if error is not None:
         error.hashi_tool_details = {**getattr(error, "hashi_tool_details", {}), **details}
         raise error

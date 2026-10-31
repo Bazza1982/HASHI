@@ -93,9 +93,23 @@ def expected_matches(name, arguments, before, after) -> bool:
     from tools.builtins import _apply_unified_diff
     try:
         ok, text = _apply_unified_diff(before.data.decode("utf-8", "surrogateescape"), str(arguments.get("patch") or ""))
-        return bool(ok and text.encode("utf-8", "surrogateescape") == after.data)
+        # The existing external patch implementations may normalize CRLF.
+        # Observe/hash actual bytes while matching the tool's text semantics.
+        return bool(ok and text.replace("\r\n", "\n") == after.data.decode("utf-8", "surrogateescape").replace("\r\n", "\n"))
     except (ValueError, UnicodeError):
         return False
+
+
+async def finish_owned(coroutine):
+    """Retain the caller's lease until started evidence I/O settles."""
+    task = asyncio.create_task(coroutine, name="fingerprint-finalize")
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+    return task.result(), cancellation
 
 
 async def dispatch_controlled(registry, tool_name, arguments, *, tool_call_id):
@@ -146,58 +160,65 @@ async def dispatch_controlled(registry, tool_name, arguments, *, tool_call_id):
         failure = exc
         output, details, business = "", {}, "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
     business_elapsed = time.monotonic() - business_started
-    receipt = {**prepared, "business_status": business, "evidence_status": "pending_reconciliation",
-               "marker_status": "pending", "prepared_event_id": prepared_id}
-    after = Observation(FileVersion())
-    try:
-        after = await asyncio.to_thread(observe, path)
-        matches = expected_matches(tool_name, arguments, before, after) if business == "completed" else False
-        business_changed = before.version != after.version
-        marker_status, marker_changed = "pending", False
-        if matches:
-            from .markers import mark
-            marker_status, after, marker_changed = await asyncio.to_thread(mark, path, after, artifact_id)
-        elif after.version.state == "absent":
-            marker_status = "deleted"
-        action = ("delete" if after.version.state == "absent" and before.version.state == "present" else
-                  "create" if before.version.state == "absent" and after.version.state == "present" else
-                  "no_change" if before.version == after.version else "modify")
-        grade = "controlled_execution" if matches and marker_status != "conflict" else "interval_observation"
-        coverage = {"external_editors_locked": False, "expected_content_matches": matches,
-                    "scope": "one admitted tool operation; external processes excluded"}
-        receipt = await asyncio.to_thread(audit.record_operation,
-            policy=policy, identity=identity, tool_call_id=call_id, tool_name=tool_name,
-            artifact_id=artifact_id, root_id=root_id, relative_path=relative, action=action,
-            before=before.version, after=after.version, business_status=business,
-            operation_id=operation_id, started_at=begun, prepared_event_id=prepared_id,
-            evidence_grade=grade, marker_status="pending" if marker_status == "manifest" else marker_status, coverage=coverage,
-            marker_changed_bytes=marker_changed, business_changed_bytes=business_changed)
-        if business == "completed" and after.version.state in {"present", "absent"}:
-            try:
-                from .manifest import project
-                await asyncio.to_thread(project, root, {**receipt, "marker_status": marker_status}, file_id=after.file_id)
-                receipt["marker_status"] = marker_status
-                receipt["projection_status"] = "projected"
-            except Exception:
-                receipt["marker_status"] = "pending"
-                receipt["projection_status"] = "pending"
-            try:
-                await asyncio.to_thread(audit.append, "fingerprint_projection", {
-                    "operation_id": operation_id, "receipt_event_id": receipt["event_id"],
-                    "marker_status": receipt["marker_status"], "projection_status": receipt["projection_status"],
-                }, request_id=identity.request_id)
-            except FingerprintUnavailable:
-                receipt["projection_audit_status"] = "unconfirmed"
-    except Exception:
-        # A committed business operation must not be exposed as retryable.
-        receipt["after"] = asdict(after.version)
-    details["fingerprint"] = {**receipt, "extra_elapsed_ms": round(max(0, time.monotonic()-started-business_elapsed)*1000, 3)}
-    if after.data is not None and business == "completed":
+    async def finalize():
+        receipt = {**prepared, "business_status": business, "evidence_status": "pending_reconciliation",
+                   "marker_status": "pending", "prepared_event_id": prepared_id}
+        after = Observation(FileVersion())
+        effect_verified = False
         try:
-            from tools.effect_receipts import observed_file_effect
-            details["effect_receipt"] = observed_file_effect(tool_name, call_id, path, after.data)
+            after = await asyncio.to_thread(observe, path)
+            matches = expected_matches(tool_name, arguments, before, after) if business == "completed" else False
+            business_changed = before.version != after.version
+            marker_status, marker_changed = "pending", False
+            if matches:
+                from .markers import mark
+                marker_status, after, marker_changed = await asyncio.to_thread(mark, path, after, artifact_id)
+            elif after.version.state == "absent":
+                marker_status = "deleted"
+            effect_verified = bool(matches and marker_status != "conflict")
+            action = ("delete" if after.version.state == "absent" and before.version.state == "present" else
+                      "create" if before.version.state == "absent" and after.version.state == "present" else
+                      "no_change" if before.version == after.version else "modify")
+            grade = "controlled_execution" if matches and marker_status != "conflict" else "interval_observation"
+            coverage = {"external_editors_locked": False, "expected_content_matches": matches,
+                        "scope": "one admitted tool operation; external processes excluded"}
+            receipt = await asyncio.to_thread(audit.record_operation,
+                policy=policy, identity=identity, tool_call_id=call_id, tool_name=tool_name,
+                artifact_id=artifact_id, root_id=root_id, relative_path=relative, action=action,
+                before=before.version, after=after.version, business_status=business,
+                operation_id=operation_id, started_at=begun, prepared_event_id=prepared_id,
+                evidence_grade=grade, marker_status="pending" if marker_status == "manifest" else marker_status, coverage=coverage,
+                marker_changed_bytes=marker_changed, business_changed_bytes=business_changed)
+            if business == "completed" and after.version.state in {"present", "absent"}:
+                try:
+                    from .manifest import project
+                    await asyncio.to_thread(project, root, {**receipt, "marker_status": marker_status}, file_id=after.file_id)
+                    receipt["marker_status"] = marker_status
+                    receipt["projection_status"] = "projected"
+                except Exception:
+                    receipt["marker_status"] = "pending"
+                    receipt["projection_status"] = "pending"
+                try:
+                    await asyncio.to_thread(audit.append, "fingerprint_projection", {
+                        "operation_id": operation_id, "receipt_event_id": receipt["event_id"],
+                        "marker_status": receipt["marker_status"], "projection_status": receipt["projection_status"],
+                    }, request_id=identity.request_id)
+                except FingerprintUnavailable:
+                    receipt["projection_audit_status"] = "unconfirmed"
         except Exception:
-            details["fingerprint"]["effect_projection_status"] = "unavailable"
+            # A committed business operation must not be exposed as retryable.
+            receipt["after"] = asdict(after.version if effect_verified else FileVersion())
+        details["fingerprint"] = {**receipt, "extra_elapsed_ms": round(max(0, time.monotonic()-started-business_elapsed)*1000, 3)}
+        if effect_verified and after.data is not None and business == "completed":
+            try:
+                from tools.effect_receipts import observed_file_effect
+                details["effect_receipt"] = observed_file_effect(tool_name, call_id, path, after.data)
+            except Exception:
+                details["fingerprint"]["effect_projection_status"] = "unavailable"
+
+    _unused, cancellation = await finish_owned(finalize())
+    if failure is None and cancellation is not None:
+        failure = cancellation
     if failure is not None:
         try:
             failure.hashi_tool_details = {**getattr(failure, "hashi_tool_details", {}), **details}

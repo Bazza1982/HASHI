@@ -59,7 +59,11 @@ The lease coordinates participating HASHI tools; it does not lock human editors.
 Business, evidence and marker/projection outcomes remain separate. A failure
 to establish required durable preparation blocks that controlled mutation.
 Failures after a committed write never cause automatic business replay.
-Cancellation preserves partial-effect evidence and cleanup uncertainty.
+Cancellation preserves partial-effect evidence and cleanup uncertainty. Started
+post-execution evidence I/O finishes before releasing the existing resource
+lease, even when the caller cancels. A partial marker failure leaves the final
+version unknown and suppresses stale derived effect receipts; it does not replay
+the completed business operation.
 
 ## Portable markers
 
@@ -127,7 +131,9 @@ unsupported schema and malformed indexes never become a positive match.
 
 Export defaults to metadata only. File bytes require the explicit
 `--include-content` choice. Output is exclusively created, and archive paths,
-case collisions and evidence namespace collisions are checked before writing.
+case collisions and evidence namespace collisions (including file/directory
+ancestor conflicts) are checked before writing. Portable indexes and companions
+accept only their supported integer schema; booleans are not schema versions.
 The export is selective and unsigned: it is neither cryptographic author
 authentication nor a proof of the complete internal audit chain.
 

@@ -85,7 +85,8 @@ def _namespace_locked(root: Path, root_id: str) -> Path:
             stream.flush()
             os.fsync(stream.fileno())
     # Existing unrelated directories are never adopted, even when empty.
-    if load_json(owner) != {"kind": OWNER_KIND, "schema": SCHEMA, "root_id": root_id}:
+    owner_record = load_json(owner)
+    if type(owner_record.get("schema")) is not int or owner_record != {"kind": OWNER_KIND, "schema": SCHEMA, "root_id": root_id}:
         raise ValueError("fingerprint namespace belongs to another owner")
     return folder
 
@@ -97,7 +98,7 @@ def read_manifest(root: Path) -> dict | None:
     if path.parent.is_symlink() or getattr(path.parent, "is_junction", lambda: False)():
         raise ValueError("linked evidence directory is not supported")
     value = load_json(path)
-    if value.get("kind") != KIND or value.get("schema") != SCHEMA:
+    if value.get("kind") != KIND or type(value.get("schema")) is not int or value.get("schema") != SCHEMA:
         raise ValueError("unrecognized manifest; preserving existing evidence")
     if not isinstance(value.get("artifacts"), dict) or not isinstance(value.get("receipts"), dict):
         raise ValueError("invalid manifest")
@@ -185,7 +186,7 @@ def write_sidecar(path: Path, record: dict) -> Path:
         expected_revision = revision(destination)
         if destination.exists() or destination.is_symlink():
             old = load_json(destination)
-            if (old.get("kind") != payload["kind"] or old.get("target") != path.name
+            if (old.get("kind") != payload["kind"] or type(old.get("schema")) is not int or old.get("schema") != SCHEMA or old.get("target") != path.name
                     or old.get("receipt", {}).get("artifact_id") != record["artifact_id"]):
                 raise ValueError("sidecar name is already in use")
         atomic_projection(destination, payload, expected_revision=expected_revision)

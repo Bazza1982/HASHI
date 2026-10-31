@@ -19,6 +19,14 @@ tuple paths; incomplete Shell cleanup after cancellation; supervised write-only
 readback boundaries; invalid policy handling after a supervised write; strict
 receipt/index validation; optional-field data leakage; and ZIP collisions.
 
+A final failure-boundary pass additionally reproduced stale effect receipts
+after partial marker writes, cancellation releasing a lease while marker I/O
+was still running, unsupported portable schema versions, and file/directory
+ancestor collisions in ZIP names. Each new regression failed before its fix.
+The corrected implementation waits for owned finalization before releasing the
+lease, withholds stale effects, requires an exact supported integer schema and
+rejects conflicting archive paths. The updated focused suite passed 79 cases.
+
 Final read-only conclusion: previously reported blocking issues were corrected
 in the reviewed files; no further blocking implementation issue was identified.
 This is a source review, not a test execution or runtime-adoption receipt.
