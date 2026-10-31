@@ -1,13 +1,9 @@
 # HASHI Agent FYI
 
-- 个人 L1：用户点击现有前端按钮即作决定，无重复登录；待批自动弹窗。
-  PAO 保留范围、版本、时长、幂等与原操作续跑；governed/L2 不走此简化入口。
-  [决定](permissions/IMPLEMENTATION_DECISION_20261030.md#个人-l1-一键审批2026-10-31-用户修订)。
+- 个人L1：认证前端按钮决定、自动弹窗、无重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
+  Adapter配超时，勿写只读视图；续跑日志分epoch、保留不可变检查；前端实测独立验收。
+  [权限状态/决定](permissions/IMPLEMENTATION_STATUS.md)。
 - Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
-
-- 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
-  续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
-  完整 L1 前端实测仍独立验收。[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
@@ -18,12 +14,12 @@
 
 - Legacy audio migration needs verified ownership/safe paths; PAO settlement
   is cancellation-safe; HERV3 checkpoint claims are immutable.
-  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
+  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md),
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
 - PAO strips internal control envelopes before delivery checks. Memory+-only
   results fail terminally; typed audio remains deliverable.
 - HERV3 has no whole-run size/time/call ceiling. Preserve state/evidence;
-  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
 - Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
   snapshots, resumable retries; no Move-only gates/source lifecycle writes.
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).
