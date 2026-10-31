@@ -1034,7 +1034,14 @@ class VoiceManager:
         )
 
     def _normalise_state(self, data: dict) -> dict:
+        self._refresh_voice_catalog()
         merged = copy.deepcopy(self.DEFAULT_STATE)
+        # Instance defaults seed unsaved selections; an explicit Agent choice
+        # (including an OS provider or a null voice) remains authoritative.
+        if "provider" not in data and self.voice_catalog.default_voice is not None:
+            preset = self.voice_catalog.preset(self.voice_catalog.default_voice)
+            for key in ("provider", "voice_name", "provider_options"):
+                merged[key] = copy.deepcopy(preset[key])
         merged.update(data)
         if not isinstance(merged.get("provider_options"), dict):
             merged["provider_options"] = {}
@@ -1053,10 +1060,10 @@ class VoiceManager:
         try:
             return self._normalise_state(dict(read_config_json(self.state_path)))
         except FileNotFoundError:
-            return copy.deepcopy(self.DEFAULT_STATE)
+            return self._normalise_state({})
         except (OSError, ValueError, TypeError):
             # Reads remain backwards compatible and fail to safe defaults.
-            return copy.deepcopy(self.DEFAULT_STATE)
+            return self._normalise_state({})
 
     def _update(self, mutate: Callable[[dict], None], *, retries: int = 4) -> dict:
         """Fresh-read mutation that never overwrites corrupt or newer state."""
@@ -1069,7 +1076,7 @@ class VoiceManager:
             state = self._normalise_state(dict(document))
         except FileNotFoundError:
             revision = None
-            state = copy.deepcopy(self.DEFAULT_STATE)
+            state = self._normalise_state({})
         except (OSError, ValueError, TypeError) as exc:
             raise RuntimeError(
                 f"Voice state is unreadable; no settings were changed: {exc}"

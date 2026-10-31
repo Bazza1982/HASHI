@@ -1636,21 +1636,25 @@ class ComputeServiceClient:
         resolved: ResolvedComputeService,
         protocol: str,
         payload: Mapping[str, Any],
+        *,
+        form_data: aiohttp.FormData | None = None,
     ) -> Mapping[str, Any]:
-        """POST JSON only to an interface resolved from the configured node origin."""
+        """Receive bounded JSON from one resolved interface, without redirects."""
 
         if not isinstance(resolved, ResolvedComputeService) or not isinstance(
             payload, Mapping
         ):
             raise ComputeServiceError("compute_invocation_invalid")
+        if form_data is not None and not isinstance(form_data, aiohttp.FormData):
+            raise ComputeServiceError("compute_invocation_invalid")
         interface = resolved.offering.interface(protocol)
         if interface.method != "POST":
             raise ComputeServiceError("compute_interface_method_invalid")
         node = resolved.snapshot.node
-        headers = {
-            **self._headers(node),
-            "Content-Type": "application/json",
-        }
+        headers = self._headers(node)
+        request_body = {"data": form_data} if form_data is not None else {"json": dict(payload)}
+        if form_data is None:
+            headers["Content-Type"] = "application/json"
         try:
             async with self.session_factory(
                 timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
@@ -1659,7 +1663,7 @@ class ComputeServiceClient:
                 async with session.post(
                     resolved.interface_url(protocol),
                     headers=headers,
-                    json=dict(payload),
+                    **request_body,
                     allow_redirects=False,
                 ) as response:
                     if response.status != 200:
@@ -1696,6 +1700,40 @@ class ComputeServiceClient:
             raise
         except (aiohttp.ClientError, OSError, TimeoutError) as exc:
             raise ComputeServiceError("compute_node_unreachable") from exc
+
+    async def transcribe(
+        self,
+        resolved: ResolvedComputeService,
+        audio: bytes,
+        *,
+        filename: str = "utterance.wav",
+        language: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Submit one bounded audio upload to the discovered STT interface."""
+        if not isinstance(audio, bytes) or not 1 <= len(audio) <= 8 * 1024 * 1024:
+            raise ComputeServiceError("compute_audio_input_invalid")
+        if not isinstance(filename, str) or re.fullmatch(
+            r"utterance\.(?:wav|ogg|mp3|m4a|webm|flac|mp4|aac)", filename
+        ) is None:
+            raise ComputeServiceError("compute_audio_input_invalid")
+        if language is not None and (
+            not isinstance(language, str)
+            or re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", language) is None
+        ):
+            raise ComputeServiceError("compute_audio_language_invalid")
+        form = aiohttp.FormData()
+        form.add_field("file", audio, filename=filename,
+                       content_type="application/octet-stream")
+        form.add_field("model", resolved.offering.model_id or "")
+        form.add_field("response_format", "json")
+        if language:
+            form.add_field("language", language)
+        result = await self.invoke_json(
+            resolved, "openai.audio.transcriptions", {}, form_data=form
+        )
+        if not isinstance(result.get("text"), str) or len(result["text"]) > 12000:
+            raise ComputeServiceError("compute_transcription_invalid")
+        return result
 
     async def invoke_bytes(
         self,

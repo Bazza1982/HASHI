@@ -257,3 +257,30 @@ privacy-boundary validation, no-redirect/bounded discovery, exact capability
 resolution, busy rejection, refresh failure fencing, direct sample URL
 rendering, and revisioned configuration. A live read from Hashi Compute proves
 only discovery interoperability, not downstream model execution.
+
+
+## Shared incoming speech configuration
+
+All ordinary voice/audio ingress uses the shared PAO transcriber, including
+future Agents. The optional revisioned instance file
+`state/platform/transcription.json` may select:
+
+```json
+{"provider":"compute","compute":{"node_id":"configured-node","service_id":"stt","model_id":"selected-model"}}
+```
+
+The node origin and manifest remain in `compute_services.json`. Each new
+transcription rereads this selector, discovers and resolves that exact local/LAN
+audio-to-text service and POSTs multipart audio to its advertised
+`openai.audio.transcriptions` interface. There is no internet/local Whisper
+fallback after an explicit Compute selection. Uploads are bounded to 8 MiB;
+the service enforces its advertised duration limit. Redirects, malformed JSON,
+oversized responses and invalid text fail closed. Cancellation propagates.
+Missing configuration preserves the existing isolated/local transcription
+contract. No native transcription dependency is installed in Core.
+
+`/call` continues to resolve its own STT/vision slots and the shared voice
+catalogue. Configure the instance `default_profile` for future owner/Agent
+pairs; saved profile choices remain independent and must be deliberately
+migrated when changing existing Agents. Input camera frames retain existing
+call/session and camera-off fences.
