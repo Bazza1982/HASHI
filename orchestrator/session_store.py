@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 30
+    SCHEMA_VERSION = 31
 
     def __init__(
         self,
@@ -685,6 +685,7 @@ class SessionStore:
                     source TEXT NOT NULL,
                     message_context_json TEXT NOT NULL DEFAULT '{}',
                     delivery_route_json TEXT NOT NULL DEFAULT '{}',
+                    fingerprint_policy_json TEXT NOT NULL DEFAULT '{}',
                     requested_mode TEXT,
                     effective_mode TEXT,
                     response_preferences_json TEXT NOT NULL DEFAULT '{}',
@@ -1636,6 +1637,10 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "delivery_route_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "fingerprint_policy_json" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN fingerprint_policy_json TEXT NOT NULL DEFAULT '{}'"
+                )
             message_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(messages)").fetchall()
@@ -2176,6 +2181,12 @@ class SessionStore:
             result["message_context"] = _json_object(
                 result.pop("message_context_json")
             )
+        if "fingerprint_policy_json" in result:
+            from orchestrator.fingerprint.models import FingerprintPolicy
+            frozen = json.loads(result.pop("fingerprint_policy_json"))
+            if not isinstance(frozen, dict):
+                raise ValueError("corrupt frozen fingerprint policy")
+            result["fingerprint_policy"] = FingerprintPolicy.from_snapshot(frozen).snapshot()
         if "delivery_route_json" in result:
             result["delivery_route"] = _json_object(
                 result.pop("delivery_route_json")
@@ -4114,9 +4125,12 @@ class SessionStore:
         response_preferences: Mapping[str, Any] | None = None,
         message_context: Mapping[str, Any] | None = None,
         delivery_route: Mapping[str, Any] | None = None,
+        fingerprint_policy: Mapping[str, Any] | None = None,
         expected_context_generation: int | None = None,
         agent_workspace: Path | str | None = None,
     ) -> AcceptedRun:
+        from orchestrator.fingerprint.models import FingerprintPolicy
+        frozen_fingerprint = FingerprintPolicy.from_snapshot(dict(fingerprint_policy or {})).snapshot()
         clean = str(text or "").strip()
         if display_text is not None and not isinstance(display_text, str):
             raise ValueError("display_text must be a string")
@@ -4439,10 +4453,10 @@ class SessionStore:
                     run_id, session_id, user_message_id, agent_id, request_id,
                     idempotency_key, request_digest, source, requested_mode,
                     effective_mode, response_preferences_json, message_context_json,
-                    delivery_route_json,
+                    delivery_route_json, fingerprint_policy_json,
                     context_generation, state, parent_run_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -4458,6 +4472,7 @@ class SessionStore:
                     _json(dict(response_preferences or {})),
                     _json(dict(message_context or {})),
                     _json(dict(delivery_route or {})),
+                    _json(frozen_fingerprint),
                     generation,
                     parent_run_id,
                     now,

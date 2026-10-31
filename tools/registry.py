@@ -1012,10 +1012,9 @@ class ToolRegistry:
         try:
             from orchestrator.execution_resources import tool_resource
             async with tool_resource(self, tool_name, arguments) as resource_wait_ms:
-                dispatched = await self._dispatch_observed(
-                    tool_name,
-                    arguments,
-                    tool_call_id=effective_call_id,
+                from orchestrator.fingerprint.execution import dispatch_controlled
+                dispatched = await dispatch_controlled(
+                    self, tool_name, arguments, tool_call_id=effective_call_id,
                 )
         except asyncio.CancelledError as exc:
             details = dict(getattr(exc, "hashi_tool_details", {}) or {})
@@ -1135,6 +1134,7 @@ class ToolRegistry:
                 tool_call_id=effective_call_id,
                 output=output,
                 is_error=True,
+                details=dict(getattr(e, "hashi_tool_details", {}) or {}),
             )
             result = self._finalize_tool_result(
                 tool_name, arguments, result, started
@@ -1201,9 +1201,11 @@ class ToolRegistry:
         from tools.effect_receipts import observe_tool_effect
 
         try:
-            receipt = observe_tool_effect(tool_name=tool_name, call_id=result.tool_call_id,
-                arguments=arguments, output=result.output, is_error=result.is_error,
-                workspace_dir=self.workspace_dir, access_roots=self.access_roots)
+            receipt = (result.details or {}).get("effect_receipt")
+            if "fingerprint" not in (result.details or {}):
+                receipt = observe_tool_effect(tool_name=tool_name, call_id=result.tool_call_id,
+                    arguments=arguments, output=result.output, is_error=result.is_error,
+                    workspace_dir=self.workspace_dir, access_roots=self.access_roots)
         except Exception:
             # Observation failure must not turn a committed write into a retryable
             # tool failure. The Phone action will remain unverified instead.
