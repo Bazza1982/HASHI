@@ -86,6 +86,38 @@ def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False, v
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("fail_at", "expected_phase"), [(1, "issue_grant"), (2, "read_grant")])
+async def test_safe_open_failure_has_distinct_diagnostic(tmp_path, monkeypatch, caplog, fail_at, expected_phase):
+    from orchestrator import session_attachment_authorization as authorization
+
+    mgr, backend, _, _, run, _, content = fixture(tmp_path)
+    real_open = authorization._open_no_symlinks
+    calls = 0
+
+    def fail_reopen(path, flags):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise PermissionError(13, "private path must not appear in logs")
+        return real_open(path, flags)
+
+    monkeypatch.setattr(authorization, "_open_no_symlinks", fail_reopen)
+    with caplog.at_level(logging.WARNING, logger="session-media-test"):
+        response = await mgr.generate_response(
+            "synthetic", run["request_id"], request_content=content
+        )
+
+    assert not response.is_success
+    assert response.error_code == "MEDIA_UNAVAILABLE"
+    assert response.stream_metadata["media_diagnostic"]["reason"] == "safe_open_failed"
+    assert response.stream_metadata["media_diagnostic"]["phase"] == expected_phase
+    assert response.stream_metadata["media_diagnostic"]["errno"] == 13
+    assert "safe_open_failed" in caplog.text
+    assert "private path must not appear in logs" not in caplog.text
+    assert not hasattr(backend, "seen_prompt")
+
+
+@pytest.mark.asyncio
 async def test_committed_current_run_audio_is_consumed_without_directory_grants(tmp_path):
     mgr, backend, store, session, run, meta, content = fixture(tmp_path)
     original = backend.authorized_media_roots()
@@ -108,6 +140,7 @@ async def test_forged_request_scope_is_rejected(tmp_path, key, value):
     meta[key] = value
     response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
     assert not response.is_success and response.error_code == "MEDIA_PATH_NOT_AUTHORIZED"
+    assert response.stream_metadata["media_diagnostic"]["reason"] == f"run_metadata_{key}_mismatch"
     assert not hasattr(backend, "seen_roots")
 
 

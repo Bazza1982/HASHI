@@ -2311,6 +2311,25 @@ class FlexibleBackendManager:
         finally:
             await self._dispose_backend(candidate)
 
+    def _media_contract_failure(self, exc, request_id):
+        from adapters.base import BackendResponse
+
+        diagnostic = dict(getattr(exc, "diagnostic", {}) or {})
+        metadata = {"attachment_id": exc.attachment_id or None}
+        if diagnostic:
+            metadata["media_diagnostic"] = diagnostic
+            self.logger.warning(
+                "Media validation failed request_id=%s attachment_id=%s phase=%s "
+                "reason=%s error_type=%s errno=%s winerror=%s",
+                request_id, exc.attachment_id or "", diagnostic.get("phase"),
+                diagnostic.get("reason"), diagnostic.get("error_type"),
+                diagnostic.get("errno"), diagnostic.get("winerror"),
+            )
+        return BackendResponse(
+            text="", duration_ms=0, error=str(exc), is_success=False,
+            error_code=exc.code, error_retryable=False, stream_metadata=metadata,
+        )
+
     async def generate_response(
         self,
         prompt: str,
@@ -2346,11 +2365,7 @@ class FlexibleBackendManager:
                 text="", duration_ms=0, is_success=False, stop_reason="safe_voice_discarded",
             )
         except MultimodalContractError as exc:
-            return BackendResponse(
-                text="", duration_ms=0, error=str(exc), is_success=False,
-                error_code=exc.code, error_retryable=False,
-                stream_metadata={"attachment_id": exc.attachment_id or None},
-            )
+            return self._media_contract_failure(exc, request_id)
 
     async def _generate_response_with_attachment_reads(
         self,
@@ -2388,15 +2403,7 @@ class FlexibleBackendManager:
                         authorized_roots=roots_resolver(),
                     )
             except MultimodalContractError as exc:
-                return BackendResponse(
-                    text="",
-                    duration_ms=0,
-                    error=str(exc),
-                    is_success=False,
-                    error_code=exc.code,
-                    error_retryable=False,
-                    stream_metadata={"attachment_id": exc.attachment_id or None},
-                )
+                return self._media_contract_failure(exc, request_id)
 
             parameters = inspect.signature(
                 self.current_backend.generate_response

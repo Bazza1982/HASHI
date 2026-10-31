@@ -6,7 +6,23 @@ from datetime import timedelta
 from math import ceil
 from typing import Any
 
+import httpx
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
+
+
+def telegram_request_not_submitted(exc: BaseException) -> bool:
+    """Prove a pre-write connection failure, never infer safety from error text.
+
+    PTB wraps HTTPX errors with an explicit cause. Read/write timeouts and
+    unrelated exception wrappers do not establish that Telegram saw no request.
+    """
+    seen: set[int] = set()
+    while type(exc) in (NetworkError, TimedOut):
+        if id(exc) in seen or exc.__cause__ is None:
+            return False
+        seen.add(id(exc))
+        exc = exc.__cause__
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
 
 def _retry_after_seconds(value: Any) -> int:

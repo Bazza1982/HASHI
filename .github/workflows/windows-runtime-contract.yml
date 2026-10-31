@@ -94,6 +94,8 @@ jobs:
           tests/test_runtime_contract.py
           tests/test_function_generation.py
           tests/test_process_execution.py
+          tests/test_agent_pcm_edit.py
+          tests/test_agent_pcm_api.py
           tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
           tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_fails_fast_when_durable_store_is_unavailable
           tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta

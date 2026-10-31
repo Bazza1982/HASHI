@@ -102,7 +102,16 @@ async def try_dispatch_command_interaction_transport(
         config = runtime.global_config
         if str(getattr(config, "deployment_profile", "personal") or "personal") != "personal":
             raise InteractionError("command_menu_governed_not_supported", 501)
-        actor = getattr(config, "authorized_id", None)
+        # A primary user can be configured after this Worker starts. Resolve
+        # the current PAO-owned identity before the bridge and native handlers
+        # consult this runtime's compatibility projection. Never retain stale
+        # authorization when the persisted policy cannot be read.
+        from orchestrator.telegram_actor_scope import refresh_primary_user
+
+        try:
+            actor = refresh_primary_user(runtime)
+        except (OSError, ValueError, TypeError, LookupError):
+            raise InteractionError("command_menu_forbidden", 403) from None
         checker = getattr(runtime, "_is_authorized_user", None)
         if type(actor) is not int or (callable(checker) and not checker(actor)):
             raise InteractionError("command_menu_forbidden", 403)

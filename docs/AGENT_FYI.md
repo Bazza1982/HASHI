@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
   续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
   完整 L1 前端实测仍独立验收。[状态](permissions/IMPLEMENTATION_STATUS.md)。
@@ -91,6 +93,7 @@ retain partial uncertainty; join Tool/job diagnostics.
 Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home can read them.
 Session retention deletes them.
+Access failures differ from integrity mismatches; diagnostics omit paths.
 
 Telegram proactive routes: owner-only; revalidate actor/egress after restart.
 Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain
