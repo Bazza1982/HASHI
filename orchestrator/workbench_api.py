@@ -955,6 +955,12 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
+        self.app.router.add_get(
+            "/api/agents/{name}/agent-document", self.handle_agent_document
+        )
+        self.app.router.add_put(
+            "/api/agents/{name}/agent-document", self.handle_agent_document
+        )
         self.app.router.add_post(
             "/api/agents/{name}/system-prompts/{slot}/delete-if-unchanged",
             self.handle_agent_sys_prompt_conditional_delete,
@@ -5301,6 +5307,7 @@ class WorkbenchApiServer:
             if denied is not None:
                 return denied
         try:
+            previous = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
             snapshot = await asyncio.to_thread(
                 self.telegram_access_service.change, agent_id, **payload
             )
@@ -5308,6 +5315,20 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
+        # A Token may have been saved before the first authorized user. Finish
+        # the existing exact-Agent activation only when that prerequisite first
+        # becomes available; later access-list edits remain live policy changes.
+        if previous["primary_user_id"] is None and snapshot["primary_user_id"] is not None:
+            for target in self._runtime_map():
+                try:
+                    credential = self._telegram_credential_status(target)
+                    if credential["configured"] and credential["activation_status"] == "pending":
+                        await self._activate_saved_telegram_credential(request, credential)
+                except Exception as exc:
+                    # Access is already committed; a failed adoption must never
+                    # invite an automatic replay or roll back the user setting.
+                    logger.warning("Telegram activation after owner setup pending: agent=%s error_type=%s",
+                                   target, type(exc).__name__)
         return self._telegram_credential_response(
             {"ok": True, "management_supported": True,
              "global_management_supported": self._telegram_access_management_supported(
@@ -6116,6 +6137,52 @@ class WorkbenchApiServer:
         except ConfigDurabilityError:
             return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503)
         return web.json_response({"ok": True, "agent": canonical_agent, "slot": slot})
+
+    async def handle_agent_document(self, request):
+        """Read or revision-check a user-edited canonical Agent document."""
+        from orchestrator.agent_pcm_edit import MAX_AGENT_PCM_BYTES, read_agent_pcm, replace_agent_pcm
+        from orchestrator.pcm import PCMValidationError
+
+        name = str(request.match_info.get("name") or "").strip()
+        denied = self._guard_agent_management_access(request, name)
+        if denied is not None:
+            return denied
+        row = next((item for item in self._load_agent_rows() if item.get("name") == name), None)
+        if row is None:
+            return web.json_response({"ok": False, "error_code": "agent_not_found"}, status=404)
+        runtime = self._runtime_map().get(name.casefold())
+        metadata = self._metadata_for_agent(row, runtime)
+        workspace = str(metadata.get("workspace_dir") or "").strip()
+        if not workspace:
+            return web.json_response({"ok": False, "error_code": "pcm_unavailable"}, status=503)
+        try:
+            if request.method == "GET":
+                result = await asyncio.to_thread(read_agent_pcm, workspace)
+            else:
+                chunks = bytearray()
+                async for chunk in request.content.iter_chunked(65536):
+                    chunks.extend(chunk)
+                    if len(chunks) > 6 * MAX_AGENT_PCM_BYTES + 4096:
+                        return web.json_response({"ok": False, "error_code": "pcm_too_large"}, status=413)
+                try:
+                    payload = json.loads(chunks.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = None
+                if not isinstance(payload, dict) or set(payload) != {"expected_revision", "content"}:
+                    return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
+                result = await asyncio.to_thread(
+                    replace_agent_pcm, workspace, payload["expected_revision"], payload["content"],
+                )
+        except PCMValidationError as exc:
+            status = 409 if exc.code == "pcm_conflict" else 413 if exc.code == "pcm_too_large" else 400
+            if exc.code in {"pcm_unreadable", "pcm_missing", "pcm_symlink_forbidden"}:
+                status = 503
+            return web.json_response({"ok": False, "error_code": exc.code}, status=status,
+                                     headers={"Cache-Control": "no-store"})
+        except (OSError, TimeoutError):
+            return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503,
+                                     headers={"Cache-Control": "no-store"})
+        return web.json_response({"ok": True, **result}, headers={"Cache-Control": "no-store"})
 
     async def handle_agent_overview(self, request):
         name = str(request.match_info.get("name") or "").strip()

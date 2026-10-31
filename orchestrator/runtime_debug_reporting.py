@@ -307,6 +307,11 @@ def persist_terminal_diagnostic(
             },
             "safe_retry_evidence": safe_retry_evidence(payload),
         }
+        from orchestrator.media_diagnostics import sanitize_media_diagnostic
+
+        media = sanitize_media_diagnostic(payload.get("media_diagnostic"))
+        if media:
+            document["terminal"]["media_diagnostic"] = media
         content = json.dumps(
             document, ensure_ascii=False, sort_keys=True, indent=2
         ) + "\n"

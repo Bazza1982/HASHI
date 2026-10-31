@@ -91,6 +91,30 @@ async def test_clone_reused_transaction_renders_appropriate_next_action(tmp_path
     assert "❌" not in message["text"]
 
 
+def test_remote_controls_use_instance_home_instead_of_the_code_checkout(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    code, home = tmp_path / "code", tmp_path / "instance"
+    (code / "remote").mkdir(parents=True)
+    (home / "remote").mkdir(parents=True)
+    (code / "remote" / "config.yaml").write_text(
+        "server:\n  port: 8767\n  use_tls: true\n", encoding="utf-8",
+    )
+    (home / "remote" / "config.yaml").write_text(
+        "server:\n  port: 19099\n  use_tls: false\n", encoding="utf-8",
+    )
+    (home / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "TEST", "remote_port": 19099}}),
+        encoding="utf-8",
+    )
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.global_config = SimpleNamespace(project_root=code, bridge_home=home)
+    snapshot = runtime._remote_config_snapshot()
+    assert snapshot["root"] == home
+    assert snapshot["port"] == 19099
+    assert snapshot["use_tls"] is False
+
+
 def test_load_instances_reads_first_available_file(tmp_path):
     missing = tmp_path / "missing.json"
     path = tmp_path / "instances.json"

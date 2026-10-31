@@ -19,7 +19,19 @@ pytestmark = [
 
 
 def _powershell(script: str):
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    # A newly consulted task cmdlet must not autoload a module over scenario
+    # doubles and accidentally mutate the real scheduler.
+    isolation = """
+Import-Module ScheduledTasks -ErrorAction Stop
+function Get-ScheduledTask { param($TaskName, $ErrorAction) $null }
+function Register-ScheduledTask { throw 'Unmocked task registration' }
+function Start-ScheduledTask { throw 'Unmocked task start' }
+function Stop-ScheduledTask { }
+function Enable-ScheduledTask { throw 'Unmocked task enable' }
+function Disable-ScheduledTask { throw 'Unmocked task disable' }
+function Unregister-ScheduledTask { throw 'Unmocked task deletion' }
+"""
+    encoded = base64.b64encode((isolation + script).encode("utf-16-le")).decode("ascii")
     return subprocess.run(
         [
             "powershell.exe",
@@ -37,8 +49,10 @@ def _ps_string(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+@pytest.mark.parametrize("separate_home", [False, True])
+@pytest.mark.parametrize("existing_home", ["missing", "same", "other"])
 def test_remote_registration_keeps_network_process_limited_and_actuator_highest(
-    tmp_path,
+    tmp_path, separate_home, existing_home,
 ):
     root = tmp_path / "hashi restart boundary"
     remote = root / "remote"
@@ -51,10 +65,20 @@ def test_remote_registration_keeps_network_process_limited_and_actuator_highest(
         ROOT / "remote/supervisor_identity.py",
         remote / "supervisor_identity.py",
     )
+    if separate_home:
+        (remote / "supervisor_identity.py").unlink()
+    code_arguments = f" -CodeRoot {_ps_string(ROOT)}" if separate_home else ""
     captured = tmp_path / "registered-tasks.json"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
 $global:RegisteredTasks = @()
+function Get-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    if ($TaskName -eq 'HashiRemote-supervisor-contract' -and '{existing_home}' -ne 'missing') {{
+        $Directory = if ('{existing_home}' -eq 'same') {{ {_ps_string(root)} }} else {{ {_ps_string(tmp_path / 'other')} }}
+        [pscustomobject]@{{Actions=@([pscustomobject]@{{WorkingDirectory=$Directory}})}}
+    }}
+}}
 function New-ScheduledTaskAction {{
     param($Execute, $Argument, $WorkingDirectory)
     [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
@@ -77,16 +101,30 @@ function Register-ScheduledTask {{
         Principal=$InputObject.Principal
     }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'{code_arguments}
 $global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(captured)}
 """)
 
+    if existing_home == "other":
+        assert result.returncode != 0
+        assert not captured.exists()
+        assert "does not match this instance home" in result.stderr
+        return
     assert result.returncode == 0, result.stderr
     tasks = json.loads(captured.read_text(encoding="utf-8-sig"))
+    if isinstance(tasks, dict):
+        tasks = [tasks]
     by_name = {task["TaskName"]: task for task in tasks}
+    remote_task = by_name["HashiRemote-supervisor-contract"]
+    assert remote_task["Action"]["WorkingDirectory"] == str(root)
+    assert remote_task["Principal"]["RunLevel"] == "Limited"
+    if separate_home:
+        assert set(by_name) == {"HashiRemote-supervisor-contract"}
+        assert "-CodeRoot" in remote_task["Action"]["Arguments"]
+        assert str(ROOT) in remote_task["Action"]["Arguments"]
+        return
     restart = by_name["HashiRestart-supervisor-contract"]
     runtime = by_name["HashiRuntime-supervisor-contract"]
-    remote_task = by_name["HashiRemote-supervisor-contract"]
     assert restart["Principal"]["RunLevel"] == "Highest"
     assert runtime["Principal"]["RunLevel"] == "Highest"
     assert remote_task["Principal"]["RunLevel"] == "Limited"
@@ -412,7 +450,11 @@ function Register-ScheduledTask {{ @{{}} }}
     assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
 
 
-def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_path):
+@pytest.mark.parametrize("admin_only_access", [False, True])
+def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_path, admin_only_access):
+    import ctypes
+    if admin_only_access and not ctypes.windll.shell32.IsUserAnAdmin():
+        pytest.skip("Elevated setup versus Limited runtime ACL boundary")
     root = tmp_path / "hashi protected secrets"
     remote = root / "remote"
     remote.mkdir(parents=True)
@@ -434,13 +476,31 @@ def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_p
         ROOT / "bin/hashi_remote_ctl.ps1",
         staged / "bin/hashi_remote_ctl.ps1",
     )
-    (staged / "tools/private_files.py").write_text(
-        "raise SystemExit('ACL_HELPER_CALLED')\n",
-        encoding="utf-8",
-    )
-
+    if admin_only_access:
+        shutil.copyfile(ROOT / "tools/private_files.py", staged / "tools/private_files.py")
+    else:
+        (staged / "tools/private_files.py").write_text(
+            "raise SystemExit('ACL_HELPER_CALLED')\n", encoding="utf-8",
+        )
+    observed = tmp_path / "acl-observed.json"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
+$Secrets = {_ps_string(root / 'secrets.json')}
+if ('{admin_only_access}' -eq 'True') {{
+    $Acl = New-Object System.Security.AccessControl.FileSecurity
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($SidText in @('S-1-5-18', 'S-1-5-32-544')) {{
+        $Sid = New-Object System.Security.Principal.SecurityIdentifier($SidText)
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'Allow')))
+    }}
+    Set-Acl -LiteralPath $Secrets -AclObject $Acl
+}} else {{
+    $Acl = Get-Acl -LiteralPath $Secrets
+    $Sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $Acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'Allow')))
+    Set-Acl -LiteralPath $Secrets -AclObject $Acl
+}}
+$Before = (Get-Acl -LiteralPath $Secrets).Sddl
 function Get-CimInstance {{ @() }}
 function Stop-ScheduledTask {{ param($TaskName) }}
 function Start-ScheduledTask {{ param($TaskName) }}
@@ -457,10 +517,21 @@ function Invoke-RestMethod {{
     }}
 }}
 & {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$After = Get-Acl -LiteralPath $Secrets
+$CurrentSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$Allowed = @($After.Access | Where-Object {{
+    [string]$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $CurrentSid -and
+    $_.AccessControlType -eq 'Allow' -and
+    ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl
+}}).Count -gt 0
+[pscustomobject]@{{before=$Before;after=$After.Sddl;allowed=$Allowed}} | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(observed)}
 """)
 
     assert result.returncode == 0, result.stderr
     assert "ACL_HELPER_CALLED" not in result.stderr
+    acl = json.loads(observed.read_text(encoding="utf-8-sig"))
+    assert acl["allowed"] is True
+    assert (acl["before"] != acl["after"]) is admin_only_access
 
 
 def test_restart_retires_only_exact_instance_remote_processes(tmp_path):

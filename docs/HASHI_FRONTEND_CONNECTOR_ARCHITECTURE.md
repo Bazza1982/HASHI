@@ -63,11 +63,39 @@ startup preserves Telegram's pending updates; the accepted-update offset
 advances only after the Worker accepts each update. Source changes on HASHI3
 are not evidence that an already running shared Function has adopted them.
 
+### Telegram command reply connection recovery (2026-10-31)
+
+Functions retries a command reply only when the actual transport exception
+proves that no request was submitted: HTTPX `ConnectError` or `ConnectTimeout`,
+directly or through PTB's explicit `NetworkError`/`TimedOut` cause chain.
+At most three send attempts share one canonical Message, delivery task and
+lease; the command handler is never replayed. Authorization is checked before
+every attempt, including after bounded backoff. An exhausted pre-submission
+failure is recorded as `failed`/`telegram_reply_not_submitted`.
+
+Read/write timeouts, untyped error text and post-send persistence failures do
+not prove non-submission. They retain `unknown` delivery state and are not
+retried by this path. Rate-limit handling remains with the existing owner.
+This is a Functions change; offline validation and exact-Agent hot adoption
+are separate from live Telegram acceptance and production deployment.
+
 ### Telegram credential activation (2026-10-28)
 
 The Frontend Connector owns Bot credential verification and connection facts;
-PAO owns the exact-Agent activation transaction. Saving a verified credential
-for a running Agent requests the existing targeted Worker switch automatically.
+PAO owns the exact-Agent activation transaction. Bot credentials and authorized
+user IDs are saved independently in either order. A verified Token without an
+authorized user stays saved with `activation_status=user_required`; it neither
+activates a Worker nor grants Telegram access. Establishing the first authorized
+user completes pending exact-Agent activation for already saved Tokens.
+Native Worker command entry refreshes its compatibility actor from the current
+PAO-owned policy, retaining the stable owner scope and failing closed when that
+policy cannot be read. A shared FC command capture retains the actor already
+validated by its command binding; rendering must not reinterpret that identity
+through Telegram configuration or mutate the permission projection.
+Clients report an access-policy denial rather
+than describing a supported command as unavailable in the interface.
+Saving a verified credential for a running Agent with an authorized user
+requests the existing targeted Worker switch automatically.
 A stopped Agent stays stopped. The save and activation outcomes are separate:
 busy, unavailable or unknown activation retains the committed credential,
 reports `activation_status=pending` with a safe error code, and never replays
