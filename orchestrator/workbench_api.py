@@ -1138,6 +1138,7 @@ class WorkbenchApiServer:
         self.app.router.add_get('/api/v1/agents/{agent}/telegram/diagnostics', self.handle_telegram_diagnostics)
         self.app.router.add_post('/api/v1/run-questions/tool', self.handle_question_tool)
         self.app.router.add_get('/api/v1/sessions/{session_id}/questions', self.handle_session_questions)
+        self.app.router.add_get('/api/v1/sessions/{session_id}/permission-requests', self.handle_session_permission_requests)
         self.app.router.add_post('/api/v1/sessions/{session_id}/questions/{question_id}/answer', self.handle_question_answer)
         self.app.router.add_get("/api/health", self.handle_health)
         self.app.router.add_get("/api/chat-projection/{name}", self.handle_chat_projection)
@@ -1238,6 +1239,11 @@ class WorkbenchApiServer:
                     'question': ui_language.tr('askme.stop_unconfirmed', locale=locale),
                     'options': [option for option in options if option.get('system_action') == 'stop']}
         return {**question, 'options': options}
+
+    async def handle_session_permission_requests(self, request):
+        from orchestrator.permissions.frontend_requests import read
+
+        return await read(self, request)
 
     async def handle_session_questions(self, request):
         from orchestrator.run_questions import QuestionError

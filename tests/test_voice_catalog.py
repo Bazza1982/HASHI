@@ -356,3 +356,45 @@ def test_catalog_rejects_unsafe_schema_without_rewriting_it(
         VoiceCatalog.load(instance_path=path, project_root=tmp_path)
 
     assert path.read_bytes() == original
+
+def test_new_agent_defaults_to_configured_compute_kokoro(tmp_path):
+    path = tmp_path / "voice_catalog.json"
+    _write_catalog(
+        path,
+        {
+            "version": 1,
+            "services": [
+                {
+                    "id": "hashi-compute-kokoro",
+                    "adapter": "openai_compatible",
+                    "label": "Hashi Compute · Kokoro 82M",
+                    "location": "lan",
+                    "base_url": "http://192.168.0.41:19446/v1",
+                    "model": "kokoro-82m",
+                    "audio_format": "wav",
+                    "style_support": "unsupported",
+                }
+            ],
+            "voices": [
+                {
+                    "id": "hc_k_zf_001",
+                    "service": "hashi-compute-kokoro",
+                    "voice_name": "zf_001",
+                    "label": "年轻4",
+                    "language": "Chinese",
+                    "locale": "zh-CN",
+                    "gender": "female",
+                }
+            ],
+        },
+    )
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        catalog_path=path,
+        project_root=tmp_path,
+    )
+    state = manager.get_state()
+    assert state["provider"] == "hashi-compute-kokoro"
+    assert state["voice_name"] == "zf_001"
+    assert state["enabled"] is False

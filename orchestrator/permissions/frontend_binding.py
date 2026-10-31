@@ -62,12 +62,30 @@ async def dispatch_permission_operation(api, request, runtime, operation, metada
     )
     from orchestrator.permissions.frontend_auth import session_token
 
+    token = session_token(request)
+    temporary = False
+    # Personal L1 assumes the frontend action is a user gesture. The transport
+    # remains authenticated; governed deployments and L2 keep separate auth.
+    if (not request.headers.get("X-Workbench-Session", "").strip()
+            and not token.startswith("hs_sess_") and not api._is_governed_profile()
+            and api._strict_authenticated_owner(request) == subject.owner_id
+            and callable(getattr(api.permission_control, "personal_l1_login", None))):
+        import asyncio
+
+        try:
+            login = await asyncio.to_thread(api.permission_control.personal_l1_login, subject=subject)
+            token, temporary = login["session_token"], True
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
     ingress = PermissionIngress(
-        subject, api.permission_control, session_token(request),
-        metadata["connection_binding"],
+        subject, api.permission_control, token, metadata["connection_binding"],
     )
-    with bind_permission_ingress(ingress):
-        return await dispatch_command_interaction(projection, operation, metadata)
+    try:
+        with bind_permission_ingress(ingress):
+            return await dispatch_command_interaction(projection, operation, metadata)
+    finally:
+        if temporary:
+            await asyncio.to_thread(api.permission_control.logout, session_token=token)
 
 
 async def _try_permission_command(api, request, runtime, text, *, owner_id):
