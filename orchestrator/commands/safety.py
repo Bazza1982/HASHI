@@ -87,8 +87,11 @@ def _request_command(runtime: Any, update: Any, args: list[str]) -> str:
         return request_detail_card(
             authority.withdraw_session_request(subject, args[1], int(raw_revision)),
         )
-    if args[0].casefold() == "request" and len(args) == 2:
-        return request_detail_card(authority.get_session_request(subject, args[1]))
+    if args[0].casefold() in {"request", "prompt"} and len(args) == 2:
+        from orchestrator.permissions.presentation import request_prompt_card
+
+        render = request_prompt_card if args[0].casefold() == "prompt" else request_detail_card
+        return render(authority.get_session_request(subject, args[1]))
     if args[0].casefold() == "requests":
         if len(args) == 1:
             before = None
@@ -100,7 +103,7 @@ def _request_command(runtime: Any, update: Any, args: list[str]) -> str:
     raise ValueError("invalid permission view")
 
 
-def _decision_markup(runtime, update, request_id):
+def _decision_markup(runtime, update, request_id, *, compact=False):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     from orchestrator.permissions.frontend_control import current_permission_ingress
 
@@ -111,9 +114,21 @@ def _decision_markup(runtime, update, request_id):
     actions = current_permission_ingress().issue_actions(
         subject, request_id, view.request.revision, presentation_id=str(update.update_id),
     )
+    if compact:
+        actions = tuple(sorted(
+            (action for action in actions if action.lifetime != "run"),
+            key=lambda action: ({"once": 0, "task": 1, "ttl": 2}.get(action.lifetime, 3)
+                                if action.choice == "approve" else 4, action.duration_seconds),
+        ))
     rows = []
     for action in actions:
         label = ui_language.tr("safety.choose_" + (action.lifetime if action.choice == "approve" else "deny"))
+        if action.choice == "approve" and action.lifetime == "ttl":
+            seconds = action.duration_seconds
+            divisor, unit = (3600, "hours") if seconds % 3600 == 0 else (
+                (60, "minutes") if seconds % 60 == 0 else (1, "seconds")
+            )
+            label = ui_language.tr("safety.approve_" + unit, value=seconds // divisor)
         rows.append([InlineKeyboardButton(label, callback_data="safety:d:" + action.action_id)])
     seconds = actions[0].duration_seconds
     divisor, unit = (3600, "hours") if seconds % 3600 == 0 else (
@@ -207,16 +222,18 @@ async def safety_command(runtime: Any, update: Any, context: Any):
         await runtime._reply_text(update, _outcome_text(outcome))
         return {"ok": True, "request_id": outcome.request_id, "choice": outcome.choice,
                 "replayed": outcome.replayed}
-    if args and args[0].casefold() in {"requests", "request", "withdraw"}:
+    if args and args[0].casefold() in {"requests", "request", "prompt", "withdraw"}:
         try:
             text = await asyncio.to_thread(_request_command, runtime, update, args)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             await runtime._reply_text(update, ui_language.tr("safety.requests_unavailable"))
             return
         markup = None
-        if args[0].casefold() == "request" and len(args) == 2:
+        if args[0].casefold() in {"request", "prompt"} and len(args) == 2:
             try:
-                markup, duration = await asyncio.to_thread(_decision_markup, runtime, update, args[1])
+                markup, duration = await asyncio.to_thread(
+                    _decision_markup, runtime, update, args[1], compact=args[0].casefold() == "prompt",
+                )
                 if markup is not None:
                     text += "\n\n" + escape(duration)
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
