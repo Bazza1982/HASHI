@@ -157,7 +157,8 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
         max_chars: int = 1200,
         provider_options: dict | None = None,
     ) -> VoiceAsset:
-        spoken_text = self.prepare_spoken_text(text, max_chars=max_chars)
+        maximum = min(int(max_chars), int(self.service.get("max_input_chars", max_chars)))
+        spoken_text = self.prepare_spoken_text(text, max_chars=maximum)
         if not spoken_text:
             raise OpenAICompatibleTTSError(
                 "tts_text_invalid",

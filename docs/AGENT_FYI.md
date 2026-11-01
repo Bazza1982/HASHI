@@ -26,8 +26,9 @@
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).
 - Image fallback: selected model, same-Provider vision, LAN Compute;
   visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
-- Compute uses PAO's fail-closed Function directory; no silent LAN-to-internet
-  fallback. [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+- Compute：PAO[目录](HASHI_COMPUTE_SERVICE_DIRECTORY.md)精确选择local/LAN服务，转写设置逐请求重读，失败不静默跨网或回退本地。
+  TTS `default_voice`仅补未保存选择，不启用语音、不改已存策略；服务输入上限约束实际请求。Call独立profile共享[TTS目录](HASHI_VOICE_TTS_CATALOG.md)。
+  属Functions/实例配置；Core、源地址和运行采用独立验收。
 - Call frames are input-only/cleared camera-off; LAN targets are literal private
   IPv4 without redirects. Preview is not Agent vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
 - Tool screenshots use provider-native images, never Base64 text. Ollama
