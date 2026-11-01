@@ -11,8 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.base import BackendResponse
+from adapters.base import BaseBackend, BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
+from adapters.her_v2 import HERv2Adapter
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.multimodal_contract import validate_authorized_media_references
 from orchestrator.session_store import SessionStore
@@ -44,6 +45,15 @@ class CodexConsumer(Consumer, CodexCLIAdapter):
     """The actual selected adapter type with a byte/prompt observation endpoint."""
 
 
+class HERConsumer(HERv2Adapter):
+    """Real HER input contract, with provider execution replaced by observation."""
+
+    def __init__(self, config, global_config):
+        BaseBackend.__init__(self, config, global_config)
+
+    generate_response = Consumer.generate_response
+
+
 def intake(store, session, *, filename="voice.wav", voice=False):
     payload = wav_bytes()
     row = store.stage_attachment(session_id=session["session_id"], owner_id=session["owner_id"],
@@ -57,7 +67,7 @@ def intake(store, session, *, filename="voice.wav", voice=False):
         attachment_id=row["attachment_id"], item_index=1)
 
 
-def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False, voice_count=1):
+def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False, voice_count=1, backend_class=None):
     store = store or SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
     session = store.ensure_default_session(owner_id=owner, agent_id=agent)
     parts = [dict(intake(store, session, filename=f"voice-{index}.wav", voice=codex), item_index=index)
@@ -71,7 +81,7 @@ def fixture(tmp_path, *, agent="qa", owner="user:qa", store=None, codex=False, v
     run = store.get_run_by_request(accepted.request_id)
     cfg = SimpleTestConfig(name=agent, workspace_dir=str(tmp_path / agent))
     cfg.workspace_dir.mkdir(exist_ok=True)
-    backend = (CodexConsumer if codex else Consumer)(cfg, SimpleGlobalConfig())
+    backend = (backend_class or (CodexConsumer if codex else Consumer))(cfg, SimpleGlobalConfig())
     meta = {"request_id":accepted.request_id, "hashi_session_id":session["session_id"],
         "hashi_run_id":accepted.run_id, "hashi_message_id":run["user_message_id"],
         "hashi_fencing_token":fence, "owner_id":owner, "context_generation":session["context_generation"]}
@@ -279,8 +289,75 @@ def transcript_fixture(mgr, store, run, content, *, status="released", safe=Fals
 
 
 @pytest.mark.asyncio
-async def test_codex_consumes_only_same_run_durable_released_transcript(tmp_path):
-    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
+async def test_her_gated_input_uses_durable_transcript_without_losing_voice_origin(tmp_path):
+    mgr, backend, store, _, run, _, content = fixture(
+        tmp_path, codex=True, backend_class=HERConsumer,
+    )
+    _, state = transcript_fixture(mgr, store, run, content, safe=True)
+    response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
+    assert response.is_success, response.error
+    assert backend.seen_content == content
+    assert state["text"] == "SYNTHETIC_VOICE_BLUE"
+    assert "DO_NOT_TRUST_MEMORY" not in state["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_class", [HERConsumer, Consumer])
+@pytest.mark.parametrize("status", ["transcribing", "unavailable", "discarded"])
+async def test_authorized_native_voice_does_not_wait_for_audit_transcript(tmp_path, backend_class, status):
+    from orchestrator.multimodal_contract import InputCapability
+
+    mgr, backend, store, _, run, _, content = fixture(
+        tmp_path, codex=True, backend_class=backend_class,
+    )
+    if backend_class is Consumer:
+        backend.input_capability = InputCapability(
+            provider="native-test", model="audio-model", source="test",
+            input_modalities=frozenset({"text", "audio"}),
+            input_transports={"audio": ("input_audio",)},
+        )
+    _, state = transcript_fixture(mgr, store, run, content, status="ready", safe=False)
+    state["status"] = status
+    state["ready_event"].clear()
+    state["release_event"].clear()
+    response = await asyncio.wait_for(
+        mgr.generate_response("synthetic", run["request_id"], request_content=content), 2,
+    )
+    assert response.is_success, response.error
+    assert backend.seen_content == content
+    assert not state.get("confirmation_requested")
+    assert not state["ready_event"].is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
+async def test_cancelled_run_cannot_use_a_late_voice_release(tmp_path, backend_class):
+    mgr, backend, store, _, run, meta, content = fixture(
+        tmp_path, codex=True, backend_class=backend_class,
+    )
+    _, state = transcript_fixture(mgr, store, run, content, status="ready", safe=True)
+
+    async def confirm_after_stop():
+        store.require_voice_transcript_confirmation(request_id=run["request_id"])
+        store.decide_voice_transcript(request_id=run["request_id"], confirmed=True)
+        store.finish_request(
+            run["request_id"], success=False, failure_state="stopped",
+            error_text="Interrupted by user_stop", fencing_token=meta["hashi_fencing_token"],
+        )
+        state["status"] = "released"
+        state["release_event"].set()
+
+    state["request_confirmation"] = confirm_after_stop
+    response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
+    assert not response.is_success
+    assert not hasattr(backend, "seen_prompt")
+    assert store.get_run(run["run_id"])["state"] == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer])
+async def test_text_consumers_use_only_same_run_durable_released_transcript(tmp_path, backend_class):
+    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True, backend_class=backend_class)
     record, state = transcript_fixture(mgr, store, run, content)
     response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
     assert response.is_success, response.error
@@ -294,8 +371,9 @@ async def test_codex_consumes_only_same_run_durable_released_transcript(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirm", [True, False])
-async def test_codex_waits_for_safevoice_confirmation_and_honors_discard(tmp_path, confirm):
-    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
+async def test_consumers_wait_for_safevoice_confirmation_and_honor_discard(tmp_path, confirm, backend_class):
+    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True, backend_class=backend_class)
     record, state = transcript_fixture(mgr, store, run, content, status="ready", safe=True)
     challenged = asyncio.Event()
     async def challenge():
@@ -319,9 +397,10 @@ async def test_codex_waits_for_safevoice_confirmation_and_honors_discard(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["missing_state", "other_run", "other_attachment", "not_durable", "durable_unreleased", "unavailable"])
-async def test_codex_voice_cannot_bypass_durable_gate(tmp_path, fault):
-    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
-    record, state = transcript_fixture(mgr, store, run, content)
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
+async def test_voice_consumers_cannot_bypass_durable_gate(tmp_path, fault, backend_class):
+    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True, backend_class=backend_class)
+    record, state = transcript_fixture(mgr, store, run, content, safe=True)
     if fault == "missing_state":
         mgr.runtime._native_voice_transcripts = {}
     elif fault == "other_run":
@@ -448,18 +527,19 @@ async def test_unsupported_platform_preserves_existing_roots_without_new_grants(
 @pytest.mark.asyncio
 async def test_actual_backend_identity_overrides_stale_config_selection(tmp_path):
     mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
-    record, state = transcript_fixture(mgr, store, run, content)
+    record, state = transcript_fixture(mgr, store, run, content, safe=True)
     mgr.config.active_backend = "her-v3"
     response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
     assert response.is_success and "SYNTHETIC_VOICE_BLUE" in backend.seen_prompt
-    # Switching the actual consumer away from Codex must retain its audio route.
-    other = Consumer(mgr.config, backend.global_config)
+    # HER preserves its canonical voice origin, regardless of stale CLI config.
+    other = HERConsumer(mgr.config, backend.global_config)
     mgr.current_backend = other
     mgr.config.active_backend = "codex-cli"
     response = await mgr.generate_response("synthetic", run["request_id"], request_content=content)
     assert response.is_success
     assert other.seen_content["parts"][0]["type"] == "media"
     assert "SYNTHETIC_VOICE_BLUE" not in other.seen_prompt
+    assert state["text"] == "SYNTHETIC_VOICE_BLUE"
 
 
 @pytest.mark.asyncio

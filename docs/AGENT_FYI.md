@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- PAO统一语音：同Run持久确认，丢弃正常停止，确认后复核。文字用放行转写，HER保留语音来源，原生音频不等转写。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
+
 - Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
@@ -35,11 +37,10 @@
 
 ## Authority and ownership
 
-PCM: Persona/Context/Memory. PAO: Agents/Sessions/Runs/jobs/Workzones/delivery.
-HERV3: Engine Turns/model/tool loop/cost. Frontends: authentication/rendering.
-Use the narrowest Function/config owner. Core has no product policy/imports;
-changes need major-migration approval, version bump, label and independent review.
-Flags grant nothing.
+PCM管Persona/Context/Memory；PAO管Agent/Session/Run/Job/Workzone/交付；
+HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
+功能放在最窄的Function/配置owner。Core不含产品策略或导入；改动须获准major迁移、
+升版本、加标签并独立复核。标志不授予权限。
 
 Prove source, Worker adoption and delivery separately. Tools cannot alter/kill
 Core/Python, read secrets or grant authority. `/reboot min|same`: one Worker;

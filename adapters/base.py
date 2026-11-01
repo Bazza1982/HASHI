@@ -72,6 +72,9 @@ class BackendCapabilities:
     tool_request_mode: str = "none"
     recovery_mode: str = "reconstruct_safe"
     reasoning_transport: str = "absent"
+    # Canonical consumers preserve voice origin for their own media routing.
+    # PAO still owns confirmation, durable release and intentional discard.
+    voice_input_mode: str = "transcript"
 
 
 @dataclass

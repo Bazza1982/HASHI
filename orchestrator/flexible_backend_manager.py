@@ -2343,12 +2343,12 @@ class FlexibleBackendManager:
         from orchestrator.multimodal_contract import MultimodalContractError
         from orchestrator.session_attachment_authorization import (
             VoiceTranscriptDiscarded, bind_backend_attachment_reads, current_run_attachment_grants,
-            released_codex_voice_input,
+            released_voice_input,
         )
         try:
             grants = current_run_attachment_grants(self, request_id, request_content)
             with bind_backend_attachment_reads(self.current_backend, grants):
-                prompt, request_content, transcript_routes = await released_codex_voice_input(
+                prompt, request_content, transcript_routes = await released_voice_input(
                     self, request_id, prompt, request_content,
                 )
                 response = await self._generate_response_with_attachment_reads(

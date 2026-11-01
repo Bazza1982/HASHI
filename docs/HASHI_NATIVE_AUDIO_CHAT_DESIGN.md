@@ -115,6 +115,17 @@ The following decisions are fixed for the first implementation:
     work stages, and the derived local transcript therefore bypass Safe Voice.
     Safe Voice retains its confirm-or-discard design only for transcript-first
     text-model voice routes. No correction editor is added.
+15. PAO applies the same-Run voice decision before calling any Engine. A
+    durable discard ends the Run normally with `safe_voice_discarded`, without
+    a backend error or model/tool execution. Memory-only decisions, stale
+    Sessions/fences and unreleased or unavailable transcripts cannot authorize
+    execution. Confirmation waits revalidate the current Run afterward.
+    Text consumers receive the durable local transcript. Engines declaring
+    canonical voice input keep the voice-origin attachment and media routing;
+    their gated transcript is a projection of PAO's durable release. They do
+    not own a separate confirmation policy. Authorized raw-audio Turns keep
+    running independently of STT; a completed native answer is not cancelled
+    or replayed by an unrelated audit-transcript outcome.
 
 ## 3. Goals
 

@@ -334,21 +334,20 @@ def current_run_attachment_grants(manager: Any, request_id: str, content: Mappin
         _deny(attachment_id, reason=f"grant_resolution_{type(exc).__name__}")
 
 
-async def released_codex_voice_input(manager: Any, request_id: str, prompt: str, content):
-    """Consume the existing same-Run STT gate; never initiate transcription.
+async def released_voice_input(manager: Any, request_id: str, prompt: str, content):
+    """Apply PAO's same-Run voice decision before entering any Engine.
 
-Only Codex's text CLI needs this materialization. HER owns its native/audio
-route and Safe Voice stage decisions. Ordinary audio files retain routing.
+Text consumers receive only durable, released STT. Canonical consumers retain
+voice origin and native routing, but never reinterpret a gated discard.
+Authorized raw-audio Turns do not wait for their independent audit transcript.
+Ordinary audio files retain their existing routing.
 """
     from orchestrator.multimodal_contract import (
         MultimodalContractError, canonical_request_content, normalize_request_content,
         validate_authorized_media_references,
     )
     from orchestrator.voice_transcript_gate import await_authorized_transcript
-    from adapters.codex_cli import CodexCLIAdapter
-
-    if not isinstance(manager.current_backend, CodexCLIAdapter):
-        return prompt, content, ()
+    backend = manager.current_backend
     normalized = normalize_request_content(content)
     voice = [part for part in (normalized or {}).get("parts", ())
              if part.get("type") == "media" and part.get("modality") == "audio"
@@ -363,10 +362,21 @@ route and Safe Voice stage decisions. Ordinary audio files retain routing.
             or set(state.get("attachment_ids") or ()) != attachment_ids
             or any(registry.get(identifier) is not state for identifier in attachment_ids)):
         _deny(str(voice[0]["attachment_id"]))
+    capability = getattr(backend, "input_capability", None)
+    canonical_input = (
+        getattr(getattr(backend, "capabilities", None), "voice_input_mode", "transcript")
+        == "canonical"
+        or (capability is not None and capability.supports("audio"))
+    )
+    if canonical_input and not bool(state.get("safe_voice")):
+        return prompt, content, ()
     # Check intake integrity before trusting derived input, and once again
     # after a potentially long confirmation wait. The fd fence remains active.
-    validate_authorized_media_references(normalized, authorized_roots=manager.current_backend.authorized_media_roots())
+    validate_authorized_media_references(normalized, authorized_roots=backend.authorized_media_roots())
     _, status = await await_authorized_transcript(state, require_confirmation=True)
+    # Cancellation or a changed Session cannot authorize either a late release
+    # or a late discard. Recheck the original Run/fence after the wait.
+    current_run_attachment_grants(manager, request_id, normalized)
     if status == "discarded":
         # A memory-only or stale gate result is not an authenticated decision.
         # Confirm the same Run has a durably discarded input before treating
@@ -389,13 +399,10 @@ route and Safe Voice stage decisions. Ordinary audio files retain routing.
         raise VoiceTranscriptDiscarded()
     if status != "released":
         raise MultimodalContractError(
-            f"Voice transcript is {status}; no Codex model was invoked",
+            f"Voice transcript is {status}; no model action was started",
             code="MEDIA_FALLBACK_UNAVAILABLE", attachment_id=str(voice[0]["attachment_id"]),
         )
-    # Re-resolve Run/fence/session after waiting; a reset/cancelled Run cannot
-    # authorize its stale transcript even if the in-memory gate was released.
-    current_run_attachment_grants(manager, request_id, normalized)
-    validate_authorized_media_references(normalized, authorized_roots=manager.current_backend.authorized_media_roots())
+    validate_authorized_media_references(normalized, authorized_roots=backend.authorized_media_roots())
     store = runtime.session_store
     run = store.get_run_by_request(request_id, agent_id=manager.config.name)
     with store._lock, store._connection() as connection:
@@ -408,6 +415,11 @@ route and Safe Voice stage decisions. Ordinary audio files retain routing.
                    or not str(by_attachment[identifier]["text"]).strip() for identifier in attachment_ids)):
         _deny(str(voice[0]["attachment_id"]))
     transcript = "\n".join(str(by_attachment[str(part["attachment_id"])]["text"]).strip() for part in voice)
+    if canonical_input:
+        # The Engine consumes a projection of the same durable release. It
+        # preserves voice-origin routing rather than becoming a text Turn.
+        state["text"] = transcript
+        return prompt, content, ()
     remaining = [part for part in normalized["parts"] if part not in voice]
     remaining.append({"type": "text", "text": transcript})
     remaining = [dict(part, item_index=index) for index, part in enumerate(remaining, 1)]

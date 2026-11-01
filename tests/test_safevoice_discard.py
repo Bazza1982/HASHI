@@ -13,7 +13,9 @@ from orchestrator.frontend_projection import project_frontend_event
 from orchestrator.session_store import SessionConflict, StaleFencingToken
 from orchestrator.workbench_api import WorkbenchApiServer
 from tests.test_audit_run_handoff import _listener_runtime
-from tests.test_session_attachment_authorization import fixture, transcript_fixture
+from tests.test_session_attachment_authorization import (
+    CodexConsumer, Consumer, HERConsumer, fixture, transcript_fixture,
+)
 from tests.test_wrapper_commands import (
     _completed_task, _make_background_runtime, _make_foreground_runtime, _queued_request,
 )
@@ -21,8 +23,11 @@ from tests.test_wrapper_commands import (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_proxy", [False, True])
-async def test_discarded_codex_voice_finishes_canonical_run_without_error(tmp_path, monkeypatch, worker_proxy):
-    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
+async def test_discarded_voice_finishes_canonical_run_without_error(tmp_path, monkeypatch, worker_proxy, backend_class):
+    mgr, backend, store, session, run, meta, content = fixture(
+        tmp_path, codex=True, backend_class=backend_class,
+    )
     record, state = transcript_fixture(mgr, store, run, content, status="ready", safe=True)
     challenged = asyncio.Event()
 
@@ -225,8 +230,9 @@ async def test_multiple_voice_inputs_require_all_confirmations(tmp_path, decisio
 
 
 @pytest.mark.asyncio
-async def test_discard_is_not_accepted_from_memory_without_durable_decision(tmp_path):
-    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
+@pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
+async def test_discard_is_not_accepted_from_memory_without_durable_decision(tmp_path, backend_class):
+    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True, backend_class=backend_class)
     _record, state = transcript_fixture(mgr, store, run, content, status="ready", safe=True)
     state["status"] = "discarded"
     state["release_event"].set()
