@@ -12,6 +12,58 @@ from orchestrator.skill_manager import SkillManager
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,payload,reason", [
+    (401, {"ok": False, "error_code": "not_authenticated"}, "not_authenticated"),
+    (409, {"ok": False, "error_code": "job_changed", "message": "Refresh the changed task."}, "job_changed"),
+    (503, {"ok": False, "error_code": "worker_unavailable", "error": "Worker is restarting."}, "worker_unavailable"),
+    (400, {"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, "kind must be cron"),
+])
+async def test_scheduler_tool_keeps_real_http_rejection_reason(tmp_path, status, payload, reason):
+    from aiohttp import web
+    from tools.hashi_scheduler import execute_hashi_scheduler_tool
+
+    calls = []
+    async def reject(request):
+        calls.append((request.method, request.path))
+        return web.json_response(payload, status=status)
+
+    app = web.Application()
+    app.router.add_get("/api/agents/momo/scheduler/jobs", reject)
+    async with TestServer(app) as upstream:
+        result = await execute_hashi_scheduler_tool(
+            "hashi_scheduler_list", {},
+            audit_context={"agent_name": "momo", "workbench_api_base_url": str(upstream.make_url("/")).rstrip("/")},
+        )
+    assert result.startswith("Error:")
+    assert reason in result and str(status) in result
+    if "message" in payload:
+        assert payload["message"] in result
+    if "error" in payload:
+        assert payload["error"] in result
+    assert calls == [("GET", "/api/agents/momo/scheduler/jobs")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["hashi_scheduler_list", "hashi_scheduler_update"])
+async def test_scheduler_transport_timeout_is_safe_and_never_replays(tool_name, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from tools import hashi_scheduler
+
+    request = AsyncMock(side_effect=asyncio.TimeoutError("private-url?token=private-secret"))
+    monkeypatch.setattr(hashi_scheduler, "_request_json", request)
+    result = await hashi_scheduler.execute_hashi_scheduler_tool(
+        tool_name, {"job_id": "fixture-only"},
+        audit_context={"agent_name": "momo", "workbench_api_base_url": "http://127.0.0.1:1"},
+    )
+    assert "timed out" in result and "scheduler_api_timeout" in result
+    assert "private-" not in result
+    if tool_name == "hashi_scheduler_update":
+        assert "unconfirmed" in result
+    assert request.await_count == 1
+
+
 class _FakeRequest:
     def __init__(self, *, name="momo", batch_id=None, query=None, payload=None):
         self.match_info = {"name": name}
