@@ -1589,6 +1589,9 @@ class ToolRegistry:
     ) -> str:
         """Relay a CLI tool call to its owning Function Worker, then Core RPC."""
         from urllib.parse import urlsplit
+        from urllib.error import HTTPError
+        from orchestrator.api_failures import operation_failure_payload, public_operation_failure_message
+        from orchestrator.operation_failures import OperationRejected, operation_failure
 
         proxy = self._effective_audit_context().get("browser_gateway_proxy")
         if not isinstance(proxy, dict):
@@ -1613,6 +1616,17 @@ class ToolRegistry:
             ensure_ascii=False,
         ).encode("utf-8")
 
+        def local_failure(error: Exception) -> str:
+            if isinstance(error, HTTPError):
+                error = OperationRejected("response_invalid")
+            failure = operation_failure(error, operation="browser_gateway", phase="request", unconfirmed=True)
+            try:
+                self.logger.warning("Browser proxy transport failure: %s", failure.diagnostic())
+            except Exception:
+                pass
+            return "Error: " + operation_failure_payload(failure,
+                error_code="browser_gateway_unavailable", effect_state="unconfirmed")["message"]
+
         def request_proxy() -> str:
             request = urllib_request.Request(
                 url,
@@ -1633,8 +1647,21 @@ class ToolRegistry:
                 if result.get("is_error") and not output.startswith("Error:"):
                     return "Error: " + output
                 return output
+            except HTTPError as exc:
+                try:
+                    raw = exc.read(16 * 1024 + 1)
+                    detail = json.loads(raw) if len(raw) <= 16 * 1024 else None
+                except Exception:
+                    detail = None
+                message = public_operation_failure_message(detail)
+                if message:
+                    return "Error: " + message
+                known = {"request must be an object", "browser tool is not allowed", "arguments must be an object"}
+                if exc.code == 400 and exc.reason in known:
+                    return "Error: " + exc.reason
+                return local_failure(exc)
             except Exception as exc:
-                return f"Error: browser capability gateway failed ({type(exc).__name__})"
+                return local_failure(exc)
 
         return await asyncio.to_thread(request_proxy)
 

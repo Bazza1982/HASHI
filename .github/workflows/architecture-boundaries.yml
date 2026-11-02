@@ -154,6 +154,9 @@ jobs:
             tests/test_hchat_delivery_status.py \
             tests/test_runtime_debug_reporting.py \
             tests/test_workbench_hchat_channel_gate.py \
+            tests/test_browser_gateway_proxy.py \
+            tests/test_browser_proxy_failure_details.py \
+            tests/test_browser_gateway_phase1.py \
             tests/test_frontend_contracts.py \
             tests/test_runtime_media.py \
             tests/test_runtime_long.py \

@@ -11,9 +11,21 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
+import logging
 import secrets
 import threading
 from typing import Any
+from types import SimpleNamespace
+
+from orchestrator import ui_language
+from orchestrator.api_failures import operation_failure_payload
+from orchestrator.operation_failures import OperationRejected, operation_failure
+
+logger = logging.getLogger("HASHI.BrowserGateway")
+
+
+class _BrowserResultLimit(ValueError):
+    pass
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -32,6 +44,28 @@ class BrowserGatewayProxy:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
+
+            def failure(self, error, *, phase, dispatched, audit_context, status=502, code="browser_action_failed", explanation=""):
+                if dispatched and isinstance(error, (ValueError, TypeError)):
+                    error = OperationRejected("response_invalid")
+                failure = operation_failure(error, operation="browser_gateway", phase=phase, unconfirmed=dispatched)
+                try:
+                    logger.warning("Browser proxy failure: %s", failure.diagnostic())
+                except Exception:
+                    pass
+                payload = operation_failure_payload(failure, error_code=code,
+                    effect_state="unconfirmed" if dispatched else "not_started",
+                    locale=ui_language.configured_default_locale(SimpleNamespace(global_config=audit_context.get("global_config"))))
+                if explanation:
+                    payload["message"] = explanation + "\n" + payload["message"]
+                    payload["error"] = payload["message"]
+                response = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
 
             def do_POST(self) -> None:
                 if self.path != "/browser-tool":
@@ -63,6 +97,7 @@ class BrowserGatewayProxy:
                 if audit_context is None:
                     self.send_error(403)
                     return
+                phase, dispatched = "validate", False
                 try:
                     payload = json.loads(self.rfile.read(size))
                     if not isinstance(payload, dict):
@@ -74,6 +109,7 @@ class BrowserGatewayProxy:
                     if not isinstance(arguments, dict):
                         raise ValueError("arguments must be an object")
                     call_id = str(payload.get("tool_call_id") or "")
+                    phase, dispatched = "dispatch", True
                     future = asyncio.run_coroutine_threadsafe(
                         proxy.registry.execute_with_audit_context(
                             tool_name,
@@ -88,17 +124,29 @@ class BrowserGatewayProxy:
                     except FutureTimeout:
                         future.cancel()
                         raise TimeoutError("browser action timed out") from None
+                    phase = "presentation"
                     response = json.dumps(
                         {"output": result.output, "is_error": result.is_error},
                         ensure_ascii=False,
                     ).encode("utf-8")
                     if len(response) > MAX_RESPONSE_BYTES:
-                        raise ValueError("browser result exceeds gateway limit")
-                except (ValueError, TimeoutError, json.JSONDecodeError) as exc:
-                    self.send_error(400, str(exc))
+                        raise _BrowserResultLimit("browser result exceeds gateway limit")
+                except _BrowserResultLimit as exc:
+                    self.failure(exc, phase=phase, dispatched=dispatched, audit_context=audit_context,
+                        status=400, code="browser_result_too_large", explanation="browser result exceeds gateway limit")
                     return
-                except Exception:
-                    self.send_error(502, "browser action failed")
+                except TimeoutError as exc:
+                    self.failure(exc, phase=phase, dispatched=dispatched, audit_context=audit_context,
+                        status=400, code="browser_action_timed_out", explanation="browser action timed out")
+                    return
+                except ValueError as exc:
+                    if not dispatched:
+                        self.send_error(400, str(exc))
+                    else:
+                        self.failure(exc, phase=phase, dispatched=True, audit_context=audit_context)
+                    return
+                except Exception as exc:
+                    self.failure(exc, phase=phase, dispatched=dispatched, audit_context=audit_context)
                     return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
