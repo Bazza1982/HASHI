@@ -132,6 +132,7 @@ jobs:
             tests/test_admin_failure_details.py \
             tests/test_management_failure_details.py \
             tests/test_workbench_workzone_management.py \
+            tests/test_workzone_pending_projection.py \
             tests/test_workbench_guarded_deletion.py \
             tests/test_workzone.py \
             tests/test_runtime_workzone.py \

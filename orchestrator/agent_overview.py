@@ -144,6 +144,16 @@ def _workzone_overview(
         else active_state
     )
     revision = int(state.get("revision") or 0)
+    pending_activation = revision > active_revision
+    if pending_activation and isinstance(raw_active_state, Mapping):
+        # Saving and then reverting a change can leave a newer revision with
+        # the same effective configuration. Keep both real revisions; the
+        # indicator describes an unadopted scope change, not revision equality.
+        configuration_keys = ("slot_id", "path", "enabled", "label")
+        pending_activation = len(state["slots"]) != len(active_state["slots"]) or any(
+            any(saved[key] != adopted[key] for key in configuration_keys)
+            for saved, adopted in zip(state["slots"], active_state["slots"])
+        )
     active = workzone_module.active_workzone_slots(state)
     primary = workzone_module.primary_workzone_path(state)
     primary_item = next((item for item in state["slots"] if item["slot_id"] == "main"), None)
@@ -151,7 +161,7 @@ def _workzone_overview(
         "active": bool(active),
         "revision": revision,
         "active_revision": active_revision,
-        "pending_activation": revision > active_revision,
+        "pending_activation": pending_activation,
         "path": str(primary) if primary is not None else None,
         "path_kind": primary_item.get("path_kind") if primary_item else None,
         "execution_platform": primary_item.get("execution_platform") if primary_item else None,
