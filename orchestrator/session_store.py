@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 31
+    SCHEMA_VERSION = 32
 
     def __init__(
         self,
@@ -1709,6 +1709,8 @@ class SessionStore:
                 self._promote_legacy_session_workzones(connection)
             if stored_schema_version < 29:
                 self._revert_legacy_terminal_recovery(connection)
+            from orchestrator import attachment_catalogue
+            attachment_catalogue.install_schema(connection)
             pcm_forget_session.install_schema(connection)
             pcm_forget_preview.install_schema(connection)
             connection.execute(
@@ -9703,6 +9705,23 @@ class SessionStore:
         if row is None:
             raise SessionNotFound("agent history anchor was not found")
         return self._agent_history_boundary(dict(row))
+
+    def attachment_catalogue_page(self, *, owner_id, agent_ids, after=0, limit=50):
+        """Read only committed, owner-visible attachment messages across Agents."""
+        from orchestrator import attachment_catalogue
+        with self._connection() as connection:
+            page = attachment_catalogue.read_page(connection, instance_id=self.instance_id,
+                owner_id=owner_id, agent_ids=agent_ids, after=after, limit=limit)
+        return {**page, "messages": [self._message_dict(row) for row in page["messages"]]}
+
+    def attachment_catalogue_source(self, *, owner_id, agent_ids, session_id, message_id, attachment_id):
+        """Resolve one immutable historical source without selecting its Session."""
+        from orchestrator import attachment_catalogue
+        with self._connection() as connection:
+            source = attachment_catalogue.read_source(connection, instance_id=self.instance_id,
+                owner_id=owner_id, agent_ids=agent_ids, session_id=session_id,
+                message_id=message_id, attachment_id=attachment_id)
+        return {**source, "messages": [self._message_dict(row) for row in source["messages"]]}
 
     def agent_history_page(
         self,

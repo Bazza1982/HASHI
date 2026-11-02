@@ -10,6 +10,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -83,7 +84,7 @@ def verify(destination: Path, manifest: dict[str, Any]) -> list[str]:
     return failures
 
 
-def _copy_verified_stream(source: BinaryIO, target: Path, entry: dict[str, Any]) -> None:
+def _copy_verified_stream(source: BinaryIO, target: Path, entry: dict[str, Any], *, deadline=None) -> None:
     temporary = target.with_name(f".{target.name}.{os.getpid()}.partial")
     expected_size = int(entry["size_bytes"])
     expected_digest = str(entry["sha256"]).casefold()
@@ -92,6 +93,8 @@ def _copy_verified_stream(source: BinaryIO, target: Path, entry: dict[str, Any])
     try:
         with temporary.open("wb") as output:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                if deadline is not None and time.monotonic() > deadline:
+                    raise TimeoutError("Pinned model download exceeded its total deadline")
                 received += len(chunk)
                 if received > expected_size:
                     raise ValueError(f"extracted file exceeded pinned size for {target.name}")
@@ -193,10 +196,36 @@ def provision(
             _install_model(archive_path, destination, model)
 
 
+# Public companion contract; the manifest remains the single pin owner.
+load_manifest = _load_manifest
+
+
+def provision_huggingface(destination: Path, manifest: dict[str, Any]) -> None:
+    revisions = manifest["source"].get("huggingface_revisions", {})
+    for model in manifest["models"]:
+        name = str(model["name"])
+        revision = revisions.get(name, "")
+        if not re.fullmatch(r"[a-f0-9]{40}", revision):
+            raise ValueError("Pinned official mirror revision is unavailable")
+        folder = destination / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for entry in model["files"]:
+            target = folder / str(entry["path"])
+            if _verify_file(target, entry) is None:
+                continue
+            url = f"https://huggingface.co/PaddlePaddle/{name}/resolve/{revision}/{entry['path']}"
+            request = urllib.request.Request(url, headers={"User-Agent": "HASHI-OCR-Provisioner/1"})
+            deadline = time.monotonic() + 240
+            with urllib.request.urlopen(request, timeout=30) as response:
+                _copy_verified_stream(response, target, entry, deadline=deadline)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=paddle_ocr_manifest_path())
     parser.add_argument("--destination", type=Path, default=default_paddle_model_root())
+    parser.add_argument("--source", choices=("official", "huggingface"), default="official")
+    parser.add_argument("--model", action="append", default=[], help="Prepare/check only named pinned models.")
     parser.add_argument(
         "--archive-directory",
         type=Path,
@@ -213,6 +242,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     manifest = _load_manifest(args.manifest.resolve())
+    if args.model:
+        requested = set(args.model)
+        known = {model["name"] for model in manifest["models"]}
+        if not requested <= known:
+            raise ValueError("Unknown pinned model selection")
+        manifest = {**manifest, "models": [model for model in manifest["models"] if model["name"] in requested]}
     destination = args.destination.expanduser().resolve()
     archive_directory = (
         args.archive_directory.expanduser().resolve()
@@ -220,7 +255,10 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     if not args.check:
-        provision(destination, manifest, archive_directory=archive_directory)
+        if args.source == "huggingface":
+            provision_huggingface(destination, manifest)
+        else:
+            provision(destination, manifest, archive_directory=archive_directory)
     failures = verify(destination, manifest)
     if failures:
         for failure in failures:

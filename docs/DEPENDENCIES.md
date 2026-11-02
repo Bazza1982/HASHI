@@ -13,6 +13,7 @@ compatibility shim.
 | Development and tests | `python -m pip install -r requirements-dev.txt` | Standard profile and test tools |
 | Minimal source-checkout environment | `python -m pip install -e .` | Base Python dependencies; optional APIs, Remote, and TUI need their extras |
 | Every declared integration | `python -m pip install -e ".[all]"` | All optional profiles; potentially very large |
+| Isolated native OCR | `python scripts/provision_ocr_runtime.py` | Hashed OCR lock, fixed models and instance-owned selection; never Core |
 | HERV3 Privacy Level 2 | `python scripts/provision_privacy_runtime.py` | Separate Presidio/spaCy detector and English model; never Core |
 
 ## Feature extras

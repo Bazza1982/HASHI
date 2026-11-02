@@ -148,8 +148,21 @@ def default_ocr_model_root() -> Path:
     return base / "hashi" / "ocr" / f"tessdata_fast-{OCR_MODEL_REVISION}"
 
 
+def _ocr_platform_setting(key: str) -> str:
+    bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+    if not bridge_home:
+        return ""
+    try:
+        config = json.loads((Path(bridge_home) / "state" / "platform" / "ocr.json").read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return ""
+    if not isinstance(config, dict) or not isinstance(config.get(key, ""), str):
+        raise ValueError("OCR platform configuration is invalid")
+    return str(config.get(key, "")).strip()
+
+
 def default_paddle_model_root() -> Path:
-    override = str(os.environ.get("HASHI_PADDLE_OCR_MODEL_ROOT") or "").strip()
+    override = str(os.environ.get("HASHI_PADDLE_OCR_MODEL_ROOT") or "").strip() or _ocr_platform_setting("paddle_model_root")
     if override:
         return Path(override).expanduser()
     if os.name == "nt":
@@ -323,18 +336,7 @@ def _paddle_python_override() -> str:
     python = str(os.environ.get("HASHI_PADDLE_OCR_PYTHON") or "").strip()
     if python:
         return python
-    bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
-    if not bridge_home:
-        return ""
-    config_path = Path(bridge_home) / "state" / "platform" / "ocr.json"
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return ""
-    python = config.get("paddle_python", "")
-    if not isinstance(python, str):
-        raise ValueError("OCR platform paddle_python must be a string")
-    return python.strip()
+    return _ocr_platform_setting("paddle_python")
 
 
 def _paddle_runtime_ready() -> bool:

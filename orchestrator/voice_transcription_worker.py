@@ -108,6 +108,7 @@ class _ModelRuntime:
         *,
         model_size: str,
         language: str | None,
+        include_segments: bool = False,
     ) -> dict[str, Any]:
         try:
             model, device, compute_type = self._model(model_size, language)
@@ -119,14 +120,19 @@ class _ModelRuntime:
             beam_size=5,
             vad_filter=True,
         )
-        text = " ".join(
-            str(segment.text or "").replace("\x00", "").strip()
-            for segment in segments
-        ).strip()
+        parts, timed = [], []
+        for segment in segments:
+            parts.append(str(segment.text or "").replace("\x00", "").strip())
+            if include_segments:
+                timed.append({"start": segment.start, "end": segment.end, "text": parts[-1]})
+                if len(timed) > 20000:
+                    raise ValueError("transcription segment limit exceeded")
+        text = " ".join(parts).strip()
         if len(text.encode("utf-8")) > MAX_OUTPUT_BYTES // 2:
             raise ValueError("transcription text exceeded its protocol limit")
         return {
             "text": text,
+            **({"segments": timed} if include_segments else {}),
             "device": device,
             "compute_type": compute_type,
             "language": str(getattr(info, "language", "") or ""),
@@ -158,7 +164,11 @@ def _request_payload(raw: str | dict[str, Any]) -> dict[str, Any]:
     audio_path = Path(str(value.get("audio_path") or "")).resolve()
     if not audio_path.is_file():
         raise ValueError("audio file is unavailable")
+    include_segments = value.get("include_segments", False)
+    if not isinstance(include_segments, bool):
+        raise ValueError("include_segments must be a boolean")
     return {
+        "include_segments": include_segments,
         "id": request_id,
         "audio_path": audio_path,
         "model_size": model_size,
@@ -194,7 +204,10 @@ def _serve() -> int:
                 request["audio_path"],
                 model_size=request["model_size"],
                 language=request["language"],
+                **({"include_segments": True} if request["include_segments"] else {}),
             )
+            if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES - 1024:
+                raise ValueError("transcription result exceeded its protocol limit")
             payload = {
                 "version": PROTOCOL_VERSION,
                 "id": request_id,

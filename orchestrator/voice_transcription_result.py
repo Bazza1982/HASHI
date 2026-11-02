@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import uuid4
@@ -114,11 +115,46 @@ def transcription_failure(error: Exception, *, phase: str) -> TranscriptionFailu
 
 
 @dataclass(frozen=True)
+class TranscriptionSegment:
+    start: float
+    end: float
+    text: str
+
+
+def transcription_segments(value):
+    if not isinstance(value, (list, tuple)) or len(value) > 20000:
+        raise TranscriptionProtocolError()
+    result = []
+    previous = 0.0
+    size = 0
+    for row in value:
+        if not isinstance(row, dict):
+            raise TranscriptionProtocolError()
+        start, end, text = row.get("start"), row.get("end"), row.get("text")
+        if (isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+                or not math.isfinite(start) or not math.isfinite(end)
+                or start < previous or end < start or end > 8640000
+                or not isinstance(text, str)):
+            raise TranscriptionProtocolError()
+        size += len(text.encode("utf-8"))
+        if size > 524288:
+            raise TranscriptionProtocolError()
+        previous = float(start)
+        if text.strip():
+            result.append(TranscriptionSegment(float(start), float(end), text.strip()))
+    return tuple(result)
+
+
+@dataclass(frozen=True)
 class TranscriptionResult:
     text: str = ""
     failure: TranscriptionFailure | None = None
+    segments: tuple[TranscriptionSegment, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.segments, tuple) or not all(isinstance(row, TranscriptionSegment) for row in self.segments):
+            raise TypeError("invalid transcription segments")
         if not isinstance(self.text, str) or (self.failure is not None and not isinstance(self.failure, TranscriptionFailure)):
             raise TypeError("invalid transcription result")
         if self.failure is None and not self.text.strip():

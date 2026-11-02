@@ -26,7 +26,7 @@ from orchestrator import voice_transcription_worker
 from orchestrator.config_json import read_config_json
 from orchestrator.voice_transcription_result import (
     TranscriptionFailed, TranscriptionFailure, TranscriptionProtocolError,
-    TranscriptionResult, transcription_failure,
+    TranscriptionResult, transcription_failure, transcription_segments,
 )
 from orchestrator.compute_services import (
     ComputeReference, ComputeRequirements, ComputeServiceClient,
@@ -147,7 +147,7 @@ class VoiceTranscriber:
         """Compatibility text API; errors contain safe codes and a diagnostic reference."""
         return (await self.transcribe_result(audio_path)).legacy_text()
 
-    async def transcribe_result(self, audio_path: str | Path) -> TranscriptionResult:
+    async def transcribe_result(self, audio_path: str | Path, *, include_segments: bool = False) -> TranscriptionResult:
         """Return immutable facts for this call, independently of Engine and PAO state."""
         phase = "input"
         try:
@@ -163,7 +163,7 @@ class VoiceTranscriber:
                 external_python = _external_python()
                 if external_python:
                     phase = "external"
-                    text = await self._transcribe_external(audio_path, external_python)
+                    text = await self._transcribe_external(audio_path, external_python, include_segments=True) if include_segments else await self._transcribe_external(audio_path, external_python)
                 else:
                     loop = asyncio.get_running_loop()
                     phase = "model"
@@ -171,10 +171,17 @@ class VoiceTranscriber:
                         if self._model is None:
                             await loop.run_in_executor(None, self._load_model)
                     phase = "local"
-                    text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
+                    if include_segments:
+                        text = await loop.run_in_executor(None, lambda: self._transcribe_sync(str(audio_path), include_segments=True))
+                    else:
+                        text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
+            segments = ()
+            if include_segments and isinstance(text, dict):
+                segments = transcription_segments(text.get("segments", []))
+                text = text.get("text")
             if not isinstance(text, str):
                 raise TranscriptionProtocolError()
-            return TranscriptionResult(text=text)
+            return TranscriptionResult(text=text, segments=segments)
         except Exception as error:
             failure = transcription_failure(error, phase=phase)
             logger.exception("Transcription failure: %s", json.dumps(failure.as_dict()))
@@ -299,7 +306,7 @@ class VoiceTranscriber:
             return payload
         raise TranscriptionProtocolError("isolated transcription worker returned too many log lines")
 
-    async def _transcribe_external(self, audio_path: Path, python: str) -> str:
+    async def _transcribe_external(self, audio_path: Path, python: str, *, include_segments: bool = False):
         async with self._lock:
             process = await self._ensure_external_process(python)
             self._external_request_sequence += 1
@@ -310,6 +317,7 @@ class VoiceTranscriber:
                 "audio_path": str(audio_path.resolve()),
                 "model_size": self.model_size,
                 "language": self.language,
+                **({"include_segments": True} if include_segments else {}),
             }
             try:
                 process.stdin.write(
@@ -336,9 +344,9 @@ class VoiceTranscriber:
             str(payload.get("language") or "unknown"),
             float(payload.get("duration") or 0.0),
         )
-        return str(payload.get("text") or "").strip()
+        return payload if include_segments else str(payload.get("text") or "").strip()
 
-    def _transcribe_sync(self, audio_path: str) -> str:
+    def _transcribe_sync(self, audio_path: str, *, include_segments: bool = False):
         """Synchronous transcription (runs in executor thread)."""
         segments, info = self._model.transcribe(
             audio_path,
@@ -353,13 +361,15 @@ class VoiceTranscriber:
             f"(probability={lang_prob:.2f}), duration={info.duration:.1f}s"
         )
 
-        parts = []
+        parts, timed = [], []
         for segment in segments:
             parts.append(segment.text.strip())
+            if include_segments:
+                timed.append({"start": segment.start, "end": segment.end, "text": segment.text})
 
         text = " ".join(parts).strip()
         logger.info(f"Transcription complete: {len(text)} chars")
-        return text
+        return {"text": text, "segments": timed} if include_segments else text
 
 
 # Module-level singleton — shared by all agents

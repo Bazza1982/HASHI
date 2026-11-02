@@ -960,6 +960,10 @@ class WorkbenchApiServer:
                 "/api/v1/agents/{agent_id}/history",
                 self.handle_v1_agent_history,
             ),
+            ("GET", "/api/v1/attachment-catalogue", self.handle_v1_attachment_catalogue),
+            ("GET", "/api/v1/attachment-catalogue/source", self.handle_v1_attachment_catalogue_source),
+            ("GET", "/api/v1/file-content/capabilities", self.handle_v1_file_content_capabilities),
+            ("POST", "/api/v1/file-content", self.handle_v1_file_content),
         ):
             self.app.router.add_route(method, path, session_handler(handler))
         self.app.router.add_get(
@@ -1195,7 +1199,8 @@ class WorkbenchApiServer:
             return web.json_response({'ok':False,'error_code':'telegram_diagnostics_unavailable'},status=503)
         try:
             limit=int(request.query.get('limit','20'))
-            if not 1<=limit<=50:raise ValueError()
+            if not 1<=limit<=50:
+                raise ValueError()
             data=reader(agent,limit=limit)
             return web.json_response(data,headers={'Cache-Control':'no-store'})
         except (ValueError,TypeError):
@@ -1217,18 +1222,23 @@ class WorkbenchApiServer:
             claims=verify_tool_token(self.admin_token,request.headers.get('X-Hashi-Run-Question-Token',''),
                 instance_id=str(self.global_config.instance_id))
             body=await request.json()
-            if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
+            if not isinstance(body,dict):
+                raise QuestionError('question_payload_invalid',400)
             operation=body.pop('operation',None)
             if operation=='create':
                 question=self._questions().create(request_id=claims['request_id'],agent_id=claims['agent_id'],payload=body)
             elif operation=='get':
                 question=self._questions().get_answer(request_id=claims['request_id'],agent_id=claims['agent_id'],
                     question_id=str(body.get('question_id') or ''))
-            else:raise QuestionError('question_operation_invalid',400)
+            else:
+                raise QuestionError('question_operation_invalid',400)
             return web.json_response({'ok':True,'question':question},headers={'Cache-Control':'no-store'})
-        except QuestionError as exc:return self._question_error(exc)
-        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
-        except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
+        except QuestionError as exc:
+            return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:
+            return self._v1_error(exc)
+        except (ValueError,TypeError):
+            return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
 
     def _question_for_display(self, question, owner, *, stop_complete=False):
         from orchestrator import ui_language
@@ -1258,21 +1268,26 @@ class WorkbenchApiServer:
     async def handle_session_questions(self, request):
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
-        if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        if owner is None:
+            return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
         try:
             result=self._questions().list(session_id=str(request.match_info['session_id']),owner_id=owner)
             result=[self._question_for_display(question, owner) for question in result]
             return web.json_response({'ok':True,'questions':result},headers={'Cache-Control':'no-store'})
-        except QuestionError as exc:return self._question_error(exc)
-        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
+        except QuestionError as exc:
+            return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:
+            return self._v1_error(exc)
 
     async def handle_question_answer(self, request):
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
-        if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        if owner is None:
+            return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
         try:
             body=await request.json()
-            if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
+            if not isinstance(body,dict):
+                raise QuestionError('question_payload_invalid',400)
             question=self._questions().answer(session_id=str(request.match_info['session_id']),owner_id=owner,
                 question_id=str(request.match_info['question_id']),payload=body)
             if (question.get('answer') or {}).get('system_action') == 'stop':
@@ -1290,9 +1305,12 @@ class WorkbenchApiServer:
                     return web.json_response({'ok': False, 'error_code': 'question_stop_unconfirmed'}, status=503)
             question = self._question_for_display(question, owner, stop_complete=True)
             return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
-        except QuestionError as exc:return self._question_error(exc)
-        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
-        except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
+        except QuestionError as exc:
+            return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:
+            return self._v1_error(exc)
+        except (ValueError,TypeError):
+            return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
 
     def _learn_reply_route(self, text: str, reply_route: dict) -> None:
         """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
@@ -7309,6 +7327,8 @@ class WorkbenchApiServer:
                     "event_schema_version": "1.0",
                     "control_schema_version": "1.0",
                     "attachment_schema_version": "1.1",
+                    "attachment_catalogue": {"version": 1, "incremental": True, "historical_source": True},
+                    "file_content": {"version": 1, "read_only": True, "explicit_media_processing": True},
                     "message_content_schema_version": "1.2",
                     "attachment_upload_transport": (
                         "direct-multipart-or-octet-stream"
@@ -7594,7 +7614,6 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
-        manager = runtime.backend_manager
         backend = str(getattr(runtime.config, "active_backend", "") or "")
         from orchestrator.flexible_backend_registry import get_supported_privacy_levels
         from orchestrator.runtime_privacy import current_privacy_level
@@ -8047,6 +8066,123 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": True, "sessions": rows, "next_cursor": None}
             )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    def _file_content_owner(self):
+        from orchestrator.file_content_service import FileContentService
+        service = getattr(self, "_file_content_service", None)
+        if service is None:
+            service = self._file_content_service = FileContentService()
+        return service
+
+    async def handle_v1_file_content_capabilities(self, request):
+        if self._v1_owner_id(request) is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            return web.json_response({"ok": True, **await asyncio.to_thread(self._file_content_owner().capabilities)})
+        except Exception:
+            return web.json_response({"ok": False, "error_code": "fileshare_processing_unavailable"}, status=503)
+
+    async def handle_v1_file_content(self, request):
+        from urllib.parse import unquote
+        from orchestrator.file_content_service import FileContentError
+        if not self._check_admin_auth(request) or self._v1_owner_id(request) is None:
+            return web.json_response({"ok": False, "error_code": "fileshare_processing_denied"}, status=403)
+        try:
+            if request.headers.get("Content-Type", "").split(";", 1)[0] != "application/octet-stream":
+                raise FileContentError("fileshare_content_invalid", 415)
+            payload = await request.read()
+            result = await self._file_content_owner().process(payload,
+                filename=unquote(request.headers.get("X-File-Name", "")),
+                operation=request.headers.get("X-File-Operation", ""),
+                allow_compute=request.headers.get("X-Allow-Configured-Compute") == "1")
+            return web.json_response({"ok": True, "instance_id": self.session_store.instance_id, **result})
+        except FileContentError as error:
+            return web.json_response({"ok": False, "error_code": error.code, "code": error.code}, status=error.status)
+        except web.HTTPRequestEntityTooLarge:
+            return web.json_response({"ok": False, "error_code": "fileshare_content_limit"}, status=413)
+        except Exception:
+            return web.json_response({"ok": False, "error_code": "fileshare_processing_failed"}, status=500)
+
+    async def handle_v1_attachment_catalogue_source(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            agents = self._load_agent_rows(include_inactive=self._check_admin_auth(request))
+            if self._is_governed_profile():
+                user = self._enterprise_user_from_request(request)
+                if user is None:
+                    return self._v1_error(ValueError("not authenticated"), status=401)
+                agents = self._filter_enterprise_agent_rows_for_user(user, agents)
+            source = await asyncio.to_thread(self.session_store.attachment_catalogue_source,
+                owner_id=owner, agent_ids=[str(row["name"]) for row in agents],
+                session_id=request.query.get("session_id"), message_id=request.query.get("message_id"),
+                attachment_id=request.query.get("attachment_id"))
+            messages = await asyncio.to_thread(build_agent_history_projection,
+                self.session_store, messages=source["messages"], owner_id=owner)
+            result = {**source, "messages": messages, "instance_id": self.session_store.instance_id}
+            if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 2 * 1024 * 1024:
+                raise ValueError("attachment source context exceeds its limit")
+            if not any(row.get("message_id") == source["target_message_id"] for row in messages):
+                raise LookupError("attachment source unavailable")
+            return web.json_response({"ok": True, **result})
+        except LookupError:
+            return web.json_response({"ok": False, "error_code": "fileshare_source_unavailable"}, status=404)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_attachment_catalogue(self, request):
+        """One bounded durable feed; the browser need not visit any Agent."""
+        from orchestrator import attachment_catalogue
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            rows = self._load_agent_rows(include_inactive=self._check_admin_auth(request))
+            if self._is_governed_profile():
+                user = self._enterprise_user_from_request(request)
+                if user is None:
+                    return self._v1_error(ValueError("not authenticated"), status=401)
+                rows = self._filter_enterprise_agent_rows_for_user(user, rows)
+            agents = sorted({str(row["name"]) for row in rows})
+            names = {str(row["name"]): str(row.get("display_name") or row["name"]) for row in rows}
+            instance = self.session_store.instance_id
+            key = self._agent_history_cursor_key()
+            cursor = request.query.get("cursor")
+            after = attachment_catalogue.decode_cursor(cursor, instance=instance, owner=owner,
+                agents=agents, key=key) if cursor else 0
+            limit = int(request.query.get("limit") or 50)
+            page = await asyncio.to_thread(self.session_store.attachment_catalogue_page,
+                owner_id=owner, agent_ids=agents, after=after, limit=limit)
+            def project():
+                projected = []
+                size = 0
+                next_after = page["next_after"]
+                complete = page["complete"]
+                for message in page["messages"]:
+                    result = build_agent_history_projection(self.session_store, messages=[message], owner_id=owner)
+                    for row in result:
+                        row["agent_id"] = message["agent_id"]
+                        row["agent_name"] = names.get(message["agent_id"], message["agent_id"])
+                        # Legacy history lacks a trustworthy incarnation snapshot.
+                        # Preserve Session custody rather than assigning it to a
+                        # newly-created Agent that happens to reuse the name.
+                        row["agent_identity"] = "legacy-session:" + message["session_id"]
+                        encoded_size = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+                        if size + encoded_size > 2 * 1024 * 1024:
+                            if not projected:
+                                raise ValueError("attachment catalogue item exceeds its limit")
+                            return projected, int(message["catalogue_sequence"]) - 1, False
+                        size += encoded_size
+                        projected.append(row)
+                return projected, next_after, complete
+            messages, next_after, complete = await asyncio.to_thread(project)
+            return web.json_response({"ok": True, "catalogue_version": 1, "instance_id": instance,
+                "messages": messages, "history_complete": complete,
+                "next_cursor": attachment_catalogue.encode_cursor(next_after, instance=instance,
+                    owner=owner, agents=agents, key=key)})
         except Exception as exc:
             return self._v1_error(exc)
 

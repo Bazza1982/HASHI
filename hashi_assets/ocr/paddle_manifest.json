@@ -8,7 +8,14 @@
   "source": {
     "owner": "PaddlePaddle",
     "base_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0",
-    "release": "paddle3.0.0"
+    "release": "paddle3.0.0",
+    "huggingface_revisions": {
+      "PP-OCRv6_medium_det": "8e0f56fb2ef86b461d99cfc7ac5c137738985f61",
+      "PP-OCRv6_medium_rec": "e5a92bcbc5cc1b494628e458d267778f0704fd7c",
+      "korean_PP-OCRv5_mobile_rec": "c02ecaf1f22bfd1c618cce154fd19185b47e663a",
+      "eslav_PP-OCRv5_mobile_rec": "7553801264d3379d8d2e854971989e5e26c22e03",
+      "arabic_PP-OCRv5_mobile_rec": "33d91636a65dca87f5562cc48860332ae367ee1b"
+    }
   },
   "license": "Apache-2.0",
   "default_languages": [

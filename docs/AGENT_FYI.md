@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- 文件库：PAO附件目录按owner/Agent签名游标补历史，不依赖页面；来源定位不换主Session。OCR/转写只读且显式启用，真实分段不造时间；独立OCR锁/模型不进Core。[契约](HASHI_FILE_LIBRARY_CONTENT.md)。
+
 - Fingerprint默认OFF、按Run冻结；开启Shell须持久审计；marker用护栏原子替换/Manifest，绝对路径限可信Workzone，不重放写入。[PAO](HASHI_FINGERPRINT.md)。
 
 - PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，显式授权原生音频不等转写；原因跨入口保留；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
