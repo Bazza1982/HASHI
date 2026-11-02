@@ -77,6 +77,16 @@ Workbench validates the bounded public fields and clears old details when a
 different error occurs. Call hangup retains its unknown end state and cause.
 Diagnostic sink failures cannot replace the public error response.
 
+Workzone validation retains finite reasons for missing/non-folder, duplicate,
+home-workspace and native-Windows path failures without changing path rules.
+Protected Workzone, parked-topic and local /sys mutations retain pre-write
+read/validation versus unconfirmed persistence failures. Original owner,
+revision, local-only and confirmation checks are unchanged; a missing write
+acknowledgement never rolls back or replays the owner's operation. Workbench
+carries the safe detail through its management relay and dialog/batch notice.
+Known pre-write failures count as failed, while unconfirmed writes stop a batch
+and retain its actual completed/remaining counts.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed

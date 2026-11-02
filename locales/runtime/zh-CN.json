@@ -1,4 +1,10 @@
 {
+  "operation.failure.reason.workzone_path_missing": "未提供工作区目录。",
+  "operation.failure.reason.workzone_windows_path_required": "此 Windows 实例需要 Windows 目录路径或 WSL UNC 路径。",
+  "operation.failure.reason.workzone_path_is_file": "选中的路径是文件，请选择目录。",
+  "operation.failure.reason.workzone_path_not_directory": "选中的目录不存在或无法访问。",
+  "operation.failure.reason.workzone_path_is_agent_home": "这个目录就是代理的原始工作区，可关闭 Workzone 返回。",
+  "operation.failure.reason.workzone_path_duplicate": "这个目录已经绑定到其他工作区槽位。",
   "locale": "zh-CN",
   "display_name": "Chinese (Simplified)",
   "native_name": "简体中文",

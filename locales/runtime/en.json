@@ -1,4 +1,10 @@
 {
+  "operation.failure.reason.workzone_path_missing": "No workspace folder was supplied.",
+  "operation.failure.reason.workzone_windows_path_required": "This Windows instance requires a Windows folder path or a WSL UNC path.",
+  "operation.failure.reason.workzone_path_is_file": "The selected path is a file. Select a folder.",
+  "operation.failure.reason.workzone_path_not_directory": "The selected folder does not exist or is not accessible.",
+  "operation.failure.reason.workzone_path_is_agent_home": "The folder is already the Agent home workspace. Use Workzone off to return there.",
+  "operation.failure.reason.workzone_path_duplicate": "This folder is already assigned to another Workzone slot.",
   "locale": "en",
   "display_name": "English",
   "native_name": "English",

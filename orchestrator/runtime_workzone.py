@@ -644,7 +644,8 @@ def _validate_unique_path(
         if item["slot_id"] == slot:
             continue
         if Path(item["path"]).resolve() == path.resolve():
-            raise ValueError(
+            raise workzone_module.WorkzonePathError(
+                "workzone_path_duplicate",
                 ui_language.tr("workzone.path_duplicate", slot=item["slot_id"])
             )
 

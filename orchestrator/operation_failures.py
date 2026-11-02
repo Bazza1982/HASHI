@@ -37,7 +37,9 @@ class OperationRejected(RuntimeError):
 def _reason(error: Exception) -> str:
     from orchestrator.session_store import SessionConflict, SessionNotFound
 
-    if isinstance(error, OperationRejected):
+    from orchestrator.workzone_errors import WorkzonePathError
+
+    if isinstance(error, (OperationRejected, WorkzonePathError)):
         return error.reason
 
     if isinstance(error, (ConfigConflictError, SessionConflict)):

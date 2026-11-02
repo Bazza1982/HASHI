@@ -130,6 +130,11 @@ jobs:
           python -m pytest -q \
             tests/test_workbench_primary_session_metadata.py \
             tests/test_admin_failure_details.py \
+            tests/test_management_failure_details.py \
+            tests/test_workbench_workzone_management.py \
+            tests/test_workbench_guarded_deletion.py \
+            tests/test_workzone.py \
+            tests/test_runtime_workzone.py \
             tests/test_workbench_agent_management.py \
             tests/test_agent_deletion.py \
             tests/contract/test_agent_creation.py \

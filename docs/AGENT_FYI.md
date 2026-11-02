@@ -8,7 +8,7 @@
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys + parked deletion: authenticated, revision-checked;
+- Task/local /sys + parked deletion: auth/revision checked; retain causes and unknown writes;
   /sys excludes global/permanent, parked needs guarded Worker, keeps chat.
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
