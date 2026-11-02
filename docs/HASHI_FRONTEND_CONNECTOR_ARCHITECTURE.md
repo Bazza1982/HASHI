@@ -32,6 +32,13 @@ current-Run, content-integrity and exact-file fences remain unchanged. Native
 voice admission retains its existing transcript and retention policy. See the
 [October 10 repair](repairs/TELEGRAM_MEDIA_ADMISSION_20261010.md).
 
+Attachment captions are human text: input `attachment_ref` and output
+`media_ref` preserve paragraph breaks (LF/CRLF) and tabs. Their existing 4096
+and 512 character limits stay unchanged. Other control characters are rejected
+with a safe reason code, never by echoing the caption. This exception applies
+only to captions; connector IDs, attachment IDs and authority fields retain
+their stricter validation. Connector/live adoption is a separate gate.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed

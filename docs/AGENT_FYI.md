@@ -4,7 +4,7 @@
 - 个人L1：认证前端按钮决定、自动弹窗、无重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
   Adapter配超时，勿写只读视图；续跑日志分epoch、保留不可变检查；前端实测独立验收。
   [权限状态/决定](permissions/IMPLEMENTATION_STATUS.md)。
-- Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+- 图片说明支持换行/制表；长度与身份校验不变。Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

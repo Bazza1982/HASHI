@@ -100,6 +100,26 @@ def _string(value: Any, name: str, *, maximum: int = 512) -> str:
     return normalized
 
 
+class FrontendCaptionError(ValueError):
+    """Safe caption reason, retaining the existing ValueError catch contract."""
+
+    def __init__(self, error_code: str, *, maximum: int):
+        super().__init__("caption is invalid")
+        self.error_code = error_code
+        self.maximum = maximum
+
+
+def _caption(value: Any, *, maximum: int) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise FrontendCaptionError("caption_empty", maximum=maximum)
+    if len(normalized) > maximum:
+        raise FrontendCaptionError("caption_too_long", maximum=maximum)
+    if any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 for char in normalized):
+        raise FrontendCaptionError("caption_control_character", maximum=maximum)
+    return normalized
+
+
 def _token(value: Any, name: str, *, maximum: int = 256) -> str:
     normalized = _string(value, name, maximum=maximum)
     if not _TOKEN.fullmatch(normalized):
@@ -321,7 +341,7 @@ def normalize_frontend_operation(value: Any) -> dict[str, Any]:
                         ),
                         "ordinal": ordinal,
                         "caption": (
-                            _string(item.get("caption"), "caption", maximum=4096)
+                            _caption(item.get("caption"), maximum=4096)
                             if item.get("caption")
                             else None
                         ),
@@ -785,7 +805,7 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
             "group_id": _token(raw.get("group_id"), "group_id"),
             "attachment_id": _token(raw.get("attachment_id"), "attachment_id"),
             "role": str(raw.get("role") or "").casefold(),
-            "caption": _string(raw.get("caption"), "caption", maximum=512) if raw.get("caption") else None,
+            "caption": _caption(raw.get("caption"), maximum=512) if raw.get("caption") else None,
         }
     else:
         raise ValueError(f"unsupported content component type: {component_type}")
