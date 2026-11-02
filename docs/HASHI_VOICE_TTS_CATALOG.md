@@ -155,8 +155,11 @@ result is a claim of deployed end-to-end recovery.
 
 A service may declare optional `language_voices`, a map from `zh`, `en`
 and `ja` to catalogue voice IDs. Every mapped voice must be enabled on this
-platform, belong to that service and declare the matching language. This
-explicit policy precedes generic English compatibility and catalogue order.
+platform, belong to that service and declare the matching language. An explicit
+voice already native to the detected language is retained with its options.
+Otherwise this language default precedes generic English compatibility and
+catalogue order, preserving character changes between languages without
+overriding a user's same-language selection.
 The existing language assessment still chooses one voice per spoken segment;
 the input locale resolves Han-only ambiguity after a Japanese segment.
 

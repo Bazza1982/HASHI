@@ -96,3 +96,34 @@ Live HASHI3 and Workbench validation was recorded separately after hot adoption;
 the user reported acceptance success on 2026-10-15. The subsequent free TTS
 deployment expansion is governed by
 [the free TTS deployment decision](FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
+
+## 2026-11-02 advanced voice repair
+
+The MSI user requested repair after exact diagnosis: selecting an advanced
+voice saved the choice but its prerecorded entry was absent, and the service's
+Chinese language default replaced other explicitly selected Chinese voices.
+
+A selected voice native to the detected language now retains both its identity
+and provider options. Per-language character defaults still resolve missing or
+non-native selections ahead of generic English compatibility. Existing
+Chinese/English/Japanese character switching remains covered by the owning
+tests; a fixed language default is not permission to replace another
+same-language manual choice.
+
+The offline preview generator reads the supplied instance catalogue and builds
+its configured service adapter, rather than enumerating only class-level
+presets. It invokes the exact provider/voice directly, without language
+adaptation or provider fallback. Resuming requires exact provider, voice, locale,
+script and verified OGG/MP3 provenance; a still-valid file with stale identity is
+regenerated. Credentials and instance paths are not copied into the bundle.
+
+The repair adds both renderer formats for the 23 advanced MiniCPM voices in the
+MSI catalogue, preserving the original 62 shipped files. Canonical product
+sample text is the only synthesis input. Generated samples are product preview
+assets, not archives of conversation speech.
+
+Focused red evidence records the manual voice being replaced and the dynamic
+alias being rejected by the generator. Source tests, real model generation,
+manifest/audio verification, adoption and actual frontend publication are
+reported separately. The source candidate does not imply the active Functions
+generation has changed; MSI's user owns any necessary hot reboot.

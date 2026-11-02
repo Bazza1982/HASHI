@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+- Advanced speech repair: an explicit native-language voice now takes precedence
+  over service language defaults; cross-language character mapping remains.
+  The prerecorded-sample generator loads the instance catalogue and its adapters,
+  and resumes only exact matching samples. Source/assets and running adoption
+  remain separate facts; see
+  [voice routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md#2026-11-02-advanced-voice-repair).
+
 - Long-speech Functions candidate: explicit nullable service bounds enable complete
   reply streaming; old running validators reject this configuration. Adopt code
   before data. Workbench delivery and native `/say` remain separate consumers;
