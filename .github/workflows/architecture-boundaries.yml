@@ -143,4 +143,9 @@ jobs:
             tests/test_compute_services.py \
             tests/test_voice_catalog.py \
             tests/test_voice_transcriber.py \
-            tests/test_agent_fyi.py
+            tests/test_agent_fyi.py \
+            tests/test_run_questions.py \
+            tests/test_run_question_connectors.py \
+            tests/test_run_questions_review.py \
+            tests/test_run_questions_repair.py \
+            tests/test_permission_questions.py

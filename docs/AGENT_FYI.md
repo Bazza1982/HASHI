@@ -98,7 +98,7 @@ Access failures differ from integrity mismatches; diagnostics omit paths.
 Telegram proactive routes: owner-only; revalidate actor/egress after restart.
 Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain
 text. Offer original-task continuation/Agent stop. `unknown` never cancels/retries;
-Codex expiry keeps authenticated partial answers.
+Codex expiry keeps authenticated partial answers. 无效答复不代表问题结束；按实际状态提示，结果不明先刷新核对。
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md), [questions](HASHI_RUN_QUESTIONS.md).
 
 CURRENT MESSAGE CONTEXT separates source/assurance/authority/destination.

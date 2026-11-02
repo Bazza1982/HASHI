@@ -1,5 +1,16 @@
 # Asynchronous questions within a Run
 
+## November 2: accurate answer rejection
+
+Telegram callbacks and text replies distinguish invalid answers, already saved
+answers, expiration, cancellation, an unavailable scoped question, and changed
+Session state. Rejection leaves the pending card and its Run intact. Only PAO's
+actual terminal state may be rendered as ended. An unconfirmed outcome asks the
+user to refresh and check the saved answer; it does not claim failure or
+replay an answer/Stop. Error codes map to bounded translations in all four
+frontend locales; exception text and answer content are never echoed.
+Answer validation, identity checks and permission rules remain with PAO.
+
 ## October 28: question-card controls
 
 Approved scope: implement on the current HASHI3 branch. PAO persists one
