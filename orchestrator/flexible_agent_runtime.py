@@ -1141,6 +1141,9 @@ class FlexibleAgentRuntime:
         )
 
         request_metadata = dict(request_metadata or {})
+        from orchestrator.fingerprint.runtime import admission_policy
+        # Policy is PAO-owned, never accepted from frontend/model metadata.
+        request_metadata["fingerprint_policy"] = admission_policy(self)
         transient_live_frames = pop_live_frames_metadata(request_metadata)
         admission_metadata = dict(request_metadata)
         # A delayed Telegram Update may only pass the freshness gate while the
@@ -1677,6 +1680,14 @@ class FlexibleAgentRuntime:
             if request_session_id != str(session["session_id"]):
                 raise SessionConflict("admission receipt Session changed")
             request_id = accepted.request_id
+            from orchestrator.fingerprint.models import FingerprintPolicy
+            admitted_run = await asyncio.to_thread(
+                self.session_store.get_run, accepted.run_id, owner_id=session_owner
+            )
+            # Includes the transaction winner on a concurrent idempotent retry.
+            metadata["fingerprint_policy"] = FingerprintPolicy.from_snapshot(
+                admitted_run.get("fingerprint_policy")
+            ).snapshot()
         from orchestrator.frontend_agent_presence import schedule_agentpresence_message_received
 
         schedule_agentpresence_message_received(

@@ -2536,6 +2536,12 @@ class FlexibleBackendManager:
                 "attachment_root": str(session_store.attachment_files_root),
             }
         request_metadata = request_meta.get("request_metadata")
+        from orchestrator.fingerprint.models import FingerprintPolicy
+        context["fingerprint_policy"] = FingerprintPolicy.from_snapshot(
+            (request_metadata or {}).get("fingerprint_policy")
+            if isinstance(request_metadata, dict) else None
+        ).snapshot()
+        context["instance_id"] = str(getattr(getattr(runtime, "global_config", None), "instance_id", ""))
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)
         context.pop("agent_activity_context", None)

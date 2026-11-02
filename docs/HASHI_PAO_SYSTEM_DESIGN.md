@@ -7,6 +7,17 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-10-31 Artifact Fingerprint
+
+PAO owns the default-OFF artifact-provenance policy, its immutable persisted Run
+snapshot, trusted operation identity and Canonical Audit association. Functions
+capture controlled tool effects inside the existing execution lease. Portable
+markers/manifests are derived projections; failure after a committed mutation
+never makes that mutation automatically replayable. Native/interval evidence
+and supervised gaps retain their actual strength and do not grant filesystem
+rights. Selective unsigned export is not author authentication. See the
+[implementation decision and coverage](HASHI_FINGERPRINT.md).
+
 ### 2026-10-30 Telegram user access (HASHI3 foundation only)
 
 PAO's intended authorization is additive: the configured primary and other
