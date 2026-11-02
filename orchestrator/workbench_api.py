@@ -15292,10 +15292,12 @@ class WorkbenchApiServer:
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
+        phase = "session"
         try:
             agent = str(request.match_info["name"])
             explicit = str(request.query.get("session_id") or "")
             session = self.session_store.get_session(explicit, owner_id=owner, agent_id=agent, include_deleted=False) if explicit else self.session_store.resolve_primary_session(owner_id=owner, agent_id=agent)
+            phase = "validate"
             limit = int(request.query.get("limit", 50))
             if not 1 <= limit <= 200:
                 raise ValueError("invalid projection limit")
@@ -15306,13 +15308,23 @@ class WorkbenchApiServer:
                 raise ValueError("invalid projection cursor")
             if history_generation is not None and history_generation < 1:
                 raise ValueError("invalid history generation")
+            phase = "read"
             projection = build_chat_projection(self.session_store, session=session, owner_id=owner, limit=limit,
                 offset=offset, after_message_ordinal=cursor, known_history_generation=history_generation, include_command_ui=True)
             response = web.json_response({"ok": True, "chat_projection_version": 2, "projection": projection})
             response.headers["Cache-Control"] = "no-store"
             return response
         except Exception as exc:
-            return self._v1_error(exc)
+            from orchestrator.operation_failures import OperationRejected
+            if isinstance(exc, (SessionNotFound, SessionConflict)) or (
+                phase == "validate" and isinstance(exc, (ValueError, TypeError))
+            ):
+                return self._v1_error(exc)
+            if phase == "read" and isinstance(exc, (ValueError, TypeError)):
+                exc = OperationRejected("response_invalid")
+            return self._admin_operation_failure_response(request, exc,
+                operation="chat_projection", phase=phase, readonly=True,
+                error_code="chat_projection_unavailable", status=503)
 
     async def handle_reboot_operation(self, request):
         owner = self._v1_owner_id(request)

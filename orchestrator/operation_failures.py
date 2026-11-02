@@ -36,6 +36,7 @@ class OperationRejected(RuntimeError):
 
 def _reason(error: Exception) -> str:
     from orchestrator.session_store import SessionConflict, SessionNotFound
+    from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
 
     from orchestrator.workzone_errors import WorkzonePathError
 
@@ -48,6 +49,13 @@ def _reason(error: Exception) -> str:
         return "durability_unconfirmed"
     if isinstance(error, SessionNotFound):
         return "scope_unavailable"
+    if isinstance(error, FunctionWorkerRemoteError):
+        remote_type = error.error.get("type") if isinstance(error.error, dict) else None
+        return {
+            "PermissionError": "access_denied", "FileNotFoundError": "missing_file",
+            "TimeoutError": "timed_out", "ConnectionError": "connection_failed",
+            "ConnectionResetError": "connection_failed", "BrokenPipeError": "connection_failed",
+        }.get(remote_type, "internal_error") if isinstance(remote_type, str) else "internal_error"
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         return ("authentication_rejected" if status in {401, 403} else "rate_limited" if status == 429

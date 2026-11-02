@@ -1386,6 +1386,15 @@ Failure returns `ok: false`, a stable `chat_projection_*` error code and
 command handling, command audit capture or model admission. The envelope and
 transcript body are not written to command or failure logs.
 
+Read failures now retain the finite cause, failure phase and a correlated public
+reference through both shared HTTP and Worker RPC paths. Raw exception text,
+transcript paths and content never cross this boundary. The result explicitly
+reports a read-only failure; it does not fall through to chat or submit an action.
+Workbench relays only the validated public explanation, retains cached messages,
+and scopes the notice to the affected conversation. A later successful read clears
+the notice even when its snapshot or empty delta has not changed. Existing query,
+authentication, polling cadence, failure thresholds and connection fences remain.
+
 HTTP and Worker callers share `build_chat_projection`, so message identity,
 context fences, byte cursors, half-record handling and recent-Run discovery
 retain one implementation. Reading creates no Messages, Runs or frontend reading

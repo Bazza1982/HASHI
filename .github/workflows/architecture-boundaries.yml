@@ -143,6 +143,7 @@ jobs:
             tests/test_workbench_scheduler_api.py \
             tests/test_tool_gateway_mcp.py \
             tests/test_chat_projection_transport.py \
+            tests/test_projection_failure_details.py \
             tests/test_frontend_contracts.py \
             tests/test_runtime_media.py \
             tests/test_runtime_long.py \
