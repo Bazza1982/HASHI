@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_workbench_agent_management import _server, _Request
+from tests.test_workbench_agent_management import _server, _Request, _installed_codex
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,8 @@ async def test_admin_failure_before_dispatch_does_not_claim_the_action_was_submi
 
 
 @pytest.mark.asyncio
-async def test_created_agent_is_not_reported_uncreated_when_start_acknowledgment_fails(tmp_path):
+async def test_created_agent_is_not_reported_uncreated_when_start_acknowledgment_fails(tmp_path, monkeypatch):
+    _installed_codex(monkeypatch)
     starts = []
     async def timed_out(name):
         starts.append(name)

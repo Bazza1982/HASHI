@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,19 @@ class _Request:
 
     async def json(self):
         return self._payload
+
+
+def _installed_codex(monkeypatch):
+    """Creation tests model an installed CLI without depending on the host."""
+    original = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda command, *args, **kwargs:
+        "/test-fixture/bin/codex" if Path(str(command)).stem == "codex"
+        else original(command, *args, **kwargs))
+
+
+@pytest.fixture(autouse=True)
+def installed_codex_fixture(monkeypatch):
+    _installed_codex(monkeypatch)
 
 
 def _config(agent_active: bool = False) -> dict:
