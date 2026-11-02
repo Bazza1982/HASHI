@@ -80,6 +80,8 @@ def test_grant_recovery_renew_idempotency_expiry_and_late_reply(native):
     assert store.media_capture_renew(owner_id="user:7", binding=scope,
         **auth(lease), sequence=2, now=1005)["granted"] is False
     assert _claim(store, scope, now=1020)["granted"] is False
+    store.media_capture_release(owner_id="user:7",binding=scope,
+        **auth(lease),stopped=True,now=1020)
     replacement = _claim(store, scope, "capture-b", now=1021)
     assert replacement["granted"] and replacement["epoch"] > lease["epoch"]
     # A late stop acknowledgement for the old capture cannot stop its replacement.
@@ -155,7 +157,7 @@ def test_standby_preemption_commits_pause_before_any_call_grant(native):
         standby_id=control["standby_id"])["lifecycle"] == "PAUSED"
 
 
-def test_call_waits_for_standby_expiry_barrier_and_cannot_renew_after_it(native):
+def test_expired_standby_stays_locked_until_stop_receipt_and_cannot_renew(native):
     store, scope = native
     binding = {k:v for k,v in scope.items() if k != "client_id"}
     control = store.standby_control(owner_id="user:7",body={
@@ -167,6 +169,9 @@ def test_call_waits_for_standby_expiry_barrier_and_cannot_renew_after_it(native)
     lease = _claim(store,scope,"capture-standby","standby",standby_id=control["standby_id"],
         standby_epoch=control["epoch"])
     assert not _claim(store,scope,"capture-call","call",1004)["granted"]
+    assert not _claim(store,scope,"capture-call","call",1015)["granted"]
+    store.media_capture_release(owner_id="user:7",binding=scope,
+        **auth(lease),stopped=True,now=1015)
     assert _claim(store,scope,"capture-call","call",1015)["granted"]
     assert not store.media_capture_release(owner_id="user:7",binding=scope,
         **auth(lease),stopped=True,now=1016)["granted"]
@@ -260,3 +265,31 @@ def test_native_standby_cannot_bypass_control_lifecycle_or_epoch(native):
     with pytest.raises(CaptureError,match="capture_standby_scope_changed"):
         _claim(store,scope,"capture-standby","standby",standby_id=control["standby_id"],
             standby_epoch=control["epoch"]+1)
+
+def test_expiry_is_not_a_physical_stop_receipt(native):
+    store,scope = native
+    lease = _claim(store,scope)
+    expired = store.media_capture_status(owner_id="user:7",binding=scope,
+        **auth(lease),now=1015)
+    assert not expired["granted"]
+    waiting = _claim(store,{**scope,"client_id":"another-browser"},"capture-phone","phone",1016)
+    assert not waiting["granted"], "expiry alone cannot prove an unqualified browser stopped"
+    store.media_capture_release(owner_id="user:7",binding=scope,
+        **auth(lease),stopped=False,now=1017)
+    assert not _claim(store,scope,"capture-phone","phone",1018)["granted"]
+    store.media_capture_release(owner_id="user:7",binding=scope,
+        **auth(lease),stopped=True,now=1018)
+    assert _claim(store,scope,"capture-phone","phone",1018)["granted"]
+
+
+def test_lost_grant_can_be_recovered_after_expiry_without_restarting_capture(native):
+    store,scope = native
+    original = {"owner_id":"user:7","binding":scope,"capture_id":"lost-response",
+                "purpose":"call","issued_at":1000}
+    lease = store.media_capture_acquire(**original,now=1000)
+    recovered = store.media_capture_acquire(**original,now=1016)
+    assert not recovered["granted"]
+    assert recovered["lease_token"] == lease["lease_token"]
+    assert recovered["expires_at"] == lease["expires_at"]
+    assert store.media_capture_release(owner_id="user:7",binding=scope,
+        **auth(recovered),stopped=True,now=1016)["state"] == "RELEASED"

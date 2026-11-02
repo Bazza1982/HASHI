@@ -424,17 +424,17 @@ S0 实际调用核对与阻断矩阵：
 ## 16. S2 第一增量：共享租约存储（2026-11-03）
 
 **仅存储实现，不是 S2 通过或媒体已经可用。**PAO/Functions 的
-\`orchestrator/frontend_capture.py\` 由 SessionStore schema 34 安装和调用，
+`orchestrator/frontend_capture.py` 由 SessionStore schema 34 安装和调用，
 共用原生数据库、连接和事务，不创建媒体数据库、设备进程或模型调用。
 控制表仍按第 15 节保存 ID/版本/状态；新增两张采集表也只保存 scope、
 许可、代次、期限和短期去重元数据，不保存环境正文或媒体。
 
 - 同 owner/instance 只保留一个活动许可，不信任浏览器 device_id；跨 Worker
-  由 \`BEGIN IMMEDIATE\` 获取。不同 owner/instance 分开，不干预其他实例或应用。
+  由 `BEGIN IMMEDIATE` 获取。不同 owner/instance 分开，不干预其他实例或应用。
 - 15 秒许可、5 秒续期；续期序号去重、迟到或过期请求不恢复已停止许可。
   状态查询不续期；已观察到的时钟回退或 Conversation 代次变化撤销许可。
 - Call/Phone 抢占协议先在同一事务暂停 Standby、推进持久 epoch，再返回
-  STOP_PENDING；收到客户端停采回执或到期屏障前不给新许可。通话结束不自动恢复 Standby。
+  STOP_PENDING；收到停采回执前不给新许可。通话结束不自动恢复 Standby。
 - 无停采回执仅标 REVOKING，不声称物理 track 已释放；旧回执不能影响新许可。
   获取容量和短期幂等记录有限，释放不被获取预算阻断。
 - 原生存储层可接收 Standby 内部许可，但必须有 ACTIVE 控制及准确 epoch。
@@ -450,3 +450,10 @@ S0 实际调用核对与阻断矩阵：
 原 Call/Phone 全部回归，以及有界音频/视觉 ingress、后台/锁屏/物理 track
 资格。浏览器到期屏障的协议检查不等于物理停止证据。不得把此存储增量
 用于开放 Standby；S1 的停止容量隔离、S3–S5 与客户端仍未完成。
+
+接线前的停止规则补正：服务器许可到期只撤销使用权，不是网页物理停采证明。
+未获停采回执的 EXPIRED 许可也不释放 owner 媒体锁；合格原生计时器实际停采
+后可以提交回执，网页仅凭超时不能替代它。旧首轮“到期即可另取许可”的
+协议期待已用更严格的可观测停止检查替换，新增对应 RED→GREEN 证据。
+丢失首个获取回执时，完全相同请求可回读原许可及失效状态以完成停止，
+不会续期或重新采集；不同请求体不获旧许可凭据。

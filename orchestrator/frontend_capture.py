@@ -183,18 +183,29 @@ def acquire(connection, *, instance_id, owner_id, binding, capture_id, purpose,
         WHERE instance_id=? AND owner_id=? AND capture_id=?""",
         (instance_id,str(owner_id),capture_id)).fetchone()
     if prior:
-        if row is None or row["capture_id"] != capture_id or row["state"] != "ACTIVE":
+        if row is None or row["capture_id"] != capture_id:
             return _closed("capture_attempt_closed")
         if prior["request_digest"] != digest:
-            raise CaptureError("capture_idempotency_conflict",409)
-        _session(connection,owner_id,binding)
+            if row["state"] == "ACTIVE":
+                raise CaptureError("capture_idempotency_conflict",409)
+            return _closed("capture_attempt_closed")
+        if row["state"] == "ACTIVE":
+            try:
+                _session(connection,owner_id,binding)
+            except CaptureError:
+                row = _state(connection,row,"REVOKING",now)
+        # Recover the same grant after a lost acknowledgement, even when it
+        # expired. This does not renew it and lets its client finish stopping.
         return _view(row)
     if issued_at-now > 30 or now-issued_at > 30:
         raise CaptureError("capture_request_expired",409)
     _session(connection,owner_id,binding)
     if row is not None and now < row["last_seen"]:
         return _closed("capture_clock_changed")
-    if row is not None and row["state"] in ("ACTIVE","REVOKING"):
+    # Permission expiry revokes use; it is not physical release evidence.
+    # A qualified native timer may stop the device and acknowledge release.
+    # An unresponsive browser must not be unlocked by a server clock alone.
+    if row is not None and row["state"] != "RELEASED":
         if row["purpose"] == "standby" and purpose in ("call","phone"):
             # This transaction commits the Standby epoch fence before the
             # caller may observe STOP_PENDING. Raising here would roll it back.

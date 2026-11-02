@@ -2,7 +2,7 @@
 
 - 历史搜索用私有POST/绑定游标，FC仍补旧记录并核验显示；读I/O不能阻塞HTTP。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
 
-- Standby仅控制；S2租约仅离线存储，未接Call/Phone/设备；采集/Judge/ARMED未合格。[阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md)。
+- Standby仅控制；S2租约仅离线存储，到期不等于停采；未接Call/Phone/设备；采集/Judge/ARMED未合格。[阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md)。
 
 - 文件库：PAO附件目录按owner/Agent签名游标补历史，不依赖页面；来源定位不换主Session。OCR/转写只读且显式启用，真实分段不造时间；独立OCR锁/模型不进Core。[契约](HASHI_FILE_LIBRARY_CONTENT.md)。
 
