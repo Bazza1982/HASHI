@@ -658,6 +658,7 @@ def accept_request(
         if explicit_expected_generation is not None
         else int(session["context_generation"])
     )
+    from orchestrator.fingerprint.runtime import admission_policy
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
@@ -690,6 +691,7 @@ def accept_request(
             if isinstance(metadata.get("_run_delivery_route"), Mapping)
             else None
         ),
+        fingerprint_policy=admission_policy(runtime),
         agent_workspace=getattr(runtime, "workspace_dir", None),
     )
     return session, accepted, resolved_owner, surface, channel_key

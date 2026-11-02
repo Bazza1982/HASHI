@@ -127,6 +127,25 @@ class ManagedToolRegistry(ToolRegistry):
     def _finish_result(
         self, name: str, arguments: dict, result: ToolResult, started: float
     ) -> ToolResult:
+        if name in {"file_write", "apply_patch", "run_script"} and (result.details or {}).get("control_disposition") == "allowed":
+            from orchestrator.fingerprint.runtime import context_policy
+            try:
+                enabled = context_policy(self._effective_audit_context()).enabled
+                policy_status = "frozen"
+            except ValueError:
+                enabled, policy_status = True, "unverifiable"
+            if enabled:
+                # Retain verified permission facts without reopening a write-only
+                # handle or granting an evidence-directory write.
+                result.details = {**(result.details or {}), "fingerprint": {
+                    "business_status": "failed" if result.is_error else "completed",
+                    "evidence_status": "permission_result_only", "policy_status": policy_status,
+                    "marker_status": "not_qualified", "coverage_complete": False,
+                    "before_state": "not_observed", "after_state": "not_observed",
+                    "permission_operation": (result.details or {}).get("permission_operation"),
+                    "permission_replayed": (result.details or {}).get("permission_replayed", False),
+                    "gap": "artifact hash/marker adapter is not qualified for this supervised handle",
+                }}
         finalized = self._finalize_tool_result(name, arguments, result, started)
         self._record_tool_audit(name, arguments, finalized, started)
         return finalized

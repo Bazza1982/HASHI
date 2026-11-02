@@ -4,6 +4,7 @@ import importlib
 import logging
 import os
 from dataclasses import dataclass, field
+from orchestrator.fingerprint.models import FingerprintPolicy
 from pathlib import Path
 from typing import Any
 
@@ -173,6 +174,7 @@ class GlobalConfig:
     wiki_provider: dict[str, Any] = field(default_factory=dict)
     central_memory: dict[str, Any] = field(default_factory=dict)
     canonical_audit: dict[str, Any] = field(default_factory=dict)
+    fingerprint: FingerprintPolicy = field(default_factory=FingerprintPolicy)
     # The qualified persistent Session/attachment contract is standard for a
     # personal instance.  An explicit false remains an operator opt-out.
     # Media is available by default; qualified targets and user permissions
@@ -750,6 +752,7 @@ class ConfigManager:
             wiki_provider=dict(g_raw.get("wiki_provider") or {}),
             central_memory=dict(g_raw.get("central_memory") or {}),
             canonical_audit=canonical_audit_config,
+            fingerprint=FingerprintPolicy.from_mapping(g_raw.get("fingerprint", {})),
             persistent_session_v1=_truthy(
                 g_raw.get("persistent_session_v1", True)
             ),

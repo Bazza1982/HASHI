@@ -1,0 +1,69 @@
+name: Fingerprint focused checks
+
+on:
+  pull_request:
+    paths:
+      - "orchestrator/fingerprint/**"
+      - "orchestrator/config.py"
+      - "orchestrator/config_admin.py"
+      - "orchestrator/flexible_agent_runtime.py"
+      - "orchestrator/flexible_backend_manager.py"
+      - "orchestrator/frontend_ingress.py"
+      - "orchestrator/runtime_pipeline.py"
+      - "orchestrator/runtime_session.py"
+      - "orchestrator/session_store.py"
+      - "orchestrator/permissions/native_factory.py"
+      - "orchestrator/permissions/registry.py"
+      - "tools/registry.py"
+      - "tools/effect_receipts.py"
+      - "hashi.py"
+      - "tests/test_fingerprint_*.py"
+      - ".github/workflows/fingerprint.yml"
+  push:
+    branches: [main, feature-fingerprint]
+    paths:
+      - "orchestrator/fingerprint/**"
+      - "tests/test_fingerprint_*.py"
+      - ".github/workflows/fingerprint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare the declared Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python 3.12.13 .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install locked runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Check artifact provenance, recovery, privacy and platform boundaries
+        run: >-
+          python -m pytest -q
+          tests/test_fingerprint_foundation.py
+          tests/test_fingerprint_admission.py
+          tests/test_fingerprint_execution.py
+          tests/test_fingerprint_artifacts.py
+          tests/test_fingerprint_coverage.py
+          tests/test_fingerprint_failure_boundaries.py
+          tests/test_fingerprint_integration.py
+          tests/test_fingerprint_verify_export.py
+      - name: Preserve protected Core
+        run: python scripts/check_protected_core_changes.py --base origin/main
