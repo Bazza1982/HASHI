@@ -102,6 +102,14 @@ conversion. Saved Agent state contains service and voice identifiers, not
 endpoint URLs or credentials. Provider failures remain explicit and use the
 existing bounded fallback and audit path.
 
+Voice reply consumers preserve separate synthesis, asset preparation, publication,
+and delivery outcomes. `/say` renders the safe cause and diagnostic reference;
+a receipt from another endpoint cannot confirm this delivery. If publication or
+delivery acknowledgement is lost, report the outcome as unconfirmed and do not
+retry automatically. A confirmed delivery remains successful if later bookkeeping
+fails. Cancellation remains cancellation, and disabled automatic replies remain
+an ordinary no-op. This is a PAO Function/FC boundary, independent of model backend.
+
 The `/voice` and `/call` menus derive their voices and localized labels from the
 merged catalogue and paginate large catalogues. Selecting a voice persists the
 exact service ID, voice alias, and declared per-voice options in the owning

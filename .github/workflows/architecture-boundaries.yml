@@ -152,6 +152,9 @@ jobs:
             tests/test_voice_transcriber.py \
             tests/test_voice_transcription_result.py \
             tests/test_voice_failure_projection.py \
+            tests/test_voice_reply_outcomes.py \
+            tests/test_say_command.py \
+            tests/test_slash_command_audit.py \
             tests/test_api_voice_ingress.py \
             tests/test_voice_admission_boundaries.py \
             tests/test_voice_confirmation_transport.py \

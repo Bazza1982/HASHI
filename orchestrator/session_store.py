@@ -13069,6 +13069,26 @@ class SessionStore:
                 "duplicate": False,
             }
 
+    def frontend_delivery_task_result(
+        self, *, session_id: str, owner_id: str, event_id: str,
+        connector_id: str, endpoint_id: str,
+    ) -> dict[str, Any] | None:
+        """Read bounded outcome evidence for exactly one owned delivery target."""
+        self.get_session(str(session_id), owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT task_id, state, last_error_code FROM connector_delivery_tasks "
+                "WHERE session_id=? AND event_id=? AND connector_id=? AND endpoint_id=? "
+                "ORDER BY created_at DESC, task_id DESC LIMIT 1",
+                (str(session_id), str(event_id), str(connector_id), str(endpoint_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "outbox_id": str(row["task_id"]), "state": str(row["state"]),
+            "error_code": str(row["last_error_code"] or ""),
+        }
+
     def frontend_delivery_receipts(
         self,
         *,

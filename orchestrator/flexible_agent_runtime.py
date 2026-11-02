@@ -14,6 +14,7 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Mapping
+from orchestrator.voice_reply_result import VoiceReplyResult
 import json
 
 import aiohttp
@@ -3363,20 +3364,78 @@ class FlexibleAgentRuntime:
         return runtime_status.job_counts(self)
 
     async def _send_voice_reply(
-        self,
-        chat_id: int,
-        text: str,
-        request_id: str,
-        force: bool = False,
+        self, chat_id: int, text: str, request_id: str, force: bool = False,
     ) -> bool | None:
-        """Publish a Telegram-local voice rendition through the FC outbox.
+        """Keep the established acknowledged/failed/unconfirmed compatibility result."""
+        result = await self._send_voice_reply_result(chat_id, text, request_id, force=force)
+        return result.delivered
 
-        ``True`` is an acknowledged delivery, ``False`` is a hard failure,
-        and ``None`` is an ambiguous outcome that must never be retried.
-        """
-        if not self.telegram_connected:
-            return False
+    async def _send_voice_reply_result(
+        self, chat_id: int, text: str, request_id: str, force: bool = False,
+    ) -> "VoiceReplyResult":
+        """Keep the producer's cause and the exact target's durable delivery facts."""
+        from telegram.error import TelegramError
+        from orchestrator.voice_reply_result import voice_reply_failure
+        from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error_detail
+
+        def failed(stage, code, reason, *, uncertain=False, exception=None):
+            result = voice_reply_failure(stage, code, reason, uncertain=uncertain)
+            logger = getattr(self, "error_logger", None)
+            log = getattr(logger, "warning" if uncertain else "exception" if exception else "error", None)
+            if not callable(log):
+                log = getattr(logger, "error", None) if not uncertain else None
+            if callable(log):
+                log(
+                    f"Voice reply outcome request_id={request_id} stage={stage} "
+                    f"code={result.code} reference={result.reference}: {reason}"
+                )
+            mark_error = getattr(self, "_mark_error", None)
+            if result.delivered is False and callable(mark_error):
+                mark_error(
+                    f"Voice reply failed at {stage} [{result.code}]; reference {result.reference}"
+                )
+            return result
+
         publication = None
+        endpoint_id = ""
+        phase = "configuration"
+        publication_started = False
+
+        def delivery_evidence():
+            if publication is None or not endpoint_id:
+                return "", "", ""
+            scope = {
+                "session_id": str(publication["session_id"]),
+                "owner_id": str(publication["owner_id"]),
+                "event_id": str(publication["delivery_event_id"]),
+            }
+            receipts = self.session_store.frontend_delivery_receipts(**scope)
+            receipts = [row for row in receipts if row.get("endpoint_id") == endpoint_id]
+            status = str(receipts[-1]["status"] if receipts else "")
+            read_task = getattr(self.session_store, "frontend_delivery_task_result", None)
+            task = read_task(**scope, connector_id="telegram", endpoint_id=endpoint_id) if callable(read_task) else None
+            return status, str((task or {}).get("state") or ""), str((task or {}).get("error_code") or "")
+
+        def delivery_failure(status, task_state, code, exception=None):
+            uncertain = status not in {"failed", "skipped"} and task_state not in {"failed", "suppressed", "expired"}
+            reason_key = {
+                "telegram_disconnected": "voice.reply.reason.disconnected",
+                "telegram_delivery_blocked": "voice.reply.reason.blocked",
+                "telegram_access_revoked": "voice.reply.reason.access_revoked",
+            }.get(code)
+            if isinstance(exception, TelegramError):
+                reason = safe_voice_error_detail(exception)
+            else:
+                reason = ui_language.tr(reason_key or (
+                    "voice.reply.reason.delivery_unconfirmed" if uncertain else "voice.reply.reason.delivery_failed"
+                ))
+            return failed(
+                "delivery", code or ("voice_delivery_unconfirmed" if uncertain else "voice_delivery_failed"),
+                reason, uncertain=uncertain, exception=exception,
+            )
+
+        if not self.telegram_connected:
+            return failed("configuration", "telegram_disconnected", ui_language.tr("voice.reply.reason.disconnected"))
         try:
             from orchestrator.frontend_connector_registry import (
                 endpoint_id_for,
@@ -3389,7 +3448,8 @@ class FlexibleAgentRuntime:
                 key="voice_rendition",
             )
             if not customization or customization.get("route") != "connector_local":
-                raise RuntimeError("Telegram voice rendition is not registered in FC")
+                return failed("configuration", "voice_route_unavailable", ui_language.tr("voice.reply.reason.route_unavailable"))
+            phase = "synthesis"
             asset = await self.voice_manager.synthesize_reply(
                 self.name,
                 request_id,
@@ -3399,8 +3459,13 @@ class FlexibleAgentRuntime:
                 source_surface="telegram",
             )
             if asset is None:
-                return False
+                if not force:
+                    return VoiceReplyResult(False, "configuration", "voice_replies_disabled")
+                return failed("synthesis", "voice_synthesis_no_asset", ui_language.tr("voice.reply.reason.no_asset"))
+            phase = "prepare"
             payload = asset.ogg_path.read_bytes()
+            phase = "publication"
+            publication_started = True
             publication = runtime_session.publish_frontend_media_notification(
                 self,
                 filename=asset.ogg_path.name,
@@ -3418,6 +3483,7 @@ class FlexibleAgentRuntime:
                 channel_key=str(chat_id),
                 semantic_role="voice_message",
             )
+            phase = "delivery"
             endpoint_id = endpoint_id_for(
                 "telegram",
                 ingress_transport="telegram",
@@ -3443,38 +3509,40 @@ class FlexibleAgentRuntime:
                     purpose="voice-rendition",
                     include_text=False,
                 )
-            receipts = self.session_store.frontend_delivery_receipts(
-                session_id=str(publication["session_id"]),
-                owner_id=str(publication["owner_id"]),
-                event_id=str(publication["delivery_event_id"]),
-            )
-            status = str(receipts[-1]["status"] if receipts else "unknown")
-            if status in {"accepted", "delivered"}:
-                return True
-            if status == "unknown":
-                return None
-            return False
+            status, task_state, code = delivery_evidence()
+            if status in {"accepted", "delivered", "read", "played"}:
+                return VoiceReplyResult(True)
+            return delivery_failure(status, task_state, code)
         except Exception as exc:
-            status = ""
-            if publication is not None:
+            if phase == "delivery":
                 try:
-                    receipts = self.session_store.frontend_delivery_receipts(
-                        session_id=str(publication["session_id"]),
-                        owner_id=str(publication["owner_id"]),
-                        event_id=str(publication["delivery_event_id"]),
-                    )
-                    status = str(
-                        receipts[-1]["status"] if receipts else ""
-                    )
+                    status, task_state, code = delivery_evidence()
                 except Exception:
-                    status = ""
-            self.error_logger.error(
-                f"Voice reply failed for {request_id}: {type(exc).__name__}"
+                    status, task_state, code = "", "", ""
+                if status in {"accepted", "delivered", "read", "played"}:
+                    return VoiceReplyResult(True)
+                return delivery_failure(status, task_state, code, exc)
+            if publication_started:
+                return failed(
+                    "publication", "voice_publication_unconfirmed",
+                    ui_language.tr("voice.reply.reason.publication_unconfirmed"),
+                    uncertain=True, exception=exc,
+                )
+            if isinstance(exc, VoiceSynthesisError):
+                return failed("synthesis", exc.code, safe_voice_error_detail(exc), exception=exc)
+            if phase == "prepare":
+                code = (
+                    "voice_asset_missing" if isinstance(exc, FileNotFoundError)
+                    else "voice_asset_access_denied" if isinstance(exc, PermissionError)
+                    else "voice_asset_unavailable"
+                )
+                reason = ui_language.tr("voice.reply.reason." + code)
+                return failed(phase, code, reason, exception=exc)
+            return failed(
+                phase, "voice_" + phase + "_failed",
+                ui_language.tr("voice.reply.reason.unexpected", error_type=type(exc).__name__),
+                exception=exc,
             )
-            if status == "unknown":
-                return None
-            self._mark_error(f"Voice reply failed: {type(exc).__name__}")
-            return False
 
     def tui_voice_state(self) -> dict[str, Any]:
         """Return the shared Agent voice identity without Telegram UI state."""
@@ -6905,20 +6973,22 @@ class FlexibleAgentRuntime:
             )
         chat_id = update.effective_chat.id
         session = active_slash_command_audit_session()
+        from orchestrator.voice_reply_result import render_voice_reply_result
+
         for text in texts:
-            ok = await self._send_voice_reply(
+            outcome = await self._send_voice_reply_result(
                 chat_id, text, f"say-{uuid4().hex}", force=True
             )
-            if ok is True:
+            if outcome.delivered is True:
                 if session is not None:
                     session.add_side_effect("voice_reply_sent")
-            elif ok is None:
+            elif outcome.delivered is None:
                 if session is not None:
                     session.add_side_effect("voice_reply_delivery_unknown")
-                await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
+                await self._reply_text(update, render_voice_reply_result(outcome))
                 return
             else:
-                await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
+                await self._reply_text(update, render_voice_reply_result(outcome))
                 return
 
     # ── /loop — recurring task management ──────────────────────────
