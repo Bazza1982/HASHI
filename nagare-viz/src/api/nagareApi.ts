@@ -82,6 +82,35 @@ type ApiErrorPayload = {
   message?: string;
 };
 
+export async function saveWorkflowFile(filePath: string, source: string): Promise<void> {
+  const unconfirmed = "Save result is unconfirmed; check the file before saving again.";
+  let response: Response;
+  try {
+    response = await fetch("/api/workflows/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ path: filePath, content: source }),
+    });
+  } catch {
+    throw new Error(unconfirmed);
+  }
+  if (!response.ok) {
+    const errorPayload = await tryParseError(response);
+    const reason = errorPayload?.message ?? errorPayload?.error ?? "Save failed: " + response.status;
+    throw new Error(response.status >= 500 ? reason + " " + unconfirmed : reason);
+  }
+  let acknowledgment: unknown;
+  try {
+    acknowledgment = await response.json();
+  } catch {
+    throw new Error(unconfirmed);
+  }
+  if (typeof acknowledgment !== "object" || acknowledgment === null
+      || (acknowledgment as Record<string, unknown>).ok !== true) {
+    throw new Error(unconfirmed);
+  }
+}
+
 export async function fetchRunSnapshot(apiBaseUrl: string, runId: string): Promise<ApiRunSnapshotResponse> {
   return requestJson<ApiRunSnapshotResponse>(`${normalizeBaseUrl(apiBaseUrl)}/runs/${encodeURIComponent(runId)}`);
 }
@@ -146,7 +175,13 @@ async function requestJson<T>(url: string): Promise<T> {
 
 async function tryParseError(response: Response): Promise<ApiErrorPayload | null> {
   try {
-    return (await response.json()) as ApiErrorPayload;
+    const value: unknown = await response.json();
+    if (typeof value !== "object" || value === null) return null;
+    const payload = value as Record<string, unknown>;
+    return {
+      message: typeof payload.message === "string" && payload.message.trim() ? payload.message : undefined,
+      error: typeof payload.error === "string" && payload.error.trim() ? payload.error : undefined,
+    };
   } catch {
     return null;
   }
