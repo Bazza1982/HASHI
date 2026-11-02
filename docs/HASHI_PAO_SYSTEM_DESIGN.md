@@ -7,6 +7,43 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-11-03 Nonblocking history reads and bounded search candidates
+
+PAO remains the sole history owner. Session list/get/messages/run/event and
+cross-Session history I/O and presentation projection execute outside the
+shared HTTP event loop. Each operation retains its original ownership checks,
+transaction and error semantics; worker threads do not hold a new authority.
+
+`POST /api/v1/agents/{agent_id}/history/search` is an authenticated, read-only
+Session extension, advertised separately as `agent_history_search` v1.0 with
+`literal_superset_v1`. A private JSON body contains a literal query (256-character
+maximum), bounded limit and optional opaque cursor. Search text is never put
+in a URL. The existing history signature additionally binds a keyed query
+fingerprint: owner, instance, Agent, query and older-history boundary must match;
+ordinary history and search cursors are not interchangeable.
+
+The native reader examines at most 4,000 visible user/assistant source rows or
+8MiB of text/content/context per page, returning at most 200 conservative
+candidates. Its boundary is the last **examined** row, including empty candidate
+pages; byte/row limits must not skip unexamined history. Ambiguous markup,
+entities, media-derived display text and Unicode unknown to the runtime remain
+candidates. The existing Frontend Connector performs its final public display
+projection and literal match. No second body store, persistent search index,
+model, new owner or Session binding is created.
+
+The real native capability is `limits.agent_history.version`; clients may
+also accept the older flat version field. Primary transcript-only command
+receipts still supplement a completed search. Current-conversation scope is
+resolved before filtering that scope; global historical matches can arrive
+before the primary supplement. Output/coverage caps and read failures remain
+visible. Search contexts independently reauthorize the selected message.
+
+Isolated evidence includes six HTTP blocking cases red/green and a same-data
+8-Session/5,552-message Chinese query: identical eight hits, 28 ordinary history
+responses versus two candidate responses. This proves that test case and
+request/byte savings, not production latency, natural busy-load P95 or a
+full-text indexing performance promise.
+
 ### 2026-10-31 Artifact Fingerprint
 
 PAO owns the default-OFF artifact-provenance policy, its immutable persisted Run

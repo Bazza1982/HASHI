@@ -135,6 +135,8 @@ jobs:
             tests/test_workzone_pending_projection.py \
             tests/test_session_read_contention.py \
             tests/test_overview_read_responsiveness.py \
+            tests/test_history_read_responsiveness.py \
+            tests/test_history_search.py \
             tests/test_workbench_guarded_deletion.py \
             tests/test_workzone.py \
             tests/test_runtime_workzone.py \

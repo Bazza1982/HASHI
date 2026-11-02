@@ -9760,6 +9760,7 @@ class SessionStore:
         agent_id: str,
         before: Mapping[str, Any] | None = None,
         limit: int = 200,
+        candidate_query: str | None = None,
     ) -> dict[str, Any]:
         """Read one chronological, cross-Session page of visible Agent history.
 
@@ -9809,9 +9810,12 @@ class SessionStore:
                     boundary["message_id"],
                 ]
             )
-        params.append(bounded + 1)
+        from orchestrator.history_search import MAX_SCAN_ROWS, collect_candidates
+        if candidate_query is not None:
+            clauses.append("m.role IN ('user','assistant')")
+        params.append((MAX_SCAN_ROWS if candidate_query is not None else bounded) + 1)
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
+            cursor = connection.execute(
                 f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
@@ -9825,18 +9829,27 @@ class SessionStore:
                 LIMIT ?
                 """,
                 params,
-            ).fetchall()
-        has_more = len(rows) > bounded
-        page_rows = rows[:bounded]
+            )
+            if candidate_query is None:
+                rows = cursor.fetchall()
+                has_more = len(rows) > bounded
+                page_rows = rows[:bounded]
+                last_examined = page_rows[-1] if page_rows else None
+                scanned = len(page_rows)
+            else:
+                page_rows, last_examined, has_more, scanned = collect_candidates(
+                    cursor, query=candidate_query, limit=bounded)
+
         next_boundary = (
-            self._agent_history_boundary(dict(page_rows[-1]))
-            if has_more and page_rows
+            self._agent_history_boundary(dict(last_examined))
+            if has_more and last_examined is not None
             else None
         )
         return {
             "messages": [self._message_dict(row) for row in reversed(page_rows)],
             "history_complete": not has_more,
             "next_boundary": next_boundary,
+            **({"scanned_messages": scanned} if candidate_query is not None else {}),
         }
 
     def visible_message_attachment(

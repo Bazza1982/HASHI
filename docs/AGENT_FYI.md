@@ -1,6 +1,8 @@
 # HASHI Agent FYI
 
-- Standby仅配置/预检/控制记录：默认OFF，媒体/Judge/ARMED/会议和完整Agent临时清理未合格，禁止借Call启动；控制删除明确仅control_only。[实际阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md#15-实施记录s0-与-s1-控制子集2026-11-03)。
+- 历史搜索用私有POST/绑定游标，FC仍补旧记录并核验显示；读I/O不能阻塞HTTP。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
+
+- Standby仅控制/预检，采集/Judge/ARMED未合格；删除仅控制记录。[阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md)。
 
 - 文件库：PAO附件目录按owner/Agent签名游标补历史，不依赖页面；来源定位不换主Session。OCR/转写只读且显式启用，真实分段不造时间；独立OCR锁/模型不进Core。[契约](HASHI_FILE_LIBRARY_CONTENT.md)。
 

@@ -962,6 +962,7 @@ class WorkbenchApiServer:
                 "/api/v1/agents/{agent_id}/history",
                 self.handle_v1_agent_history,
             ),
+            ("POST", "/api/v1/agents/{agent_id}/history/search", self.handle_v1_agent_history_search),
             ("GET", "/api/v1/attachment-catalogue", self.handle_v1_attachment_catalogue),
             ("GET", "/api/v1/attachment-catalogue/source", self.handle_v1_attachment_catalogue_source),
             ("GET", "/api/v1/file-content/capabilities", self.handle_v1_file_content_capabilities),
@@ -7133,6 +7134,7 @@ class WorkbenchApiServer:
         owner_id: str,
         agent_id: str,
         boundary: Mapping[str, Any],
+        query_scope: str | None = None,
     ) -> str:
         payload = {
             "version": 1,
@@ -7141,6 +7143,8 @@ class WorkbenchApiServer:
             "agent_id": str(agent_id).lower(),
             "before": dict(boundary),
         }
+        if query_scope is not None:
+            payload["query_scope"] = query_scope
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         body = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         signature = base64.urlsafe_b64encode(
@@ -7156,6 +7160,7 @@ class WorkbenchApiServer:
         *,
         owner_id: str,
         agent_id: str,
+        query_scope: str | None = None,
     ) -> dict[str, Any]:
         pieces = str(value or "").split(".")
         if len(pieces) != 3 or pieces[0] != "v1" or not all(pieces[1:]):
@@ -7185,6 +7190,7 @@ class WorkbenchApiServer:
             != str(getattr(self.global_config, "instance_id", ""))
             or decoded.get("owner_id") != str(owner_id)
             or decoded.get("agent_id") != str(agent_id).lower()
+            or decoded.get("query_scope") != query_scope
             or not isinstance(decoded.get("before"), dict)
         ):
             raise ValueError("agent history cursor is invalid")
@@ -7332,6 +7338,7 @@ class WorkbenchApiServer:
                     "attachment_catalogue": {"version": 1, "incremental": True, "historical_source": True},
                     "file_content": {"version": 1, "read_only": True, "explicit_media_processing": True},
                     "standby": {"version": 1, "control_available": True, "media_available": False, "armed_available": False},
+                    "agent_history_search": {"version": "1.0", "candidate_filter": "literal_superset_v1", "method": "POST", "max_scan_rows": 4000},
                     "message_content_schema_version": "1.2",
                     "attachment_upload_transport": (
                         "direct-multipart-or-octet-stream"
@@ -8057,7 +8064,8 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            rows = self.session_store.list_sessions(
+            rows = await asyncio.to_thread(
+                self.session_store.list_sessions,
                 owner_id=owner,
                 agent_id=str(request.query.get("agent_id") or "") or None,
                 include_archived=str(
@@ -8210,7 +8218,8 @@ class WorkbenchApiServer:
             if before_session_id is not None:
                 if len(before_session_id) > 256:
                     raise ValueError("agent history anchor is invalid")
-                before = self.session_store.agent_history_anchor(
+                before = await asyncio.to_thread(
+                    self.session_store.agent_history_anchor,
                     owner_id=owner,
                     agent_id=agent_id,
                     session_id=before_session_id,
@@ -8224,7 +8233,8 @@ class WorkbenchApiServer:
                 )
             else:
                 before = None
-            page = self.session_store.agent_history_page(
+            page = await asyncio.to_thread(
+                self.session_store.agent_history_page,
                 owner_id=owner,
                 agent_id=agent_id,
                 before=before,
@@ -8243,7 +8253,8 @@ class WorkbenchApiServer:
             return web.json_response(
                 {
                     "ok": True,
-                    "messages": build_agent_history_projection(
+                    "messages": await asyncio.to_thread(
+                        build_agent_history_projection,
                         self.session_store,
                         messages=page["messages"],
                         owner_id=owner,
@@ -8255,12 +8266,71 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
+    async def handle_v1_agent_history_search(self, request):
+        """Read-only bounded candidate filtering; query text stays out of URLs."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            if request.content_type != "application/json":
+                raise ValueError("history search requires JSON")
+            chunks, size = [], 0
+            async for chunk in request.content.iter_chunked(4096):
+                size += len(chunk)
+                if size > 4096:
+                    return self._v1_error(ValueError("history search body exceeds limit"), status=413)
+                chunks.append(chunk)
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("history search JSON has duplicate keys")
+                    result[key] = value
+                return result
+            try:
+                payload = json.loads(b"".join(chunks).decode("utf-8"), object_pairs_hook=unique_object)
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise ValueError("history search JSON is invalid") from error
+            if (not isinstance(payload, dict) or "query" not in payload
+                    or payload.keys() - {"query", "cursor", "limit"}):
+                raise ValueError("history search fields are invalid")
+            from orchestrator.history_search import literal_candidate
+            query = payload["query"]
+            literal_candidate(query)
+            agent = str(request.match_info.get("agent_id") or "").strip().lower()
+            if agent not in self._runtime_map():
+                raise SessionNotFound("agent not found")
+            limit = payload.get("limit", 200)
+            if type(limit) is not int or not 1 <= limit <= 200:
+                raise ValueError("history search limit is invalid")
+            cursor = payload.get("cursor")
+            if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 2048):
+                raise ValueError("history search cursor is invalid")
+            query_scope = hmac.new(self._agent_history_cursor_key(),
+                                   b"history-search\\0" + query.encode("utf-8"), hashlib.sha256).hexdigest()
+            before = self._decode_agent_history_cursor(
+                cursor, owner_id=owner, agent_id=agent, query_scope=query_scope) if cursor else None
+            page = await asyncio.to_thread(self.session_store.agent_history_page,
+                owner_id=owner, agent_id=agent, before=before, limit=limit, candidate_query=query)
+            messages = await asyncio.to_thread(build_agent_history_projection,
+                self.session_store, messages=page["messages"], owner_id=owner)
+            next_cursor = self._encode_agent_history_cursor(
+                owner_id=owner, agent_id=agent, boundary=page["next_boundary"],
+                query_scope=query_scope) if page["next_boundary"] is not None else None
+            return web.json_response({"ok": True, "candidate_filter_version": 1,
+                "messages": messages, "history_complete": page["history_complete"],
+                "next_cursor": next_cursor, "scanned_messages": page["scanned_messages"]},
+                headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
+        except Exception as exc:
+            return self._v1_error(exc)
+
     async def handle_v1_session_get(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            session = self.session_store.get_session(
+            session = await asyncio.to_thread(
+                self.session_store.get_session,
                 request.match_info["session_id"], owner_id=owner
             )
             return web.json_response({"ok": True, "session": session})
@@ -8329,7 +8399,8 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            rows = self.session_store.messages(
+            rows = await asyncio.to_thread(
+                self.session_store.messages,
                 request.match_info["session_id"],
                 owner_id=owner,
                 after_ordinal=int(request.query.get("after_ordinal") or 0),
@@ -9858,14 +9929,16 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            run = self.session_store.get_run(
+            run = await asyncio.to_thread(
+                self.session_store.get_run,
                 request.match_info["run_id"], owner_id=owner
             )
             if run["session_id"] != request.match_info["session_id"]:
                 raise SessionNotFound("run not found in Session")
             final_message = None
             if run.get("final_message_id"):
-                final_message = self.session_store.get_message(
+                final_message = await asyncio.to_thread(
+                    self.session_store.get_message,
                     run["final_message_id"],
                     session_id=run["session_id"],
                     owner_id=owner,
@@ -9918,21 +9991,24 @@ class WorkbenchApiServer:
         try:
             consumer_id = str(request.query.get("consumer_id") or "").strip()
             if consumer_id:
-                delivery = self.session_store.poll_event_consumer(
+                delivery = await asyncio.to_thread(
+                    self.session_store.poll_event_consumer,
                     session_id=request.match_info["session_id"],
                     owner_id=owner,
                     consumer_id=consumer_id,
                     limit=int(request.query.get("limit") or 500),
                 )
                 return web.json_response({"ok": True, **delivery})
-            rows = self.session_store.events(
+            rows = await asyncio.to_thread(
+                self.session_store.events,
                 request.match_info["session_id"],
                 owner_id=owner,
                 after_sequence=int(request.query.get("after_sequence") or 0),
                 limit=int(request.query.get("limit") or 500),
                 run_id=request.query.get("run_id"),
             )
-            snapshot = self.session_store.snapshot(
+            snapshot = await asyncio.to_thread(
+                self.session_store.snapshot,
                 request.match_info["session_id"], owner_id=owner
             )
             return web.json_response(
