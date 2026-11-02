@@ -1,5 +1,33 @@
 # HASHI Native Audio Chat — Product Requirements and Technical Design
 
+## November 2: shared transcription outcomes (HASHI5 candidate)
+
+The Functions transcription owner returns one immutable per-call result:
+transcript text or a bounded failure code, observed stage, error type and
+diagnostic reference. Known dependency names use a fixed allowlist. Neither
+public outcomes nor the compatibility text API echo exception messages, paths,
+credentials or service response bodies. Empty transcription is a distinct
+failure. Compute selection and the no-silent-fallback rule remain unchanged.
+Cancellation closes the old isolated STT exchange before another recording can
+reuse its pipe; cancellation remains cancellation, never a usable transcript.
+
+Telegram, WhatsApp (including reclassified audio), basic uploads, Session API
+and native Function Worker input consume that shared result. PAO records its
+safe failure facts with the original attachment/Run Event. The same shared
+Engine boundary projects them for Codex, HER and other Engines before any
+transcript-dependent action. Confirmation, current-Run fences and native raw
+audio authorization retain their existing semantics. A transcription warning
+does not promise that every backend can continue on raw audio.
+
+Basic voice rejections retain their existing API code and status, with safe
+cause and diagnostic fields. Functions carries this typed rejection through
+the existing JSON RPC result; the protected Core protocol is unchanged.
+A transport acknowledgement is separate from request admission. Missing
+receipts or unknown outcomes never authorize automatic resubmission.
+
+This candidate's source checks, running Functions adoption, real STT success,
+external frontend acceptance and production rollout are separate gates.
+
 ## Document control
 
 | Field | Value |

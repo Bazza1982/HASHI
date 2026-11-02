@@ -24,6 +24,10 @@ from pathlib import Path
 
 from orchestrator import voice_transcription_worker
 from orchestrator.config_json import read_config_json
+from orchestrator.voice_transcription_result import (
+    TranscriptionFailed, TranscriptionFailure, TranscriptionProtocolError,
+    TranscriptionResult, transcription_failure,
+)
 from orchestrator.compute_services import (
     ComputeReference, ComputeRequirements, ComputeServiceClient,
     ComputeServiceDirectory, ComputeServicesConfig,
@@ -140,34 +144,41 @@ class VoiceTranscriber:
         return "cpu", "int8"
 
     async def transcribe(self, audio_path: str | Path) -> str:
-        """
-        Transcribe an audio file to text.
+        """Compatibility text API; errors contain safe codes and a diagnostic reference."""
+        return (await self.transcribe_result(audio_path)).legacy_text()
 
-        Runs the model in a thread executor to avoid blocking the event loop.
-        Returns the transcribed text, or an error message string prefixed
-        with [Transcription error] on failure.
-        """
-        audio_path = Path(audio_path)
-        if not audio_path.exists():
-            return f"[Transcription error] File not found: {audio_path}"
-
+    async def transcribe_result(self, audio_path: str | Path) -> TranscriptionResult:
+        """Return immutable facts for this call, independently of Engine and PAO state."""
+        phase = "input"
         try:
+            audio_path = Path(audio_path)
+            if not audio_path.is_file():
+                raise FileNotFoundError()
+            phase = "configuration"
             root, config = _transcription_configuration()
             if config.get("provider") == "compute":
-                return await self._transcribe_compute(audio_path, root, config)
-            external_python = _external_python()
-            if external_python:
-                return await self._transcribe_external(audio_path, external_python)
-            loop = asyncio.get_running_loop()
-            async with self._lock:
-                # Lazy load on first call
-                if self._model is None:
-                    await loop.run_in_executor(None, self._load_model)
-            text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
-            return text
-        except Exception as e:
-            logger.error(f"Transcription failed for {audio_path}: {e}", exc_info=True)
-            return f"[Transcription error] {e}"
+                phase = "compute"
+                text = await self._transcribe_compute(audio_path, root, config)
+            else:
+                external_python = _external_python()
+                if external_python:
+                    phase = "external"
+                    text = await self._transcribe_external(audio_path, external_python)
+                else:
+                    loop = asyncio.get_running_loop()
+                    phase = "model"
+                    async with self._lock:
+                        if self._model is None:
+                            await loop.run_in_executor(None, self._load_model)
+                    phase = "local"
+                    text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
+            if not isinstance(text, str):
+                raise TranscriptionProtocolError()
+            return TranscriptionResult(text=text)
+        except Exception as error:
+            failure = transcription_failure(error, phase=phase)
+            logger.exception("Transcription failure: %s", json.dumps(failure.as_dict()))
+            return TranscriptionResult(failure=failure)
 
     async def _transcribe_compute(self, audio_path: Path, root: Path, config: dict) -> str:
         reference = config.get("compute")
@@ -263,10 +274,10 @@ class VoiceTranscriber:
         for _ in range(1000):
             raw = await process.stdout.readline()
             if not raw:
-                raise RuntimeError("isolated transcription worker exited without a result")
+                raise TranscriptionProtocolError("isolated transcription worker exited without a result")
             total_bytes += len(raw)
             if total_bytes > voice_transcription_worker.MAX_OUTPUT_BYTES:
-                raise RuntimeError("isolated transcription worker output exceeded its limit")
+                raise TranscriptionProtocolError("isolated transcription worker output exceeded its limit")
             line = raw.decode("utf-8", errors="replace").strip()
             if not line.startswith(voice_transcription_worker.RESULT_PREFIX):
                 continue
@@ -275,17 +286,18 @@ class VoiceTranscriber:
                     line[len(voice_transcription_worker.RESULT_PREFIX) :]
                 )
             except json.JSONDecodeError as exc:
-                raise RuntimeError(
+                raise TranscriptionProtocolError(
                     "isolated transcription worker returned invalid JSON"
                 ) from exc
             if not isinstance(payload, dict):
-                raise RuntimeError("isolated transcription worker returned an invalid result")
-            if payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION:
-                raise RuntimeError("isolated transcription worker protocol does not match")
-            if str(payload.get("id") or "") != request_id:
-                raise RuntimeError("isolated transcription worker response ID does not match")
+                raise TranscriptionProtocolError("isolated transcription worker returned an invalid result")
+            if (type(payload.get("version")) is not int
+                    or payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION):
+                raise TranscriptionProtocolError("isolated transcription worker protocol does not match")
+            if payload.get("id") != request_id:
+                raise TranscriptionProtocolError("isolated transcription worker response ID does not match")
             return payload
-        raise RuntimeError("isolated transcription worker returned too many log lines")
+        raise TranscriptionProtocolError("isolated transcription worker returned too many log lines")
 
     async def _transcribe_external(self, audio_path: Path, python: str) -> str:
         async with self._lock:
@@ -308,13 +320,14 @@ class VoiceTranscriber:
                     self._read_external_result(process, request_id),
                     timeout=EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS,
                 )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 await self.aclose()
                 raise
         if not payload.get("ok"):
-            raise RuntimeError(
-                str(payload.get("error") or "isolated transcription worker failed")[:500]
-            )
+            failure = TranscriptionFailure.from_dict(payload.get("failure"))
+            if failure is None:
+                failure = transcription_failure(TranscriptionProtocolError(), phase="external")
+            raise TranscriptionFailed(failure)
         self._device = str(payload.get("device") or "") or None
         self._compute_type = str(payload.get("compute_type") or "") or None
         logger.info(

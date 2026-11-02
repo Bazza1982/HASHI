@@ -1514,17 +1514,27 @@ class FunctionWorkerHost:
             await runtime.enqueue_startup_bootstrap(int(params["chat_id"]))
             return True
         if method == "runtime.enqueue_api_media":
-            result = await runtime.enqueue_api_media(
-                local_path=Path(str(params["local_path"])),
-                media_kind=str(params["media_kind"]),
-                filename=str(params["filename"]),
-                caption=str(params.get("caption") or ""),
-                emoji=str(params.get("emoji") or ""),
-                source=str(params.get("source") or "api"),
-                deliver_to_telegram=bool(params.get("deliver_to_telegram", True)),
-                request_metadata=params.get("request_metadata"),
-                idempotency_key=params.get("idempotency_key"),
-            )
+            from orchestrator.runtime_media import VoiceIngressError
+            from orchestrator.voice_transcription_result import TranscriptionFailure
+
+            try:
+                result = await runtime.enqueue_api_media(
+                    local_path=Path(str(params["local_path"])),
+                    media_kind=str(params["media_kind"]),
+                    filename=str(params["filename"]),
+                    caption=str(params.get("caption") or ""),
+                    emoji=str(params.get("emoji") or ""),
+                    source=str(params.get("source") or "api"),
+                    deliver_to_telegram=bool(params.get("deliver_to_telegram", True)),
+                    request_metadata=params.get("request_metadata"),
+                    idempotency_key=params.get("idempotency_key"),
+                )
+            except VoiceIngressError as error:
+                failure = TranscriptionFailure.from_dict(error.failure)
+                if failure is None or str(error) not in {"voice_transcription_unavailable", "voice_transcription_empty"}:
+                    raise
+                return {"type": "hashi.voice-admission-rejection", "version": 1,
+                        "code": str(error), "failure": failure.as_dict()}
             await self.emit_metadata()
             return result
         if method == "runtime.send_text":
@@ -1689,19 +1699,14 @@ class FunctionWorkerHost:
         ):
             return existing[0]
 
-        async def transcribe_part(part: dict[str, Any]) -> dict[str, str]:
+        async def transcribe_part(part: dict[str, Any]) -> dict[str, Any]:
             from orchestrator.voice_transcriber import get_transcriber
+            from orchestrator.voice_transcription_result import transcribe_audio
 
-            result = str(
-                await get_transcriber().transcribe(Path(str(part["local_ref"])))
-            )
-            return {
-                "attachment_id": str(part["attachment_id"]),
-                "text": "" if result.startswith("[Transcription error]") else result.strip(),
-                "error": result if result.startswith("[Transcription error]") else "",
-            }
+            result = await transcribe_audio(get_transcriber(), Path(str(part["local_ref"])))
+            return result.attachment_result(str(part["attachment_id"]))
 
-        async def transcribe_all() -> list[dict[str, str]]:
+        async def transcribe_all() -> list[dict[str, Any]]:
             return list(
                 await asyncio.gather(*(transcribe_part(part) for part in voice_parts))
             )
@@ -1774,8 +1779,12 @@ class FunctionWorkerHost:
         state["auto_release"] = auto_release
 
         async def finalize() -> None:
+            from orchestrator.voice_transcription_result import first_transcription_failure, transcription_failure
+
             try:
                 results = list(await state["task"])
+                failure = first_transcription_failure(results)
+                state["failure"] = failure.as_dict() if failure else None
                 unavailable = any(not str(item.get("text") or "") for item in results)
                 state["text"] = "\n".join(
                     str(item.get("text") or "").strip()
@@ -1794,13 +1803,15 @@ class FunctionWorkerHost:
                         text=text,
                         provenance="local_stt",
                         safe_voice_state=part_state,
+                        **({"failure": result["failure"]} if result.get("failure") else {}),
                     )
                     state["transcript_decisions"][str(recorded["transcript_id"])] = part_state
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 state["text"] = ""
                 state["status"] = "unavailable"
+                state["failure"] = transcription_failure(error, phase="record").as_dict()
             finally:
                 state["ready_event"].set()
                 if state["status"] in {"released", "discarded", "unavailable"}:

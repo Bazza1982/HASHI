@@ -203,6 +203,7 @@ jobs:
           tests/test_permission_windows_token.py
           orchestrator/telegram_credential_activation.py tests/test_telegram_activation_lifecycle.py
           orchestrator/frontend_failures.py tests/test_frontend_failures.py
+          orchestrator/voice_transcription_result.py tests/test_voice_transcription_result.py tests/test_voice_failure_projection.py
           orchestrator/her_v2/provider_continuation.py scripts/permissions/windows_lpac_probe.py
           scripts/permissions/windows_file_helper_probe.py
           scripts/permissions/build_runtime_capsule.py

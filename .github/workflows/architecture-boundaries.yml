@@ -148,6 +148,11 @@ jobs:
             tests/test_compute_services.py \
             tests/test_voice_catalog.py \
             tests/test_voice_transcriber.py \
+            tests/test_voice_transcription_result.py \
+            tests/test_voice_failure_projection.py \
+            tests/test_api_voice_ingress.py \
+            tests/test_voice_admission_boundaries.py \
+            tests/test_voice_confirmation_transport.py \
             tests/test_agent_fyi.py \
             tests/test_run_questions.py \
             tests/test_run_question_connectors.py \

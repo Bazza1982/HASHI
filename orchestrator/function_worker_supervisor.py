@@ -1005,6 +1005,18 @@ class AgentRuntimeHandle:
                 "idempotency_key": idempotency_key,
             },
         )
+        if isinstance(result, Mapping):
+            from orchestrator.runtime_media import VoiceIngressError
+            from orchestrator.voice_transcription_result import TranscriptionFailure
+
+            failure = TranscriptionFailure.from_dict(result.get("failure"))
+            if (result.get("type") == "hashi.voice-admission-rejection"
+                    and type(result.get("version")) is int and result.get("version") == 1
+                    and isinstance(result.get("code"), str)
+                    and result.get("code") in {"voice_transcription_unavailable", "voice_transcription_empty"}
+                    and failure is not None):
+                raise VoiceIngressError(str(result["code"]), failure=failure.as_dict())
+            raise FunctionWorkerError("Invalid media admission result; verify the original request")
         if result:
             self._outstanding_request_ids.add(str(result))
         return None if result is None else str(result)

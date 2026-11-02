@@ -8191,24 +8191,14 @@ class WorkbenchApiServer:
         ):
             return existing_states[0]
 
-        async def _transcribe_part(part: dict[str, Any]) -> dict[str, str]:
+        async def _transcribe_part(part: dict[str, Any]) -> dict[str, Any]:
             from orchestrator.voice_transcriber import get_transcriber
+            from orchestrator.voice_transcription_result import transcribe_audio
 
-            transcriber = get_transcriber()
-            result = str(
-                await transcriber.transcribe(Path(str(part["local_ref"])))
-            )
-            return {
-                "attachment_id": str(part["attachment_id"]),
-                "text": (
-                    ""
-                    if result.startswith("[Transcription error]")
-                    else result.strip()
-                ),
-                "error": result if result.startswith("[Transcription error]") else "",
-            }
+            result = await transcribe_audio(get_transcriber(), Path(str(part["local_ref"])))
+            return result.attachment_result(str(part["attachment_id"]))
 
-        async def _transcribe() -> list[dict[str, str]]:
+        async def _transcribe() -> list[dict[str, Any]]:
             return list(
                 await asyncio.gather(
                     *(_transcribe_part(part) for part in voice_parts)
@@ -8294,8 +8284,12 @@ class WorkbenchApiServer:
         state["finalizer_started"] = True
 
         async def _finalize() -> None:
+            from orchestrator.voice_transcription_result import first_transcription_failure, transcription_failure
+
             try:
                 results = list(await state["task"])
+                failure = first_transcription_failure(results)
+                state["failure"] = failure.as_dict() if failure else None
                 unavailable = any(not str(item.get("text") or "") for item in results)
                 state["text"] = "\n".join(
                     str(item.get("text") or "").strip()
@@ -8320,15 +8314,17 @@ class WorkbenchApiServer:
                         text=part_text,
                         provenance="local_stt",
                         safe_voice_state=part_state,
+                        **({"failure": result["failure"]} if result.get("failure") else {}),
                     )
                     state["transcript_decisions"][
                         str(recorded["transcript_id"])
                     ] = part_state
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 state["text"] = ""
                 state["status"] = "unavailable"
+                state["failure"] = transcription_failure(error, phase="record").as_dict()
                 for attachment_id in state.get("attachment_ids") or [
                     state["attachment_id"]
                 ]:
@@ -8339,6 +8335,7 @@ class WorkbenchApiServer:
                             text="",
                             provenance="local_stt",
                             safe_voice_state="unavailable",
+                            failure=state["failure"],
                         )
                     except Exception:
                         pass
@@ -11676,6 +11673,16 @@ class WorkbenchApiServer:
                         rejection = {"ok": False,
                             "accepted": None if request_ids else False,
                             "error_code": code}
+                        from orchestrator.voice_transcription_result import TranscriptionFailed, TranscriptionFailure
+                        from orchestrator.frontend_failures import frontend_failure
+
+                        failure = TranscriptionFailure.from_dict(getattr(exc, "failure", None))
+                        if failure is not None:
+                            public = frontend_failure(TranscriptionFailed(failure), phase="transcribe",
+                                submission_state="unconfirmed" if request_ids else "not_submitted")
+                            rejection.update({"transcription_failure": failure.as_dict(),
+                                "cause_code": failure.code, "diagnostic_ref": failure.reference,
+                                "message": public.render(locale=preferred_locale(runtime))})
                         if request_ids:
                             # Earlier files in this multipart request have
                             # already crossed admission. Do not invite replay

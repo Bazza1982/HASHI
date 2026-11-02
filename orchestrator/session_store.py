@@ -7842,7 +7842,11 @@ class SessionStore:
         text: str,
         provenance: str,
         safe_voice_state: str,
+        failure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from orchestrator.voice_transcription_result import TranscriptionFailure
+
+        failure_fact = TranscriptionFailure.from_dict(failure)
         clean = str(text or "").strip()
         state = str(safe_voice_state or "released").strip().casefold()
         if state not in {
@@ -7939,6 +7943,7 @@ class SessionStore:
                     "text": clean,
                     "provenance": str(provenance or "local_stt"),
                     "safe_voice_state": state,
+                    **({"failure": failure_fact.as_dict()} if state == "unavailable" and failure_fact else {}),
                 },
                 outbox=True,
             )
@@ -7951,13 +7956,14 @@ class SessionStore:
                     status="degraded",
                     phase="transcription",
                     summary=(
-                        "Local voice transcription is unavailable; the native "
-                        "audio response will continue."
+                        (failure_fact.message + " " if failure_fact else "Local voice transcription is unavailable. ")
+                        + "Transcript-dependent actions cannot start."
                     ),
                     detail={
                         "transcript_id": transcript_id,
                         "attachment_id": str(attachment_id),
                         "warning_code": "local_stt_unavailable",
+                        **({"failure": failure_fact.as_dict()} if failure_fact else {}),
                     },
                     outbox=True,
                 )

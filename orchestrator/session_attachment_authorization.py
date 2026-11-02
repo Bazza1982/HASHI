@@ -398,9 +398,19 @@ Ordinary audio files retain their existing routing.
             )
         raise VoiceTranscriptDiscarded()
     if status != "released":
+        from orchestrator.voice_transcription_result import TranscriptionFailure
+
+        failure = TranscriptionFailure.from_dict(state.get("failure"))
+        detail = f"Voice transcript is {status}; no model action was started"
+        diagnostic = None
+        if status == "unavailable" and failure is not None:
+            detail = (f"[{failure.code}] {failure.message} No model action was started. "
+                      f"Diagnostic reference: {failure.reference}")
+            diagnostic = {"phase": "transcription", "reason": failure.code,
+                          "error_type": failure.error_type, "diagnostic_ref": failure.reference}
         raise MultimodalContractError(
-            f"Voice transcript is {status}; no model action was started",
-            code="MEDIA_FALLBACK_UNAVAILABLE", attachment_id=str(voice[0]["attachment_id"]),
+            detail, code="MEDIA_FALLBACK_UNAVAILABLE",
+            attachment_id=str(voice[0]["attachment_id"]), diagnostic=diagnostic,
         )
     validate_authorized_media_references(normalized, authorized_roots=backend.authorized_media_roots())
     store = runtime.session_store

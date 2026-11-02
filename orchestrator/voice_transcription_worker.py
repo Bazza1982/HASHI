@@ -16,6 +16,11 @@ import sys
 from pathlib import Path
 from typing import Any, BinaryIO
 
+if __package__:
+    from orchestrator.voice_transcription_result import TranscriptionFailed, transcription_failure
+else:
+    from voice_transcription_result import TranscriptionFailed, transcription_failure
+
 PROTOCOL_VERSION = 1
 DEFAULT_MODEL_SIZE = "small"
 RESULT_PREFIX = "HASHI_VOICE_TRANSCRIPTION_RESULT="
@@ -91,7 +96,10 @@ class _ModelRuntime:
         model_size: str,
         language: str | None,
     ) -> dict[str, Any]:
-        model, device, compute_type = self._model(model_size, language)
+        try:
+            model, device, compute_type = self._model(model_size, language)
+        except Exception as error:
+            raise TranscriptionFailed(transcription_failure(error, phase="model")) from error
         segments, info = model.transcribe(
             str(audio_path),
             language=language,
@@ -158,9 +166,11 @@ def _serve() -> int:
     runtime = _ModelRuntime()
     for raw in sys.stdin.buffer:
         request_id = ""
+        phase = "input"
         try:
             request = _request_payload(raw.decode("utf-8"))
             request_id = request["id"]
+            phase = "worker"
             result = runtime.transcribe(
                 request["audio_path"],
                 model_size=request["model_size"],
@@ -173,12 +183,14 @@ def _serve() -> int:
                 **result,
             }
         except Exception as exc:
-            logger.exception("Isolated transcription request failed")
+            failure = transcription_failure(exc, phase=phase)
+            logger.exception("Isolated transcription failure: %s", json.dumps(failure.as_dict()))
             payload = {
                 "version": PROTOCOL_VERSION,
                 "id": request_id,
                 "ok": False,
-                "error": f"{type(exc).__name__}: {exc}"[:500],
+                "error": str(TranscriptionFailed(failure)),
+                "failure": failure.as_dict(),
             }
         _write_result(payload)
     return 0
