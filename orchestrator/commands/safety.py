@@ -15,6 +15,56 @@ from orchestrator.command_ui import card_title
 from orchestrator.permissions.frontend_native import native_command
 
 
+class SafetyInputError(ValueError):
+    """Locally proved syntax error, without protected-object information."""
+
+
+def _failure(runtime, error, *, phase, mutation_started=False):
+    from dataclasses import replace
+    import logging
+    from orchestrator.operation_failures import OperationFailed, operation_failure
+    from orchestrator.permissions.authority import PermissionErrorBase, RevisionConflict, OperationConflict
+    from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
+
+    if isinstance(error, OperationFailed):
+        return error.failure
+    rejected = isinstance(error, (PermissionErrorBase, SessionDecisionDenied, SafetyInputError))
+    failure = operation_failure(
+        error, operation="safety", phase=phase, unconfirmed=mutation_started and not rejected,
+    )
+    reason = failure.reason
+    if isinstance(error, SafetyInputError) or (phase == "validate" and isinstance(error, (ValueError, TypeError, KeyError, AttributeError))):
+        reason = "invalid_input"
+    elif isinstance(error, (RevisionConflict, OperationConflict)):
+        reason = "state_changed"
+    elif isinstance(error, (PermissionErrorBase, SessionDecisionDenied)):
+        reason = "scope_unavailable"
+    elif phase == "scope" and isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
+        reason = "scope_unavailable"
+    elif phase == "configuration" and isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
+        reason = "configuration_invalid"
+    failure = replace(failure, reason=reason, error_code=f"safety_{phase}_{reason}")
+    logger = getattr(runtime, "error_logger", None) or getattr(runtime, "logger", None)
+    write = getattr(logger, "error", None)
+    if not callable(write):
+        write = logging.getLogger("HASHI.Safety").error
+    write("Permission command failure: %s", failure.diagnostic())
+    return failure
+
+
+def _failure_text(key, failure):
+    return ui_language.tr("safety.control_unconfirmed" if failure.unconfirmed else key) + "\n" + failure.render()
+
+
+def _control_failure(operation, failure, text):
+    state = "unconfirmed" if failure.unconfirmed else "rejected"
+    return {
+        "ok": False, "error_code": f"permission_{operation}_{state}",
+        "error_message": text, "request_outcome": state,
+        "diagnostic_reference": failure.reference, "failure_phase": failure.phase,
+    }
+
+
 def _authorized(runtime: Any, update: Any) -> bool:
     checker = getattr(runtime, "_is_authorized_user", None)
     actor = getattr(getattr(update, "effective_user", None), "id", None)
@@ -76,31 +126,42 @@ def _subject_for_update(runtime: Any, update: Any):
 
 
 def _request_command(runtime: Any, update: Any, args: list[str]) -> str:
-    from orchestrator.permissions.presentation import request_detail_card, request_list_card
+    from orchestrator.permissions.presentation import request_detail_card, request_list_card, request_prompt_card
+    from orchestrator.operation_failures import OperationFailed
 
-    authority, subject = _subject_for_update(runtime, update)
-    if args[0].casefold() == "withdraw" and len(args) == 4 and args[2] == "--revision":
-        raw_revision = args[3]
-        if (not raw_revision.isascii() or not raw_revision.isdecimal()
-                or len(raw_revision) > 9 or int(raw_revision) < 1):
-            raise ValueError("invalid permission request version")
-        return request_detail_card(
-            authority.withdraw_session_request(subject, args[1], int(raw_revision)),
-        )
-    if args[0].casefold() in {"request", "prompt"} and len(args) == 2:
-        from orchestrator.permissions.presentation import request_prompt_card
-
-        render = request_prompt_card if args[0].casefold() == "prompt" else request_detail_card
-        return render(authority.get_session_request(subject, args[1]))
-    if args[0].casefold() == "requests":
-        if len(args) == 1:
-            before = None
-        elif len(args) == 3 and args[1].casefold() == "before":
-            before = args[2]
+    phase = "validate"
+    try:
+        action = args[0].casefold()
+        if action == "withdraw" and len(args) == 4 and args[2] == "--revision":
+            raw_revision = args[3]
+            if (not raw_revision.isascii() or not raw_revision.isdecimal()
+                    or len(raw_revision) > 9 or int(raw_revision) < 1):
+                raise SafetyInputError("invalid permission request version")
+            revision, before = int(raw_revision), None
+        elif action in {"request", "prompt"} and len(args) == 2:
+            revision, before = None, None
+        elif action == "requests":
+            if len(args) == 1:
+                before = None
+            elif len(args) == 3 and args[1].casefold() == "before":
+                before = args[2]
+            else:
+                raise SafetyInputError("invalid permission request page")
+            revision = None
         else:
-            raise ValueError("invalid permission request page")
+            raise SafetyInputError("invalid permission view")
+        phase = "scope"
+        authority, subject = _subject_for_update(runtime, update)
+        if action == "withdraw":
+            phase = "withdraw"
+            return request_detail_card(authority.withdraw_session_request(subject, args[1], revision))
+        phase = "read"
+        if action in {"request", "prompt"}:
+            render = request_prompt_card if action == "prompt" else request_detail_card
+            return render(authority.get_session_request(subject, args[1]))
         return request_list_card(authority.list_session_requests(subject, before=before, limit=10))
-    raise ValueError("invalid permission view")
+    except Exception as exc:
+        raise OperationFailed(_failure(runtime, exc, phase=phase, mutation_started=phase == "withdraw")) from None
 
 
 def _decision_markup(runtime, update, request_id, *, compact=False):
@@ -155,18 +216,24 @@ async def safety_decision_callback(runtime, update, context):
         return
     query = update.callback_query
     await query.answer()
+    phase, mutation_started = "validate", False
     try:
         match = re.fullmatch(r"safety:d:([a-f0-9]{32})", query.data)
         if match is None:
-            raise ValueError("invalid permission action")
+            raise SafetyInputError("invalid permission action")
+        phase = "scope"
         _, subject = _subject_for_update(runtime, update)
-        outcome = await asyncio.to_thread(
-            current_permission_ingress().submit_action, subject, match[1],
-        )
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        await runtime._reply_text(update, ui_language.tr("safety.decision_rejected"))
-        return {"ok": False, "error_code": "permission_decision_rejected"}
-    await runtime._reply_text(update, _outcome_text(outcome))
+        ingress = current_permission_ingress()
+        phase, mutation_started = "decision", True
+        outcome = await asyncio.to_thread(ingress.submit_action, subject, match[1])
+        phase = "presentation"
+        text = _outcome_text(outcome)
+    except Exception as exc:
+        failure = _failure(runtime, exc, phase=phase, mutation_started=mutation_started)
+        text = _failure_text("safety.decision_rejected", failure)
+        await runtime._reply_text(update, text)
+        return _control_failure("decision", failure, text)
+    await runtime._reply_text(update, text)
     return {"ok": True, "request_id": outcome.request_id, "choice": outcome.choice}
 
 
@@ -181,52 +248,69 @@ async def safety_command(runtime: Any, update: Any, context: Any):
         from orchestrator.permissions.frontend_control import current_permission_ingress
         from orchestrator.permissions.presentation import management_card
 
+        phase, mutation_started = "scope", False
         try:
             _, subject = _subject_for_update(runtime, update)
-            outcome = await current_permission_ingress().manage(
-                subject, args, invocation_id=str(update.update_id),
-            )
+            ingress = current_permission_ingress()
+            phase, mutation_started = "management", True
+            outcome = await ingress.manage(subject, args, invocation_id=str(update.update_id))
+            phase = "presentation"
             text = management_card(outcome)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
-            text = ui_language.tr("safety.management_failed")
+        except Exception as exc:
+            failure = _failure(runtime, exc, phase=phase, mutation_started=mutation_started)
+            text = _failure_text("safety.management_failed", failure)
             await runtime._reply_text(update, text)
-            return {"ok": False, "error_code": "permission_management_rejected"}
+            return _control_failure("management", failure, text)
         await runtime._reply_text(update, text, parse_mode="HTML")
         return {"ok": True}
     if args and args[0].casefold() in {"tasks", "leases"}:
         from orchestrator.permissions.presentation import session_summary_card
 
+        phase = "scope"
         try:
             authority, subject = _subject_for_update(runtime, update)
+            phase = "read"
             summary = await asyncio.to_thread(authority.session_summary, subject=subject)
+            phase = "presentation"
             text = session_summary_card(summary)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
-            await runtime._reply_text(update, ui_language.tr("safety.requests_unavailable"))
+        except Exception as exc:
+            failure = _failure(runtime, exc, phase=phase)
+            await runtime._reply_text(update, _failure_text("safety.requests_unavailable", failure))
             return
         await runtime._reply_text(update, text, parse_mode="HTML")
         return
     if args and args[0].casefold() in {"approve", "deny"}:
         from orchestrator.permissions.frontend_control import current_permission_ingress
 
+        phase, mutation_started = "scope", False
         try:
             _, subject = _subject_for_update(runtime, update)
             ingress = current_permission_ingress()
+            phase, mutation_started = "decision", True
             outcome = await asyncio.to_thread(
                 ingress.decide, subject, args, invocation_id=str(update.update_id),
             )
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
-            text = ui_language.tr("safety.decision_rejected")
+            phase = "presentation"
+            text = _outcome_text(outcome)
+        except Exception as exc:
+            failure = _failure(runtime, exc, phase=phase, mutation_started=mutation_started)
+            text = _failure_text("safety.decision_rejected", failure)
             await runtime._reply_text(update, text)
-            return {"ok": False, "error_code": "permission_decision_rejected",
-                    "error_message": text, "request_outcome": "rejected"}
-        await runtime._reply_text(update, _outcome_text(outcome))
+            return _control_failure("decision", failure, text)
+        await runtime._reply_text(update, text)
         return {"ok": True, "request_id": outcome.request_id, "choice": outcome.choice,
                 "replayed": outcome.replayed}
     if args and args[0].casefold() in {"requests", "request", "prompt", "withdraw"}:
         try:
             text = await asyncio.to_thread(_request_command, runtime, update, args)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
-            await runtime._reply_text(update, ui_language.tr("safety.requests_unavailable"))
+        except Exception as exc:
+            withdrawing = args[0].casefold() == "withdraw"
+            failure = _failure(runtime, exc, phase="withdraw" if withdrawing else "read",
+                               mutation_started=withdrawing)
+            text = _failure_text("safety.requests_unavailable", failure)
+            await runtime._reply_text(update, text)
+            if withdrawing:
+                return _control_failure("withdraw", failure, text)
             return
         markup = None
         if args[0].casefold() in {"request", "prompt"} and len(args) == 2:
@@ -236,8 +320,9 @@ async def safety_command(runtime: Any, update: Any, context: Any):
                 )
                 if markup is not None:
                     text += "\n\n" + escape(duration)
-            except (OSError, ValueError, TypeError, KeyError, AttributeError):
-                pass
+            except Exception as exc:
+                failure = _failure(runtime, exc, phase="presentation")
+                text += "\n\n" + escape(_failure_text("safety.requests_unavailable", failure))
         await runtime._reply_text(update, text, parse_mode="HTML",
                                   **({"reply_markup": markup} if markup is not None else {}))
         return
@@ -246,8 +331,9 @@ async def safety_command(runtime: Any, update: Any, context: Any):
         return
     try:
         level, control_text = await asyncio.to_thread(_read_status, runtime)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        await runtime._reply_text(update, ui_language.tr("safety.config_unavailable"))
+    except Exception as exc:
+        failure = _failure(runtime, exc, phase="configuration")
+        await runtime._reply_text(update, _failure_text("safety.config_unavailable", failure))
         return
     text = "\n".join((
         card_title("🛡️", ui_language.tr("safety.title")),

@@ -145,7 +145,7 @@ jobs:
           python -m ruff check orchestrator/permissions orchestrator/config.py
           orchestrator/commands/safety.py orchestrator/command_registry.py orchestrator/session_store.py
           orchestrator/runtime_menu_views.py
-          tests/test_permission_safety_command.py tests/test_permission_frontend_views.py
+          tests/test_permission_safety_command.py tests/test_permission_frontend_views.py tests/test_safety_failure_details.py
           tests/test_command_registry.py tests/test_permission_pao_fence.py
           orchestrator/enterprise/identity.py tests/test_permission_enterprise_decisions.py
           adapters/her_v2_provider.py tools/request_access.py
@@ -223,6 +223,7 @@ jobs:
           python -m pytest -q
           tests/test_permission_agent_tools.py
           tests/test_permission_safety_command.py
+          tests/test_safety_failure_details.py
           tests/test_permission_frontend_views.py
           tests/test_permission_pao_fence.py
           tests/test_session_store.py

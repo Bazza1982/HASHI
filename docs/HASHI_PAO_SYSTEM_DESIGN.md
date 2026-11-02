@@ -269,6 +269,15 @@ A missing file alone means an empty declaration set. Corrupt or inaccessible dat
 must never be rendered as no configured jobs. Listing does not migrate active
 heartbeats, publish settings, create files or execute/toggle any job.
 
+Permission command failures retain a safe stage/category and diagnostic reference
+without disclosing protected request, owner, token or policy details. Local syntax
+errors are distinct from authoritative stale/rejected decisions and infrastructure
+failures. If a control submission lacks a confirmed outcome, the FC reports it as
+unconfirmed and never claims that no permission was granted or retries it. Failed
+control-button rendering is visible alongside an already readable request view.
+These presentation facts do not authenticate a user, create an authority or weaken
+the original private ingress, ownership, revision or policy checks.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible

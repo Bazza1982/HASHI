@@ -40,6 +40,8 @@ HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
 功能放在最窄的Function/配置owner。Core不含产品策略或导入；改动须获准major迁移、
 升版本、加标签并独立复核。标志不授予权限。
 
+权限页面保留安全阶段/原因/编号；私密拒绝不泄漏对象，提交不明不谎称未授权，不重放；原认证和审批检查不变。
+
 Prove source, Worker adoption and delivery separately. Tools cannot alter/kill
 Core/Python, read secrets or grant authority. `/reboot min|same`: one Worker;
 `max`: shared Functions/Workers, never Core/Remote. Code needs reboot; docs do not.
