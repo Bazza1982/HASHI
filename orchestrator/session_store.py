@@ -3089,6 +3089,22 @@ class SessionStore:
             return self._session_dict(row)
 
     def ensure_default_session(self, *, owner_id: str, agent_id: str) -> dict[str, Any]:
+        owner = str(owner_id).strip()
+        agent = str(agent_id).strip().lower()
+        if not owner or not agent:
+            raise ValueError("owner_id and agent_id are required")
+        # Existing Sessions are a pure WAL read. Acquiring a writer lock here
+        # queues every roster/overview read behind an unrelated transaction.
+        # A missing row still uses create_session's atomic recheck and insert.
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM sessions
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                     AND is_default = 1""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+        if row is not None:
+            return self._session_dict(row)
         return self.create_session(
             owner_id=owner_id,
             agent_id=agent_id,
@@ -3867,7 +3883,9 @@ class SessionStore:
         owner = str(owner_id)
         agent = str(agent_id).lower()
         default = self.ensure_default_session(owner_id=owner, agent_id=agent)
-        with self._lock, self._connection() as connection:
+        # This snapshot only selects an existing binding. Establishment below
+        # retains its write lock, transaction and competing-binding recheck.
+        with self._connection() as connection:
             current = connection.execute(
                 """
                 SELECT s.* FROM channel_bindings AS b
