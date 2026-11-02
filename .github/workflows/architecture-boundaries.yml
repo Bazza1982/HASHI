@@ -86,6 +86,8 @@ jobs:
             tests/test_command_ui.py \
             tests/test_ui_language.py \
             tests/test_backend_selection_transaction.py \
+            tests/test_session_operation_failures.py \
+            tests/test_fresh_context.py \
             tests/test_agent_fyi.py \
             tests/test_dependency_profiles.py \
             tests/test_function_worker_protocol.py \

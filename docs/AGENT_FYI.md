@@ -84,10 +84,9 @@ fsynced candidate; permanent failure preserves state and never replays actions.
 
 ## Sessions, trust, and delivery
 
-PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Rebuild frontend
-history from PAO; caches must match its current owner/Agent Session. Preserve
-order, atomic attachments and failed/cancelled-asset isolation. Telegram proofs
-retain partial uncertainty; join Tool/job diagnostics.
+PAO管Conversation/Message/Run，Engine管Session/Turn；前端历史以PAO为准，缓存匹配owner/代理/会话。
+保留顺序、原子附件及失败/取消附件隔离；Telegram保留部分送达的不确定性，关联工具/任务诊断。
+会话操作保留阶段/安全原因/诊断号；提交不明先核对，禁止清理可能已选中的新会话。
 
 Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home can read them.

@@ -234,6 +234,15 @@ PAO is the sole owner of:
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
 
+Conversation commands preserve the failing stage, a safe cause and a per-operation
+diagnostic reference. A backend-reset rejection can retain the known previous
+Conversation selection; a failed storage/binding acknowledgement cannot prove
+that the write did not commit. Such outcomes remain unconfirmed, with a request
+to inspect current state before retrying. New-session cleanup is restricted to
+the pre-binding failure boundary: a possibly committed selection must never be
+archived as an inactive candidate. Cancellation propagates without being rendered
+as a failed command. These are shared PAO Functions, independent of Engine.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible
