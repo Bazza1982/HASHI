@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,6 +10,9 @@ from orchestrator import runtime_session, ui_language
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import card_title, selected_label, status_label
 from orchestrator.run_questions import RunQuestions
+from orchestrator.settings_failures import (
+    record_settings_failure, render_settings_callback_failure, settings_failure_text,
+)
 
 
 def _authorized(runtime: Any, update: Any) -> bool:
@@ -61,15 +63,20 @@ async def askme_command(runtime: Any, update: Any, context: Any) -> None:
     if args and (len(args) != 1 or args[0] not in {"on", "off"}):
         await runtime._reply_text(update, ui_language.tr("askme.usage"))
         return
+    phase = "read"
     try:
         service = _service(runtime)
         if args:
+            phase = "persist"
             policy = await asyncio.to_thread(service.set_question_policy, scope=scope,
                                              agent_id=runtime.name, enabled=args[0] == "on")
         else:
             policy = await asyncio.to_thread(service.question_policy, runtime.name)
-    except (OSError, sqlite3.Error, ValueError):
-        await runtime._reply_text(update, ui_language.tr("askme.error"))
+    except Exception as exc:
+        failure = record_settings_failure(
+            runtime, exc, operation="question_settings", phase=phase, unconfirmed=phase == "persist",
+        )
+        await runtime._reply_text(update, settings_failure_text(failure))
         return
     text, keyboard = _card(policy)
     await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=keyboard)
@@ -84,12 +91,17 @@ async def askme_callback(runtime: Any, update: Any, context: Any) -> None:
     if len(parts) != 3 or parts[0] != "askme" or parts[1] not in {"agent", "instance"} or parts[2] not in {"on", "off"}:
         await query.answer(ui_language.tr("askme.usage"), show_alert=True)
         return
+    phase = "read"
     try:
         service = _service(runtime)
+        phase = "persist"
         policy = await asyncio.to_thread(service.set_question_policy, scope=parts[1],
                                          agent_id=runtime.name, enabled=parts[2] == "on")
-    except (OSError, sqlite3.Error, ValueError):
-        await query.answer(ui_language.tr("askme.error"), show_alert=True)
+    except Exception as exc:
+        failure = record_settings_failure(
+            runtime, exc, operation="question_settings", phase=phase, unconfirmed=phase == "persist",
+        )
+        await render_settings_callback_failure(query, failure)
         return
     text, keyboard = _card(policy)
     await query.answer()

@@ -4360,8 +4360,13 @@ class FlexibleAgentRuntime:
                 selected = ui_language.preferred_locale(self, update)
             else:
                 ui_language.set_preferred_locale(self, selected, update)
-        except (OSError, ValueError, UnicodeError) as exc:
-            raise RuntimeError(f"language preference save failed: {exc}") from exc
+        except Exception as exc:
+            from orchestrator.operation_failures import OperationFailed
+            from orchestrator.settings_failures import record_settings_failure
+
+            raise OperationFailed(record_settings_failure(
+                self, exc, operation="language_settings", phase="persist",
+            )) from None
         catalog = ui_language.load_catalog(selected)
         key = "language.reset" if reset else "language.changed"
         notice = ui_language.tr(
@@ -4460,12 +4465,11 @@ class FlexibleAgentRuntime:
                     ui_language.tr("language.invalid", locale=current),
                 )
                 return
-            except RuntimeError:
-                await self._reply_text(
-                    update,
-                    "语言偏好无法安全保存；原设置保持不变。" if current == "zh-CN" else
-                    "The language preference could not be saved safely; the previous setting was kept.",
-                )
+            except RuntimeError as exc:
+                from orchestrator.settings_failures import record_settings_failure, settings_failure_text
+
+                failure = record_settings_failure(self, exc, operation="language_settings", phase="persist")
+                await self._reply_text(update, settings_failure_text(failure, locale=current))
                 return
         await self._reply_text(
             update,
@@ -4508,12 +4512,11 @@ class FlexibleAgentRuntime:
                 show_alert=True,
             )
             return
-        except RuntimeError:
-            await query.answer(
-                "语言偏好无法安全保存。" if old_locale == "zh-CN" else
-                "The language preference could not be saved safely.",
-                show_alert=True,
-            )
+        except RuntimeError as exc:
+            from orchestrator.settings_failures import record_settings_failure, render_settings_callback_failure
+
+            failure = record_settings_failure(self, exc, operation="language_settings", phase="persist")
+            await render_settings_callback_failure(query, failure, locale=old_locale)
             return
         await query.edit_message_text(
             self._language_menu_text(locale=selected, notice=notice),

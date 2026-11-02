@@ -70,6 +70,20 @@ existing canonical actor key; resetting that actor removes all of its aliases.
 No language catalog, UI layout, Telegram destination, or TUI client setting is
 changed by this persistence migration.
 
+Language preference commands and buttons preserve the specific safe storage cause
+and per-operation diagnostic reference. Invalid requested languages are rejected
+before storage; invalid stored documents are reported as configuration errors.
+A committed durability error never claims that the previous language was kept.
+The low-level preference functions retain their established exception contracts.
+
+The shared setting-error renderer also serves PAO question-policy and model
+fallback-policy controls. It distinguishes read failures, stale revisions,
+storage failures and unconfirmed writes, without retrying. Callback pages carry
+the complete reason and reference instead of only a short popup. Fallback error
+pages show a freshly validated saved-policy snapshot when available; an unreadable
+snapshot is never rendered as a newly saved default. Language preferences remain
+Frontend Connector-owned; question and fallback policy remain PAO-owned.
+
 ## Group mutation behavior
 
 `AgentDirectory` remains the group owner. Each public mutation reads a fresh

@@ -85,6 +85,11 @@ jobs:
             tests/test_engineering_safeguards.py \
             tests/test_command_ui.py \
             tests/test_ui_language.py \
+            tests/test_ui_language_persistence.py \
+            tests/test_settings_failures.py \
+            tests/test_askme_control.py \
+            tests/test_runtime_her_fallback.py \
+            tests/test_model_fallback_policy.py \
             tests/test_backend_selection_transaction.py \
             tests/test_backend_switch_outcomes.py \
             tests/test_credit_failures.py \

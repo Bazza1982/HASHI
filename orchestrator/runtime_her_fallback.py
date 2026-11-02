@@ -21,7 +21,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from orchestrator import model_fallback_policy as policy_owner
 from orchestrator import ui_language
 from orchestrator.command_ui import back_label, refresh_label, setting_card
-from orchestrator.config_json import ConfigConflictError
+from orchestrator.operation_failures import OperationFailed
+from orchestrator.settings_failures import record_settings_failure, render_settings_callback_failure
 from orchestrator.privacy_levels import PrivacyLevel
 
 
@@ -44,7 +45,12 @@ def _load(runtime: Any) -> policy_owner.FallbackPolicy:
 
 
 def _load_for_update(runtime: Any) -> tuple[policy_owner.FallbackPolicy, Any]:
-    return policy_owner.read_policy(runtime, _actor(runtime), for_update=True)
+    try:
+        return policy_owner.read_policy(runtime, _actor(runtime), for_update=True)
+    except Exception as exc:
+        raise OperationFailed(record_settings_failure(
+            runtime, exc, operation="fallback_settings", phase="read",
+        )) from None
 
 
 def _save(
@@ -53,19 +59,14 @@ def _save(
     *,
     document: Any,
 ) -> bool:
-    """Publish one policy under the read revision.
-
-    A conflict or durability error leaves the prior policy active and reports
-    failure; the requested display value is never shown as if it were saved.
-    """
-
+    """Publish once under the read revision; preserve rejection/commit facts."""
     actor = _actor(runtime)
     try:
         policy_owner.write_policy(runtime, actor, policy, document=document)
-    except ConfigConflictError:
-        return False
-    except (OSError, ValueError, UnicodeError):
-        return False
+    except Exception as exc:
+        raise OperationFailed(record_settings_failure(
+            runtime, exc, operation="fallback_settings", phase="persist",
+        )) from None
     return True
 
 
@@ -291,8 +292,8 @@ def _cost_label(policy: policy_owner.FallbackPolicy) -> str:
     )
 
 
-def fallback_menu_text(runtime: Any) -> str:
-    policy = _load(runtime)
+def fallback_menu_text(runtime: Any, *, policy: policy_owner.FallbackPolicy | None = None) -> str:
+    policy = policy if policy is not None else _load(runtime)
     herv3_rule = policy.source_rule(policy_owner.SOURCE_HERV3)
     codex_rule = policy.source_rule(policy_owner.SOURCE_CODEX_CLI)
     facts = [
@@ -345,8 +346,8 @@ def _mode_button(policy: policy_owner.FallbackPolicy, mode: str) -> InlineKeyboa
     )
 
 
-def fallback_menu_keyboard(runtime: Any) -> InlineKeyboardMarkup:
-    policy = _load(runtime)
+def fallback_menu_keyboard(runtime: Any, *, policy: policy_owner.FallbackPolicy | None = None) -> InlineKeyboardMarkup:
+    policy = policy if policy is not None else _load(runtime)
     return InlineKeyboardMarkup(
         [
             [
@@ -1117,6 +1118,22 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             runtime, query, fallback_menu_text(runtime), fallback_menu_keyboard(runtime)
         )
         await query.answer()
+    except OperationFailed as exc:
+        failure = exc.failure
+        current_text = ""
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(refresh_label(), callback_data="fallback:refresh"),
+        ]])
+        if failure.phase != "read":
+            try:
+                saved, _document = policy_owner.read_policy(runtime, _actor(runtime), for_update=True)
+                current_text = fallback_menu_text(runtime, policy=saved)
+                keyboard = fallback_menu_keyboard(runtime, policy=saved)
+            except Exception as read_error:
+                record_settings_failure(runtime, read_error, operation="fallback_settings", phase="read")
+        await render_settings_callback_failure(
+            query, failure, current_text=current_text, keyboard=keyboard,
+        )
     except (IndexError, KeyError, TypeError, ValueError) as exc:
         if str(exc) == ui_language.tr("fallback.save_failed"):
             try:
