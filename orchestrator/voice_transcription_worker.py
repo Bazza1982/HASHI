@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import logging
 import re
@@ -19,7 +20,19 @@ from typing import Any, BinaryIO
 if __package__:
     from orchestrator.voice_transcription_result import TranscriptionFailed, transcription_failure
 else:
-    from voice_transcription_result import TranscriptionFailed, transcription_failure
+    # -I excludes both cwd and the script directory. Load only the companion
+    # pinned beside this generation's worker, without adding an import root.
+    _result_name = "_hashi_voice_transcription_result"
+    _result_spec = importlib.util.spec_from_file_location(
+        _result_name, Path(__file__).with_name("voice_transcription_result.py"),
+    )
+    if _result_spec is None or _result_spec.loader is None:
+        raise ImportError("Pinned transcription result module is unavailable")
+    _result_module = importlib.util.module_from_spec(_result_spec)
+    sys.modules[_result_name] = _result_module
+    _result_spec.loader.exec_module(_result_module)
+    TranscriptionFailed = _result_module.TranscriptionFailed
+    transcription_failure = _result_module.transcription_failure
 
 PROTOCOL_VERSION = 1
 DEFAULT_MODEL_SIZE = "small"
@@ -124,8 +137,8 @@ class _ModelRuntime:
         }
 
 
-def _request_payload(raw: str) -> dict[str, Any]:
-    value = json.loads(raw)
+def _request_payload(raw: str | dict[str, Any]) -> dict[str, Any]:
+    value = json.loads(raw) if isinstance(raw, str) else raw
     if not isinstance(value, dict):
         raise ValueError("request must be an object")
     if value.get("version") != PROTOCOL_VERSION:
@@ -168,7 +181,13 @@ def _serve() -> int:
         request_id = ""
         phase = "input"
         try:
-            request = _request_payload(raw.decode("utf-8"))
+            value = json.loads(raw.decode("utf-8"))
+            # A valid correlation ID survives an input rejection, so the parent
+            # receives the actual cause rather than a false protocol mismatch.
+            candidate_id = value.get("id") if isinstance(value, dict) else None
+            if isinstance(candidate_id, str) and 0 < len(candidate_id) <= 128:
+                request_id = candidate_id
+            request = _request_payload(value)
             request_id = request["id"]
             phase = "worker"
             result = runtime.transcribe(

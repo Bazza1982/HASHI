@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +16,46 @@ from orchestrator.voice_transcription_result import (
     TranscriptionFailed, TranscriptionFailure,
     transcribe_audio, transcription_failure,
 )
+
+
+@pytest.mark.parametrize("mode", ["probe", "serve"])
+def test_real_isolated_worker_boots_from_pinned_files_with_an_unrelated_cwd(tmp_path, mode):
+    worker = Path(voice_transcriber.__file__).with_name("voice_transcription_worker.py")
+    (tmp_path / "voice_transcription_result.py").write_text(
+        "raise RuntimeError('untrusted-cwd-import')", encoding="utf-8",
+    )
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "raise RuntimeError('untrusted-package-import')", encoding="utf-8",
+    )
+    request_id = "wire-isolated-entry"
+    missing_audio = tmp_path / "missing-private-input.wav"
+    request = json.dumps({
+        "version": 1, "id": request_id, "audio_path": str(missing_audio),
+        "model_size": "small", "language": None,
+    }) + "\n"
+    completed = subprocess.run(
+        [sys.executable, "-I", str(worker), "--" + mode],
+        input=request if mode == "serve" else "", text=True, encoding="utf-8",
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True, timeout=15, check=False,
+    )
+    prefix = "HASHI_VOICE_TRANSCRIPTION_RESULT="
+    records = [line[len(prefix):] for line in completed.stdout.splitlines() if line.startswith(prefix)]
+    assert records, completed.stderr
+    payload = json.loads(records[-1])
+    assert "untrusted-" not in completed.stdout + completed.stderr
+    if mode == "probe":
+        assert payload["status"] in {"ok", "error"}
+        assert completed.returncode == (0 if payload["status"] == "ok" else 1)
+        assert "voice_transcription_result" not in payload.get("error", "")
+    else:
+        assert completed.returncode == 0
+        assert payload["version"] == 1 and payload["id"] == request_id
+        assert payload["ok"] is False and payload["failure"]["phase"] == "input"
+        assert str(missing_audio) not in payload["error"]
+        assert payload["failure"]["reference"].startswith("stterr_")
 
 
 @pytest.mark.parametrize("field,value", [
