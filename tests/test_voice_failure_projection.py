@@ -21,8 +21,51 @@ from tests.test_session_attachment_authorization import Consumer, CodexConsumer,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("producer", ["function_worker", "session_api"])
+@pytest.mark.parametrize("safe_voice", [False, True])
+@pytest.mark.parametrize("native_enabled", [False, True])
+async def test_voice_state_producers_keep_native_choice_separate_from_confirmation(
+    tmp_path, monkeypatch, producer, safe_voice, native_enabled,
+):
+    from orchestrator import voice_transcriber
+    from orchestrator.function_worker_host import FunctionWorkerHost
+
+    async def transcribe(_path):
+        return "synthetic producer transcript"
+
+    monkeypatch.setattr(
+        voice_transcriber, "get_transcriber",
+        lambda: SimpleNamespace(transcribe=transcribe),
+    )
+    runtime = SimpleNamespace(
+        _native_voice_transcripts={}, _safevoice_enabled=safe_voice,
+        voice_manager=SimpleNamespace(
+            native_audio_enabled=lambda terminal: native_enabled and terminal == "desktop",
+        ),
+    )
+    canonical = {"parts": [{
+        "type": "media", "modality": "audio", "semantic_role": "voice_message",
+        "attachment_id": "att-producer", "local_ref": str(tmp_path / "synthetic.wav"),
+    }]}
+    if producer == "function_worker":
+        owner = FunctionWorkerHost.__new__(FunctionWorkerHost)
+        owner.runtime = runtime
+        state = await owner._begin_native_voice_transcription(canonical, terminal="desktop")
+    else:
+        owner = WorkbenchApiServer.__new__(WorkbenchApiServer)
+        state = owner._begin_session_voice_transcription(
+            runtime=runtime, canonical_content=canonical, terminal="desktop",
+        )
+    assert state is not None
+    await state["task"]
+    assert state["native_audio_authorized"] is native_enabled
+    assert state["safe_voice"] is (safe_voice and not native_enabled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safe", [False, True])
 @pytest.mark.parametrize("backend_class", [Consumer, CodexConsumer, HERConsumer])
-async def test_transcription_failure_reaches_every_engine_boundary_without_a_model_action(tmp_path, backend_class):
+async def test_transcription_failure_reaches_every_engine_boundary_without_a_model_action(tmp_path, backend_class, safe):
     mgr, backend, store, session, run, _, content = fixture(tmp_path, codex=True, backend_class=backend_class)
     mgr.config.active_backend = "codex-cli"
     failure = transcription_failure(ImportError("leak_token_Example", name="faster_whisper"), phase="model")
@@ -30,7 +73,7 @@ async def test_transcription_failure_reaches_every_engine_boundary_without_a_mod
     store.record_voice_transcript(request_id=run["request_id"], attachment_id=attachment_id,
         text="", provenance="local_stt", safe_voice_state="unavailable", failure=failure.as_dict())
     state = {"request_id":run["request_id"], "attachment_id":attachment_id, "attachment_ids":[attachment_id],
-        "safe_voice":True, "status":"unavailable", "text":"", "failure":failure.as_dict(),
+        "safe_voice":safe, "status":"unavailable", "text":"", "failure":failure.as_dict(),
         "ready_event":asyncio.Event(), "release_event":asyncio.Event(), "gate_lock":asyncio.Lock()}
     state["ready_event"].set()
     state["release_event"].set()

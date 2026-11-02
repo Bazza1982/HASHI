@@ -368,7 +368,8 @@ Ordinary audio files retain their existing routing.
         == "canonical"
         or (capability is not None and capability.supports("audio"))
     )
-    if canonical_input and not bool(state.get("safe_voice")):
+    if (canonical_input and state.get("native_audio_authorized") is True
+            and not bool(state.get("safe_voice"))):
         return prompt, content, ()
     # Check intake integrity before trusting derived input, and once again
     # after a potentially long confirmation wait. The fd fence remains active.

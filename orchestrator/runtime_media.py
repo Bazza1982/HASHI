@@ -1175,6 +1175,7 @@ async def handle_voice_or_audio(
                 "attachment_id": attachment_id,
                 # Choosing Native is explicit authorization for the complete
                 # raw-audio Turn, including its one derived audit transcript.
+                "native_audio_authorized": True,
                 "safe_voice": False,
                 "confirmation_requested": False,
                 "confirmation_presented": False,

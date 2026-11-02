@@ -317,6 +317,7 @@ async def test_authorized_native_voice_does_not_wait_for_audit_transcript(tmp_pa
             input_transports={"audio": ("input_audio",)},
         )
     _, state = transcript_fixture(mgr, store, run, content, status="ready", safe=False)
+    state["native_audio_authorized"] = True
     state["status"] = status
     state["ready_event"].clear()
     state["release_event"].clear()
@@ -327,6 +328,39 @@ async def test_authorized_native_voice_does_not_wait_for_audit_transcript(tmp_pa
     assert backend.seen_content == content
     assert not state.get("confirmation_requested")
     assert not state["ready_event"].is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_class", [HERConsumer, Consumer])
+async def test_confirmation_disabled_does_not_authorize_raw_audio_or_skip_pending_stt(tmp_path, backend_class):
+    from orchestrator.multimodal_contract import InputCapability
+
+    mgr, backend, store, _, run, _, content = fixture(
+        tmp_path, codex=True, backend_class=backend_class,
+    )
+    if backend_class is Consumer:
+        backend.input_capability = InputCapability(
+            provider="native-capable-test", model="audio-model", source="test",
+            input_modalities=frozenset({"text", "audio"}),
+            input_transports={"audio": ("input_audio",)},
+        )
+    _, state = transcript_fixture(mgr, store, run, content, safe=False)
+    state["status"] = "pending"
+    state["ready_event"].clear()
+    state["release_event"].clear()
+    task = asyncio.create_task(
+        mgr.generate_response("synthetic", run["request_id"], request_content=content),
+    )
+    await asyncio.sleep(0)
+    consumed_before_transcription = hasattr(backend, "seen_prompt")
+    state["status"] = "released"
+    state["ready_event"].set()
+    state["release_event"].set()
+    response = await asyncio.wait_for(task, 2)
+    assert not consumed_before_transcription
+    assert response.is_success, response.error
+    assert state["text"] == "SYNTHETIC_VOICE_BLUE"
+    assert backend.seen_content == content
 
 
 @pytest.mark.asyncio
@@ -396,11 +430,12 @@ async def test_consumers_wait_for_safevoice_confirmation_and_honor_discard(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("safe", [False, True])
 @pytest.mark.parametrize("fault", ["missing_state", "other_run", "other_attachment", "not_durable", "durable_unreleased", "unavailable"])
 @pytest.mark.parametrize("backend_class", [CodexConsumer, Consumer, HERConsumer])
-async def test_voice_consumers_cannot_bypass_durable_gate(tmp_path, fault, backend_class):
+async def test_voice_consumers_cannot_bypass_durable_gate(tmp_path, fault, backend_class, safe):
     mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True, backend_class=backend_class)
-    record, state = transcript_fixture(mgr, store, run, content, safe=True)
+    record, state = transcript_fixture(mgr, store, run, content, safe=safe)
     if fault == "missing_state":
         mgr.runtime._native_voice_transcripts = {}
     elif fault == "other_run":

@@ -8223,6 +8223,7 @@ class WorkbenchApiServer:
             "attachment_id": attachment_ids[0],
             "attachment_ids": attachment_ids,
             "transcript_decisions": {},
+            "native_audio_authorized": native_authorized,
             "safe_voice": bool(
                 getattr(runtime, "_safevoice_enabled", False)
                 and not native_authorized
