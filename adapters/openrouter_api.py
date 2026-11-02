@@ -2636,17 +2636,38 @@ class OpenRouterAdapter(BaseBackend):
         return True
 
     async def get_key_info(self) -> dict | None:
+        """Compatibility view; unsupported Providers never send their credentials."""
+        return (await self.get_key_info_result()).payload
+
+    async def get_key_info_result(self):
+        from adapters.key_info_result import KeyInfoResult
+        from orchestrator.operation_failures import OperationRejected, operation_failure
+
+        # Account inspection is specific to OpenRouter. Inheriting chat transport
+        # must never opt another Provider's credentials into this endpoint.
+        if type(self) is not OpenRouterAdapter or getattr(self.config, "engine", "openrouter-api") != "openrouter-api":
+            return KeyInfoResult(False)
+        phase = "configuration"
         try:
+            if not self.api_key:
+                raise OperationRejected("authentication_rejected")
+            phase = "request"
             self._ensure_client()
             response = await self.client.get(
                 "https://openrouter.ai/api/v1/key",
                 headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=15.0, follow_redirects=False,
             )
             response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.error(f"Failed to fetch OpenRouter key info: {e}")
-            return None
+            phase = "decode"
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+                raise OperationRejected("response_invalid")
+            return KeyInfoResult(True, payload)
+        except Exception as exc:
+            issue = operation_failure(exc, operation="credit", phase=phase)
+            self.logger.error("OpenRouter key inspection failure: %s", issue.diagnostic())
+            return KeyInfoResult(True, issue=issue)
 
     # ------------------------------------------------------------------
     # Payload builder

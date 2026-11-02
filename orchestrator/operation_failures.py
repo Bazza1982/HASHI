@@ -8,12 +8,14 @@ import sqlite3
 from dataclasses import dataclass
 from uuid import uuid4
 
+import httpx
+
 from orchestrator import ui_language
 from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 
 _PHASES = frozenset({
     "read", "create", "reset_backend", "bind", "save", "archive", "default", "activate",
-    "configuration", "initialize", "session", "fence", "persist", "retire", "cleanup",
+    "configuration", "initialize", "session", "fence", "persist", "retire", "cleanup", "request", "decode",
 })
 
 
@@ -21,7 +23,10 @@ class OperationRejected(RuntimeError):
     """An owner-proved rejection; no exception text crosses the boundary."""
 
     def __init__(self, reason: str):
-        if reason not in {"backend_refused", "backend_unavailable", "backend_not_allowed", "privacy_blocked"}:
+        if reason not in {
+            "backend_refused", "backend_unavailable", "backend_not_allowed", "privacy_blocked",
+            "response_invalid", "authentication_rejected",
+        }:
             raise ValueError("invalid operation rejection")
         self.reason = reason
         super().__init__(reason)
@@ -39,6 +44,16 @@ def _reason(error: Exception) -> str:
         return "durability_unconfirmed"
     if isinstance(error, SessionNotFound):
         return "scope_unavailable"
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return ("authentication_rejected" if status in {401, 403} else "rate_limited" if status == 429
+                else "service_unavailable" if status >= 500 else "http_rejected")
+    if isinstance(error, httpx.TimeoutException):
+        return "timed_out"
+    if isinstance(error, (httpx.DecodingError, httpx.ProtocolError)):
+        return "response_invalid"
+    if isinstance(error, httpx.TransportError):
+        return "connection_failed"
     if isinstance(error, json.JSONDecodeError):
         return "configuration_invalid"
     if isinstance(error, sqlite3.Error):
@@ -104,6 +119,8 @@ def operation_failure(error: Exception, *, operation: str, phase: str, unconfirm
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", error_type):
         error_type = "Exception"
     reason = _reason(error)
+    if phase == "decode" and isinstance(error, (ValueError, TypeError)):
+        reason = "response_invalid"
     return OperationFailure(
         operation, phase, reason, error_type, f"{operation}_{phase}_{reason}",
         "operr_" + uuid4().hex[:24], bool(unconfirmed or isinstance(error, ConfigDurabilityError)),

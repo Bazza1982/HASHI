@@ -6462,14 +6462,18 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         backend = self.backend_manager.current_backend
-        if not backend or not hasattr(backend, "get_key_info"):
+        inspect_key = getattr(backend, "get_key_info_result", None)
+        if not callable(inspect_key):
             await self._reply_text(update, ui_language.tr("credit.openrouter_only"))
             return
-        key_info = await backend.get_key_info()
-        if not key_info:
-            await self._reply_text(update, ui_language.tr("credit.fetch_failed"))
+        result = await inspect_key()
+        if not result.supported:
+            await self._reply_text(update, ui_language.tr("credit.openrouter_only"))
             return
-        data = key_info.get("data", {})
+        if result.issue is not None:
+            await self._reply_text(update, ui_language.tr("credit.fetch_failed") + "\n" + result.issue.render())
+            return
+        data = (result.payload or {}).get("data", {})
         await self._reply_text(
             update,
             runtime_menu_views.credit_status_text(data),

@@ -254,6 +254,14 @@ but cannot relabel a committed selection as failed or automatically repeat it.
 The Boolean compatibility API reflects the actual live selection; UI consumers
 use the immutable per-call result to retain the reason and warning.
 
+Read-only account inspection also preserves typed Provider HTTP, connection,
+timeout and response-decoding failures through the command renderer. OpenRouter
+key inspection is qualified only for the concrete OpenRouter adapter; inheriting
+its chat transport does not authorize another Provider's credentials at that
+endpoint. Unsupported Providers return an explicit unsupported result without a
+request. Failures omit credential values, response bodies and transport URLs;
+redirects are not followed and each lookup performs one bounded-time GET.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible
