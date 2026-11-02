@@ -550,6 +550,8 @@ class WorkbenchApiServer:
         )
         from orchestrator.frontend_call.routes import register_call_api
         register_call_api(self)
+        from orchestrator.standby.routes import register_standby_api
+        register_standby_api(self)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
@@ -7329,6 +7331,7 @@ class WorkbenchApiServer:
                     "attachment_schema_version": "1.1",
                     "attachment_catalogue": {"version": 1, "incremental": True, "historical_source": True},
                     "file_content": {"version": 1, "read_only": True, "explicit_media_processing": True},
+                    "standby": {"version": 1, "control_available": True, "media_available": False, "armed_available": False},
                     "message_content_schema_version": "1.2",
                     "attachment_upload_transport": (
                         "direct-multipart-or-octet-stream"

@@ -10,6 +10,14 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "standby.auth_required": "请先通过身份验证，再查看待命状态。",
+    "standby.usage": "用法：/standby [status]",
+    "standby.config_only": "已关闭 · 仅可管理配置",
+    "standby.no_capture": "麦克风、摄像头和系统音频均已停止。",
+    "standby.unqualified": "媒体、判断和代理临时内容清理尚未完成资格验证。",
+    "standby.control_count": "已保存的控制记录：{count}",
+    "standby.no_actions": "查看此卡不会开始采集、调用模型或启动代理工作。",
+    "standby.control_unavailable": "待命控制暂不可用，未开始采集。",
     "safety.requests": "权限请求列表",
     "safety.request": "权限请求",
     "safety.no_requests": "当前会话没有权限请求。",
@@ -3105,6 +3113,7 @@
     "ingress_confirmation.identity_mismatch": "这条确认不属于当前聊天或原消息。"
   },
   "commands": {
+    "standby": "查看待命状态与准备情况",
     "safety": "查看权限状态",
     "askme": "控制提问卡片",
     "help": "显示帮助菜单",
@@ -3221,6 +3230,7 @@
     "hcc": "管理上下文缓存注入"
   },
   "titles": {
+    "Standby": "环境待命",
     "Hashi command centre": "HASHI 命令中心",
     "Interface language": "界面语言",
     "Reboot agents": "重启 Functions",

@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 32
+    SCHEMA_VERSION = 33
 
     def __init__(
         self,
@@ -1711,6 +1711,8 @@ class SessionStore:
                 self._revert_legacy_terminal_recovery(connection)
             from orchestrator import attachment_catalogue
             attachment_catalogue.install_schema(connection)
+            from orchestrator.standby.store import install_schema as install_standby_schema
+            install_standby_schema(connection)
             pcm_forget_session.install_schema(connection)
             pcm_forget_preview.install_schema(connection)
             connection.execute(
@@ -3312,6 +3314,34 @@ class SessionStore:
                 params,
             ).fetchall()
         return [self._run_dict(row) for row in rows]
+
+    def standby_control(self, *, owner_id, body, now=None):
+        """Commit only Standby-owned controls through the native transaction."""
+        from orchestrator.standby.store import control
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return control(connection, instance_id=self.instance_id, owner_id=owner_id,
+                           body=body, now=time() if now is None else now)
+
+    def standby_snapshot(self, *, owner_id, binding, standby_id):
+        from orchestrator.standby.store import snapshot
+        with self._lock, self._connection() as connection:
+            return snapshot(connection, instance_id=self.instance_id, owner_id=owner_id,
+                            binding_value=binding, standby_id=standby_id)
+
+    def standby_recent(self, *, owner_id, binding, now=None):
+        from orchestrator.standby.store import recent
+        from time import time
+        with self._lock, self._connection() as connection:
+            return recent(connection, instance_id=self.instance_id, owner_id=owner_id,
+                          binding_value=binding, now=time() if now is None else now)
+
+    def standby_operation_status(self, *, owner_id, agent_id, operation_id):
+        from orchestrator.standby.store import operation_status
+        with self._lock, self._connection() as connection:
+            return operation_status(connection, instance_id=self.instance_id, owner_id=owner_id,
+                                    agent_id=agent_id, operation_id=operation_id)
 
     def preview_pcm_forget(
         self, *, owner_id: str, agent_id: str, session_id: str,

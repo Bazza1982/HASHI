@@ -372,4 +372,51 @@ PRD SB-xx 对应证据：
 剩余阻断与下个任务：
 ```
 
-**本次文档交付只完成方案编制与源码抽查，不将以上任何实施关卡标记通过。**
+**原文档交付只完成方案编制与源码抽查，不将以上任何实施关卡标记通过。**
+
+## 15. 实施记录：S0 与 S1 控制子集（2026-11-03）
+
+本节记录实际实现，前文各阶段目标保持有效。历史文档中的
+`feature-standby` 与当时“仅文档”限制属于原轮次；本次集中接手获准在既有
+非生产 checkout/main 施工，不创建新分支或工作树，不代表生产发布获准。
+
+**已实现：**PAO/Functions 的严格有界 Profile schema、原文与用户确认解释、
+默认无输入/无记录/无外发、config_json 私有版本检查；SessionStore schema 33
+控制扩展；owner/Agent/Conversation/generation 归属、控制 revision/epoch、
+幂等操作回执与原 ID 查询；配置、暂停、结束和“仅本次控制记录”的删除。
+控制表只保存 ID、版本和状态，保存的 Profile 在配置 owner，环境正文不进入
+新表或普通 Message。读取不产生采集/模型请求；配置损坏或 Agent 不在线不会
+阻止已存在控制记录的结束入口。新控制记录及操作回执具有容量/保留边界。
+
+`POST /api/v1/standby/operation` 采用已有 Backend API 身份、部署 Profile
+限制和 no-store；拒绝跨 scope、未知字段、重复 JSON key、非有限数与超大请求。
+原生 capabilities 明确区分 control_available 与 media/armed_available。
+共享动态命令注册提供 `/standby [status]`，只读状态用现有卡片与语言目录，
+不启动假 Call、不播放开场，不创建第二个模型 Provider 或 Agent。
+
+**仍未实现/不可启用：**S2 媒体租约与 Call/Phone 仲裁、连续采集、S3 合格 Judge、
+S4 完整 Agent 临时内容保留与选择性清理、S5 受管会议材料/递纸条、客户端采集面板。
+这些入口统一返回 `standby_capability_unqualified`，预检逐项说明资格缺口；
+SHADOW/ARMED、自动整理、记忆、升格产物均未开放。当前只允许 CONFIGURED/
+PAUSED/STOPPED 的控制子集；不能据此宣称 G1、完整后端或任何实际待命体验通过。
+
+S0 实际调用核对与阻断矩阵：
+
+| 原生路径 | 已有能力 | Standby 资格/阻断 |
+|---|---|---|
+| Call routes/ports/adapters | 认证、原生 Session 检查、现有媒体配置和调用 | 不启动 Call；设备租约及 Standby 处理资格未接入 |
+| Call admit → PAO Run/Message | 普通用户交谈持久化/执行 | 不满足临时环境文字/工具/compact/记忆清理，禁止升级 |
+| transient_live_media | 当前轮图像不写 Session | 不是完整环境正文/派生内容的保留契约 |
+| Phone worker_actions/ephemeral factory | 既有 Phone 无工具一次推断、隐私兼容检查 | Phone 提示词与资格不能冒充 Standby Judge，未调用 |
+| SessionStore | 原生事务与现有聊天权威 | 只增加控制扩展；不保存媒体、转写或 Judge 原始结果 |
+| config_json | 私有文件、跨进程锁、乐观并发 | Profile 保存复用；冲突或已提交耐久性未知不得盲重试 |
+
+删除当前控制记录只能报告 `control_only=true` 与
+`external_copies=not_created`，不宣称 PCM/Engine/备份的全局删除或物理擦除。
+不得让后续实现直接借用此控制子集开放 ACTIVE：媒体租约、每阶段提交屏障、
+真实内容 owner/TTL/恢复、预算与停止的容量隔离必须先完成相应验收。
+
+红绿：新增真实临时 SessionStore、并发事务、config CAS、aiohttp/authentication、
+共享命令与双语卡片测试；首轮在旧版本缺少模块处失败，随后实际控制/API通过。
+现有 SessionStore/Call ports 回归亦已执行。完整清单与实际命令/结果在原白板卡，
+不以此段说明替代真实设备、语言语义质量或 8 小时验收。

@@ -10,6 +10,14 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "standby.auth_required": "Standby status requires an authenticated user.",
+    "standby.usage": "Usage: /standby [status]",
+    "standby.config_only": "Off · configuration controls only",
+    "standby.no_capture": "Microphone, camera and system audio are stopped.",
+    "standby.unqualified": "Media, judgment and temporary Agent-content cleanup are not qualified yet.",
+    "standby.control_count": "Saved control records: {count}",
+    "standby.no_actions": "Opening this card starts no capture, model request or Agent work.",
+    "standby.control_unavailable": "Standby controls are unavailable. No capture was started.",
     "safety.requests": "Permission requests",
     "safety.request": "Permission request",
     "safety.no_requests": "No requests in this conversation.",
@@ -3105,6 +3113,7 @@
     "ingress_confirmation.identity_mismatch": "This confirmation does not belong to this chat or message."
   },
   "commands": {
+    "standby": "Standby status and readiness",
     "safety": "View permission status",
     "askme": "Control question cards",
     "help": "Show help menu",
@@ -3221,6 +3230,7 @@
     "hcc": "Manage context cache injection"
   },
   "titles": {
+    "Standby": "Standby",
     "Hashi command centre": "Hashi command centre",
     "Interface language": "Interface language",
     "Reboot agents": "Reboot Functions",

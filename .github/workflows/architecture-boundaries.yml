@@ -142,6 +142,7 @@ jobs:
             tests/test_agent_deletion.py \
             tests/contract/test_agent_creation.py \
             tests/test_session_api.py \
+            tests/standby \
             tests/test_attachment_catalogue.py \
             tests/test_file_content_service.py \
             tests/test_transcription_segments.py \
