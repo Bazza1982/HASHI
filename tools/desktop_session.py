@@ -15,7 +15,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, MAX_FRAME_BYTES, ULTRA_BYTES_PER_SECOND, ULTRA_FRAME_BYTES, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options
+from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, MAX_FRAME_BYTES, ULTRA_BYTES_PER_SECOND, ULTRA_FRAME_BYTES, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options, preview_options, PREVIEW_MAX_BYTES, PREVIEW_INTERVAL, PREVIEW_TTL_MS
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 
 
@@ -32,6 +32,7 @@ class SessionState:
         self.frames = 0
         self.last_profile = None
         self.last_frame_bytes = 0
+        self.last_preview = -100.0
         self.last_work_seconds = 0.0
 
 
@@ -40,6 +41,7 @@ class DesktopController:
         self.native, self.lock_factory, self.clock = native, lock_factory, clock
         self.guard = threading.RLock()
         self.capture_guard = threading.Lock()
+        self.last_preview = -100.0
         self.owner = None
         self.device_lock = None
         self.deadline = 0.0
@@ -195,9 +197,13 @@ class DesktopController:
         if operation == "desktop_info":
             fields(args, set())
             rows, rev = self.native.displays()
-            return {"displays": rows, "display_revision": rev, "protocol_version": 1}
+            with self.guard:
+                self._get_session(session_id)
+            return {"displays": rows, "display_revision": rev, "protocol_version": 1, "preview_supported": True}
         if operation == "desktop_view":
             return self._set_view(args, actor, session_id)
+        if operation == "desktop_previews":
+            return self.previews(args, session_id)
         if operation == "desktop_frame":
             fields(args, {"after_frame", "refresh_profile"})
             return self.frame(str(args.get("after_frame", "")), session_id, args.get("refresh_profile", "standard"))
@@ -237,6 +243,52 @@ class DesktopController:
             fields(args, {"lease_id", "event"}, {"lease_id", "event"})
             return self.input(args["event"], actor, session_id, args["lease_id"])
         raise DesktopError("desktop_invalid_operation")
+
+    def previews(self, value, session_id):
+        options = preview_options(value)
+        if not self.capture_guard.acquire(blocking=False):
+            raise DesktopError("desktop_capture_busy", 429)
+        try:
+            self.native.available()
+            rows, revision = self.native.displays()
+            by_id = {row["id"]: row for row in rows}
+            if revision != options["display_revision"] or not set(options["display_ids"]).issubset(by_id):
+                raise DesktopError("desktop_display_changed", 409)
+            with self.guard:
+                sess = self.sessions.get(session_id)
+                if sess is None:
+                    raise DesktopError("desktop_session_expired", 410)
+                now = self.clock()
+                sess.last_contact = now
+                if now - max(sess.last_preview, self.last_preview) < PREVIEW_INTERVAL:
+                    raise DesktopError("desktop_preview_busy", 429)
+                sess.last_preview = self.last_preview = now
+            result = []
+            for display_id in options["display_ids"]:
+                row = by_id[display_id]
+                rect = {key: row[key] for key in ("x", "y", "width", "height")}
+                scale = min(1, 320 / rect["width"], 180 / rect["height"])
+                size = (max(1, round(rect["width"] * scale)), max(1, round(rect["height"] * scale)))
+                image = self.native.capture(rect, size)
+                try:
+                    data = jpeg_bytes(image, max_bytes=PREVIEW_MAX_BYTES)
+                finally:
+                    image.close()
+                from PIL import Image
+                with Image.open(io.BytesIO(data)) as encoded:
+                    width, height = encoded.size
+                result.append({"display_id": display_id, "width": width, "height": height,
+                               "jpeg": base64.b64encode(data).decode("ascii")})
+            # A close or hot-plug during capture discards all prepared content.
+            self.native.available()
+            if self.native.displays()[1] != revision:
+                raise DesktopError("desktop_display_changed", 409)
+            with self.guard:
+                if self.sessions.get(session_id) is not sess:
+                    raise DesktopError("desktop_session_expired", 410)
+            return {"display_revision": revision, "ttl_ms": PREVIEW_TTL_MS, "previews": result}
+        finally:
+            self.capture_guard.release()
 
     def frame(self, after, session_id, refresh_profile="standard"):
         frame_interval_seconds(refresh_profile, idle=False)

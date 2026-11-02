@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterator, Mapping
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
-from orchestrator.desktop_contract import ACTIONS as DESKTOP_ACTIONS, DesktopError
+from orchestrator.desktop_contract import SUPPORTED_ACTIONS as DESKTOP_ACTIONS, DesktopError
 from orchestrator.file_permissions import tighten_fd_permissions
 from tools.device_paths import resolve_device_path_arguments
 

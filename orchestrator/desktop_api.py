@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from aiohttp import web
-from orchestrator.desktop_contract import SESSION_TTL, MAX_FRAME_BYTES, DesktopError, fields, identifier, view_options, validate_input
+from orchestrator.desktop_contract import SESSION_TTL, MAX_FRAME_BYTES, DesktopError, fields, identifier, preview_options, view_options, validate_input
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +64,12 @@ class DesktopSessionService:
         if not hmac.compare_digest(owner, record.owner) or not hmac.compare_digest(client, record.client):
             raise DesktopError("desktop_session_forbidden", 403)
         record.expires = self.clock()+SESSION_TTL
-        mapping = {"frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
+        mapping = {"previews": "desktop_previews", "frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
         if op not in mapping: raise DesktopError("desktop_invalid_operation")
         if op == "frame":
             args = {"after_frame": str(b.get("after_frame", ""))[:160]}
             if "refresh_profile" in b: args["refresh_profile"] = b["refresh_profile"]
+        elif op == "previews": args = preview_options(b.get("options"))
         elif op == "view": args = view_options(b.get("options"))
         elif op == "input": args = {"lease_id": identifier(b.get("lease_id"), "lease"), "event": validate_input(b.get("event"))}
         elif op == "control":
@@ -77,11 +78,14 @@ class DesktopSessionService:
             if args["mode"] != "acquire": args["lease_id"] = identifier(b.get("lease_id"), "lease")
         else: args = {}
         async def call():
-            return await self.broker().invoke_desktop(record.binding, actor_id=owner, session_id=sid,
-                                                      operation=mapping[op], args=args)
+            result = await self.broker().invoke_desktop(record.binding, actor_id=owner, session_id=sid,
+                                                        operation=mapping[op], args=args)
+            if op == "previews" and (self.sessions.get(sid) is not record or record.expires <= self.clock()):
+                raise DesktopError("desktop_session_expired", 410)
+            return result
         # Input is ordered separately from the frame request. Frames never hold
         # the session's mutation lock or wait behind slow keyboard rendering.
-        if op == "frame": return await call()
+        if op in {"frame", "previews"}: return await call()
         async with record.lock:
             try:
                 return await call()
@@ -139,7 +143,7 @@ def register_desktop_api(api):
                 raw.extend(chunk)
                 if len(raw) > 32768: raise DesktopError("desktop_request_too_large", 413)
             body = json.loads(raw)
-            readonly = isinstance(body, dict) and body.get("operation") in {"targets", "frame"}
+            readonly = isinstance(body, dict) and body.get("operation") in {"targets", "frame", "previews"}
             phase, dispatched = "read" if readonly else "dispatch", True
             result = await service.run(owner, body)
             phase = "presentation"
