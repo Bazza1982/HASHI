@@ -8085,18 +8085,11 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error_code": "fileshare_processing_unavailable"}, status=503)
 
     async def handle_v1_file_content(self, request):
-        from urllib.parse import unquote
         from orchestrator.file_content_service import FileContentError
         if not self._check_admin_auth(request) or self._v1_owner_id(request) is None:
             return web.json_response({"ok": False, "error_code": "fileshare_processing_denied"}, status=403)
         try:
-            if request.headers.get("Content-Type", "").split(";", 1)[0] != "application/octet-stream":
-                raise FileContentError("fileshare_content_invalid", 415)
-            payload = await request.read()
-            result = await self._file_content_owner().process(payload,
-                filename=unquote(request.headers.get("X-File-Name", "")),
-                operation=request.headers.get("X-File-Operation", ""),
-                allow_compute=request.headers.get("X-Allow-Configured-Compute") == "1")
+            result = await self._file_content_owner().process_request(request)
             return web.json_response({"ok": True, "instance_id": self.session_store.instance_id, **result})
         except FileContentError as error:
             return web.json_response({"ok": False, "error_code": error.code, "code": error.code}, status=error.status)

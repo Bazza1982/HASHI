@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import time
 from pathlib import Path
@@ -85,7 +86,9 @@ def _gateway_events(caplog, event: str | None = None):
 
 def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeypatch):
     client, token = _client(tmp_path, lan_mode=True)
-    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok": True})
+    monkeypatch.setattr(
+        remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok": True}
+    )
 
     unauthenticated = client.get("/workbench/v1/status")
     headers = _signed_headers(token, method="GET", path="/workbench/v1/status")
@@ -95,19 +98,24 @@ def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeyp
     assert authenticated.status_code == 200
     payload = authenticated.json()
     response_auth = payload.pop("response_auth")
-    assert verify_response_auth(
-        shared_token=token,
-        request_nonce=headers[HEADER_NONCE],
-        payload=payload,
-        response_auth=response_auth,
-    ) is True
+    assert (
+        verify_response_auth(
+            shared_token=token,
+            request_nonce=headers[HEADER_NONCE],
+            payload=payload,
+            response_auth=response_auth,
+        )
+        is True
+    )
     assert payload["gateway"] == "workbench_v1"
     assert payload["authenticated_instance"] == "WORKBENCH"
     assert payload["instance"]["instance_id"] == "HASHI1"
     assert payload["workbench_online"] is True
 
 
-def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_path, monkeypatch, caplog):
+def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(
+    tmp_path, monkeypatch, caplog
+):
     caplog.set_level(logging.INFO, logger=remote_server.logger.name)
     client, token = _client(tmp_path)
     captured: dict = {}
@@ -116,7 +124,9 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
         captured.update(kwargs)
         return 202, b'{"ok":true}', {"content-type": "application/json"}
 
-    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    monkeypatch.setattr(
+        remote_server, "_forward_workbench_gateway_request", fake_forward
+    )
     body = b'{"agent":"lily","text":"hello"}'
     path = "/workbench/v1/proxy/api/chat"
     query = "z=2&a=hello+world"
@@ -149,7 +159,11 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
     assert response.headers["x-hashi-correlation-id"] == "call-request-1"
     assert response.headers["x-hashi-trace-id"] == "call-trace-1"
     names = [row["event"] for row in _gateway_events(caplog)]
-    assert names.index("proxy_received") < names.index("proxy_authenticated") < names.index("proxy_response_ready")
+    assert (
+        names.index("proxy_received")
+        < names.index("proxy_authenticated")
+        < names.index("proxy_response_ready")
+    )
     assert names.index("proxy_response_ready") < names.index("asgi_response_completed")
 
 
@@ -163,7 +177,9 @@ def test_gateway_proxy_seals_remote_scope_for_session_run_after_authentication(
         captured.update(kwargs)
         return 202, b'{"ok":true}', {"content-type": "application/json"}
 
-    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    monkeypatch.setattr(
+        remote_server, "_forward_workbench_gateway_request", fake_forward
+    )
     prompt = "delayed remote message"
     payload = {
         "idempotency_key": "remote-delay-idempotency",
@@ -209,6 +225,7 @@ def test_gateway_proxy_authenticates_bridge_transfer_response(tmp_path, monkeypa
         "Content-Type": "application/json",
         **_signed_headers(token, method="POST", path=path, body=body),
     }
+
     def forward(**kwargs):
         captured.update(kwargs)
         return (
@@ -225,17 +242,22 @@ def test_gateway_proxy_authenticates_bridge_transfer_response(tmp_path, monkeypa
     payload = response.json()
     response_auth = payload.pop("response_auth")
     assert payload == {"ok": True, "status": "accepted"}
-    assert verify_response_auth(
-        shared_token=token,
-        request_nonce=headers[HEADER_NONCE],
-        payload=payload,
-        response_auth=response_auth,
-    ) is True
+    assert (
+        verify_response_auth(
+            shared_token=token,
+            request_nonce=headers[HEADER_NONCE],
+            payload=payload,
+            response_auth=response_auth,
+        )
+        is True
+    )
     assert captured["timeout"] == remote_server._BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS
     assert captured["timeout"] < 3600
 
 
-def test_gateway_proxy_uses_agent_lifecycle_budget_for_active_route(tmp_path, monkeypatch):
+def test_gateway_proxy_uses_agent_lifecycle_budget_for_active_route(
+    tmp_path, monkeypatch
+):
     from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
 
     client, token = _client(tmp_path)
@@ -245,7 +267,9 @@ def test_gateway_proxy_uses_agent_lifecycle_budget_for_active_route(tmp_path, mo
         captured.update(kwargs)
         return 200, b'{"ok":true}', {"content-type": "application/json"}
 
-    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    monkeypatch.setattr(
+        remote_server, "_forward_workbench_gateway_request", fake_forward
+    )
     body = b'{"is_active":true}'
     path = "/workbench/v1/proxy/api/agents/phd_1/active"
     response = client.post(
@@ -275,7 +299,9 @@ def test_gateway_proxy_keeps_generic_requests_on_generic_budget(tmp_path, monkey
         captured.update(kwargs)
         return 200, b'{"ok":true}', {"content-type": "application/json"}
 
-    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    monkeypatch.setattr(
+        remote_server, "_forward_workbench_gateway_request", fake_forward
+    )
     path = "/workbench/v1/proxy/api/agents"
     response = client.get(
         path,
@@ -302,7 +328,74 @@ def test_gateway_proxy_rejects_missing_or_wrong_shared_token(tmp_path, monkeypat
     assert client.get(path, headers=valid).status_code == 200
 
 
-def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(monkeypatch):
+def test_signed_file_content_survives_the_actual_gateway_and_rejects_policy_tampering(
+    tmp_path, monkeypatch
+):
+    client, token = _client(tmp_path)
+    captured = []
+    body = json.dumps(
+        {
+            "filename": "fixture.wav",
+            "operation": "transcribe",
+            "allow_compute": False,
+            "payload": base64.b64encode(b"synthetic audio").decode("ascii"),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def forward(request, timeout):
+        captured.append(
+            {
+                "body": request.data,
+                "headers": {
+                    key.lower(): value for key, value in request.header_items()
+                },
+            }
+        )
+        return Response()
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(
+        remote_server, "_workbench_admin_token", lambda: "synthetic-admin"
+    )
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", forward)
+    path = "/workbench/v1/proxy/api/v1/file-content"
+
+    def headers():
+        return {
+            "Content-Type": "application/json",
+            "X-Allow-Configured-Compute": "1",
+            **_signed_headers(token, method="POST", path=path, body=body),
+        }
+
+    response = client.post(path, content=body, headers=headers())
+    assert response.status_code == 200
+    assert captured[0]["body"] == body
+    assert captured[0]["headers"]["content-type"] == "application/json"
+    assert "x-allow-configured-compute" not in captured[0]["headers"]
+    tampered = body.replace(b'"allow_compute":false', b'"allow_compute":true')
+    assert tampered != body
+    response = client.post(path, content=tampered, headers=headers())
+    assert response.status_code == 401
+    assert len(captured) == 1
+
+
+def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(
+    monkeypatch,
+):
     captured: dict = {}
 
     class _Response:
@@ -327,7 +420,9 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
         captured["url"] = request.full_url
         captured["method"] = request.get_method()
         captured["body"] = request.data
-        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["headers"] = {
+            key.lower(): value for key, value in request.header_items()
+        }
         captured["timeout"] = timeout
         if request.full_url.endswith("/admin/start-agent") and timeout < 35:
             raise TimeoutError("worker still starting after 30 seconds")
@@ -365,12 +460,16 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
     assert captured["headers"]["x-hashi-trace-id"] == "call-trace-2"
     assert captured["headers"]["x-hashi-span-id"] == "remote-span-2"
     assert "x-hashi-digest" not in captured["headers"]
-    started = remote_server._request_workbench_agent_lifecycle("windows-fixture", action="start")
+    started = remote_server._request_workbench_agent_lifecycle(
+        "windows-fixture", action="start"
+    )
     assert started["ok"] is True
     assert captured["timeout"] >= 35
 
 
-def test_forwarder_records_safe_socket_cause_without_endpoint_or_message(monkeypatch, caplog):
+def test_forwarder_records_safe_socket_cause_without_endpoint_or_message(
+    monkeypatch, caplog
+):
     caplog.set_level(logging.INFO, logger=remote_server.logger.name)
     cause = OSError(104, "PRIVATE loopback endpoint")
     cause.code = "ECONNRESET"
@@ -429,13 +528,19 @@ def test_desktop_gateway_selects_live_local_api_before_post(monkeypatch):
         if request.full_url.startswith("http://10.255.255.254:"):
             raise URLError("connection refused")
         if request.get_method() == "GET":
-            return Response(b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}')
+            return Response(
+                b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}'
+            )
         return Response(b'{"ok":true,"targets":[{"instance_id":"HASHI1"}]}')
 
-    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1"))
+    monkeypatch.setattr(
+        remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1")
+    )
     monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
     monkeypatch.setattr(remote_server, "_workbench_port", 18800)
-    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "existing-token")
+    monkeypatch.setattr(
+        remote_server, "_workbench_admin_token", lambda: "existing-token"
+    )
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
 
     status, body, _headers = remote_server._forward_workbench_gateway_request(
@@ -477,13 +582,19 @@ def test_desktop_input_unknown_outcome_is_never_retried(monkeypatch):
         posted.append(request.full_url)
         raise TimeoutError("response lost after input")
 
-    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1"))
+    monkeypatch.setattr(
+        remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1")
+    )
     monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
     monkeypatch.setattr(remote_server, "_workbench_port", 18800)
-    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "existing-token")
+    monkeypatch.setattr(
+        remote_server, "_workbench_admin_token", lambda: "existing-token"
+    )
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
 
-    with pytest.raises(remote_server.WorkbenchGatewayError, match="request_outcome_unknown") as outcome:
+    with pytest.raises(
+        remote_server.WorkbenchGatewayError, match="request_outcome_unknown"
+    ) as outcome:
         remote_server._forward_workbench_gateway_request(
             method="POST",
             api_path="v1/desktop/operation",
@@ -501,17 +612,25 @@ def test_desktop_identity_preflight_is_small_authenticated_and_exact(monkeypatch
     class Response:
         status = 200
         headers = {"Content-Type": "application/json"}
-        def __enter__(self): return self
-        def __exit__(self, *_args): return False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def read(self, *_args):
             return b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}'
+
     calls = []
+
     def urlopen(request, timeout):
         calls.append(request)
         if request.get_method() == "GET":
             assert request.full_url.endswith("/api/v1/instance/identity")
             assert request.get_header("X-workbench-token") == "local-admin"
         return Response()
+
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
     monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "local-admin")
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
@@ -519,47 +638,84 @@ def test_desktop_identity_preflight_is_small_authenticated_and_exact(monkeypatch
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("identity", [
-    {"ok":True,"instance_id":"HASHI2","workbench_port":18800,"protocol":"hashi-instance-identity-v1"},
-    {"ok":True,"instance_id":"HASHI1","workbench_port":18801,"protocol":"hashi-instance-identity-v1"},
-    {"ok":True,"instance_id":"HASHI1","workbench_port":18800},
-])
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {
+            "ok": True,
+            "instance_id": "HASHI2",
+            "workbench_port": 18800,
+            "protocol": "hashi-instance-identity-v1",
+        },
+        {
+            "ok": True,
+            "instance_id": "HASHI1",
+            "workbench_port": 18801,
+            "protocol": "hashi-instance-identity-v1",
+        },
+        {"ok": True, "instance_id": "HASHI1", "workbench_port": 18800},
+    ],
+)
 def test_desktop_identity_unverified_is_rejected_before_input(monkeypatch, identity):
     class Response:
         status = 200
         headers = {}
-        def __enter__(self): return self
-        def __exit__(self, *_args): return False
-        def read(self, *_args): return json.dumps(identity).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            return json.dumps(identity).encode()
+
     posts = []
+
     def urlopen(request, timeout):
-        if request.get_method() != "GET": posts.append(request)
+        if request.get_method() != "GET":
+            posts.append(request)
         return Response()
+
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
-    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id":"HASHI1"})
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
     monkeypatch.setattr(remote_server, "_workbench_port", 18800)
     monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "local-admin")
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
     with pytest.raises(ConnectionError):
         remote_server._forward_workbench_gateway_request(
-            method="POST", api_path="v1/desktop/operation", query="",
-            body_bytes=b'{"operation":"input"}', request_headers={})
+            method="POST",
+            api_path="v1/desktop/operation",
+            query="",
+            body_bytes=b'{"operation":"input"}',
+            request_headers={},
+        )
     assert posts == []
 
 
-def test_desktop_error_envelope_distinguishes_preflight_from_unknown_outcome(tmp_path, monkeypatch):
-    client,token=_client(tmp_path)
-    path="/workbench/v1/proxy/api/v1/desktop/operation"
-    body=b'{"operation":"input"}'
-    for code,accepted,retryable,status in [
-        ("local_workbench_identity_unverified",False,True,503),
-        ("request_outcome_unknown",None,False,502),
+def test_desktop_error_envelope_distinguishes_preflight_from_unknown_outcome(
+    tmp_path, monkeypatch
+):
+    client, token = _client(tmp_path)
+    path = "/workbench/v1/proxy/api/v1/desktop/operation"
+    body = b'{"operation":"input"}'
+    for code, accepted, retryable, status in [
+        ("local_workbench_identity_unverified", False, True, 503),
+        ("request_outcome_unknown", None, False, 502),
     ]:
+
         def fail(**_kwargs):
-            raise remote_server.WorkbenchGatewayError(code,accepted=accepted,retryable=retryable,status=status)
-        monkeypatch.setattr(remote_server,"_forward_workbench_gateway_request",fail)
-        response=client.post(path,content=body,headers=_signed_headers(token,method="POST",path=path,body=body))
-        assert response.status_code==status
-        assert response.json()["code"]==code
+            raise remote_server.WorkbenchGatewayError(
+                code, accepted=accepted, retryable=retryable, status=status
+            )
+
+        monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fail)
+        response = client.post(
+            path,
+            content=body,
+            headers=_signed_headers(token, method="POST", path=path, body=body),
+        )
+        assert response.status_code == status
+        assert response.json()["code"] == code
         assert response.json()["accepted"] is accepted
         assert response.json()["retryable"] is retryable

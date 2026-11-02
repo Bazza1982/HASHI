@@ -35,16 +35,18 @@ An unavailable original does not invalidate a separately retained Workbench copy
 ## Optional content extraction
 
 `GET /api/v1/file-content/capabilities` reports readiness without loading a model.
-Admin-authenticated `POST /api/v1/file-content` accepts at most 32 MiB of bytes,
-an encoded filename and operation `ocr` or `transcribe`. Two active requests are
-admitted. Results include the verified instance, bounded text segments, real locators,
+Admin-authenticated `POST /api/v1/file-content` uses one strict UTF-8 JSON body:
+`filename`, `operation` (`ocr` or `transcribe`), Boolean `allow_compute`, and canonical
+base64 `payload` (at most 32 MiB decoded). Metadata and bytes share the existing Remote
+HMAC signature. Custom policy headers and multipart framing are not accepted. The encoded
+request fits the existing 64 MiB HTTP limit; only two requests may parse/process at once. Results include the verified instance, bounded text segments, real locators,
 and ready/partial status. Failures carry stable safe codes, without private paths.
 
 OCR normalizes bounded image pixels before calling the existing OCR owner. Transcription
 uses the existing configured VoiceTranscriber and its isolated local helper. Optional
 `include_segments` preserves the default legacy text protocol and returns actual
 faster-whisper start/end times when requested. Compute use requires a separate explicit
-`X-Allow-Configured-Compute: 1`; the configured service must still satisfy the existing
+body field `allow_compute: true`; the configured service must still satisfy the existing
 local/LAN destination policy. No automatic cloud fallback or model selection occurs.
 Text-only Compute responses remain searchable but are marked partial with no invented
 time points. Native cancellation retains admission until the actual work terminates;

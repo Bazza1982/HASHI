@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import asyncio
+import base64
 import io
 import json
 import tempfile
@@ -34,6 +35,43 @@ class FileContentError(ValueError):
         super().__init__(code)
 
 
+async def read_content_request(request, *, max_bytes):
+    """Strict JSON binds policy and bytes without unsigned MIME/header framing."""
+    if getattr(request, "content_type", "") != "application/json":
+        raise FileContentError("fileshare_content_invalid", 415)
+    encoded_limit = ((max_bytes + 2) // 3) * 4
+    try:
+        raw = await request.read()
+        if len(raw) > encoded_limit + 4096:
+            raise FileContentError("fileshare_content_limit", 413)
+        value = json.loads(raw.decode("utf-8"))
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"filename", "operation", "allow_compute", "payload"}
+            or not isinstance(value["filename"], str)
+            or not isinstance(value["operation"], str)
+            or not isinstance(value["allow_compute"], bool)
+            or not isinstance(value["payload"], str)
+        ):
+            raise FileContentError("fileshare_content_invalid")
+        if len(value["filename"]) > 240:
+            raise FileContentError("fileshare_content_invalid")
+        if len(value["payload"]) > encoded_limit:
+            raise FileContentError("fileshare_content_limit", 413)
+        payload = base64.b64decode(value["payload"], validate=True)
+        if len(payload) > max_bytes:
+            raise FileContentError("fileshare_content_limit", 413)
+        if base64.b64encode(payload).decode("ascii") != value["payload"]:
+            raise FileContentError("fileshare_content_invalid")
+        return payload, {
+            key: value[key] for key in ("filename", "operation", "allow_compute")
+        }
+    except FileContentError:
+        raise
+    except (ValueError, TypeError, UnicodeError) as error:
+        raise FileContentError("fileshare_content_invalid") from error
+
+
 class FileContentService:
     MAX_BYTES = 32 * 1024 * 1024
 
@@ -42,6 +80,19 @@ class FileContentService:
         self.ocr = ocr
         self.configuration = configuration
         self.active = 0
+        self.receiving = 0
+
+    async def process_request(self, request):
+        if self.receiving >= 2:
+            raise FileContentError("fileshare_content_busy", 429)
+        self.receiving += 1
+        try:
+            payload, metadata = await read_content_request(
+                request, max_bytes=self.MAX_BYTES
+            )
+            return await self.process(payload, **metadata)
+        finally:
+            self.receiving -= 1
 
     def config(self):
         if self.configuration:
