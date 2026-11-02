@@ -119,8 +119,8 @@ receipts, each final once. `/bg` freezes admission; schedules imply no chat.
 `/delay` and interactive `/loop` retain context.
 
 Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
-Telegram readiness requires separate Bot-bound app/ingress and a user;
-activation is Agent-only. Bounded polls preserve pending updates.
+Telegram须用户及Bot绑定的双向证据；单Agent启用空闲等待≤15m，校验凭据/创建/stop。
+回执或未知即停自动提交；状态只读、重试不重存，保留待收更新。
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery

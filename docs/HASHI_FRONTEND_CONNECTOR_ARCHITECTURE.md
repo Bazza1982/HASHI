@@ -101,6 +101,27 @@ busy, unavailable or unknown activation retains the committed credential,
 reports `activation_status=pending` with a safe error code, and never replays
 the credential write or widens the request into a shared/all-Agent reboot.
 
+The Functions credential owner now retains one credential-free continuation
+for a busy Agent, for at most 15 minutes. Before every submission it rechecks
+the saved revision, Agent creation identity, stop epoch and actual activity;
+replacement, deletion, stopping or unavailable activity ends the wait. Only a
+pre-admission busy rejection without a durable receipt may be resubmitted.
+An accepted receipt, durable target-busy result or unknown acknowledgement
+never starts another automatic operation. PAO remains the sole lifecycle owner.
+
+Credential status GET is observational. It projects waiting, expiry, an opaque
+operation ID and explicit retry availability without saving or activating.
+`POST /api/admin/agents/{agent}/telegram-activation` accepts only
+`expected_revision` and `expected_lifecycle_id`; management authentication and
+both current bindings are required. It retries adoption of an already saved
+credential, accepts no token and never starts a stopped Agent. The Workbench
+proxy retains only these public fields and the dialog updates its status while
+open. Expiry has a token-free retry control. Closing the page does not cancel
+the server-owned wait; shared Functions shutdown cancels it. Waits are not
+recovered across Functions restart: the saved credential remains intact and
+the current status exposes explicit activation. Older Workers without a
+creation identity retain their prior one-shot/manual recovery behavior.
+
 After Worker cutover, shared Functions refresh the configuration through its
 existing owner before reconciling Telegram receivers. A new Bot is not polled
 for a Worker still carrying the previous Bot fingerprint. An in-flight poll

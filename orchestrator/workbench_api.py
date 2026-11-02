@@ -78,6 +78,7 @@ from orchestrator.telegram_credential import (
     TelegramCredentialService,
     verify_telegram_bot_token,
 )
+from orchestrator.telegram_credential_activation import TelegramCredentialActivation
 from orchestrator.workbench_auth import _windows_remote_runtime_sids
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
@@ -442,6 +443,11 @@ class WorkbenchApiServer:
         self.telegram_access_service = TelegramAccessService(
             config_path=self.config_path, secrets_path=secrets_path,
         )
+        self.telegram_activation = TelegramCredentialActivation(
+            status=self._telegram_credential_base_status, runtime_map=self._runtime_map,
+            execute=self._execute_telegram_credential_activation,
+            operation=self._telegram_credential_activation_operation,
+        )
         self._agent_config_lock = asyncio.Lock()
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
@@ -745,6 +751,10 @@ class WorkbenchApiServer:
         self.app.router.add_put(
             "/api/admin/agents/{agent_id}/telegram-credential",
             self.handle_admin_agent_telegram_credential_replace,
+        )
+        self.app.router.add_post(
+            "/api/admin/agents/{agent_id}/telegram-activation",
+            self.handle_admin_agent_telegram_activation,
         )
         self.app.router.add_put(
             "/api/admin/agents/{agent_id}/telegram-mirror-policy",
@@ -2506,6 +2516,7 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        await self.telegram_activation.close()
         permission_endpoint = getattr(self, "_permission_transition_endpoint", None)
         if permission_endpoint is not None:
             await permission_endpoint.close()
@@ -5356,62 +5367,88 @@ class WorkbenchApiServer:
         reader = getattr(runtime, "get_runtime_metadata", None)
         return reader() if callable(reader) else {}
 
-    def _telegram_credential_status(self, agent_id: str) -> dict:
+    def _telegram_credential_base_status(self, agent_id: str) -> dict:
         return self.telegram_credential_service.status(
             agent_id, runtime_active=self._telegram_credential_runtime_active(agent_id),
             runtime_metadata=self._telegram_credential_runtime_metadata(agent_id),
         )
 
-    async def _activate_saved_telegram_credential(self, request, result: dict) -> None:
-        """Adopt a durable credential using PAO's existing exact-Agent switch.
+    def _telegram_credential_status(self, agent_id: str) -> dict:
+        return self.telegram_activation.project(self._telegram_credential_base_status(agent_id))
 
-        A failed activation never rolls back the saved credential, retries the
-        write, or promotes outbound/mirror readiness into a bidirectional claim.
-        """
+    async def _execute_telegram_credential_activation(self, runtime, owner, invocation_id):
+        return await try_execute_slash_command_text(
+            runtime, "/reboot min", source_channel="api_chat",
+            session_metadata={
+                "_hashi_owner_id": owner, "owner_id": owner,
+                "session_surface": "workbench", "session_channel_key": "default",
+                "frontend_invocation_id": invocation_id,
+            },
+        )
+
+    def _telegram_credential_activation_operation(self, entry):
+        manager = getattr(self.orchestrator, "reboot_manager", None)
+        reader = getattr(manager, "operation", None)
+        return reader(entry.operation_id, owner_id=entry.owner_id,
+                      agent_id=entry.agent_id) if callable(reader) else None
+
+    async def _activate_saved_telegram_credential(self, request, result: dict) -> None:
+        """Continue adoption only; the committed credential is never replayed."""
         try:
-            status = self._telegram_credential_status(result["agent_id"])
-            if status["credential_revision"] != result["credential_revision"]:
-                raise ValueError("credential_state_changed")
-            for key in ("activation_status", "activation_required", "inbound_connected",
-                        "outbound_connected", "bidirectional_ready"):
-                result[key] = status[key]
-            if status["activation_status"] in {
-                "inactive", "connected", "connecting", "user_required"
-            }:
-                return
-            runtime = self._runtime_map().get(result["agent_id"].casefold())
-            owner = self._v1_owner_id(request)
-            if not owner or not getattr(runtime, "is_function_worker_proxy", False):
-                raise ValueError("activation_unavailable")
-            response = await try_execute_slash_command_text(
-                runtime, "/reboot min", source_channel="api_chat",
-                session_metadata={
-                    "_hashi_owner_id": owner, "owner_id": owner,
-                    "session_surface": "workbench", "session_channel_key": "default",
-                    "frontend_invocation_id": "telegram-credential:" + result["credential_revision"],
-                },
+            status = await self.telegram_activation.activate(
+                result["agent_id"], revision=result["credential_revision"],
+                owner_id=self._v1_owner_id(request),
             )
-            activation = response.get("result") if isinstance(response, dict) else None
-            record = (activation or {}).get("record") or {}
-            if (response.get("ok") is True and activation
-                    and activation.get("accepted") is True
-                    and record.get("status") in {"accepted", "running", "succeeded"}):
-                result.update(activation_status="activating", activation_required=None,
-                              activation_operation_id=record.get("id"))
-                return
-            reason = (activation or {}).get("reason") or (response or {}).get("error")
-            result["activation_error_code"] = (
-                "AGENT_BUSY" if reason in {"busy", "target_busy", "AGENT_BUSY"}
-                else "telegram_activation_unavailable"
-            )
+            for key, value in status.items():
+                if key.startswith("activation_") or key in {
+                    "inbound_connected", "outbound_connected", "bidirectional_ready",
+                }:
+                    result[key] = value
+            return
         except Exception as exc:
-            # Verification has already committed; do not echo exception text
-            # (which may contain a transport credential) or invite a save retry.
             logger.warning("Telegram activation pending: agent=%s error_type=%s",
                            result["agent_id"], type(exc).__name__)
-            result["activation_error_code"] = "telegram_activation_unavailable"
+            result["activation_error_code"] = (
+                "credential_state_changed" if isinstance(exc, ValueError)
+                and str(exc) == "credential_state_changed"
+                else "telegram_activation_unavailable"
+            )
         result.update(activation_status="pending", bidirectional_ready=False,
-                      activation_required="agent_restart")
+                      activation_required="agent_restart", activation_retry_allowed=False)
+
+    async def handle_admin_agent_telegram_activation(self, request):
+        """Retry one saved revision; accepts no credential and never starts a stopped Agent."""
+        if not self._check_admin_auth(request):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "admin_auth_failed"}, status=403)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if (not isinstance(payload, dict)
+                or set(payload) != {"expected_revision", "expected_lifecycle_id"}
+                or any(not isinstance(value, str) or not value for value in payload.values())
+                or len(payload["expected_revision"]) != 64
+                or any(char not in "0123456789abcdef" for char in payload["expected_revision"])
+                or len(payload["expected_lifecycle_id"]) > 160):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "invalid_request"}, status=400)
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        try:
+            result = self._telegram_credential_status(agent_id)
+            lifecycle = self._telegram_credential_runtime_metadata(agent_id).get("agent_lifecycle_id")
+            if (payload["expected_revision"] != result["credential_revision"]
+                    or payload["expected_lifecycle_id"] != lifecycle):
+                return self._telegram_credential_response(
+                    {"ok": False, "error_code": "credential_state_changed"}, status=409)
+            await self._activate_saved_telegram_credential(request, result)
+            return self._telegram_credential_response(result)
+        except TelegramCredentialError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code)
+        except (OSError, ValueError):
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": "telegram_credential_unavailable"}, status=503)
 
     async def handle_admin_agent_telegram_credential(self, request):
         """Return credential status without ever reading the token back."""
