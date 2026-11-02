@@ -669,6 +669,7 @@ def test_transfer_package_cannot_reintroduce_exchanges_omitted_by_word_cap(tmp_p
 
 @pytest.mark.asyncio
 async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tmp_path):
+    from orchestrator.backend_switch_result import BackendSwitchResult
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path
     runtime.config = SimpleNamespace(
@@ -682,7 +683,7 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
     )
     runtime.backend_manager = SimpleNamespace(
         current_backend=backend,
-        switch_backend=AsyncMock(return_value=True),
+        switch_backend_result=AsyncMock(return_value=BackendSwitchResult(True)),
         agent_mode="fixed",
     )
     runtime.handoff_builder = SimpleNamespace(
