@@ -370,7 +370,7 @@ def test_new_agent_defaults_to_configured_compute_kokoro(tmp_path):
                     "adapter": "openai_compatible",
                     "label": "Hashi Compute · Kokoro 82M",
                     "location": "lan",
-                    "base_url": "http://192.0.2.41:19446/v1",
+                    "base_url": "http://10.23.45.67:19446/v1",
                     "model": "kokoro-82m",
                     "audio_format": "wav",
                     "style_support": "unsupported",
