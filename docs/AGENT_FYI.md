@@ -88,7 +88,7 @@ fsynced candidate; permanent failure preserves state and never replays actions.
 
 PAO管Conversation/Message/Run，Engine管Session/Turn；前端历史以PAO为准，缓存匹配owner/代理/会话。
 保留顺序、原子附件及失败/取消附件隔离；Telegram保留部分送达的不确定性，关联工具/任务诊断。
-会话/后端操作保留阶段/原因/诊断号；已写入不回滚、不重放，禁止清理可能已选中的新会话；退役失败不改变新后端已启用的事实。
+会话/后端/代理操作保留阶段/原因/诊断号；如实区分已创建与启动不明；已写入不回滚、不重放，禁止清理可能已选中的新会话；退役失败不改变新后端已启用的事实。
 /credit仅查OpenRouter，其他后端不借继承发送凭据；鉴权/限流/连接/响应失败分别提示，不显示凭据或原始响应。
 语言/提问/备用设置区分冲突、存储与保存不明，按钮显示完整原因；回读实际值，不拿默认值冒充已保存。
 

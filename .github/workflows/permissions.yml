@@ -210,6 +210,7 @@ jobs:
           adapters/key_info_result.py tests/test_credit_failures.py
           orchestrator/settings_failures.py orchestrator/commands/askme.py tests/test_settings_failures.py
           tests/test_jobs_read_failures.py tests/test_habit_reset_failures.py
+          orchestrator/api_failures.py orchestrator/agent_management.py tests/test_admin_failure_details.py
           orchestrator/her_v2/provider_continuation.py scripts/permissions/windows_lpac_probe.py
           scripts/permissions/windows_file_helper_probe.py
           scripts/permissions/build_runtime_capsule.py

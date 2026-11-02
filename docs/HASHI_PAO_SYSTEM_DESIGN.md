@@ -278,6 +278,16 @@ control-button rendering is visible alongside an already readable request view.
 These presentation facts do not authenticate a user, create an authority or weaken
 the original private ingress, ownership, revision or policy checks.
 
+Administrator creation, deletion, deletion-preview and deletion-status failures
+retain the legacy primary API code and add a safe cause code, failing stage and
+diagnostic reference. Before dispatch, no Agent mutation has been submitted;
+a preview/status query never submits a new Agent change. An unconfirmed mutation
+is reported as unknown and never replayed. The PAO creation owner additionally
+retains proved facts: if creation succeeded before startup failed, the response
+states that the Agent already exists rather than inviting duplicate creation.
+These observed facts are immutable per-call data, not authentication or permission.
+Expected domain errors and the original administrator checks remain authoritative.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible

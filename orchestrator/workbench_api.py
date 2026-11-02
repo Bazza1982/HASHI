@@ -1345,6 +1345,33 @@ class WorkbenchApiServer:
             workspaces_root=config_dir / "workspaces",
         )
 
+    def _admin_operation_failure_response(self, request, error, *, operation, phase,
+                                          error_code, dispatched=False, readonly=False):
+        from orchestrator import ui_language
+        from orchestrator.agent_management import AgentOperationFailure
+        from orchestrator.api_failures import operation_failure_payload
+        from orchestrator.operation_failures import OperationFailed, operation_failure
+
+        failure = error.failure if isinstance(error, OperationFailed) else operation_failure(
+            error, operation=operation, phase=phase, unconfirmed=dispatched and not readonly,
+        )
+        observed = dict(error.observed) if isinstance(error, AgentOperationFailure) else {}
+        if readonly:
+            effect_state = "not_requested"
+        elif isinstance(error, AgentOperationFailure):
+            effect_state = "unconfirmed" if failure.unconfirmed else "not_started"
+        else:
+            effect_state = "unconfirmed" if dispatched else "not_started"
+        try:
+            locale = ui_language.preferred_locale(self, actor_id=self._v1_owner_id(request))
+        except Exception:
+            locale = ui_language.configured_default_locale(self)
+        payload = operation_failure_payload(
+            failure, error_code=error_code, effect_state=effect_state, locale=locale, observed=observed,
+        )
+        logger.error("Admin operation failure: %s observed=%s", failure.diagnostic(), observed)
+        return web.json_response(payload, status=500)
+
     def _agent_management_manager(self):
         manager = getattr(self.orchestrator, "agent_management", None)
         if manager is not None:
@@ -5120,6 +5147,7 @@ class WorkbenchApiServer:
                 status=400,
             )
 
+        phase, dispatched = "prepare", False
         try:
             action = self._agent_management_action(
                 request,
@@ -5136,10 +5164,9 @@ class WorkbenchApiServer:
                     "restricted": payload.get("restricted", False),
                 },
             )
-            outcome = await self._agent_management_manager().dispatch(
-                action,
-                session_store=self.session_store,
-            )
+            manager = self._agent_management_manager()
+            phase, dispatched = "dispatch", True
+            outcome = await manager.dispatch(action, session_store=self.session_store)
         except AgentCreationError as exc:
             status = (
                 409
@@ -5163,19 +5190,9 @@ class WorkbenchApiServer:
                 status=exc.status_code,
             )
         except Exception as exc:
-            logger.error(
-                "agent_create.failed agent_name=%s backend=%s error=%s",
-                name,
-                backend,
-                type(exc).__name__,
-            )
-            return web.json_response(
-                {
-                    "ok": False,
-                    "error": "agent creation failed",
-                    "error_code": "creation_failed",
-                },
-                status=500,
+            return self._admin_operation_failure_response(
+                request, exc, operation="agent_create", phase=phase,
+                error_code="creation_failed", dispatched=dispatched,
             )
         result = outcome["creation"]
         lifecycle = outcome["lifecycle"]
@@ -5640,6 +5657,7 @@ class WorkbenchApiServer:
                 status=403,
             )
         agent_id = request.match_info.get("agent_id")
+        phase, dispatched = "prepare", False
         try:
             action = self._agent_management_action(
                 request,
@@ -5648,10 +5666,9 @@ class WorkbenchApiServer:
                 agent_id=agent_id,
                 payload={},
             )
-            outcome = await self._agent_management_manager().dispatch(
-                action,
-                session_store=self.session_store,
-            )
+            manager = self._agent_management_manager()
+            phase, dispatched = "read", True
+            outcome = await manager.dispatch(action, session_store=self.session_store)
             return web.json_response(outcome["preview"], status=outcome["status"])
         except AgentManagementError as exc:
             return web.json_response(
@@ -5664,10 +5681,9 @@ class WorkbenchApiServer:
                 status=exc.status_code,
             )
         except Exception as exc:
-            logger.error("agent_deletion.preview_failed agent=%s error=%s", agent_id, exc)
-            return web.json_response(
-                {"ok": False, "error": "failed to generate deletion preview", "error_code": "preview_failed"},
-                status=500,
+            return self._admin_operation_failure_response(
+                request, exc, operation="agent_preview", phase=phase,
+                error_code="preview_failed", dispatched=dispatched, readonly=True,
             )
 
     async def handle_admin_agent_deletion(self, request):
@@ -5707,6 +5723,7 @@ class WorkbenchApiServer:
                 status=400,
             )
 
+        phase, dispatched = "prepare", False
         try:
             action = self._agent_management_action(
                 request,
@@ -5719,10 +5736,9 @@ class WorkbenchApiServer:
                     "idempotency_key": idempotency_key,
                 },
             )
-            outcome = await self._agent_management_manager().dispatch(
-                action,
-                session_store=self.session_store,
-            )
+            manager = self._agent_management_manager()
+            phase, dispatched = "dispatch", True
+            outcome = await manager.dispatch(action, session_store=self.session_store)
             return web.json_response(outcome["result"], status=outcome["status"])
         except CleanupPendingError as exc:
             return web.json_response(
@@ -5746,44 +5762,38 @@ class WorkbenchApiServer:
                 status=exc.status_code,
             )
         except Exception as exc:
-            logger.error("agent_deletion.failed agent=%s error=%s", agent_id, exc)
-            return web.json_response(
-                {"ok": False, "error": "agent deletion failed", "error_code": "deletion_failed"},
-                status=500,
+            return self._admin_operation_failure_response(
+                request, exc, operation="agent_delete", phase=phase,
+                error_code="deletion_failed", dispatched=dispatched,
             )
 
     async def handle_admin_agent_deletion_status(self, request):
         if not self._check_admin_auth(request):
             return web.json_response(
-                {
-                    "ok": False,
-                    "error": "admin auth failed",
-                    "error_code": "admin_auth_failed",
-                },
-                status=403,
+                {"ok": False, "error": "admin auth failed", "error_code": "admin_auth_failed"}, status=403,
             )
         operation_id = request.match_info.get("operation_id")
+        phase, dispatched = "prepare", False
         try:
             action = self._agent_management_action(
-                request,
-                kind="action",
-                operation="deletion.status",
-                agent_id=None,
+                request, kind="action", operation="deletion.status", agent_id=None,
                 payload={"operation_id": operation_id},
             )
-            outcome = await self._agent_management_manager().dispatch(
-                action,
-                session_store=self.session_store,
-            )
-        except AgentManagementError as exc:
+            manager = self._agent_management_manager()
+            phase, dispatched = "read", True
+            outcome = await manager.dispatch(action, session_store=self.session_store)
             return web.json_response(
-                {"ok": False, "error": str(exc), "error_code": exc.error_code},
-                status=exc.status_code,
+                {"ok": True, "receipt": outcome["receipt"]}, status=outcome["status"],
             )
-        return web.json_response(
-            {"ok": True, "receipt": outcome["receipt"]},
-            status=outcome["status"],
-        )
+        except (AgentManagementError, AgentDeletionError) as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code}, status=exc.status_code,
+            )
+        except Exception as exc:
+            return self._admin_operation_failure_response(
+                request, exc, operation="agent_delete_status", phase=phase,
+                error_code="deletion_status_failed", dispatched=dispatched, readonly=True,
+            )
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()

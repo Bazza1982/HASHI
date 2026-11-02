@@ -129,6 +129,10 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_workbench_primary_session_metadata.py \
+            tests/test_admin_failure_details.py \
+            tests/test_workbench_agent_management.py \
+            tests/test_agent_deletion.py \
+            tests/contract/test_agent_creation.py \
             tests/test_session_api.py \
             tests/test_workbench_scheduler_api.py \
             tests/test_tool_gateway_mcp.py \

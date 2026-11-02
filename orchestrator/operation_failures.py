@@ -17,7 +17,7 @@ _PHASES = frozenset({
     "read", "create", "reset_backend", "bind", "save", "archive", "default", "activate",
     "configuration", "initialize", "session", "fence", "persist", "retire", "cleanup", "request", "decode", "parse",
     "scope", "validate", "decision", "management", "withdraw", "presentation",
-    "inventory", "snapshot", "move", "finalize", "restore",
+    "inventory", "snapshot", "move", "finalize", "restore", "prepare", "provision", "start", "dispatch",
 })
 
 
