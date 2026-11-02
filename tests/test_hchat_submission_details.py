@@ -108,7 +108,7 @@ def test_group_receipt_reports_partial_acceptance_instead_of_all_queued(local_se
     assert "queued for" not in text and "PRIVATE" not in text
 
 
-@pytest.mark.parametrize("state", ["queued", "awaiting_confirmation", "discarded"])
+@pytest.mark.parametrize("state", ["queued", "awaiting_confirmation", "discarded", "auth_failed"])
 def test_protocol_receipt_survives_post_acceptance_bookkeeping_failure(local_sender, monkeypatch, state):
     from tools import protocol_send
     monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "fixture-only")
@@ -123,9 +123,17 @@ def test_protocol_receipt_survives_post_acceptance_bookkeeping_failure(local_sen
         if state != "sending":
             raise PermissionError("PRIVATE bookkeeping")
     monkeypatch.setattr(protocol_send, "_record_outbound_correlation", track)
-    monkeypatch.setattr(protocol_send, "_request_json", lambda *a, **k: {"ok": True, "state": state})
+    monkeypatch.setattr(protocol_send, "_request_json", lambda *a, **k:
+        {"ok": False, "code": "auth_failed", "accepted": False} if state == "auth_failed" else {"ok": True, "state": state})
+    def no_fallback():
+        raise AssertionError("A known receiver result must not enter another route")
+    monkeypatch.setattr(hchat_send, "_load_instances", no_fallback)
     result = deliver_hchat_draft(HChatDraft("akane@HASHI2", "one draft"), from_agent="zelda")
-    assert result.success is True and result.delivery_status == state
-    assert result.accepted is (state != "discarded")
-    assert result.failure.phase == "persist" and result.failure.reason == "access_denied"
+    if state == "auth_failed":
+        assert result.success is False and result.delivery_status == "failed" and result.accepted is False
+        assert result.failure.reason == "authentication_rejected"
+    else:
+        assert result.success is True and result.delivery_status == state
+        assert result.accepted is (state != "discarded")
+        assert result.failure.phase == "persist" and result.failure.reason == "access_denied"
     assert "PRIVATE" not in hchat_delivery_receipt_text(result, locale="en")
