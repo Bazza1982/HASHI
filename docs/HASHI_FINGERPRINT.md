@@ -63,9 +63,21 @@ Cancellation preserves partial-effect evidence and cleanup uncertainty. Started
 post-execution evidence I/O finishes before releasing the existing resource
 lease, even when the caller cancels. Inline marker bytes are staged and fsynced
 beside the target, the exact business version is checked again, and publication
-uses atomic replacement. Staging or replacement failure leaves the completed
-business bytes untouched and falls back to the Manifest. A concurrent version
-change remains a conflict and is never overwritten.
+uses atomic replacement. A same-directory hard-link guard pins the version being
+replaced; after publication, Fingerprint checks the displaced inode and restores
+an in-place external edit instead of keeping the marker. Unsupported guards,
+staging or replacement failure leave the completed business bytes untouched and
+fall back to the Manifest. A detected concurrent version change remains a
+conflict and is never attributed to the Agent.
+
+Portable filesystems do not expose an atomic compare-and-swap for a pathname.
+The guard detects completed in-place writes across the final observe/replace
+boundary without blocking ordinary editors, but cannot exclude a non-cooperating
+process that replaces the directory entry after the last check, or keeps writing
+an already-open inode after guard validation. Complete exclusion requires every
+writer to participate in an OS-level lock/transaction. If immediate restoration
+is refused, the displaced bytes remain in the same-directory hidden `.guard`
+file and the operation is reported as a conflict rather than deleting evidence.
 
 ## Portable markers
 
@@ -160,10 +172,11 @@ exclusive file occupancy and real invalid-UTF-8 binary observations. These are
 local deterministic tests, not a live frontend/model or running-instance
 acceptance claim. Required shared-runtime gates are recorded separately.
 
-Follow-up failure injection covers interrupted marker staging, denied atomic
-replacement, a concurrent external edit, unavailable Shell start-audit storage,
-and mixed valid/out-of-scope native absolute paths. Each regression was recorded
-red on the reviewed implementation before its correction.
+Follow-up failure injection covers interrupted marker staging, unavailable
+hard-link guards, denied atomic replacement, concurrent edits before and at the
+replacement boundary, unavailable Shell start-audit storage, and mixed
+valid/out-of-scope native absolute paths. Each regression was recorded red on
+the reviewed implementation before its correction.
 
 On A9_MAX's isolated Python 3.12 test environment, 20 warm small JSON writes
 measured median tool latency about 25 ms OFF and 75 ms ON; median measured

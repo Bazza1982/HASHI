@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -34,7 +36,7 @@ async def test_after_write_effect_renderer_failure_preserves_business_success(tm
     assert len(events(store, "fingerprint_prepared")) == 1
 
 
-@pytest.mark.parametrize("fault", ["staging_write", "replace"])
+@pytest.mark.parametrize("fault", ["staging_write", "guard", "replace"])
 def test_inline_marker_failure_never_changes_completed_business_file(tmp_path, monkeypatch, fault):
     from orchestrator.fingerprint import markers
 
@@ -47,6 +49,8 @@ def test_inline_marker_failure_never_changes_completed_business_file(tmp_path, m
             stream.write(payload[:5])
             raise OSError("staged marker write interrupted")
         monkeypatch.setattr(markers, "_write_all", partial_stage)
+    elif fault == "guard":
+        monkeypatch.setattr(markers, "_link_guard", lambda *a: (_ for _ in ()).throw(OSError("hard links unavailable")))
     else:
         monkeypatch.setattr(markers, "_replace", lambda *a: (_ for _ in ()).throw(OSError("replace denied")))
 
@@ -57,6 +61,7 @@ def test_inline_marker_failure_never_changes_completed_business_file(tmp_path, m
     assert final.version == observation.version
     assert target.read_bytes() == original
     assert not list(tmp_path.glob(".completed.py.*.tmp"))
+    assert not list(tmp_path.glob(".completed.py.*.guard"))
 
 
 def test_inline_marker_version_check_preserves_concurrent_external_edit(tmp_path, monkeypatch):
@@ -78,6 +83,41 @@ def test_inline_marker_version_check_preserves_concurrent_external_edit(tmp_path
     assert changed is False
     assert final.version != observation.version
     assert target.read_bytes() == b"human = True\n"
+
+
+@pytest.mark.parametrize("reported_failure", [False, True])
+def test_inline_marker_replace_boundary_preserves_concurrent_external_edit(
+    tmp_path, monkeypatch, reported_failure
+):
+    from orchestrator.fingerprint import markers
+
+    target = tmp_path / "shared.py"
+    target.write_bytes(b"agent = True\n")
+    observation = observe(target)
+    real_replace = markers._replace
+    at_replace = threading.Event()
+    edit_complete = threading.Event()
+
+    def pause_before_replace(source, destination):
+        at_replace.set()
+        assert edit_complete.wait(5), "concurrent edit did not complete"
+        real_replace(source, destination)
+        if reported_failure:
+            raise OSError("replacement completed before status was lost")
+
+    monkeypatch.setattr(markers, "_replace", pause_before_replace)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(markers.mark, target, observation, "hfp_" + "3" * 32)
+        assert at_replace.wait(5), "marker did not reach the replacement boundary"
+        target.write_bytes(b"human = True\n")
+        edit_complete.set()
+        status, final, changed = future.result(timeout=5)
+
+    assert status == "conflict"
+    assert changed is False
+    assert final.version != observation.version
+    assert target.read_bytes() == b"human = True\n"
+    assert not list(tmp_path.glob(".shared.py.*.guard"))
 
 
 @pytest.mark.asyncio
