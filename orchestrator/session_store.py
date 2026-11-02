@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 33
+    SCHEMA_VERSION = 34
 
     def __init__(
         self,
@@ -1713,6 +1713,8 @@ class SessionStore:
             attachment_catalogue.install_schema(connection)
             from orchestrator.standby.store import install_schema as install_standby_schema
             install_standby_schema(connection)
+            from orchestrator.frontend_capture import install_schema as install_capture_schema
+            install_capture_schema(connection)
             pcm_forget_session.install_schema(connection)
             pcm_forget_preview.install_schema(connection)
             connection.execute(
@@ -3314,6 +3316,38 @@ class SessionStore:
                 params,
             ).fetchall()
         return [self._run_dict(row) for row in rows]
+
+    def media_capture_acquire(self, *, owner_id, binding, capture_id, purpose,
+                              issued_at, now=None, standby_id=None, standby_epoch=None):
+        """Serialize cross-Worker capture admission through native storage."""
+        from orchestrator.frontend_capture import acquire
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return acquire(connection, instance_id=self.instance_id, owner_id=owner_id,
+                binding=binding, capture_id=capture_id, purpose=purpose,
+                issued_at=issued_at, now=time() if now is None else now,
+                standby_id=standby_id, standby_epoch=standby_epoch)
+
+    def _media_capture_operate(self, operation, *, owner_id, binding, capture_id,
+                               lease_token, epoch, now=None, sequence=None, stopped=None):
+        from orchestrator.frontend_capture import operate
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return operate(connection, operation=operation, instance_id=self.instance_id,
+                owner_id=owner_id, binding=binding, capture_id=capture_id,
+                lease_token=lease_token, epoch=epoch, now=time() if now is None else now,
+                sequence=sequence, stopped=stopped)
+
+    def media_capture_status(self, **request):
+        return self._media_capture_operate("status", **request)
+
+    def media_capture_renew(self, **request):
+        return self._media_capture_operate("renew", **request)
+
+    def media_capture_release(self, **request):
+        return self._media_capture_operate("release", **request)
 
     def standby_control(self, *, owner_id, body, now=None):
         """Commit only Standby-owned controls through the native transaction."""
