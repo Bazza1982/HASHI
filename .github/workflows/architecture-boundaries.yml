@@ -146,6 +146,14 @@ jobs:
             tests/test_projection_failure_details.py \
             tests/test_remote_workbench_gateway.py \
             tests/test_remote_workbench_failure_details.py \
+            tests/test_hchat_submission_details.py \
+            tests/test_hchat_delivery.py \
+            tests/test_hchat_send.py \
+            tests/test_protocol_send.py \
+            tests/test_hchat_freshness.py \
+            tests/test_hchat_delivery_status.py \
+            tests/test_runtime_debug_reporting.py \
+            tests/test_workbench_hchat_channel_gate.py \
             tests/test_frontend_contracts.py \
             tests/test_runtime_media.py \
             tests/test_runtime_long.py \
