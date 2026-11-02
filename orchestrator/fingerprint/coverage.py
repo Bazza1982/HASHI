@@ -6,8 +6,9 @@ attribution, recursive repository scan, background watcher or permission bypass.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import uuid
 
 from .execution import Observation, observe, output_facts, target_for, finish_owned
@@ -25,6 +26,63 @@ def matrix() -> dict:
         "external_editors": "not locked; conflicting or unobserved changes remain unattributed",
         "background_writes": "may continue after foreground completion; coverage incomplete",
     }
+
+
+def _relative_engine_path(value: str, trusted_roots=()) -> str:
+    """Map one Engine path without publishing or trusting an absolute path."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("Engine file path is invalid")
+    windows_path = PureWindowsPath(value)
+    posix_path = PurePosixPath(value)
+    if not windows_path.is_absolute() and not posix_path.is_absolute():
+        return relative_target(value)
+
+    candidates = []
+    if windows_path.is_absolute():
+        for raw_root in trusted_roots:
+            root = PureWindowsPath(str(raw_root))
+            if not root.is_absolute():
+                continue
+            try:
+                candidates.append(windows_path.relative_to(root))
+            except ValueError:
+                continue
+    else:
+        for raw_root in trusted_roots:
+            root = PurePosixPath(str(raw_root))
+            if not root.is_absolute():
+                continue
+            try:
+                candidates.append(posix_path.relative_to(root))
+            except ValueError:
+                continue
+    for candidate in sorted(candidates, key=lambda item: len(item.parts)):
+        try:
+            return relative_target(candidate.as_posix())
+        except ValueError:
+            continue
+    raise ValueError("absolute Engine path is outside trusted workspaces")
+
+
+def _trusted_engine_roots(runtime, item) -> tuple[str, ...]:
+    metadata = getattr(item, "request_metadata", None) or {}
+    snapshot = metadata.get("workzone_snapshot") if isinstance(metadata, Mapping) else None
+    roots = []
+    if isinstance(snapshot, Mapping):
+        for slot in snapshot.get("slots") or ():
+            if not isinstance(slot, Mapping) or not bool(slot.get("enabled")):
+                continue
+            path = str(slot.get("path") or "")
+            if (path and bool(slot.get("available"))
+                    and slot.get("host_compatible") is not False and path not in roots):
+                roots.append(path)
+    # This matches native Engine selection: exact available Workzones first;
+    # Agent home only when no usable Workzone is active.
+    if not roots:
+        workspace = getattr(runtime, "workspace_dir", None)
+        if workspace is not None:
+            roots.append(str(Path(workspace).expanduser().resolve()))
+    return tuple(roots)
 
 
 async def dispatch_shell(registry, tool_name, arguments, *, tool_call_id):
@@ -55,11 +113,13 @@ async def dispatch_shell(registry, tool_name, arguments, *, tool_call_id):
     prepared = {"operation_id": operation_id, "identity": asdict(identity),
         "tool_call_id": call_id, "tool_name": tool_name, "policy_version": policy.version,
         "started_at": utc_now(), "coverage": matrix(), "gaps": gaps}
+    # Shell text cannot be safely classified as read-only. When Fingerprint is
+    # ON, no potentially mutating command may run before this durability gate.
+    await asyncio.to_thread(
+        audit.append, "fingerprint_execution_started", prepared,
+        request_id=identity.request_id,
+    )
     evidence = "persisted"
-    try:
-        await asyncio.to_thread(audit.append, "fingerprint_execution_started", prepared, request_id=identity.request_id)
-    except Exception:
-        evidence = "unavailable"
     error = None
     try:
         result = await registry._dispatch_observed(tool_name, arguments, tool_call_id=call_id)
@@ -127,11 +187,12 @@ async def observe_engine_event(runtime, item, event):
     raw_paths = event_metadata.get("file_paths") or [getattr(event, "file_path", "")]
     if not isinstance(raw_paths, (tuple, list)):
         raw_paths = []
+    trusted_roots = _trusted_engine_roots(runtime, item)
     relative_paths, omitted = [], max(0, len(raw_paths) - 32)
     for raw in raw_paths[:32]:
         try:
-            relative_paths.append(relative_target(raw))
-        except ValueError:
+            relative_paths.append(_relative_engine_path(raw, trusted_roots))
+        except (TypeError, ValueError):
             omitted += 1
     payload = {"schema": 1, "operation_id": uuid.uuid4().hex, "identity": asdict(identity),
         "engine_event_id": str(getattr(event, "event_id", "") or ""),
@@ -141,5 +202,6 @@ async def observe_engine_event(runtime, item, event):
         "observed_at": utc_now(), "coverage": {
             "complete": False, "scope": "received file events only", "before_state": "unknown",
             "write_completion": "not_confirmed", "supervised_handle_reopened": False,
-            "native_paths_without_events": "not_covered", "author_authentication": "not_verified"}}
+            "native_paths_without_events": "not_covered", "author_authentication": "not_verified",
+            "absolute_path_mapping": "trusted_workspaces_only"}}
     return await asyncio.to_thread(audit.append, "fingerprint_engine_report", payload, request_id=identity.request_id)

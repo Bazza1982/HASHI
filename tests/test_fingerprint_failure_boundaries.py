@@ -21,32 +21,80 @@ from tests.test_fingerprint_admission import runtime_at
 AUTH = {"actor": "test", "purpose": "crash recovery verification", "allow_raw_audit": True}
 
 
-@pytest.mark.parametrize("fault", ["effect_renderer", "partial_marker"])
 @pytest.mark.asyncio
-async def test_after_write_effect_renderer_failure_preserves_business_success(tmp_path, monkeypatch, fault):
+async def test_after_write_effect_renderer_failure_preserves_business_success(tmp_path, monkeypatch):
     registry, store, work = registry_at(tmp_path)
     import tools.effect_receipts as effects
-    if fault == "effect_renderer":
-        monkeypatch.setattr(effects, "observed_file_effect", lambda *a: (_ for _ in ()).throw(OSError("projection failed")))
-        name, content = "saved.txt", "once"
-    else:
-        from orchestrator.fingerprint import markers
-        def partial(path, observation, artifact_id):
-            path.write_bytes(b"partial-marker")
-            raise OSError("marker write interrupted")
-        monkeypatch.setattr(markers, "mark", partial)
-        name, content = "saved.py", "x=1\n"
+    monkeypatch.setattr(effects, "observed_file_effect", lambda *a: (_ for _ in ()).throw(OSError("projection failed")))
+    name, content = "saved.txt", "once"
     result = await registry.execute("file_write", {"path": name, "content": content}, tool_call_id="write")
     assert not result.is_error
-    if fault == "effect_renderer":
-        assert (work / name).read_text() == content
-        assert result.details["fingerprint"]["effect_projection_status"] == "unavailable"
-    else:
-        assert (work / name).read_bytes() == b"partial-marker"
-        assert result.details["fingerprint"]["evidence_status"] == "pending_reconciliation"
-        assert result.details.get("effect_receipt") is None
-        assert result.details["fingerprint"]["after"]["state"] == "unknown"
+    assert (work / name).read_text() == content
+    assert result.details["fingerprint"]["effect_projection_status"] == "unavailable"
     assert len(events(store, "fingerprint_prepared")) == 1
+
+
+@pytest.mark.parametrize("fault", ["staging_write", "replace"])
+def test_inline_marker_failure_never_changes_completed_business_file(tmp_path, monkeypatch, fault):
+    from orchestrator.fingerprint import markers
+
+    target = tmp_path / "completed.py"
+    original = b"value = 1\n"
+    target.write_bytes(original)
+    observation = observe(target)
+    if fault == "staging_write":
+        def partial_stage(stream, payload):
+            stream.write(payload[:5])
+            raise OSError("staged marker write interrupted")
+        monkeypatch.setattr(markers, "_write_all", partial_stage)
+    else:
+        monkeypatch.setattr(markers, "_replace", lambda *a: (_ for _ in ()).throw(OSError("replace denied")))
+
+    status, final, changed = markers.mark(target, observation, "hfp_" + "1" * 32)
+
+    assert status == "manifest"
+    assert changed is False
+    assert final.version == observation.version
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".completed.py.*.tmp"))
+
+
+def test_inline_marker_version_check_preserves_concurrent_external_edit(tmp_path, monkeypatch):
+    from orchestrator.fingerprint import markers
+
+    target = tmp_path / "shared.py"
+    target.write_bytes(b"agent = True\n")
+    observation = observe(target)
+    real_write_all = markers._write_all
+
+    def concurrent_edit(stream, payload):
+        real_write_all(stream, payload)
+        target.write_bytes(b"human = True\n")
+
+    monkeypatch.setattr(markers, "_write_all", concurrent_edit)
+    status, final, changed = markers.mark(target, observation, "hfp_" + "2" * 32)
+
+    assert status == "conflict"
+    assert changed is False
+    assert final.version != observation.version
+    assert target.read_bytes() == b"human = True\n"
+
+
+@pytest.mark.asyncio
+async def test_marker_replace_failure_falls_back_to_manifest(tmp_path, monkeypatch):
+    from orchestrator.fingerprint import markers
+
+    registry, store, work = registry_at(tmp_path)
+    monkeypatch.setattr(markers, "_replace", lambda *a: (_ for _ in ()).throw(OSError("replace denied")))
+    result = await registry.execute(
+        "file_write", {"path": "saved.py", "content": "value = 1"}, tool_call_id="write"
+    )
+
+    assert not result.is_error
+    assert (work / "saved.py").read_bytes() == b"value = 1"
+    assert result.details["fingerprint"]["marker_status"] == "manifest"
+    manifest = read_manifest(work)
+    assert manifest["artifacts"]["saved.py"]["state"] == "present"
 
 
 @pytest.mark.asyncio

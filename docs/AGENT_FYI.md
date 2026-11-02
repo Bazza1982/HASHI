@@ -1,8 +1,8 @@
 # HASHI Agent FYI
 
-- Fingerprint defaults OFF and freezes policy per Run. Evidence failure never
-  replays committed writes; repair evidence only. Keep gaps/unsigned exports
-  explicit. [PAO](HASHI_FINGERPRINT.md).
+- Fingerprint is OFF/Run-frozen. ON Shell needs durable audit; markers are
+  atomic/Manifest; absolute paths need trusted Workzones. Never replay writes.
+  [PAO](HASHI_FINGERPRINT.md).
 
 - Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 

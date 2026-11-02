@@ -48,6 +48,33 @@ async def test_shell_no_declared_targets_never_scans_worktree(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_shell_does_not_execute_when_required_start_audit_is_not_durable(tmp_path, monkeypatch):
+    registry, store, work = registry_at(tmp_path)
+    real_record = store.record
+    dispatched = False
+
+    def fail_start(kind, *args, **kwargs):
+        if kind == "fingerprint_execution_started":
+            raise OSError("audit storage full")
+        return real_record(kind, *args, **kwargs)
+
+    async def mutating_shell(*args, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        (work / "must-not-exist.txt").write_text("mutated")
+        return "OK"
+
+    monkeypatch.setattr(store, "record", fail_start)
+    monkeypatch.setattr(registry, "_dispatch_observed", mutating_shell)
+    result = await registry.execute("shell", {"command": "opaque mutation"}, tool_call_id="shell")
+
+    assert result.is_error
+    assert dispatched is False
+    assert not (work / "must-not-exist.txt").exists()
+    assert not events(store, "fingerprint_execution_started")
+
+
+@pytest.mark.asyncio
 async def test_native_file_start_event_is_reported_not_committed_or_attributed(tmp_path):
     registry, store, work = registry_at(tmp_path)
     runtime = SimpleNamespace(name="agent", global_config=SimpleNamespace(instance_id="TEST"), canonical_audit=store)

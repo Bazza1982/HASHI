@@ -61,9 +61,11 @@ to establish required durable preparation blocks that controlled mutation.
 Failures after a committed write never cause automatic business replay.
 Cancellation preserves partial-effect evidence and cleanup uncertainty. Started
 post-execution evidence I/O finishes before releasing the existing resource
-lease, even when the caller cancels. A partial marker failure leaves the final
-version unknown and suppresses stale derived effect receipts; it does not replay
-the completed business operation.
+lease, even when the caller cancels. Inline marker bytes are staged and fsynced
+beside the target, the exact business version is checked again, and publication
+uses atomic replacement. Staging or replacement failure leaves the completed
+business bytes untouched and falls back to the Manifest. A concurrent version
+change remains a conflict and is never overwritten.
 
 ## Portable markers
 
@@ -94,8 +96,8 @@ does not preserve provenance.
 | Path | First-version evidence |
 |---|---|
 | HASHI file_write/apply_patch | Exact before/after versions in the participating controlled interval; expected-content check; safe marker or manifest |
-| HASHI shell/bash | Execution-window facts, including failures and unfinished cleanup; only trusted, explicitly configured bounded file targets are observed |
-| Native Engine edits | Actually received file-edit events, labelled engine_reported; no claim that a start event means a completed write |
+| HASHI shell/bash | A durable start event is required before execution while Fingerprint is ON; execution-window facts include failures and unfinished cleanup; only trusted, explicitly configured bounded file targets are observed |
+| Native Engine edits | Actually received file-edit events, labelled engine_reported; absolute Windows/Linux paths are reduced only within the admitted trusted Workspaces; no claim that a start event means a completed write |
 | Supervised files | Existing verified permission result retained, with explicit artifact-adapter gap; no reopening a write-only handle or extra evidence-directory permission |
 | Human/external editors | No global lock or blanket authorship attribution |
 | Background writes | Coverage remains incomplete while writes may outlive foreground execution |
@@ -103,7 +105,10 @@ does not preserve provenance.
 There is no recursive repository scan per tool and no git-diff authorship
 inference. Native events may be fire-and-forget; the receipt scope is only
 events actually received, not a guarantee that the entire Engine stream was
-drained. Unsupported paths do not acquire an affirmative author marker.
+drained. Relative reports remain relative. Absolute reports outside the
+admission-time trusted Workspaces are omitted individually, without discarding
+other valid paths from the same event. Unsupported paths do not acquire an
+affirmative author marker.
 
 The supervised adapter deliberately reports permission_result_only and
 not_qualified. Its existing service audit callback is not assumed to be a
@@ -154,6 +159,11 @@ Windows offline execution additionally exercises CRLF, long paths, path case,
 exclusive file occupancy and real invalid-UTF-8 binary observations. These are
 local deterministic tests, not a live frontend/model or running-instance
 acceptance claim. Required shared-runtime gates are recorded separately.
+
+Follow-up failure injection covers interrupted marker staging, denied atomic
+replacement, a concurrent external edit, unavailable Shell start-audit storage,
+and mixed valid/out-of-scope native absolute paths. Each regression was recorded
+red on the reviewed implementation before its correction.
 
 On A9_MAX's isolated Python 3.12 test environment, 20 warm small JSON writes
 measured median tool latency about 25 ms OFF and 75 ms ON; median measured

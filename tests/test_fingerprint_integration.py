@@ -11,7 +11,7 @@ import pytest
 from adapters.codex_cli import CodexCLIAdapter
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.config_json import write_config_json
-from orchestrator.fingerprint.coverage import observe_engine_event
+from orchestrator.fingerprint.coverage import _relative_engine_path, observe_engine_event
 from orchestrator.fingerprint.models import FingerprintPolicy
 from tests.test_fingerprint_admission import runtime_at
 from tests.test_fingerprint_execution import registry_at, events
@@ -59,15 +59,36 @@ async def test_actual_codex_file_change_converter_retains_all_reported_paths(tmp
     received = []
     adapter._emit_stream_event = lambda event, callback: received.append(event)
     adapter._parse_codex_event(json.dumps({"type": "item.completed", "item": {
-        "type": "file_change", "changes": [{"path": "one.py"}, {"path": "two.py"}]}}), None)
+        "type": "file_change", "changes": [
+            {"path": str(work / "one.py")},
+            {"path": "two.py"},
+            {"path": str(tmp_path / "outside.py")},
+        ]}}), None)
     assert len(received) == 1 and isinstance(received[0].metadata["file_paths"], tuple)
-    runtime = SimpleNamespace(name="agent", global_config=SimpleNamespace(instance_id="TEST"), canonical_audit=store)
+    runtime = SimpleNamespace(name="agent", workspace_dir=tmp_path / "home",
+        global_config=SimpleNamespace(instance_id="TEST"), canonical_audit=store)
     item = SimpleNamespace(session_id="session", run_id="run", request_id="request",
-        request_metadata={"fingerprint_policy": FingerprintPolicy(enabled=True).snapshot()})
+        request_metadata={"fingerprint_policy": FingerprintPolicy(enabled=True).snapshot(),
+            "workzone_snapshot": {"revision": 7, "slots": [{
+                "slot_id": "main", "path": str(work), "enabled": True,
+                "available": True, "host_compatible": True,
+            }]}})
     await observe_engine_event(runtime, item, received[0])
     report = events(store, "fingerprint_engine_report")[-1]["payload"]
     assert report["reported_paths"] == ["one.py", "two.py"]
+    assert report["omitted_path_count"] == 1
     assert report["coverage"]["complete"] is False
+
+
+def test_native_engine_absolute_path_mapping_handles_windows_and_linux_roots():
+    roots = (r"C:\Users\Barry\project", "/home/barry/project")
+
+    assert _relative_engine_path(r"c:\users\barry\project\src\main.py", roots) == "src/main.py"
+    assert _relative_engine_path("/home/barry/project/src/main.py", roots) == "src/main.py"
+    with pytest.raises(ValueError):
+        _relative_engine_path(r"C:\Users\Barry\private\secret.py", roots)
+    with pytest.raises(ValueError):
+        _relative_engine_path("/home/barry/project-other/secret.py", roots)
 
 
 @pytest.mark.parametrize("snapshot", [FingerprintPolicy(enabled=True).snapshot(), {"schema": 999}])

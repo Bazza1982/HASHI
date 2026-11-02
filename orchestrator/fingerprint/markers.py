@@ -7,11 +7,45 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 
 from .execution import Observation, observe
 
 MARKER = re.compile(rb"(?m)^# HASHI-Fingerprint: (hfp_[0-9a-f]{32})[ \t]*\r?$")
 EXCLUDED = re.compile(rb"(?i)(auto.?generated|do not edit|generated file|signed|signature|snapshot|byte.?exact)")
+
+
+def _write_all(stream, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = stream.write(remaining)
+        if not written:
+            raise OSError("marker candidate write made no progress")
+        remaining = remaining[written:]
+
+
+def _replace(source: Path, destination: Path) -> None:
+    os.replace(source, destination)
+
+
+def _same_observation(left: Observation, right: Observation) -> bool:
+    return (
+        left.version == right.version
+        and left.file_id == right.file_id
+        and left.data == right.data
+    )
+
+
+def _fallback_after_failure(path: Path, observation: Observation) -> tuple[str, Observation, bool]:
+    try:
+        current = observe(path)
+    except (OSError, ValueError):
+        # No business bytes were touched by a failed candidate publication.
+        # The existing observation remains suitable for a Manifest projection.
+        return "manifest", observation, False
+    if _same_observation(current, observation):
+        return "manifest", observation, False
+    return "conflict", current, False
 
 
 def inline_candidate(path: Path, data: bytes, artifact_id: str) -> bytes | None:
@@ -46,19 +80,38 @@ def mark(path: Path, observation: Observation, artifact_id: str) -> tuple[str, O
         return "manifest", observation, False
     if candidate == observation.data:
         return "inline", observation, False
-    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "r+b") as stream:
-        info = os.fstat(stream.fileno())
+    temporary: Path | None = None
+    descriptor = -1
+    try:
+        info = path.stat(follow_symlinks=False)
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or (info.st_dev, info.st_ino) != observation.file_id
-                or stream.read(len(observation.data) + 1) != observation.data):
+                or (info.st_dev, info.st_ino) != observation.file_id):
             return "conflict", observe(path), False
-        # Preserve the header, permissions, encoding/BOM and existing newline bytes.
-        stream.seek(0)
-        stream.write(candidate)
-        stream.truncate()
-        stream.flush()
-        os.fsync(stream.fileno())
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(name)
+        mode = stat.S_IMODE(info.st_mode)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            _write_all(stream, candidate)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        # The candidate is complete and durable before the business path is
+        # touched. Recheck the exact version immediately before publication.
+        current = observe(path)
+        if not _same_observation(current, observation):
+            return "conflict", current, False
+        _replace(temporary, path)
+        temporary = None
+    except (OSError, ValueError):
+        return _fallback_after_failure(path, observation)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     final = observe(path)
     if final.version.sha256 != hashlib.sha256(candidate).hexdigest():
         return "conflict", final, True
