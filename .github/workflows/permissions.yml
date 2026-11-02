@@ -218,6 +218,7 @@ jobs:
           orchestrator/hchat_submit_result.py orchestrator/hchat_delivery.py
           tools/hchat_send.py tools/protocol_send.py tests/test_hchat_submission_details.py
           tools/browser_gateway_proxy.py tests/test_browser_proxy_failure_details.py
+          tests/test_portable_bootstrap_failure_details.py
           orchestrator/her_v2/provider_continuation.py scripts/permissions/windows_lpac_probe.py
           scripts/permissions/windows_file_helper_probe.py
           scripts/permissions/build_runtime_capsule.py
