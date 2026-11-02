@@ -24,6 +24,7 @@ class SessionState:
         self.last_contact = last_contact
         self.view = None
         self.view_revision = ""
+        self.view_sequence = 0
         self.display_revision = ""
         self.frame_cache = None
         self.frame_history = OrderedDict()
@@ -115,11 +116,18 @@ class DesktopController:
         with self.guard:
             self.expire()
             view = view_options(value)
+            sequence = view.pop("sequence", None)
             rows, _ = self.native.displays()
             if not set(self._view_display_ids(view)).issubset({r["id"] for r in rows}):
                 raise DesktopError("desktop_display_changed", 409)
             rev = self._display_revision(rows, view)
             sess = self._get_session(session_id)
+            if sequence is None and sess.view_sequence or sequence is not None and sequence < sess.view_sequence:
+                raise DesktopError("desktop_view_superseded", 409)
+            if sequence is not None:
+                if sequence == sess.view_sequence and view != sess.view:
+                    raise DesktopError("desktop_view_conflict", 409)
+                sess.view_sequence = sequence
             if view == sess.view and rev == sess.display_revision:
                 return {"view_revision": sess.view_revision}
             if self.owner and self.owner[:2] == (actor, session_id):
@@ -199,7 +207,7 @@ class DesktopController:
             rows, rev = self.native.displays()
             with self.guard:
                 self._get_session(session_id)
-            return {"displays": rows, "display_revision": rev, "protocol_version": 1, "preview_supported": True}
+            return {"displays": rows, "display_revision": rev, "protocol_version": 1, "preview_supported": True, "view_sequence_supported": True}
         if operation == "desktop_view":
             return self._set_view(args, actor, session_id)
         if operation == "desktop_previews":
@@ -244,12 +252,20 @@ class DesktopController:
             return self.input(args["event"], actor, session_id, args["lease_id"])
         raise DesktopError("desktop_invalid_operation")
 
+    def _preview_available(self):
+        self.native.available()
+        status = getattr(self.native, "desktop_state", None)
+        if callable(status):
+            value = status()
+            if value.get("locked") or value.get("secure_desktop"):
+                raise DesktopError("desktop_locked", 423)
+
     def previews(self, value, session_id):
         options = preview_options(value)
         if not self.capture_guard.acquire(blocking=False):
             raise DesktopError("desktop_capture_busy", 429)
         try:
-            self.native.available()
+            self._preview_available()
             rows, revision = self.native.displays()
             by_id = {row["id"]: row for row in rows}
             if revision != options["display_revision"] or not set(options["display_ids"]).issubset(by_id):
@@ -269,6 +285,10 @@ class DesktopController:
                 rect = {key: row[key] for key in ("x", "y", "width", "height")}
                 scale = min(1, 320 / rect["width"], 180 / rect["height"])
                 size = (max(1, round(rect["width"] * scale)), max(1, round(rect["height"] * scale)))
+                self._preview_available()
+                with self.guard:
+                    if self.sessions.get(session_id) is not sess:
+                        raise DesktopError("desktop_session_expired", 410)
                 image = self.native.capture(rect, size)
                 try:
                     data = jpeg_bytes(image, max_bytes=PREVIEW_MAX_BYTES)
@@ -280,7 +300,7 @@ class DesktopController:
                 result.append({"display_id": display_id, "width": width, "height": height,
                                "jpeg": base64.b64encode(data).decode("ascii")})
             # A close or hot-plug during capture discards all prepared content.
-            self.native.available()
+            self._preview_available()
             if self.native.displays()[1] != revision:
                 raise DesktopError("desktop_display_changed", 409)
             with self.guard:

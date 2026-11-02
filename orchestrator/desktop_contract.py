@@ -81,7 +81,7 @@ def preview_options(value) -> dict:
 
 
 def view_options(value) -> dict:
-    v = fields(value, {"display_id", "display_ids", "small", "crop"})
+    v = fields(value, {"display_id", "display_ids", "small", "crop", "sequence"})
     single, multiple = "display_id" in v, "display_ids" in v
     if single == multiple:
         raise DesktopError("desktop_invalid_display")
@@ -107,7 +107,8 @@ def view_options(value) -> dict:
     crop = {k: unit(n) for k, n in crop.items()}
     if crop["width"] < .05 or crop["height"] < .05 or crop["x"] + crop["width"] > 1.000001 or crop["y"] + crop["height"] > 1.000001:
         raise DesktopError("desktop_invalid_crop")
-    return {**selection, "small": v.get("small", False), "crop": crop}
+    sequence = {"sequence": integer(v["sequence"], 1, 2**53 - 1)} if "sequence" in v else {}
+    return {**selection, "small": v.get("small", False), "crop": crop, **sequence}
 
 
 def validate_input(value) -> dict:

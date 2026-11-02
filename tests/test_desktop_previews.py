@@ -287,3 +287,50 @@ async def test_api_close_discards_a_preview_that_was_already_in_transport():
     finish.set()
     with pytest.raises(DesktopError, match="session_expired"):
         await asyncio.wait_for(pending, 1)
+
+def test_view_sequence_prevents_a_late_request_from_reversing_the_final_target(desktop):
+    controller, native, _ = desktop
+    info = controller.handle("desktop_info", {}, "owner-a", "session-a")
+    assert info["view_sequence_supported"] is True
+    latest = controller.handle("desktop_view", {"display_id": "left", "sequence": 2}, "owner-a", "session-a")
+    with pytest.raises(DesktopError, match="view_superseded"):
+        controller.handle("desktop_view", {"display_id": "main", "sequence": 1}, "owner-a", "session-a")
+    # The duplicate final request is harmless, but reusing its sequence for a
+    # different target cannot silently overwrite the view.
+    assert controller.handle("desktop_view", {"display_id": "left", "sequence": 2}, "owner-a", "session-a") == latest
+    with pytest.raises(DesktopError, match="view_conflict"):
+        controller.handle("desktop_view", {"display_id": "main", "sequence": 2}, "owner-a", "session-a")
+    frame = controller.frame("", "session-a")["meta"]
+    assert frame["display_ids"] == ["left"]
+    controller.handle("desktop_control", {"mode": "acquire", "lease_id": "lease-a"}, "owner-a", "session-a")
+    controller.handle("desktop_input", {"lease_id": "lease-a", "event": {
+        "seq": 1, "kind": "down", "button": "left", "x": .5, "y": .5,
+        "frame_id": frame["frame_id"], "view_revision": frame["view_revision"],
+    }}, "owner-a", "session-a")
+    assert native.inputs[-1]["px"] < 0
+
+
+@pytest.mark.parametrize("sequence", [True, 0, -1, 2 ** 53, "1"])
+def test_invalid_view_sequences_do_not_change_the_selected_display(desktop, sequence):
+    controller, _, _ = desktop
+    controller.handle("desktop_view", {"display_id": "main"}, "owner-a", "session-a")
+    before = dict(controller.sessions["session-a"].view)
+    with pytest.raises(DesktopError):
+        controller.handle("desktop_view", {"display_id": "left", "sequence": sequence}, "owner-a", "session-a")
+    assert controller.sessions["session-a"].view == before
+
+@pytest.mark.parametrize("mid_capture", [False, True])
+def test_independent_previews_clear_on_locked_secure_desktop_without_disabling_the_main_view(desktop, mid_capture):
+    controller, native, _ = desktop
+    state = {"locked": not mid_capture, "secure_desktop": False}
+    native.desktop_state = lambda: dict(state)
+    if mid_capture:
+        native.after_capture = lambda: state.update(locked=True)
+    with pytest.raises(DesktopError, match="locked"):
+        previews(controller, ["left"])
+    assert len(native.captures) == int(mid_capture)
+    # The explicit secure-desktop/manual view remains an existing independent
+    # capability; only the extra overview preview is paused.
+    native.after_capture = lambda: None
+    controller.frame("", "session-a")
+    assert controller.sessions["session-a"].frame_cache is not None
