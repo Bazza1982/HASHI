@@ -3,7 +3,7 @@
 - PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，原生音频不等转写；原因跨入口保留；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
 - 个人L1：认证前端决定、自动弹窗、免重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
   Adapter设超时，只读视图禁写，保留epoch日志/不可变检查；实测独立验收。[权限](permissions/IMPLEMENTATION_STATUS.md)。
-- 附件说明可换行/制表，长度/身份限制不变；失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+- 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

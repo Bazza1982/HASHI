@@ -66,6 +66,17 @@ Workbench respects an explicit replay prohibition both on the initial response
 and during queued recovery. Its error view retains a bounded, correlated public
 message; malformed details use the existing localized unknown-result fallback.
 
+Desktop and Call unexpected errors retain a safe cause, observed stage and
+diagnostic reference across the Functions API, authenticated Workbench relay,
+client error and visible surface. A dispatched mutation remains unconfirmed;
+read-only queries do not claim a new mutation. Backend/service exceptions are
+not relabeled as invalid request JSON. Existing auth, opt-in, input ordering,
+domain refusals and cancellation remain authoritative. Raw exception text,
+desktop contents, media and credentials never enter the public detail.
+Workbench validates the bounded public fields and clears old details when a
+different error occurs. Call hangup retains its unknown end state and cause.
+Diagnostic sink failures cannot replace the public error response.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed
