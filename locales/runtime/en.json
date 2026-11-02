@@ -2663,6 +2663,7 @@
     "settings.failure.refresh.language_settings": "Use /language to check the saved language.",
     "settings.failure.refresh.question_settings": "Use /askme status to check the saved question settings.",
     "settings.failure.refresh.fallback_settings": "Refresh /fallback to check the saved policy.",
+    "operation.failure.stage.parse": "parsing the saved configuration",
     "operation.failure.stage.read": "reading the current state",
     "operation.failure.stage.create": "creating the session",
     "operation.failure.stage.reset_backend": "starting the backend session",

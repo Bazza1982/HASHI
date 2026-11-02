@@ -114,9 +114,9 @@ Keep frontend send times. PAO admits Workbench/Telegram within 30/60 seconds;
 stale input needs durable confirmation. TUI exemptions need signed local proof;
 `/hchat` needs reverse-route correlation. HASHI3 is not production.
 
-Scheduler/recovery/`/bg`: Agent-owned hidden Session; separate execution/delivery/
-receipts, each final once. `/bg` freezes admission; schedules imply no chat.
-`/delay` and interactive `/loop` retain context.
+Scheduler/恢复/`/bg`用代理自己的隐藏会话；执行、交付、回执分开且各自只终结一次。
+`/bg`入队信息固定，计划任务不承诺聊天回复；`/delay`和交互`/loop`保留上下文。
+任务列表只读权威快照，读取/解析失败带原因/编号，不显示空清单或触发迁移。
 
 Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 Telegram须用户及Bot绑定的双向证据；单Agent启用空闲等待≤15m，校验凭据/创建/stop。

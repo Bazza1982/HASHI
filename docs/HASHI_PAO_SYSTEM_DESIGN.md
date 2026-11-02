@@ -262,6 +262,13 @@ endpoint. Unsupported Providers return an explicit unsupported result without a
 request. Failures omit credential values, response bodies and transport URLs;
 redirects are not followed and each lookup performs one bounded-time GET.
 
+Scheduled-job views consume the SkillManager owner's strict read-only declaration
+snapshot. It accepts legacy BOM input, validates the displayed job collections,
+and reports separate read/parse failures with a safe cause and diagnostic reference.
+A missing file alone means an empty declaration set. Corrupt or inaccessible data
+must never be rendered as no configured jobs. Listing does not migrate active
+heartbeats, publish settings, create files or execute/toggle any job.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible

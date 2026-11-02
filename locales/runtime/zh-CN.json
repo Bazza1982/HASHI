@@ -2663,6 +2663,7 @@
     "settings.failure.refresh.language_settings": "请用 /language 核对已保存的语言。",
     "settings.failure.refresh.question_settings": "请用 /askme status 核对已保存的提问设置。",
     "settings.failure.refresh.fallback_settings": "请刷新 /fallback 核对已保存的备用策略。",
+    "operation.failure.stage.parse": "解析已保存的配置",
     "operation.failure.stage.read": "读取当前状态",
     "operation.failure.stage.create": "创建会话",
     "operation.failure.stage.reset_backend": "建立后端会话",

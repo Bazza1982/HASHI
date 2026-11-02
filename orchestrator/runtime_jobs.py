@@ -105,21 +105,29 @@ def resolve_callback_token(runtime, namespace: str, token: str, *, now: float | 
     return dict(entry.get("payload") or {})
 
 
+def _jobs_read_failure(runtime, error: Exception) -> str:
+    from orchestrator.operation_failures import OperationFailed, operation_failure
+
+    failure = error.failure if isinstance(error, OperationFailed) else operation_failure(
+        error, operation="jobs", phase="read",
+    )
+    _runtime_logger(runtime).error("Job listing failure: %s", failure.diagnostic())
+    return ui_language.tr("jobs.read_failed") + "\n" + html.escape(failure.render())
+
+
 def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_agent: str | None = None):
     """Build combined jobs message text and inline keyboard with run/toggle buttons.
 
     filter_agent: if set, only show jobs whose 'agent' field matches. None means show all.
     Returns (text: str, markup: InlineKeyboardMarkup | None).
     """
-    if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
+    read_snapshot = getattr(skill_manager, "read_jobs_snapshot", None)
+    if not callable(read_snapshot):
         return ui_language.tr("jobs.no_scheduler"), None
     try:
-        if not skill_manager.tasks_path.exists():
-            data = {"heartbeats": [], "crons": []}
-        else:
-            data = json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
-    except Exception:
-        return ui_language.tr("jobs.read_failed"), None
+        data = read_snapshot()
+    except Exception as exc:
+        return _jobs_read_failure(runtime, exc), None
 
     scope = filter_agent or ui_language.tr("jobs.scope.all")
     buttons: list = []
@@ -238,15 +246,13 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
 
 def _build_jobs_text(agent_name: str, skill_manager) -> str:
     """Build a formatted jobs listing for a single agent."""
-    if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
+    read_snapshot = getattr(skill_manager, "read_jobs_snapshot", None)
+    if not callable(read_snapshot):
         return ui_language.tr("jobs.no_scheduler")
     try:
-        if not skill_manager.tasks_path.exists():
-            data = {"heartbeats": [], "crons": []}
-        else:
-            data = json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
-    except Exception:
-        return ui_language.tr("jobs.read_failed")
+        data = read_snapshot()
+    except Exception as exc:
+        return _jobs_read_failure(None, exc)
 
     hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
     crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]

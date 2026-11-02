@@ -15,7 +15,7 @@ from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 
 _PHASES = frozenset({
     "read", "create", "reset_backend", "bind", "save", "archive", "default", "activate",
-    "configuration", "initialize", "session", "fence", "persist", "retire", "cleanup", "request", "decode",
+    "configuration", "initialize", "session", "fence", "persist", "retire", "cleanup", "request", "decode", "parse",
 })
 
 
@@ -121,6 +121,8 @@ def operation_failure(error: Exception, *, operation: str, phase: str, unconfirm
     reason = _reason(error)
     if phase == "decode" and isinstance(error, (ValueError, TypeError)):
         reason = "response_invalid"
+    if phase == "parse" and isinstance(error, (ValueError, TypeError)):
+        reason = "configuration_invalid"
     return OperationFailure(
         operation, phase, reason, error_type, f"{operation}_{phase}_{reason}",
         "operr_" + uuid4().hex[:24], bool(unconfirmed or isinstance(error, ConfigDurabilityError)),

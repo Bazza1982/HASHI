@@ -1015,6 +1015,53 @@ class SkillManager:
         self._save_tasks(tasks)
         self._save_active_heartbeats(list(existing.values()))
 
+    def read_jobs_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        """Read declarations for a view, without migrations or writable revisions."""
+        from orchestrator.operation_failures import OperationFailed, operation_failure
+
+        empty = {"heartbeats": [], "crons": [], "nudges": []}
+        phase = "read"
+        try:
+            try:
+                document = read_managed_json(self.tasks_path)
+            except FileNotFoundError:
+                return empty
+            except (ValueError, UnicodeError):
+                phase = "parse"
+                raise
+            phase = "parse"
+            if not isinstance(document, dict):
+                raise ValueError("job declarations must be an object")
+            snapshot = {}
+            for key in empty:
+                rows = document.get(key, [])
+                if not isinstance(rows, list):
+                    raise ValueError("job declarations must contain job lists")
+                projected = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError("job declaration must be an object")
+                    if not isinstance(row.get("id"), str) or not row["id"].strip():
+                        raise ValueError("job declaration requires an ID")
+                    if not isinstance(row.get("agent"), str) or not row["agent"].strip():
+                        raise ValueError("job declaration requires an owner")
+                    if "enabled" in row and type(row["enabled"]) is not bool:
+                        raise ValueError("job enabled state must be Boolean")
+                    item = dict(row)
+                    if key == "heartbeats":
+                        try:
+                            interval = int(row.get("interval_seconds", 0) or 0)
+                        except (TypeError, ValueError, OverflowError):
+                            raise ValueError("heartbeat interval must be an integer") from None
+                        if interval < 0:
+                            raise ValueError("heartbeat interval must not be negative")
+                        item["interval_seconds"] = interval
+                    projected.append(item)
+                snapshot[key] = projected
+            return snapshot
+        except Exception as exc:
+            raise OperationFailed(operation_failure(exc, operation="jobs", phase=phase)) from None
+
     def list_jobs(
         self, kind: str, agent_name: str | None = None
     ) -> list[dict[str, Any]]:

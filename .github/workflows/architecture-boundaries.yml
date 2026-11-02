@@ -93,6 +93,9 @@ jobs:
             tests/test_backend_selection_transaction.py \
             tests/test_backend_switch_outcomes.py \
             tests/test_credit_failures.py \
+            tests/test_jobs_read_failures.py \
+            tests/test_job_ownership.py \
+            tests/test_agent_runtime_job_transfer.py \
             tests/test_session_operation_failures.py \
             tests/test_fresh_context.py \
             tests/test_agent_fyi.py \
