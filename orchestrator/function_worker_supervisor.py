@@ -1224,18 +1224,24 @@ class AgentRuntimeHandle:
         request_id: str,
         source_language: str | None = None,
     ) -> dict[str, Any]:
-        return dict(
-            await self._route(
-                "runtime.tui_speech",
-                {
-                    "text": str(text),
-                    "request_id": str(request_id),
-                    "source_language": str(source_language or ""),
-                },
-                timeout=120,
-            )
-            or {}
+        from orchestrator.voice_synthesizer import VoiceSynthesisError
+
+        result = await self._route(
+            "runtime.tui_speech",
+            {
+                "text": str(text),
+                "request_id": str(request_id),
+                "source_language": str(source_language or ""),
+            },
+            timeout=120,
         )
+        try:
+            failure = VoiceSynthesisError.from_wire_result(result)
+        except ValueError:
+            raise FunctionWorkerError("Invalid speech result; verify the original request") from None
+        if failure is not None:
+            raise failure
+        return dict(result or {})
 
     async def set_command_menu(self, *, chat_id: int, locale: str) -> bool:
         return bool(

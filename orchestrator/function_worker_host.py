@@ -1665,11 +1665,16 @@ class FunctionWorkerHost:
             await self.emit_metadata()
             return result
         if method == "runtime.tui_speech":
-            return await runtime.synthesize_tui_speech(
-                str(params.get("text") or ""),
-                str(params.get("request_id") or ""),
-                str(params.get("source_language") or "") or None,
-            )
+            from orchestrator.voice_synthesizer import VoiceSynthesisError
+
+            try:
+                return await runtime.synthesize_tui_speech(
+                    str(params.get("text") or ""),
+                    str(params.get("request_id") or ""),
+                    str(params.get("source_language") or "") or None,
+                )
+            except VoiceSynthesisError as error:
+                return error.as_wire_result()
         raise FunctionWorkerStateError(f"unknown Worker request: {method}")
 
     async def _begin_native_voice_transcription(

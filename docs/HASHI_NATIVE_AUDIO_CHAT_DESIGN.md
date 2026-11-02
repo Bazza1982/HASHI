@@ -1,5 +1,20 @@
 # HASHI Native Audio Chat — Product Requirements and Technical Design
 
+## November 3: native conversion failures
+
+Speech providers share the Functions audio converter. If its configured or
+PATH-selected FFmpeg cannot start, the result identifies audio conversion and
+retains a safe cause; a missing executable explicitly asks for instance media
+configuration. This is a non-retryable conversion failure, not evidence that
+Windows SAPI synthesis itself failed. No provider, privacy setting, dependency
+environment or executable choice is silently replaced. Real SAPI/WAV output,
+FFmpeg/Opus conversion and the original Workbench player remain distinct
+acceptance stages; unavailable runtime configuration does not qualify playback.
+The same bounded, versioned failure result crosses the existing Worker JSON
+exchange, preserving its code and safe provider reasons in the authenticated
+speech API. Invalid failure results are not audio assets and never trigger a
+replayed synthesis request. The protected Core protocol is unchanged.
+
 ## November 2: shared transcription outcomes (HASHI5 candidate)
 
 The Functions transcription owner returns one immutable per-call result:
