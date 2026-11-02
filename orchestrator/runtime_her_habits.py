@@ -1091,6 +1091,27 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
     )
 
 
+async def _show_reset_failure(runtime, update, query, error):
+    failure = error.failure
+    runtime.logger.error(
+        "Habit reset failure: %s rollback_state=%s",
+        failure.diagnostic(), error.rollback_state,
+    )
+    _append_audit(
+        runtime, "habit_command_reset_failed", error_type=failure.error_type,
+        failure_code=failure.error_code, diagnostic_reference=failure.reference,
+        phase=failure.phase, rollback_state=error.rollback_state, snapshot_id=error.snapshot_id,
+        rollback_failures=[item.diagnostic() for item in error.rollback_failures],
+        context=_audit_context(runtime, update, source="callback"),
+    )
+    summary = ui_language.tr("habit.reset_failure." + error.rollback_state)
+    text = summary + "\n" + failure.render()
+    if error.snapshot_id:
+        text += "\n" + ui_language.tr("habit.reset_failure.snapshot", snapshot_id=error.snapshot_id)
+    await query.answer(summary[:130] + "\n" + failure.reference, show_alert=True)
+    await query.edit_message_text(html.escape(text), parse_mode="HTML")
+
+
 async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
     query = update.callback_query
     command_allowed = getattr(runtime, "_is_command_allowed", None)
@@ -1383,7 +1404,17 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         return
     if action == "confirm_reset":
         expected = parts[2] if len(parts) > 2 else ""
-        if expected != _her_habits.habit_state_fingerprint(runtime.workspace_dir):
+        try:
+            current_fingerprint = _her_habits.habit_state_fingerprint(runtime.workspace_dir)
+        except Exception as exc:
+            from orchestrator.operation_failures import operation_failure
+
+            await _show_reset_failure(runtime, update, query, _her_habits.HERHabitResetError(
+                operation_failure(exc, operation="habit_reset", phase="inventory"),
+                rollback_state="unchanged",
+            ))
+            return
+        if expected != current_fingerprint:
             await query.answer(
                 ui_language.tr("habit.state_changed"),
                 show_alert=True,
@@ -1402,18 +1433,15 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                     runtime.workspace_dir,
                     audit_context=context_fields,
                 )
-        except Exception as exc:  # noqa: BLE001 - reset helper performs rollback
-            _append_audit(
-                runtime,
-                "habit_command_reset_failed",
-                error_type=type(exc).__name__,
-                error=str(exc),
-                context=context_fields,
-            )
-            await query.answer(
-                ui_language.tr("habit.reset_failed"),
-                show_alert=True,
-            )
+        except Exception as exc:  # noqa: BLE001 - owner reports verified restoration facts
+            if not isinstance(exc, _her_habits.HERHabitResetError):
+                from orchestrator.operation_failures import operation_failure
+
+                exc = _her_habits.HERHabitResetError(
+                    operation_failure(exc, operation="habit_reset", phase="move"),
+                    rollback_state="unconfirmed",
+                )
+            await _show_reset_failure(runtime, update, query, exc)
             return
         text, markup = _home_view(
             runtime,

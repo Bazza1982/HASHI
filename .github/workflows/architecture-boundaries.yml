@@ -95,6 +95,8 @@ jobs:
             tests/test_credit_failures.py \
             tests/test_jobs_read_failures.py \
             tests/test_safety_failure_details.py \
+            tests/test_habit_reset_failures.py \
+            tests/test_runtime_her_habits.py \
             tests/test_permission_safety_command.py \
             tests/test_job_ownership.py \
             tests/test_agent_runtime_job_transfer.py \

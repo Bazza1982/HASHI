@@ -18,6 +18,7 @@
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
 - PAO strips internal control envelopes before delivery checks. Memory+-only
   results fail terminally; typed audio remains deliverable.
+- 习惯重置按实测恢复结果提示，快照/审计/界面共用诊断号；恢复不全保留快照，不覆盖原位置的新记录。
 - HERV3 has no whole-run size/time/call ceiling. Preserve state/evidence;
   cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
 - Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
@@ -77,9 +78,8 @@ of PCM/logs/chat/Git.
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
-JSON writes validate private candidates under lock/revision, then atomically replace.
-Display fallback is read-only; conflicts need fresh state/action, never blind
-retry or stale restore. [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+JSON写入在锁和版本检查下验证私有候选，再原子替换；展示默认值只读。
+冲突须重读并重新选择，不自动重放，不用旧快照覆盖已发布结果。[配置持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
 
 Endpoint publication retries only bounded Windows rename blocking on the same
 fsynced candidate; permanent failure preserves state and never replays actions.

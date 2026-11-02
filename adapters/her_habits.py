@@ -306,6 +306,19 @@ class HERHabitResetResult:
     journal_count: int
 
 
+class HERHabitResetError(RuntimeError):
+    """One reset's safe failure and verified restoration facts."""
+
+    def __init__(self, failure, *, rollback_state="unconfirmed", snapshot_id=None, rollback_failures=()):
+        if rollback_state not in {"unchanged", "rolled_back", "incomplete", "unconfirmed"}:
+            raise ValueError("invalid habit restoration state")
+        self.failure = failure
+        self.rollback_state = rollback_state
+        self.snapshot_id = snapshot_id
+        self.rollback_failures = tuple(rollback_failures)
+        super().__init__(failure.error_code)
+
+
 def _clean_text(value: Any, *, limit: int) -> str:
     text = str(value or "").replace("\x00", "").strip()
     return text[:limit].rstrip()
@@ -1023,62 +1036,96 @@ def reset_habit_state(
     *,
     audit_context: Mapping[str, Any] | None = None,
 ) -> HERHabitResetResult:
-    """Move all HER Habit state into a recoverable reset snapshot."""
+    """Move Habit records to a snapshot, proving restoration on any failure."""
+    from orchestrator.operation_failures import operation_failure
 
     workspace = Path(workspace_dir)
-    inventory = habit_state_inventory(workspace)
-    snapshot_id = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-"
-        + uuid.uuid4().hex[:8]
-    )
-    snapshot_root = (
-        workspace / "backend_state" / "her_habit_resets" / snapshot_id
-    )
-    snapshot_root.mkdir(parents=True, exist_ok=False)
-    manifest_path = snapshot_root / "manifest.json"
-    manifest: dict[str, Any] = {
-        "format": "her-habit-reset-v1",
-        "snapshot_id": snapshot_id,
-        "agent_id": workspace.name,
-        "status": "preparing",
-        "created_at": _utc_now(),
-        "inventory": inventory,
-        "context": dict(audit_context or {}),
-    }
-    _atomic_write_json(manifest_path, manifest)
+    inventory = None
+    snapshot_id, manifest_path = None, None
+    manifest = {}
+    attempted: list[tuple[Path, Path]] = []
+    phase = "inventory"
 
-    sources = (
-        (workspace / "habits", snapshot_root / "habits"),
-        (
-            workspace / "backend_state" / "her_habit_meditation",
-            snapshot_root / "her_habit_meditation",
-        ),
-    )
-    moved: list[tuple[Path, Path]] = []
+    def present(path):
+        try:
+            path.lstat()
+            return True
+        except FileNotFoundError:
+            return False
+
     try:
+        inventory = habit_state_inventory(workspace)
+        phase = "snapshot"
+        snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+        snapshot_root = workspace / "backend_state" / "her_habit_resets" / snapshot_id
+        snapshot_root.mkdir(parents=True, exist_ok=False)
+        manifest_path = snapshot_root / "manifest.json"
+        manifest = {
+            "format": "her-habit-reset-v1", "snapshot_id": snapshot_id,
+            "agent_id": workspace.name, "status": "preparing", "created_at": _utc_now(),
+            "inventory": inventory, "context": dict(audit_context or {}),
+        }
+        _atomic_write_json(manifest_path, manifest)
+        sources = (
+            (workspace / "habits", snapshot_root / "habits"),
+            (workspace / "backend_state" / "her_habit_meditation", snapshot_root / "her_habit_meditation"),
+        )
+        phase = "move"
         for source, destination in sources:
-            if not source.exists():
+            if not present(source):
                 continue
+            # Record intent first: replace may commit before its caller loses
+            # the acknowledgement. Recovery inspects both paths, without replay.
+            attempted.append((source, destination))
             os.replace(source, destination)
-            moved.append((source, destination))
+        phase = "finalize"
         manifest["status"] = "completed"
         manifest["completed_at"] = _utc_now()
         _atomic_write_json(manifest_path, manifest)
-    except Exception:
-        for source, destination in reversed(moved):
+    except Exception as exc:
+        failure = operation_failure(exc, operation="habit_reset", phase=phase)
+        rollback_failures = []
+        rollback_state = "unchanged"
+        if attempted:
+            for source, destination in reversed(attempted):
+                try:
+                    if present(destination):
+                        if present(source):
+                            raise OSError("the original record location is now occupied")
+                        os.replace(destination, source)
+                except Exception as restore_error:
+                    rollback_failures.append(operation_failure(
+                        restore_error, operation="habit_reset", phase="restore",
+                    ))
             try:
-                if destination.exists() and not source.exists():
-                    os.replace(destination, source)
-            except OSError:
+                restored = habit_state_inventory(workspace) == inventory and all(
+                    not present(destination) for _source, destination in attempted
+                )
+                rollback_state = "rolled_back" if restored else "incomplete"
+            except Exception as verify_error:
+                rollback_state = "unconfirmed"
+                rollback_failures.append(operation_failure(
+                    verify_error, operation="habit_reset", phase="restore",
+                ))
+        if manifest and manifest_path is not None:
+            manifest.update({
+                "status": {
+                    "unchanged": "failed_without_changes", "rolled_back": "rolled_back",
+                    "incomplete": "rollback_incomplete", "unconfirmed": "rollback_unconfirmed",
+                }[rollback_state],
+                "completed_at": _utc_now(), "failure": failure.diagnostic(),
+                "rollback_state": rollback_state,
+                "rollback_failures": [item.diagnostic() for item in rollback_failures],
+            })
+            try:
+                _atomic_write_json(manifest_path, manifest)
+            except Exception:
+                # The caller still receives these same facts and logs their reference.
                 pass
-        manifest["status"] = "rolled_back"
-        manifest["completed_at"] = _utc_now()
-        try:
-            _atomic_write_json(manifest_path, manifest)
-        except OSError:
-            pass
-        raise
+        raise HERHabitResetError(
+            failure, rollback_state=rollback_state,
+            snapshot_id=snapshot_id if manifest else None, rollback_failures=rollback_failures,
+        ) from None
 
     result = HERHabitResetResult(
         snapshot_id=snapshot_id,
