@@ -10576,9 +10576,14 @@ class WorkbenchApiServer:
         text = str(payload.get("text") or "").strip()
         request_id = str(payload.get("request_id") or "").strip()
         source_language = str(payload.get("source_language") or "").strip()
+        operation = payload.get("operation", "generate")
+        performance_context = payload.get("performance_context")
+        if (operation not in {"generate", "prepare"}
+                or (performance_context is not None and not isinstance(performance_context, dict))):
+            return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
         if (
             not text
-            or len(text) > 20_000
+            or (operation != "prepare" and len(text) > 20_000)
             or not request_id
             or len(request_id) > 160
             or (
@@ -10597,7 +10602,12 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            result = method(text, request_id, source_language or None)
+            kwargs = {}
+            if operation == "prepare":
+                kwargs["operation"] = operation
+            if performance_context is not None:
+                kwargs["performance_context"] = performance_context
+            result = method(text, request_id, source_language or None, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
         except VoiceSynthesisError as exc:

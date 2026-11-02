@@ -77,6 +77,7 @@ _OPENAI_SERVICE_FIELDS = frozenset(
         "max_response_bytes",
         "max_input_chars",
         "pcm_sample_rate_hz",
+        "automatic_performance",
     }
 )
 _VOICE_FIELDS = frozenset(
@@ -310,6 +311,10 @@ def _validate_service(value: object) -> dict[str, object]:
         "base_url": value.get("base_url"),
     }})
     service["model"] = _plain_text(value.get("model"), "service model", 200)
+    if "automatic_performance" in value:
+        if type(value["automatic_performance"]) is not bool:
+            raise VoiceCatalogError("automatic_performance must be boolean")
+        service["automatic_performance"] = value["automatic_performance"]
     audio_format = str(value.get("audio_format") or "mp3").strip().casefold()
     if audio_format not in {"mp3", "wav", "pcm"}:
         raise VoiceCatalogError("service audio_format is unsupported")

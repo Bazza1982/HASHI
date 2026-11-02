@@ -3471,6 +3471,7 @@ class FlexibleAgentRuntime:
             "reply_mode": self.voice_manager.get_reply_mode(),
             "reply_content": str(policy.get("reply_content") or "audio_and_text"),
             "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
+            "performance": self.voice_manager.get_performance(),
         }
 
     def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:
@@ -3487,8 +3488,16 @@ class FlexibleAgentRuntime:
         text: str,
         request_id: str,
         source_language: str | None = None,
+        *,
+        operation: str = "generate",
+        performance_context: dict | None = None,
     ) -> dict[str, Any]:
         """Generate a bounded local-presentation asset without any Bot send."""
+        if operation == "prepare":
+            return {"performance_context": await self.voice_manager.prepare_performance(text),
+                    "request_id": request_id}
+        if operation != "generate":
+            raise ValueError("Unknown speech operation")
 
         spoken = str(text or "").strip()
         if not spoken:
@@ -3503,6 +3512,7 @@ class FlexibleAgentRuntime:
             force=True,
             source_language=source_language or ui_language.preferred_locale(self),
             source_surface="workbench",
+            **({"performance_context": performance_context} if performance_context is not None else {}),
         )
         if asset is None:
             raise RuntimeError("TTS is unavailable for this Agent")
@@ -3558,6 +3568,7 @@ class FlexibleAgentRuntime:
             "style_applied": asset.style_applied,
             "style_reason": asset.style_reason,
             "notice": asset.notice,
+            "performance": asset.performance,
             "request_id": str(request_id or ""),
         }
 
@@ -4557,6 +4568,14 @@ class FlexibleAgentRuntime:
                 ),
             ],
         ]
+        rows.append([
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("voice.performance.on"), self.voice_manager.get_performance()),
+                callback_data="voice:performance:on"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("voice.performance.off"), not self.voice_manager.get_performance()),
+                callback_data="voice:performance:off"),
+        ])
         profile_buttons = [
             InlineKeyboardButton(
                 selected_label(
@@ -5198,6 +5217,10 @@ class FlexibleAgentRuntime:
                 message = self.voice_manager.set_voice_profile(value)
                 preview_profile = value
                 preview_renderers = ("native", "tts")
+            elif action == "performance":
+                if value not in {"on", "off"}:
+                    raise ValueError("performance must be on or off")
+                message = self.voice_manager.set_performance(value == "on")
             elif action == "content":
                 message = self.voice_manager.set_native_reply_content(value)
             # Keep callbacks from already-open legacy menus valid until those
@@ -6620,6 +6643,15 @@ class FlexibleAgentRuntime:
             )
             return
         mode = args[0].lower()
+        if mode == "performance":
+            if len(args) != 2 or args[1].lower() not in {"on", "off"}:
+                await self._reply_text(update, ui_language.tr("voice.usage_command",
+                    command="/voice performance <on|off>"))
+                return
+            self.voice_manager.set_performance(args[1].lower() == "on")
+            await self._reply_text(update, self.voice_manager.voice_menu_text(),
+                reply_markup=self._voice_keyboard(), parse_mode="HTML")
+            return
         if mode in {"providers", "list"}:
             await self._reply_text(update, self.voice_manager.provider_hints())
             return

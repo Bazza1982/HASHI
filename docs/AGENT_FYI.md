@@ -233,3 +233,16 @@ enabling speech replies or overriding saved policy. OpenAI-compatible service
 input limits bound actual synthesis requests. Call remains a separate profile
 consumer of the same voice catalogue. These are Function/instance settings;
 Core, service origins and runtime adoption are separate evidence.
+
+### 2026-11-02 — Advanced TTS automatic performance
+
+PAO Functions add a persistent default-OFF /voice performance preference and
+whole-reading preparation operation. Compute owns one local 9B judgment and
+an open-ended direction prompt. The selected voice and original text are
+preserved; all chunks reuse the transient context. Unsupported or failed
+planning remains visible as plain reading. Cancellation and ON-to-OFF isolation
+are covered independently of static voice previews.
+
+See HASHI_SPEECH_PERFORMANCE.md and the owning TTS routing decision. This
+source addition does not itself replace running shared Functions or Workers;
+adoption must be verified separately through the user-directed hot lifecycle.

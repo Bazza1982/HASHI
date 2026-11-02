@@ -4,6 +4,11 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "voice.performance.on": "Performance on",
+    "voice.performance.off": "Performance off",
+    "voice.performance.state": "Automatic performance: {state} · Advanced TTS only; saved immediately. Adds one preparation step per reading. Prerecorded previews stay unchanged.",
+    "voice.performance.updated": "Automatic performance preference saved.",
+    "voice.performance.unavailable": "Automatic performance could not be applied; this audio uses normal reading.",
     "safety.requests": "Permission requests",
     "safety.request": "Permission request",
     "safety.no_requests": "No requests in this conversation.",

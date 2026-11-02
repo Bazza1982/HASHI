@@ -80,6 +80,27 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
             )
         return value
 
+    async def prepare_performance(self, text: str) -> dict:
+        """Separate planning deadline; never archive the text or returned direction."""
+        if (self.service.get("automatic_performance") is False
+                or self.service.get("location") not in {"local", "lan"}):
+            raise ValueError("Automatic performance is unavailable for this service")
+        key = self._credential()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        timeout = aiohttp.ClientTimeout(total=100, sock_connect=10, sock_read=100)
+        async with self.session_factory(timeout=timeout, trust_env=False) as session:
+            async with session.post(
+                str(self.service["base_url"]).rstrip("/") + "/speech/performance",
+                json={"model": self.service["model"], "input": text},
+                headers=headers, allow_redirects=False,
+            ) as response:
+                raw = await response.content.read(16385)
+                if response.status != 200 or len(raw) > 16384:
+                    raise ValueError("Automatic performance planning failed")
+                from orchestrator.speech_performance import checked_plan
+                value = json.loads(raw)
+                return checked_plan(value.get("plan"), self.service["model"])
+
     async def _request(self, body: dict, *, sink: BinaryIO | None = None) -> tuple[bytes, str]:
         key = self._credential()
         headers = {"Authorization": f"Bearer {key}"} if key else {}

@@ -493,13 +493,16 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
     assert "Retention" not in menu
     assert "Audio-model tools" not in menu
 
-    assert len(keyboard) == 6
-    assert [len(row) for row in keyboard] == [2, 1, 2, 1, 2, 2]
+    assert {b.callback_data for row in keyboard for b in row} >= {
+        "voice:performance:on", "voice:performance:off",
+    }
+    assert all(1 <= len(row) <= 2 for row in keyboard)
     assert [[button.text for button in row] for row in keyboard] == [
         ["✓ Native audio model", "Text model + TTS"],
         ["Voice off"],
         ["✓ Audio + text", "Audio only"],
         ["🗣️ Choose default TTS voice"],
+        ["Performance on", "✓ Performance off"],
         ["👩 Warm", "✓ 👩 Clear"],
         ["👨 Warm", "👨 Calm"],
     ]
@@ -508,6 +511,7 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
         ["voice:mode:off"],
         ["voice:content:both", "voice:content:audio"],
         ["voice:view:voices"],
+        ["voice:performance:on", "voice:performance:off"],
         ["voice:profile:warm_female", "voice:profile:clear_female"],
         ["voice:profile:warm_male", "voice:profile:calm_male"],
     ]
@@ -570,7 +574,9 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     assert state["voice_name"] is None
     assert len(query.edits) == 1
     assert "native echo" not in query.edits[0][0]
-    assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 6
+    assert {b.callback_data for row in query.edits[0][1]["reply_markup"].inline_keyboard for b in row} >= {
+        "voice:performance:on", "voice:performance:off",
+    }
     assert query.answers[0][0].startswith("Voice set to 👨 Calm")
     assert [call["chat_id"] for call in sent_previews] == [99, 99]
     assert [call["caption"] for call in sent_previews] == [

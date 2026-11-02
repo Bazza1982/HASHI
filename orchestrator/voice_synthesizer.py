@@ -28,6 +28,7 @@ class VoiceAsset:
     style_applied: bool | None = None
     style_reason: str | None = None
     notice: str | None = None
+    performance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

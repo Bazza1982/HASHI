@@ -127,3 +127,20 @@ alias being rejected by the generator. Source tests, real model generation,
 manifest/audio verification, adoption and actual frontend publication are
 reported separately. The source candidate does not imply the active Functions
 generation has changed; MSI's user owns any necessary hot reboot.
+
+## 2026-11-02 — Optional automatic performance
+
+The shared voice state owns a separate default-false performance preference.
+It does not change the selected voice or enable voice replies. Compute performs
+one content-driven direction judgment per logical reading. HASHI transports
+the transient plan separately from text and applies it only to the selected
+private compatible service; explicit manual instructions take precedence.
+Unavailable planning gives a plain-reading notice, and OFF never reuses an old
+plan. Command buttons and text syntax share the same revision-aware writer.
+
+The logical TUI preparation operation and Function RPC carry one context before
+Workbench splits playback/provider requests. No Core protocol/version migration,
+native conversation instruction, model restart or additional configuration owner
+is involved. See [automatic speech performance](../HASHI_SPEECH_PERFORMANCE.md).
+Source qualification, runtime adoption and subjective acoustic assessment remain
+separate evidence; a user-owned hot reboot must not be executed as a test shortcut.

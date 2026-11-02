@@ -227,6 +227,7 @@ class VoiceManager:
         # voice. Providers that support style may apply it; others ignore it
         # safely. None means the user has not chosen a style.
         "voice_profile": None,
+        "performance": False,
         # Voice is available, but automatic speech requires explicit opt-in.
         # A user's saved off/native/tts choice remains exact.
         "native": {
@@ -871,6 +872,19 @@ class VoiceManager:
             action=ui_language.tr("voice.tts.action"),
         )
 
+    def get_performance(self) -> bool:
+        return self._load().get("performance") is True
+
+    def set_performance(self, enabled: bool) -> str:
+        if type(enabled) is not bool:
+            raise ValueError("performance must be boolean")
+        self._update(lambda state: state.update(performance=enabled))
+        return ui_language.tr("voice.performance.updated")
+
+    async def prepare_performance(self, text: str) -> dict:
+        from orchestrator.speech_performance import prepare
+        return await prepare(self, text, build_provider)
+
     def voice_menu_text(self) -> str:
         state = self._load()
         native = self._native_policy_from_state(state)
@@ -898,6 +912,8 @@ class VoiceManager:
             current=current,
             facts=[
                 f"<b>{html.escape(ui_language.tr('voice.field.mode'))}</b>",
+                ui_language.tr("voice.performance.state",
+                    state="ON" if self.get_performance() else "OFF"),
                 (
                     f"• <b>{html.escape(native_label)}</b> · "
                     f"{html.escape(ui_language.tr('voice.mode.native.description'))}"
@@ -1042,6 +1058,7 @@ class VoiceManager:
             for key in ("provider", "voice_name", "provider_options"):
                 merged[key] = copy.deepcopy(preset[key])
         merged.update(data)
+        merged["performance"] = merged.get("performance") is True
         if not isinstance(merged.get("provider_options"), dict):
             merged["provider_options"] = {}
         voice_profile = str(merged.get("voice_profile") or "").strip().casefold()
@@ -1565,10 +1582,19 @@ class VoiceManager:
         max_chars_override: int | None = None,
         source_language: str | None = None,
         source_surface: str = "unknown",
+        performance_context: dict | None = None,
     ) -> VoiceAsset | None:
         state = self._load()
         if not force and not state.get("enabled"):
             return None
+        from orchestrator.speech_performance import checked_context, metadata, notice
+        context = (
+            checked_context(performance_context) if performance_context is not None
+            else await self.prepare_performance(text)
+        ) if state.get("performance") is True else {"enabled": False}
+        if context.get("enabled") and context.get("provider") != state["provider"]:
+            raise VoiceSynthesisError("tts_performance_context_changed", "The voice selection changed; start a new reading.")
+        state["_performance_context"] = context
         result = await self._synthesize_configured_state(
             agent_name=agent_name,
             request_id=request_id,
@@ -1579,7 +1605,11 @@ class VoiceManager:
             source_language=source_language,
             source_surface=source_surface,
         )
-        return result.asset
+        if result.effective_provider_options.get("instructions"):
+            context = {**context, "plan": None, "reason": "manual_instructions"}
+        performance = metadata(context, result.asset.provider)
+        return replace(result.asset, performance=performance,
+                       notice=notice(performance, result.asset.notice, locale=source_language))
 
     async def synthesize_configured(
         self,
@@ -1645,6 +1675,7 @@ class VoiceManager:
         output_dir: Path | None = None,
     ) -> ConfiguredTTSResult:
         import asyncio
+        from orchestrator.speech_performance import options_for
 
         logger = logging.getLogger(f"Runtime.{agent_name}.voice")
         if catalog is None:
@@ -1798,7 +1829,8 @@ class VoiceManager:
                     voice_name=route.voice_name,
                     rate=int(state.get("rate", 0)),
                     max_chars=len(text) if complete_input and max_chars_override is None else max_chars,
-                    provider_options=route.provider_options,
+                    provider_options=options_for(
+                        state.get("_performance_context"), route.provider, route.provider_options),
                 )
             except Exception as exc:
                 failure = _provider_failure(
