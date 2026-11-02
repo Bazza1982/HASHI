@@ -9474,6 +9474,16 @@ class FlexibleAgentRuntime:
         target_provider: str | None = None,
         with_context: bool = False,
     ) -> tuple[bool, str]:
+        from orchestrator.operation_failures import operation_failure
+
+        def failure_message(error, *, phase, active=False):
+            failure = operation_failure(error, operation="backend_switch", phase=phase, unconfirmed=active)
+            self.backend_manager.logger.error("Backend selection follow-up failure: %s", failure.diagnostic())
+            summary = ui_language.tr(
+                "backend.switch.active_warning" if active else "backend.switch.failed", backend=target_engine,
+            )
+            return summary + "\n" + failure.render()
+
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
         if target_engine not in allowed_engines:
             return False, ui_language.tr("backend.switch.not_allowed", backend=target_engine)
@@ -9494,77 +9504,88 @@ class FlexibleAgentRuntime:
         if self._backend_busy():
             return False, ui_language.tr("backend.switch.busy")
 
-        selected_session = runtime_session.current_session(
-            self, surface="telegram", channel_key=str(chat_id)
-        )
-        runtime_session.apply_session_workzones(
-            self, selected_session["session_id"]
-        )
-        switch_ok = await self.backend_manager.switch_backend(
+        phase = "read"
+        try:
+            selected_session = runtime_session.current_session(
+                self, surface="telegram", channel_key=str(chat_id)
+            )
+            phase = "configuration"
+            runtime_session.apply_session_workzones(self, selected_session["session_id"])
+        except Exception as exc:
+            return False, failure_message(exc, phase=phase)
+        switch_result = await self.backend_manager.switch_backend_result(
             target_engine,
             target_model=target_model,
             target_provider=target_provider,
         )
-        if not switch_ok:
-            return False, ui_language.tr("backend.switch.failed", backend=target_engine)
-        self._sync_workzone_to_backend_config()
-        runtime_model_selection.schedule_current_model_metadata(self)
-        backend = self.backend_manager.current_backend
-        supports_sessions = bool(
-            backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
-        )
-        if with_context:
-            with suppress(Exception):
+        if not switch_result.switched:
+            message = ui_language.tr("backend.switch.failed", backend=target_engine)
+            if switch_result.issue is not None:
+                message += "\n" + switch_result.issue.render()
+            return False, message
+        try:
+            self._sync_workzone_to_backend_config()
+            runtime_model_selection.schedule_current_model_metadata(self)
+            backend = self.backend_manager.current_backend
+            supports_sessions = bool(
+                backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+            )
+            if with_context:
                 handoff_builder = runtime_session.session_handoff_builder(
                     self, surface="telegram", channel_key=str(chat_id)
                 )
                 handoff_builder.refresh_recent_context()
                 handoff_builder.build_handoff()
-        else:
-            self._clear_handoff_state()
-        self.last_backend_switch_at = datetime.now()
+            else:
+                self._clear_handoff_state()
+            self.last_backend_switch_at = datetime.now()
 
-        primer_note = (
-            f"Backend switched to {target_engine} with continuity handoff available."
-            if with_context
-            else f"Backend switched to {target_engine}. Review AGENT FYI before the next task."
-        )
-        self._arm_session_primer(
-            primer_note, session_id=selected_session["session_id"]
-        )
-
-        # A continuation request is an actual one-time backend delivery, not a
-        # handoff file that merely waits for a future user message. Stateless
-        # Flex targets already receive history every turn and need no package.
-        if with_context and supports_sessions:
-            restore_prompt, exchange_count, _word_count = (
-                runtime_session.session_handoff_builder(
-                    self, surface="telegram", channel_key=str(chat_id)
-                ).build_session_restore_prompt(
-                    max_rounds=10,
-                    max_words=6000,
-                )
+            primer_note = (
+                f"Backend switched to {target_engine} with continuity handoff available."
+                if with_context
+                else f"Backend switched to {target_engine}. Review AGENT FYI before the next task."
             )
-            if exchange_count:
-                await self.enqueue_request(
-                    chat_id,
-                    restore_prompt,
-                    "handoff",
-                    f"Backend continuation [{exchange_count} exchanges]",
-                    silent=True,
-                    deliver_to_telegram=True,
-                    skip_memory_injection=True,
-                )
+            self._arm_session_primer(
+                primer_note, session_id=selected_session["session_id"]
+            )
 
-        return True, runtime_menu_views.backend_switch_notice_text(
-            backend=target_engine,
-            model=self.get_current_model(),
-            provider=self.get_current_provider(),
-            mode=self.backend_manager.agent_mode,
-            effort=self._get_current_effort(),
-            with_context=with_context,
-            permission_status=getattr(self.backend_manager, "permission_status", lambda: None)(),
-        )
+            # A continuation request is an actual one-time backend delivery, not a
+            # handoff file that merely waits for a future user message. Stateless
+            # Flex targets already receive history every turn and need no package.
+            if with_context and supports_sessions:
+                restore_prompt, exchange_count, _word_count = (
+                    runtime_session.session_handoff_builder(
+                        self, surface="telegram", channel_key=str(chat_id)
+                    ).build_session_restore_prompt(
+                        max_rounds=10,
+                        max_words=6000,
+                    )
+                )
+                if exchange_count:
+                    await self.enqueue_request(
+                        chat_id,
+                        restore_prompt,
+                        "handoff",
+                        f"Backend continuation [{exchange_count} exchanges]",
+                        silent=True,
+                        deliver_to_telegram=True,
+                        skip_memory_injection=True,
+                    )
+
+            message = runtime_menu_views.backend_switch_notice_text(
+                backend=target_engine,
+                model=self.get_current_model(),
+                provider=self.get_current_provider(),
+                mode=self.backend_manager.agent_mode,
+                effort=self._get_current_effort(),
+                with_context=with_context,
+                permission_status=getattr(self.backend_manager, "permission_status", lambda: None)(),
+            )
+        except Exception as exc:
+            message = failure_message(exc, phase="activate", active=True)
+        if switch_result.issue is not None:
+            message += "\n" + ui_language.tr("backend.switch.active_warning") + "\n" + switch_result.issue.render()
+        return True, message
 
     cmd_model = runtime_model_selection.cmd_model
 

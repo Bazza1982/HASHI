@@ -13,6 +13,10 @@ _STRICT_SETTINGS_SAVE = ContextVar("hashi_strict_settings_save", default=False)
 from pathlib import Path
 from typing import Any, Optional
 
+from orchestrator.backend_switch_result import BackendSwitchResult
+from orchestrator.config_json import ConfigDurabilityError
+from orchestrator.operation_failures import OperationFailed, OperationRejected, operation_failure
+
 from adapters.timeout_policy import (
     HARD_TIMEOUT_KEY,
     IDLE_TIMEOUT_KEY,
@@ -1852,15 +1856,24 @@ class FlexibleBackendManager:
         engine: str,
         target_model: str | None = None,
         target_provider: str | None = None,
+        *,
+        raise_on_failure: bool = False,
     ):
         """Prepare an adapter without replacing the live backend or saved state."""
+        def rejected(error: Exception, phase: str):
+            if raise_on_failure:
+                raise OperationFailed(operation_failure(
+                    error, operation="backend_switch", phase=phase,
+                )) from None
+            return None
+
         self.logger.info(f"Initializing active backend: {engine}")
         try:
             require_level_available(self.privacy_level)
             require_backend_compatibility(engine, self.privacy_level)
         except PrivacyPolicyError as exc:
             self.logger.error("Backend blocked by privacy policy: %s", exc)
-            return None
+            return rejected(OperationRejected("privacy_blocked"), "configuration")
 
         resolved_model = target_model
         resolved_provider = target_provider
@@ -1871,7 +1884,7 @@ class FlexibleBackendManager:
         )
         if not backend_cfg_raw:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
-            return None
+            return rejected(OperationRejected("backend_not_allowed"), "configuration")
 
         try:
             adapter_cfg = self._build_adapter_config(
@@ -1882,7 +1895,7 @@ class FlexibleBackendManager:
             )
         except ValueError as exc:
             self.logger.error("Backend configuration rejected: %s", exc)
-            return None
+            return rejected(exc, "configuration")
 
         backend = None
         initialized = False
@@ -1914,23 +1927,40 @@ class FlexibleBackendManager:
                     self._attach_tool_registry(tools_cfg, adapter_cfg, backend=backend)
 
             initialized = bool(await backend.initialize())
-            return backend if initialized else None
+            if not initialized:
+                return rejected(OperationRejected("backend_unavailable"), "initialize")
+            return backend
+        except OperationFailed:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
-            return None
+            return rejected(e, "initialize")
         finally:
             if backend is not None and not initialized:
-                await self._dispose_backend(backend)
+                try:
+                    await self._dispose_backend(backend)
+                except Exception as cleanup_error:
+                    issue = operation_failure(cleanup_error, operation="backend_switch", phase="cleanup")
+                    self.logger.error("Discarded backend cleanup failure: %s", issue.diagnostic())
 
-    async def _dispose_backend(self, backend) -> None:
+    async def _dispose_backend(self, backend, *, operation="backend_cleanup", phase="cleanup"):
+        issue = None
         try:
             await backend.shutdown()
-        except Exception:
-            self.logger.exception("Failed to shut down discarded backend")
+        except Exception as exc:
+            issue = operation_failure(exc, operation=operation, phase=phase)
+            self.logger.error("Backend shutdown failure: %s", issue.diagnostic())
         proxy = getattr(backend, "_browser_gateway_proxy", None)
         if proxy is not None:
-            await asyncio.to_thread(proxy.close)
-            backend._browser_gateway_proxy = None
+            try:
+                await asyncio.to_thread(proxy.close)
+                backend._browser_gateway_proxy = None
+            except Exception as exc:
+                proxy_issue = operation_failure(exc, operation=operation, phase=phase)
+                self.logger.error("Backend proxy cleanup failure: %s", proxy_issue.diagnostic())
+                if issue is None:
+                    issue = proxy_issue
+        return issue
 
     def _resolve_tools_config(self, backend_cfg_raw: dict) -> dict | None:
         """Merge global default_tools with per-backend tools config.
@@ -2117,60 +2147,56 @@ class FlexibleBackendManager:
         target_model: str | None = None,
         target_provider: str | None = None,
     ) -> bool:
-        # Serialize selections while an adapter is being prepared. The live
-        # backend remains usable until the replacement is ready to commit.
+        """Retain the established Boolean view of the actual live selection."""
+        result = await self.switch_backend_result(target_engine, target_model, target_provider)
+        return result.switched
+
+    async def switch_backend_result(
+        self,
+        target_engine: str,
+        target_model: str | None = None,
+        target_provider: str | None = None,
+    ) -> BackendSwitchResult:
         if not hasattr(self, "_backend_switch_lock"):
             self._backend_switch_lock = asyncio.Lock()
         async with self._backend_switch_lock:
-            return await self._switch_backend_transaction(
-                target_engine, target_model, target_provider
-            )
+            return await self._switch_backend_transaction(target_engine, target_model, target_provider)
 
     async def _switch_backend_transaction(
-        self,
-        target_engine: str,
-        target_model: str | None,
-        target_provider: str | None,
-    ) -> bool:
-        target_engine = canonical_backend_engine(target_engine)
-        resolved_provider = target_provider
-        resolved_model = target_model
-        self.logger.info(
-            f"Switching backend to {target_engine}"
-            + (f" provider={resolved_provider}" if resolved_provider else "")
-            + (f" model={resolved_model}" if resolved_model else "")
-        )
-        backend_cfg_raw = self._select_backend_cfg(
-            target_engine,
-            target_model=resolved_model,
-            target_provider=resolved_provider,
-        )
-        if not backend_cfg_raw:
-            self.logger.error(f"Target backend {target_engine} not allowed.")
-            return False
-        try:
-            require_backend_compatibility(target_engine, self.privacy_level)
-        except PrivacyPolicyError as exc:
-            self.logger.error("Target backend blocked by privacy policy: %s", exc)
-            return False
-
+        self, target_engine: str, target_model: str | None, target_provider: str | None,
+    ) -> BackendSwitchResult:
         candidate = None
         committed = False
+        issue = None
+        phase = "configuration"
         try:
+            target_engine = canonical_backend_engine(target_engine)
+            backend_cfg_raw = self._select_backend_cfg(
+                target_engine, target_model=target_model, target_provider=target_provider,
+            )
+            if not backend_cfg_raw:
+                raise OperationRejected("backend_not_allowed")
+            try:
+                require_backend_compatibility(target_engine, self.privacy_level)
+            except PrivacyPolicyError:
+                raise OperationRejected("privacy_blocked") from None
+
+            phase = "initialize"
             candidate = await self._create_initialized_backend(
-                target_engine,
-                target_model=resolved_model,
-                target_provider=resolved_provider,
+                target_engine, target_model=target_model, target_provider=target_provider,
+                raise_on_failure=True,
             )
             if candidate is None:
-                return False
+                raise OperationRejected("backend_unavailable")
+            phase = "session"
             supports_sessions = bool(candidate.capabilities.supports_sessions)
             target_mode = "fixed" if supports_sessions else "flex"
             if hasattr(candidate, "set_session_mode"):
                 candidate.set_session_mode(supports_sessions)
             if supports_sessions and not await candidate.handle_new_session():
-                raise RuntimeError("Target backend could not start a new session")
+                raise OperationRejected("backend_refused")
 
+            phase = "fence"
             controller = getattr(getattr(self, "runtime", None), "permission_runs", None)
             fence_previous = getattr(controller, "before_backend_switch", None)
             if callable(fence_previous):
@@ -2179,14 +2205,17 @@ class FlexibleBackendManager:
             previous_engine = self.config.active_backend
             previous_model = self._active_model_override
             previous_mode = self.agent_mode
-            # No await between updating the live fields and the atomic write.
-            # State-store exceptions must propagate here; _save_state swallows
-            # them and therefore cannot establish a successful switch.
+            # No await between candidate fields, the authoritative atomic write,
+            # and adopting the live adapter. A published write cannot be rolled back.
             self.config.active_backend = target_engine
-            self._active_model_override = resolved_model
+            self._active_model_override = target_model
             self.agent_mode = target_mode
+            phase = "persist"
             try:
                 self.state_store.update(self._apply_managed_state_fields)
+            except ConfigDurabilityError as exc:
+                issue = operation_failure(exc, operation="backend_switch", phase=phase)
+                self.logger.warning("Backend selection published with uncertain durability: %s", issue.diagnostic())
             except Exception:
                 self.config.active_backend = previous_engine
                 self._active_model_override = previous_model
@@ -2194,17 +2223,32 @@ class FlexibleBackendManager:
                 raise
             self.current_backend = candidate
             committed = True
-        except Exception:
-            self.logger.exception("Backend switch failed; original backend retained")
-            return False
+        except Exception as exc:
+            failure = exc.failure if isinstance(exc, OperationFailed) else operation_failure(
+                exc, operation="backend_switch", phase=phase,
+            )
+            self.logger.error("Backend selection failure; live selection retained: %s", failure.diagnostic())
+            return BackendSwitchResult(False, failure)
         finally:
             if candidate is not None and not committed:
-                await self._dispose_backend(candidate)
+                try:
+                    await self._dispose_backend(candidate)
+                except Exception as cleanup_error:
+                    cleanup = operation_failure(cleanup_error, operation="backend_switch", phase="cleanup")
+                    self.logger.error("Candidate cleanup failure: %s", cleanup.diagnostic())
 
-        # Retirement cannot turn an already committed switch into a failure.
+        # Retirement happens after commitment and cannot turn it into a failed switch.
         if previous_backend is not None:
-            await self._dispose_backend(previous_backend)
-        return True
+            try:
+                retirement = await self._dispose_backend(previous_backend, operation="backend_switch", phase="retire")
+                if issue is None:
+                    issue = retirement
+            except Exception as cleanup_error:
+                cleanup = operation_failure(cleanup_error, operation="backend_switch", phase="retire")
+                self.logger.warning("Retired backend cleanup failure: %s", cleanup.diagnostic())
+                if issue is None:
+                    issue = cleanup
+        return BackendSwitchResult(True, issue)
 
     async def shutdown(self):
         if self.current_backend:

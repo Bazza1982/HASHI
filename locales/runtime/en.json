@@ -2821,6 +2821,7 @@
     "backend.switch.policy": "⚠️ Backend switch blocked by policy: {backend}",
     "backend.switch.busy": "⚠️ Backend switch blocked while a request is running or queued.",
     "backend.switch.failed": "❌ Failed to switch backend to: {backend}. The original selection was kept.",
+    "backend.switch.active_warning": "The backend is active, but a follow-up step needs attention. Check the details before changing the selection again.",
     "backend.switch.success": "✅ Backend switched to: {backend}",
     "reboot.scope.min": "minimal hot restart",
     "reboot.scope.number": "targeted hot restart",

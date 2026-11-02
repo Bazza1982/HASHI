@@ -89,6 +89,14 @@ class OperationFailure:
         }
 
 
+class OperationFailed(RuntimeError):
+    """Carry the owning boundary's immutable safe facts without reclassification."""
+
+    def __init__(self, failure: OperationFailure):
+        self.failure = failure
+        super().__init__(failure.error_code)
+
+
 def operation_failure(error: Exception, *, operation: str, phase: str, unconfirmed: bool = False) -> OperationFailure:
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", operation) or phase not in _PHASES:
         raise ValueError("invalid operation failure facts")

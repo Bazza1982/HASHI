@@ -243,6 +243,17 @@ the pre-binding failure boundary: a possibly committed selection must never be
 archived as an inactive candidate. Cancellation propagates without being rendered
 as a failed command. These are shared PAO Functions, independent of Engine.
 
+Backend selection is one PAO-owned transaction: prepare the target configuration,
+initialize its adapter, establish its Engine Session, fence prior operations,
+then publish the selection and adopt the adapter without an intervening await.
+Each failure retains the owning stage and safe diagnostic facts. A published
+configuration durability error adopts the matching target in memory and reports
+the remaining uncertainty; it cannot restore an old selection over the published
+file. Old-adapter retirement and post-selection context setup may report a warning,
+but cannot relabel a committed selection as failed or automatically repeat it.
+The Boolean compatibility API reflects the actual live selection; UI consumers
+use the immutable per-call result to retain the reason and warning.
+
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus
 control envelope is not a user result: PAO must settle the Run and visible

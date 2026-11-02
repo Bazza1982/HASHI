@@ -2821,6 +2821,7 @@
     "backend.switch.policy": "⚠️ 策略阻止了后端切换：{backend}",
     "backend.switch.busy": "⚠️ 当前有请求正在运行或排队，暂时无法切换后端。",
     "backend.switch.failed": "❌ 无法切换到后端：{backend}。已保留原选择。",
+    "backend.switch.active_warning": "后端已经启用，但后续步骤仍需处理。请先核对下方说明，再决定下一步。",
     "backend.switch.success": "✅ 已切换到后端：{backend}",
     "reboot.scope.min": "最小热重启",
     "reboot.scope.number": "指定代理热重启",
