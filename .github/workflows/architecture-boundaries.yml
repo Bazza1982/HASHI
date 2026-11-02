@@ -116,7 +116,11 @@ jobs:
             tests/test_session_api.py \
             tests/test_chat_projection_transport.py \
             tests/test_frontend_contracts.py \
-            tests/test_runtime_media.py
+            tests/test_runtime_media.py \
+            tests/test_frontend_failures.py \
+            tests/test_whatsapp_lifecycle_fc.py \
+            tests/test_whatsapp_enterprise_channel_gate.py \
+            tests/test_frontend_whatsapp_mirror.py
       - name: Run Telegram activation and readiness regressions
         run: |
           python -m pytest -q \

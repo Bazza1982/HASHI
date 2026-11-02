@@ -1,10 +1,9 @@
 # HASHI Agent FYI
 
 - PAO统一语音：同Run持久确认，丢弃正常停止，确认后复核。文字用放行转写，HER保留语音来源，原生音频不等转写。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
-- 个人L1：认证前端按钮决定、自动弹窗、无重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
-  Adapter配超时，勿写只读视图；续跑日志分epoch、保留不可变检查；前端实测独立验收。
-  [权限状态/决定](permissions/IMPLEMENTATION_STATUS.md)。
-- 图片说明支持换行/制表；长度与身份校验不变。Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+- 个人L1：认证前端决定、自动弹窗、免重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
+  Adapter设超时，只读视图禁写，保留epoch日志/不可变检查；实测独立验收。[权限](permissions/IMPLEMENTATION_STATUS.md)。
+- 附件说明可换行/制表，长度/身份限制不变；失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

@@ -1111,6 +1111,14 @@ class WhatsAppTransport:
     # Voice handling
     # ------------------------------------------------------------------
 
+    async def _report_media_failure(self, chat_key: str, error: Exception, *, phase: str):
+        from orchestrator.frontend_failures import frontend_failure
+
+        failure = frontend_failure(error, phase=phase, submission_state="not_submitted")
+        logger.exception("WhatsApp media failure: %s", json.dumps(failure.diagnostic()))
+        locale = getattr(getattr(self, "global_cfg", None), "ui_language", None)
+        await self._send_text(chat_key, failure.render(locale=locale))
+
     async def _handle_voice(self, msg, chat_key: str) -> str | None:
         """Download WhatsApp voice/audio and transcribe locally."""
         try:
@@ -1280,8 +1288,7 @@ class WhatsAppTransport:
                 return None, None
             data = await self._client.download_any(root_msg)
         except Exception as e:
-            logger.error(f"Failed to download WhatsApp {media_kind}: {e}", exc_info=True)
-            await self._send_text(chat_key, f"Failed to download {media_kind} message.")
+            await self._report_media_failure(chat_key, e, phase="download")
             return None, None
 
         if not data:
@@ -1312,7 +1319,11 @@ class WhatsAppTransport:
             ext = mime_map.get(mime.lower(), "")
 
         local_path = self._media_dir / f"wa_{media_kind}_{ts}{ext}"
-        local_path.write_bytes(data)
+        try:
+            local_path.write_bytes(data)
+        except Exception as exc:
+            await self._report_media_failure(chat_key, exc, phase="store")
+            return None, None
 
         caption = ""
         for cap_name in ("Caption", "caption", "Text", "text"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut
 
 from orchestrator import runtime_long, ui_language
+from orchestrator.frontend_failures import frontend_failure
 from orchestrator.media_utils import is_image_file
 from orchestrator.multimodal_contract import (
     attachment_manifest,
@@ -452,8 +454,10 @@ async def handle_media_message(
         summary,
         transport_metadata=_transport_metadata(update, filename),
     )
+    phase = "download"
     try:
         local_path = await runtime.download_media(file_id, filename)
+        phase = "validate"
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
         if reservation_id is not None and runtime_long.complete_media(
             runtime,
@@ -473,6 +477,7 @@ async def handle_media_message(
         )
         from orchestrator.telegram_media_admission import admit_telegram_media
 
+        phase = "store"
         rendered_prompt, request_content, request_metadata = await asyncio.to_thread(
             admit_telegram_media,
             runtime,
@@ -484,6 +489,7 @@ async def handle_media_message(
                 "ingress_transport": "telegram",
             },
         )
+        phase = "admit"
         await runtime.enqueue_request(
             chat_id,
             rendered_prompt,
@@ -495,11 +501,15 @@ async def handle_media_message(
     except Exception as e:
         if reservation_id is not None:
             runtime_long.discard_media_reservation(runtime, reservation_id)
-        runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
+        failure = frontend_failure(e, phase=phase, submission_state=(
+            "unconfirmed" if phase == "admit" else "not_submitted"))
+        runtime.error_logger.exception("Frontend media failure: " + json.dumps(failure.diagnostic()))
+        locale = ui_language.preferred_locale(runtime, update)
         try:
             await runtime._reply_text(
                 update,
-                ui_language.tr("media.failed", kind=_media_kind_label(media_kind)),
+                ui_language.tr("media.failed", locale=locale, kind=_media_kind_label(media_kind))
+                + "\n" + failure.render(locale=locale),
             )
         except Exception:
             pass

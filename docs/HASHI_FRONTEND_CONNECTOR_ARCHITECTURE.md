@@ -39,6 +39,17 @@ with a safe reason code, never by echoing the caption. This exception applies
 only to captions; connector IDs, attachment IDs and authority fields retain
 their stricter validation. Connector/live adoption is a separate gate.
 
+Pre-admission media failures preserve their observed download, validation,
+attachment-store or admission stage. Functions maps typed errors to safe,
+localized causes and correlates a generated diagnostic reference with the
+existing error logger. Exception text, HTTP bodies, credentials and captions
+are excluded from the public detail. Telegram's shared photo/document/video
+handler and WhatsApp download/storage use this presentation contract.
+Only failures before the admission call may say no model action was started.
+An exception while awaiting admission has an unconfirmed outcome even if the
+caller did not receive a request ID; it must not claim rejection or replay the
+submission. This reporting layer never owns admission, permission or retries.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed
