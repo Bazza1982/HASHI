@@ -2742,6 +2742,8 @@
     "frontend.failure.reason.internal_error": "An internal processing error occurred. Use the diagnostic reference to check the recorded cause.",
     "frontend.failure.reason.receipt_unavailable": "No valid task admission receipt was received.",
     "frontend.failure.submitted": "This content was submitted. Check the original task result before sending it again.",
+    "frontend.failure.stage.cleanup": "Clean up temporary attachment",
+    "frontend.failure.reason.transcription_access_denied": "Access to a file or component required for transcription was denied.",
     "frontend.failure.reason.transcription_configuration_invalid": "The transcription configuration is invalid or unreadable.",
     "frontend.failure.reason.transcription_model_load_failed": "The configured transcription model could not be loaded.",
     "frontend.failure.reason.transcription_runtime_unavailable": "The configured isolated transcription runtime is unavailable.",

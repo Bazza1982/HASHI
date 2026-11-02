@@ -18,6 +18,10 @@ Engine boundary projects them for Codex, HER and other Engines before any
 transcript-dependent action. Confirmation, current-Run fences and native raw
 audio authorization retain their existing semantics. A transcription warning
 does not promise that every backend can continue on raw audio.
+A transcript-recording exception settles unavailable waiters and signals both
+completion events; it cannot leave a transcript consumer hanging or replay the
+already admitted native Turn. Post-success temporary-file cleanup remains a
+separate stage and does not revoke a durable transcript.
 
 Basic voice rejections retain their existing API code and status, with safe
 cause and diagnostic fields. Functions carries this typed rejection through

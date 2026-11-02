@@ -1104,6 +1104,7 @@ async def handle_voice_or_audio(
         return
     _print_user_message(runtime.name, f"Transcribing {filename}...", media_tag=media_kind)
     phase, admission_started, submitted = "download", False, False
+    transcript_state = None
     try:
         local_path = await runtime.download_media(file_id, filename)
         phase = "validate"
@@ -1250,6 +1251,7 @@ async def handle_voice_or_audio(
                 store = getattr(runtime, "session_store", None)
                 recorder = getattr(store, "record_voice_transcript", None)
                 if callable(recorder) and request_id:
+                    phase = "store"
                     recorder(
                         request_id=str(request_id),
                         attachment_id=attachment_id,
@@ -1259,6 +1261,7 @@ async def handle_voice_or_audio(
                         failure=outcome.failure.as_dict(),
                     )
                 if store is not None:
+                    phase = "cleanup"
                     local_path.unlink(missing_ok=True)
                 return
 
@@ -1274,6 +1277,7 @@ async def handle_voice_or_audio(
             store = getattr(runtime, "session_store", None)
             recorder = getattr(store, "record_voice_transcript", None)
             if callable(recorder) and request_id:
+                phase = "store"
                 recorder(
                     request_id=str(request_id),
                     attachment_id=attachment_id,
@@ -1289,6 +1293,7 @@ async def handle_voice_or_audio(
             }:
                 transcript_state["release_event"].set()
             if store is not None:
+                phase = "cleanup"
                 local_path.unlink(missing_ok=True)
             return
 
@@ -1384,7 +1389,18 @@ async def handle_voice_or_audio(
                 request_metadata={"ingress_transport": "telegram"},
             )
     except Exception as e:
-        failure = frontend_failure(e, phase=phase, submission_state=(
+        public_error = e
+        if (isinstance(transcript_state, dict) and admission_started
+                and not transcript_state["ready_event"].is_set()):
+            from orchestrator.voice_transcription_result import transcription_failure
+
+            transcript_state["status"] = "unavailable"
+            fact = transcription_failure(e, phase="record" if phase == "store" else "processing")
+            transcript_state["failure"] = fact.as_dict()
+            public_error = TranscriptionFailed(fact)
+            transcript_state["ready_event"].set()
+            transcript_state["release_event"].set()
+        failure = frontend_failure(public_error, phase=phase, submission_state=(
             "submitted" if submitted else "unconfirmed" if admission_started else "not_submitted"))
         runtime.error_logger.exception("Voice media failure: " + json.dumps(failure.diagnostic()))
         try:

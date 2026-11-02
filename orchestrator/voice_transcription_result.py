@@ -8,7 +8,7 @@ from uuid import uuid4
 
 _MESSAGES = {
     "TRANSCRIPTION_INPUT_UNAVAILABLE": "The audio input is unavailable or invalid.",
-    "TRANSCRIPTION_ACCESS_DENIED": "The audio input could not be read because access was denied.",
+    "TRANSCRIPTION_ACCESS_DENIED": "Access to a file or component required for transcription was denied.",
     "TRANSCRIPTION_DEPENDENCY_MISSING": "A required transcription component is unavailable.",
     "TRANSCRIPTION_CONFIGURATION_INVALID": "The transcription configuration is invalid or unreadable.",
     "TRANSCRIPTION_MODEL_LOAD_FAILED": "The configured transcription model could not be loaded.",

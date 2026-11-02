@@ -14,7 +14,7 @@ from orchestrator.voice_transcription_result import TranscriptionFailed
 
 _TRANSCRIPTION_REASONS = {
     "TRANSCRIPTION_INPUT_UNAVAILABLE": "missing_file",
-    "TRANSCRIPTION_ACCESS_DENIED": "access_denied",
+    "TRANSCRIPTION_ACCESS_DENIED": "transcription_access_denied",
     "TRANSCRIPTION_DEPENDENCY_MISSING": "dependency_missing",
     "TRANSCRIPTION_CONFIGURATION_INVALID": "transcription_configuration_invalid",
     "TRANSCRIPTION_MODEL_LOAD_FAILED": "transcription_model_load_failed",
@@ -27,7 +27,7 @@ _TRANSCRIPTION_REASONS = {
     "TRANSCRIPTION_FAILED": "transcription_failed"
 }
 
-_PHASES = frozenset({"download", "validate", "store", "admit", "transcribe", "publish", "deliver", "read", "save"})
+_PHASES = frozenset({"download", "validate", "store", "admit", "transcribe", "publish", "deliver", "read", "save", "cleanup"})
 _TYPES = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
 _MEDIA_REASONS = {
     "MEDIA_UNAVAILABLE": "missing_file",

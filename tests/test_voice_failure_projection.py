@@ -159,3 +159,37 @@ async def test_every_messaging_voice_path_keeps_the_same_failure_reference(tmp_p
     assert ("没有产生转写文字" if empty else "处理组件不可用") in text
     assert "leak_token_Example" not in text
     assert transcriber.transcribe_result.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_native_transcript_recording_failure_settles_waiters_without_replaying(tmp_path, monkeypatch):
+    from orchestrator import runtime_media, voice_transcriber
+    from orchestrator.voice_transcription_result import TranscriptionResult
+    from tests.test_runtime_media import _runtime, _update
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config = SimpleNamespace(ui_language="zh-CN")
+    runtime.voice_manager = SimpleNamespace(native_audio_enabled=lambda *args: True)
+    monkeypatch.setattr(runtime_media, "_backend_supports_native_audio_chat", lambda *args, **kwargs: True)
+    monkeypatch.setattr(runtime_media, "_admit_native_telegram_audio", lambda *args, **kwargs: (
+        {"type":"hashi.request-content","version":1,"parts":[]},
+        ({"attachment_id":"att-native"},), {"ingress_transport":"telegram"}))
+    monkeypatch.setattr(voice_transcriber, "get_transcriber", lambda: SimpleNamespace(
+        transcribe_result=AsyncMock(return_value=TranscriptionResult(text="ready transcript"))))
+    def failed_record(**kwargs):
+        raise OSError("leak_token_Example")
+    runtime.session_store = SimpleNamespace(record_voice_transcript=failed_record)
+    original = runtime.enqueue_request
+    async def accept(*args, **kwargs):
+        await original(*args, **kwargs)
+        return "req-native-record-failure"
+    runtime.enqueue_request = AsyncMock(side_effect=accept)
+    await runtime_media.handle_voice_or_audio(runtime, _update(), "voice", "voice.ogg", "file-id")
+    state = runtime._native_voice_transcripts["req-native-record-failure"]
+    assert state["status"] == "unavailable"
+    assert state["ready_event"].is_set() and state["release_event"].is_set()
+    assert state["failure"]["code"] == "TRANSCRIPT_RECORDING_FAILED"
+    text = runtime.replies[-1]["text"]
+    assert "已经提交" in text and "无法保存到原会话" in text
+    assert state["failure"]["reference"] in text and "leak_token_Example" not in text
+    assert runtime.enqueue_request.await_count == 1
