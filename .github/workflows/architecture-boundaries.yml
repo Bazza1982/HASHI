@@ -134,6 +134,7 @@ jobs:
             tests/test_agent_deletion.py \
             tests/contract/test_agent_creation.py \
             tests/test_session_api.py \
+            tests/test_chat_admission_failures.py \
             tests/test_workbench_scheduler_api.py \
             tests/test_tool_gateway_mcp.py \
             tests/test_chat_projection_transport.py \

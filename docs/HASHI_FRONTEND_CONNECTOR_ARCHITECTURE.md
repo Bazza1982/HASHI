@@ -55,6 +55,17 @@ nonempty admission receipt; a missing/unknown receipt does not replay the
 consumed batch. A later notification failure cannot block or repeat an already
 accepted task.
 
+Legacy JSON and multipart chat use the same receipt rule. An empty/non-string
+request ID or an exception at admission produces a safe correlated
+`chat_admission_unconfirmed` response with `accepted: null` and
+`retry_safe: false`. Earlier accepted files keep their request IDs; later files
+are not submitted. Safe Voice confirmation/discard and transfer receipts keep
+their own contracts. Once an ID is confirmed, optional identity-lookup failure
+retains acceptance and adds a safe diagnostic warning instead of inviting replay.
+Workbench respects an explicit replay prohibition both on the initial response
+and during queued recovery. Its error view retains a bounded, correlated public
+message; malformed details use the existing localized unknown-result fallback.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed

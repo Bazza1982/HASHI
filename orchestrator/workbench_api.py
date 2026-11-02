@@ -11394,6 +11394,45 @@ class WorkbenchApiServer:
             result["accepted"] = False
         return web.json_response(result, status=status)
 
+    def _chat_admission_failure_response(self, runtime, error=None, *, request_ids=()):
+        from orchestrator.frontend_failures import AdmissionReceiptUnavailable, frontend_failure
+
+        failure = frontend_failure(
+            error if error is not None else AdmissionReceiptUnavailable(),
+            phase="admit", submission_state="unconfirmed",
+        )
+        message = failure.render(locale=preferred_locale(runtime))
+        logger.error("Chat admission unconfirmed: %s", failure.diagnostic())
+        return web.json_response({
+            "ok": False, "accepted": None, "state": "unknown", "retry_safe": False,
+            "error_code": "chat_admission_unconfirmed", "cause_code": failure.reason,
+            "error": message, "message": message, "diagnostic_ref": failure.reference,
+            "failure": failure.diagnostic(), **({"request_ids": list(request_ids)} if request_ids else {}),
+        }, status=503)
+
+    def _chat_accepted_identity(self, request_id, *, owner_id, agent_id):
+        try:
+            run = self.session_store.get_run_by_request(
+                request_id, owner_id=owner_id, agent_id=agent_id,
+            )
+        except SessionNotFound:
+            return {}  # Legacy runtimes may not expose the richer identity.
+        except Exception as exc:
+            from orchestrator.operation_failures import operation_failure
+
+            failure = operation_failure(exc, operation="chat_identity", phase="read")
+            logger.error("Accepted chat identity unavailable: %s", failure.diagnostic())
+            return {"warning_code": "chat_identity_read_failed",
+                    "identity_warning": failure.diagnostic()}
+        result = {key: run[key] for key in ("session_id", "run_id", "context_generation") if key in run}
+        if "user_message_id" in run:
+            result["message_id"] = run["user_message_id"]
+        return result
+
+    @staticmethod
+    def _has_admission_request_id(request_id):
+        return isinstance(request_id, str) and bool(request_id.strip())
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -11564,7 +11603,7 @@ class WorkbenchApiServer:
 
                     redirect = runtime_transfer.transfer_redirect_from_exception(exc)
                     if redirect is None:
-                        raise
+                        return self._chat_admission_failure_response(runtime, exc, request_ids=request_ids)
                     return self._transfer_redirect_response(
                         runtime,
                         source=source,
@@ -11578,6 +11617,8 @@ class WorkbenchApiServer:
                         },
                         redirect=redirect,
                     )
+                if not self._has_admission_request_id(request_id):
+                    return self._chat_admission_failure_response(runtime, request_ids=request_ids)
                 request_ids.append(request_id)
 
             for upload_index, upload in enumerate(uploads):
@@ -11700,7 +11741,9 @@ class WorkbenchApiServer:
                             # by describing the whole upload as unaccepted.
                             rejection["request_ids"] = request_ids
                         return web.json_response(rejection, status=statuses[code])
-                    raise
+                    return self._chat_admission_failure_response(runtime, exc, request_ids=request_ids)
+                if not self._has_admission_request_id(request_id):
+                    return self._chat_admission_failure_response(runtime, request_ids=request_ids)
                 request_ids.append(request_id)
 
             if not request_ids:
@@ -11708,14 +11751,9 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "empty payload"}, status=400
                 )
 
-            accepted_identity = {}
-            try:
-                accepted_run = self.session_store.get_run_by_request(request_ids[0],
-                    owner_id=self._v1_owner_id(request), agent_id=agent_name)
-                accepted_identity = {key: accepted_run[key] for key in (
-                    "session_id", "run_id", "context_generation")}
-            except SessionNotFound:
-                pass  # Legacy runtimes may not expose the richer identity.
+            accepted_identity = self._chat_accepted_identity(
+                request_ids[0], owner_id=self._v1_owner_id(request), agent_id=agent_name,
+            )
             return web.json_response(
                 {"ok": True, "request_id": request_ids[0], "request_ids": request_ids, **accepted_identity}
             )
@@ -12595,6 +12633,7 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "exactly one attachment source is required"},
                     status=400,
                 )
+            admission_started = False
             try:
                 if isinstance(attachment_spec, Mapping):
                     media_payload, filename, declared_type = self._decode_tui_attachment(
@@ -12612,6 +12651,7 @@ class WorkbenchApiServer:
                     declared_media_type="",
                     content_type=declared_type,
                 )
+                admission_started = True
                 request_id = await runtime.enqueue_api_media(
                     local_path=local_path,
                     media_kind=media_kind,
@@ -12623,31 +12663,20 @@ class WorkbenchApiServer:
                     idempotency_key=str(payload.get("idempotency_key") or "") or None,
                 )
             except (OSError, TypeError, ValueError) as exc:
+                if admission_started:
+                    return self._chat_admission_failure_response(runtime, exc)
                 return web.json_response(
                     {"ok": False, "error": str(exc), "error_code": "attachment_rejected"},
                     status=400,
                 )
-            if not request_id:
-                return web.json_response(
-                    {"ok": False, "error": "attachment request was not accepted"},
-                    status=409,
-                )
+            except Exception as exc:
+                return self._chat_admission_failure_response(runtime, exc)
+            if not self._has_admission_request_id(request_id):
+                return self._chat_admission_failure_response(runtime)
             response_payload = {"ok": True, "request_id": request_id}
-            try:
-                run = self.session_store.get_run_by_request(
-                    request_id,
-                    owner_id=self._v1_owner_id(request),
-                    agent_id=agent_name,
-                )
-                response_payload.update(
-                    {
-                        "session_id": run["session_id"],
-                        "run_id": run["run_id"],
-                        "message_id": run["user_message_id"],
-                    }
-                )
-            except SessionNotFound:
-                pass
+            response_payload.update(self._chat_accepted_identity(
+                request_id, owner_id=self._v1_owner_id(request), agent_id=agent_name,
+            ))
             return web.json_response(response_payload)
         if re.match(r"^/forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", text, re.IGNORECASE):
             denied = self._guard_agent_management_access(request, str(agent_name))
@@ -12682,7 +12711,7 @@ class WorkbenchApiServer:
 
             redirect = runtime_transfer.transfer_redirect_from_exception(exc)
             if redirect is None:
-                raise
+                return self._chat_admission_failure_response(runtime, exc)
             return self._transfer_redirect_response(
                 runtime,
                 source=source,
@@ -12694,19 +12723,12 @@ class WorkbenchApiServer:
                 },
                 redirect=redirect,
             )
+        if not self._has_admission_request_id(request_id):
+            return self._chat_admission_failure_response(runtime)
         response_payload = {"ok": True, "request_id": request_id}
-        if request_id:
-            try:
-                run = self.session_store.get_run_by_request(request_id)
-                response_payload.update(
-                    {
-                        "session_id": run["session_id"],
-                        "run_id": run["run_id"],
-                        "message_id": run["user_message_id"],
-                    }
-                )
-            except SessionNotFound:
-                pass
+        response_payload.update(self._chat_accepted_identity(
+            request_id, owner_id=self._v1_owner_id(request), agent_id=agent_name,
+        ))
         return web.json_response(response_payload)
 
     async def handle_message_source_capabilities(self, _request):
