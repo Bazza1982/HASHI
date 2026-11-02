@@ -11410,7 +11410,8 @@ class WorkbenchApiServer:
             "failure": failure.diagnostic(), **({"request_ids": list(request_ids)} if request_ids else {}),
         }, status=503)
 
-    def _chat_accepted_identity(self, request_id, *, owner_id, agent_id):
+    def _chat_accepted_identity(self, request_id, *, owner_id, agent_id,
+                                identity_fields=("session_id", "run_id", "message_id")):
         try:
             run = self.session_store.get_run_by_request(
                 request_id, owner_id=owner_id, agent_id=agent_id,
@@ -11427,7 +11428,7 @@ class WorkbenchApiServer:
         result = {key: run[key] for key in ("session_id", "run_id", "context_generation") if key in run}
         if "user_message_id" in run:
             result["message_id"] = run["user_message_id"]
-        return result
+        return {key: result[key] for key in identity_fields if key in result}
 
     @staticmethod
     def _has_admission_request_id(request_id):
@@ -11753,6 +11754,7 @@ class WorkbenchApiServer:
 
             accepted_identity = self._chat_accepted_identity(
                 request_ids[0], owner_id=self._v1_owner_id(request), agent_id=agent_name,
+                identity_fields=("session_id", "run_id", "context_generation"),
             )
             return web.json_response(
                 {"ok": True, "request_id": request_ids[0], "request_ids": request_ids, **accepted_identity}
