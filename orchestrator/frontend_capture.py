@@ -86,6 +86,36 @@ def _session(connection, owner, binding):
         raise CaptureError("capture_scope_changed", 409)
 
 
+def _standby_current(connection, row):
+    if row["purpose"] != "standby":
+        return True
+    control = connection.execute("""SELECT lifecycle,epoch,disposal FROM standby_controls
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND session_id=?
+        AND context_generation=? AND standby_id=?""",
+        (row["instance_id"],row["owner_id"],row["agent_id"],row["session_id"],
+         row["context_generation"],row["standby_id"])).fetchone()
+    return (control is not None and control["lifecycle"] == "ACTIVE"
+            and control["epoch"] == row["standby_epoch"] and control["disposal"] == "LIVE")
+
+
+def _authority_current(connection, row):
+    try:
+        _session(connection,row["owner_id"],row)
+    except CaptureError:
+        return False
+    return _standby_current(connection,row)
+
+
+def revoke_standby(connection, *, instance_id, owner_id, binding_value, standby_id, now):
+    """Called inside the control owner's transaction, never a local callback."""
+    connection.execute("""UPDATE media_capture_leases SET state='REVOKING',
+        fence_epoch=fence_epoch+1,last_seen=max(last_seen,?)
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND session_id=?
+        AND context_generation=? AND purpose='standby' AND standby_id=? AND state='ACTIVE'""",
+        (now,instance_id,str(owner_id),binding_value["agent_id"],binding_value["session_id"],
+         binding_value["context_generation"],standby_id))
+
+
 def _closed(reason="capture_lease_changed"):
     return {"granted": False, "state": "CLOSED", "reason": reason}
 
@@ -189,11 +219,8 @@ def acquire(connection, *, instance_id, owner_id, binding, capture_id, purpose,
             if row["state"] == "ACTIVE":
                 raise CaptureError("capture_idempotency_conflict",409)
             return _closed("capture_attempt_closed")
-        if row["state"] == "ACTIVE":
-            try:
-                _session(connection,owner_id,binding)
-            except CaptureError:
-                row = _state(connection,row,"REVOKING",now)
+        if row["state"] == "ACTIVE" and not _authority_current(connection,row):
+            row = _state(connection,row,"REVOKING",now)
         # Recover the same grant after a lost acknowledgement, even when it
         # expired. This does not renew it and lets its client finish stopping.
         return _view(row)
@@ -215,13 +242,9 @@ def acquire(connection, *, instance_id, owner_id, binding, capture_id, purpose,
         return {"granted":False,"state":"BUSY","reason":"capture_media_busy",
                 "retry_at":row["expires_at"]}
     if purpose == "standby":
-        current = connection.execute("""SELECT lifecycle,epoch,disposal FROM standby_controls
-            WHERE instance_id=? AND owner_id=? AND agent_id=? AND session_id=?
-            AND context_generation=? AND standby_id=?""",
-            (instance_id,str(owner_id),binding["agent_id"],binding["session_id"],
-             binding["context_generation"],standby_id)).fetchone()
-        if (current is None or current["lifecycle"] != "ACTIVE"
-                or current["epoch"] != standby_epoch or current["disposal"] != "LIVE"):
+        if not _standby_current(connection,{"instance_id":instance_id,
+                "owner_id":str(owner_id),**binding,"purpose":purpose,
+                "standby_id":standby_id,"standby_epoch":standby_epoch}):
             raise CaptureError("capture_standby_scope_changed",409)
     connection.execute("""DELETE FROM media_capture_attempts
         WHERE instance_id=? AND owner_id=? AND created_at<?""",
@@ -261,11 +284,9 @@ def operate(connection, *, operation, instance_id, owner_id, binding, capture_id
         return _view(_state(connection,row,"RELEASED" if stopped else "REVOKING",now))
     if row["state"] != "ACTIVE":
         return _view(row)
-    try:
-        _session(connection,owner_id,binding)
-    except CaptureError:
-        # Persist revocation, including for status. A stale Conversation may
-        # still acknowledge stopping, but can never renew or appear active.
+    if not _authority_current(connection,row):
+        # Both the Conversation and current Standby epoch are authoritative.
+        # This survives another Worker's mutation even without a callback.
         return _view(_state(connection,row,"REVOKING",now))
     if operation == "status":
         return _view(row)

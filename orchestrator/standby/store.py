@@ -17,6 +17,7 @@ from .contract import (
 
 _COMMON = ("operation", "operation_id", "issued_at", "binding")
 _MUTATE = ("standby_id", "expected_revision", "epoch")
+MAX_OPERATION_RECEIPTS = 4096
 
 
 def install_schema(connection):
@@ -37,6 +38,14 @@ def install_schema(connection):
         operation_id TEXT NOT NULL, request_digest TEXT NOT NULL,
         result_json TEXT NOT NULL, created_at REAL NOT NULL,
         PRIMARY KEY(instance_id,owner_id,agent_id,operation_id)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS standby_safety_operations (
+        instance_id TEXT NOT NULL, owner_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+        standby_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+        request_digest TEXT NOT NULL, result_json TEXT NOT NULL, created_at REAL NOT NULL,
+        PRIMARY KEY(instance_id,owner_id,agent_id,standby_id),
+        UNIQUE(instance_id,owner_id,agent_id,operation_id),
+        FOREIGN KEY(standby_id) REFERENCES standby_controls(standby_id) ON DELETE CASCADE
     )""")
 
 
@@ -95,7 +104,10 @@ def control(connection, *, instance_id, owner_id, body, now):
     identity = (instance_id, str(owner_id), scope["agent_id"], operation_id)
     digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     previous = connection.execute("""SELECT request_digest,result_json FROM standby_control_operations
-        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?""", identity).fetchone()
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?
+        UNION ALL SELECT request_digest,result_json FROM standby_safety_operations
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?
+        LIMIT 1""", (*identity,*identity)).fetchone()
     if previous:
         if previous["request_digest"] != digest:
             raise StandbyError("standby_operation_conflict", 409)
@@ -104,6 +116,8 @@ def control(connection, *, instance_id, owner_id, body, now):
         raise StandbyError("standby_operation_expired", 409)
     # Old request IDs cannot run anew after their bounded receipt window.
     connection.execute("DELETE FROM standby_control_operations WHERE created_at<?",
+                       (now - CONTROL_RETENTION_SECONDS,))
+    connection.execute("DELETE FROM standby_safety_operations WHERE created_at<?",
                        (now - CONTROL_RETENTION_SECONDS,))
     if operation == "configure":
         profile_id = identifier(body["profile_id"], maximum=64)
@@ -146,19 +160,35 @@ def control(connection, *, instance_id, owner_id, body, now):
         connection.execute("""UPDATE standby_controls SET revision=revision+1,
             epoch=epoch+1,lifecycle=?,disposal=?,updated_at=? WHERE standby_id=?""",
             (lifecycle, disposal, now, standby_id))
+        from orchestrator.frontend_capture import revoke_standby
+        revoke_standby(connection, instance_id=instance_id, owner_id=owner_id,
+            binding_value=scope, standby_id=standby_id, now=now)
     result = snapshot(connection, instance_id=instance_id, owner_id=owner_id,
                       binding_value=scope, standby_id=standby_id)
     count = connection.execute("""SELECT count(*) FROM standby_control_operations
         WHERE instance_id=? AND owner_id=? AND agent_id=?""", identity[:3]).fetchone()[0]
-    if count >= 4096:
-        raise StandbyError("standby_capacity_reached", 429)
-    connection.execute("INSERT INTO standby_control_operations VALUES (?,?,?,?,?,?,?)",
-        (*identity, digest, json.dumps(result, separators=(",", ":"), allow_nan=False), now))
+    serialized = json.dumps(result, separators=(",", ":"), allow_nan=False)
+    if count >= MAX_OPERATION_RECEIPTS:
+        if operation == "configure":
+            raise StandbyError("standby_capacity_reached", 429)
+        # One emergency receipt per existing handle. Admission cannot exhaust
+        # stopping capacity; superseded emergency IDs remain fenced by CAS.
+        connection.execute("""INSERT INTO standby_safety_operations VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(instance_id,owner_id,agent_id,standby_id) DO UPDATE SET
+            operation_id=excluded.operation_id,request_digest=excluded.request_digest,
+            result_json=excluded.result_json,created_at=excluded.created_at""",
+            (*identity[:3],standby_id,operation_id,digest,serialized,now))
+    else:
+        connection.execute("INSERT INTO standby_control_operations VALUES (?,?,?,?,?,?,?)",
+            (*identity, digest, serialized, now))
     return result
 
 
 def operation_status(connection, *, instance_id, owner_id, agent_id, operation_id):
+    identity = (instance_id, str(owner_id), identifier(agent_id, maximum=64), identifier(operation_id))
     row = connection.execute("""SELECT result_json FROM standby_control_operations
-        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?""",
-        (instance_id, str(owner_id), identifier(agent_id, maximum=64), identifier(operation_id))).fetchone()
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?
+        UNION ALL SELECT result_json FROM standby_safety_operations
+        WHERE instance_id=? AND owner_id=? AND agent_id=? AND operation_id=?
+        LIMIT 1""", (*identity,*identity)).fetchone()
     return {"state": "committed", "session": json.loads(row[0])} if row else {"state": "not_found"}

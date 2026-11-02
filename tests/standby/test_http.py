@@ -85,3 +85,47 @@ async def test_governed_deployment_does_not_advertise_live_control(api):
             headers={"Authorization":"Bearer synthetic-test-token"})
         assert response.status == 501
         assert (await response.json())["error_code"] == "standby_profile_unsupported"
+
+async def test_authenticated_end_survives_receipt_capacity_and_offline_agent(api):
+    owner,scope = api
+    owner.standby_service.now = lambda: 1000
+    first = owner.session_store.standby_control(owner_id="user:7",body={
+        "operation":"configure","operation_id":"http-full-configure","issued_at":1000,
+        "binding":scope,"profile_id":"quiet","profile_revision":"a"*64},now=1000)
+    with owner.session_store._connection() as connection:
+        connection.executemany("INSERT INTO standby_control_operations VALUES (?,?,?,?,?,?,?)",[
+            (owner.session_store.instance_id,"user:7","alice","fill-http-"+str(index),
+             "b"*64,json.dumps(first),1000) for index in range(4095)])
+    # Ending an existing control must not depend on a model, a live Agent, or
+    # re-reading a now-corrupt optional profile document.
+    owner._runtime_map = lambda: {}
+    owner.standby_service.profiles.path.write_text("{broken",encoding="utf-8")
+    body = {"operation":"end","operation_id":"http-stop-under-load","issued_at":1000,
+        "binding":scope,"standby_id":first["standby_id"],
+        "expected_revision":first["revision"],"epoch":first["epoch"]}
+    async with TestClient(TestServer(owner.app)) as client:
+        denied = await client.post("/api/v1/standby/operation",json=body)
+        assert denied.status == 403
+        assert owner.session_store.standby_snapshot(owner_id="user:7",
+            binding=scope,standby_id=first["standby_id"]) == first
+        headers = {"Authorization":"Bearer synthetic-test-token"}
+        response = await client.post("/api/v1/standby/operation",json=body,headers=headers)
+        assert response.status == 200 and "no-store" in response.headers["Cache-Control"]
+        result = await response.json()
+        assert result["session"]["lifecycle"] == "STOPPED"
+        assert result["session"]["epoch"] == first["epoch"]+1
+        again = await client.post("/api/v1/standby/operation",json=body,headers=headers)
+        assert await again.json() == result
+        query = await client.post("/api/v1/standby/operation",json={
+            "operation":"operation_status","binding":scope,
+            "operation_id":body["operation_id"]},headers=headers)
+        assert (await query.json())["session"] == result["session"]
+        denied_scope = await client.post("/api/v1/standby/operation",json={
+            **body,"operation_id":"wrong-scope",
+            "binding":{**scope,"context_generation":scope["context_generation"]+1}},headers=headers)
+        assert denied_scope.status == 404
+        with owner.session_store._connection() as connection:
+            assert connection.execute("SELECT count(*) FROM standby_control_operations").fetchone()[0] == 4096
+            assert connection.execute("SELECT count(*) FROM standby_safety_operations").fetchone()[0] == 1
+            assert connection.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert connection.execute("SELECT count(*) FROM runs").fetchone()[0] == 0

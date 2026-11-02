@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 34
+    SCHEMA_VERSION = 35
 
     def __init__(
         self,
