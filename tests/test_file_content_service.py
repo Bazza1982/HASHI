@@ -117,6 +117,21 @@ async def test_cancelling_native_processing_cleans_up_without_publishing_a_resul
     assert not paths[0].exists()
 
 
+@pytest.mark.asyncio
+async def test_ocr_processing_failure_keeps_the_native_cause_in_diagnostics(caplog):
+    service = FileContentService(
+        ocr=lambda _: SimpleNamespace(
+            status="error",
+            engine="paddleocr",
+            error="isolated helper did not return a result",
+        )
+    )
+    with caplog.at_level("ERROR", logger="BridgeU.FileContent"):
+        with pytest.raises(FileContentError, match="fileshare_ocr_error"):
+            await service.process(image_bytes(), filename="test.png", operation="ocr")
+    assert "isolated helper did not return a result" in caplog.text
+
+
 def content_body(*, metadata=None, payload=None, extra=False):
     from aiohttp.payload import BytesPayload
 

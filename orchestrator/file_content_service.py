@@ -5,8 +5,12 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import tempfile
 from pathlib import Path
+
+
+logger = logging.getLogger("BridgeU.FileContent")
 
 
 async def _bounded_thread(callable_, *args):
@@ -165,6 +169,12 @@ class FileContentService:
                     ocr = self.ocr
                 result = await _bounded_thread(ocr, normalized)
                 if result.status not in {"ok", "partial", "empty"}:
+                    logger.error(
+                        "OCR extraction failed: engine=%s status=%s reason=%s",
+                        getattr(result, "engine", "unknown"),
+                        result.status,
+                        getattr(result, "error", "not supplied"),
+                    )
                     raise FileContentError(
                         "fileshare_ocr_"
                         + (

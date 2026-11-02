@@ -42,7 +42,11 @@ HMAC signature. Custom policy headers and multipart framing are not accepted. Th
 request fits the existing 64 MiB HTTP limit; only two requests may parse/process at once. Results include the verified instance, bounded text segments, real locators,
 and ready/partial status. Failures carry stable safe codes, without private paths.
 
-OCR normalizes bounded image pixels before calling the existing OCR owner. Transcription
+OCR normalizes bounded image pixels before calling the existing OCR owner. Its native
+worker is an explicit Function import dependency and launches by its qualified artifact
+path in isolated Python mode. The packaging regression launches that captured helper,
+so success from a mutable source checkout alone cannot qualify the deployed OCR path.
+Failed extraction retains the native owner's safe reason in the diagnostic log. Transcription
 uses the existing configured VoiceTranscriber and its isolated local helper. Optional
 `include_segments` preserves the default legacy text protocol and returns actual
 faster-whisper start/end times when requested. Compute use requires a separate explicit

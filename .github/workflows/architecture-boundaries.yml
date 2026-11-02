@@ -125,7 +125,7 @@ jobs:
             tests/test_agent_pcm_api.py \
             tests/test_workbench_enterprise_health.py \
             tests/test_workspace_state.py
-      - name: Run frontend Session discovery regressions
+      - name: Run frontend Session and native file-content regressions
         run: |
           python -m pytest -q \
             tests/test_workbench_primary_session_metadata.py \
@@ -142,6 +142,12 @@ jobs:
             tests/test_agent_deletion.py \
             tests/contract/test_agent_creation.py \
             tests/test_session_api.py \
+            tests/test_attachment_catalogue.py \
+            tests/test_file_content_service.py \
+            tests/test_transcription_segments.py \
+            tests/test_ocr.py \
+            tests/test_ocr_generation.py \
+            tests/test_ocr_provision.py \
             tests/test_chat_admission_failures.py \
             tests/test_workbench_scheduler_api.py \
             tests/test_tool_gateway_mcp.py \

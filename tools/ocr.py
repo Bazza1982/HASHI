@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from tools import ocr_worker
+
 
 OCR_MODEL_REVISION = "87416418657359cb625c412a48b6e1d6d41c29bd"
 OCR_MAX_TEXT_CHARS = 50_000
@@ -427,8 +429,8 @@ def _extract_with_paddle(
 
     command = [
         _paddle_python_override() or sys.executable,
-        "-m",
-        "tools.ocr_worker",
+        "-I",
+        str(Path(ocr_worker.__file__).resolve()),
         "--image",
         str(Path(image_path).resolve()),
         "--model-root",
