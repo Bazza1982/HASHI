@@ -28,6 +28,7 @@ class OperationRejected(RuntimeError):
         if reason not in {
             "backend_refused", "backend_unavailable", "backend_not_allowed", "privacy_blocked",
             "response_invalid", "authentication_rejected",
+            "connection_refused", "name_not_resolved", "connection_reset", "target_invalid",
         }:
             raise ValueError("invalid operation rejection")
         self.reason = reason
