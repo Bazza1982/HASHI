@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator import ui_language
+from orchestrator.frontend_failures import AdmissionReceiptUnavailable, frontend_failure
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
@@ -711,6 +712,43 @@ def _quiet_seconds(runtime: Any) -> float:
         return DEFAULT_MEDIA_QUIET_SECONDS
 
 
+async def _batch_notice(runtime: Any, chat_id: int, update: Any, text: str, *,
+                        purpose: str, reference: str | None = None) -> None:
+    try:
+        if update is not None:
+            await runtime._reply_text(update, text)
+        else:
+            await runtime.send_long_message(chat_id, text,
+                request_id=reference or f"long-notice-{uuid4().hex[:8]}", purpose=purpose)
+    except Exception as exc:
+        logger = getattr(runtime, "error_logger", None) or getattr(runtime, "logger", None)
+        writer = getattr(logger, "warning", None)
+        if callable(writer):
+            writer(f"Long batch notice unconfirmed ({type(exc).__name__}); submission not repeated")
+
+
+async def _batch_failure(runtime: Any, chat_id: int, update: Any, error: Exception, *,
+                         phase: str) -> None:
+    import json
+
+    failure = frontend_failure(error, phase=phase, submission_state=(
+        "unconfirmed" if phase == "admit" else "not_submitted"))
+    logger = getattr(runtime, "error_logger", None) or getattr(runtime, "logger", None)
+    writer = getattr(logger, "exception", None) or getattr(logger, "warning", None)
+    if callable(writer):
+        writer("Long batch failure: " + json.dumps(failure.diagnostic()))
+    locale = ui_language.preferred_locale(runtime, update)
+    if isinstance(error, MultimodalContractError):
+        attachment = (ui_language.tr("long.attachment", locale=locale,
+                      attachment_id=error.attachment_id) if error.attachment_id else "")
+        heading = ui_language.tr("long.validation_failed", locale=locale,
+                                 attachment=attachment, code=error.code)
+    else:
+        heading = ui_language.tr("long.processing_failed", locale=locale)
+    await _batch_notice(runtime, chat_id, update, heading + "\n" + failure.render(locale=locale),
+                        purpose="long-failure", reference=failure.reference)
+
+
 async def _finish_batch(runtime: Any, batch_id: str) -> None:
     _ensure_batch_state(runtime)
     if str(getattr(runtime, "_long_batch_id", "") or "") != batch_id:
@@ -726,6 +764,7 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
     reason = str(getattr(runtime, "_long_finalize_reason", "user") or "user")
     update = getattr(runtime, "_long_finalize_update", None)
     discarded_voice = int(getattr(runtime, "_long_finalize_discarded_voice", 0) or 0)
+    phase = "validate"
     try:
         submission = consume_batch(runtime, int(chat_id))
         if submission is not None:
@@ -738,6 +777,7 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             if submission.attachment_manifest and getattr(runtime, "session_store", None) is not None:
                 from orchestrator.telegram_media_admission import admit_telegram_media
 
+                phase = "store"
                 prompt, content, metadata = await asyncio.to_thread(
                     admit_telegram_media,
                     runtime,
@@ -746,29 +786,8 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
                     request_content=content,
                     request_metadata=metadata,
                 )
-    except MultimodalContractError as exc:
-        attachment = (
-            ui_language.tr("long.attachment", attachment_id=exc.attachment_id)
-            if exc.attachment_id
-            else ""
-        )
-        message = ui_language.tr(
-            "long.validation_failed",
-            attachment=attachment,
-            code=exc.code,
-        )
-        logger = getattr(runtime, "logger", None)
-        if logger is not None:
-            logger.warning(f"{message} {exc}")
-        if update is not None:
-            await runtime._reply_text(update, message)
-        else:
-            await runtime.send_long_message(
-                int(chat_id),
-                message,
-                request_id=f"long-invalid-{uuid4().hex[:8]}",
-                purpose="long-invalid-media",
-            )
+    except Exception as exc:
+        await _batch_failure(runtime, int(chat_id), update, exc, phase=phase)
         return
     if submission is None:
         if reason == "timeout":
@@ -785,6 +804,18 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             )
         elif update is not None:
             await runtime._reply_text(update, ui_language.tr("long.empty"))
+        return
+
+    _print_user_message(runtime.name, submission.prompt)
+    try:
+        receipt = await runtime.enqueue_request(
+            submission.chat_id, prompt, submission.source, submission.summary,
+            request_content=content, request_metadata=metadata,
+        )
+        if not isinstance(receipt, str) or not receipt.strip():
+            raise AdmissionReceiptUnavailable()
+    except Exception as exc:
+        await _batch_failure(runtime, int(chat_id), update, exc, phase="admit")
         return
 
     if submission.media_count:
@@ -814,35 +845,12 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             if discarded_voice
             else ""
         )
-        await runtime.send_long_message(
-            submission.chat_id,
-            ui_language.tr(
-                "long.timeout_submitted",
-                details=timeout_details,
-                suffix=suffix,
-            ),
-            request_id=f"long-timeout-{uuid4().hex[:8]}",
-            purpose="long-timeout",
-        )
+        await _batch_notice(runtime, submission.chat_id, update,
+            ui_language.tr("long.timeout_submitted", details=timeout_details, suffix=suffix),
+            purpose="long-timeout", reference=f"long-timeout-{uuid4().hex[:8]}")
     elif update is not None:
-        await runtime._reply_text(update, details)
+        await _batch_notice(runtime, submission.chat_id, update, details, purpose="long-submitted")
 
-    _print_user_message(runtime.name, submission.prompt)
-    logger = getattr(runtime, "logger", None)
-    if logger is not None:
-        logger.info(
-            f"Submitting /long batch {submission.batch_id} "
-            f"(text_count={submission.text_count}, media_count={submission.media_count}, "
-            f"receipt_count={len(submission.attachment_receipts)})"
-        )
-    await runtime.enqueue_request(
-        submission.chat_id,
-        prompt,
-        submission.source,
-        submission.summary,
-        request_content=content,
-        request_metadata=metadata,
-    )
 
 
 async def _finalize_after_quiet(runtime: Any, batch_id: str) -> None:

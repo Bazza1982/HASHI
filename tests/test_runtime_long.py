@@ -227,7 +227,7 @@ async def test_cmd_end_enqueues_media_batch_once():
     assert "Review these together." in runtime.enqueued[0]["prompt"]
     assert "/tmp/a.pdf" in runtime.enqueued[0]["prompt"]
     assert runtime._long_buffer_active is False
-    assert "Submitting as one request" in runtime.replies[-1]["text"]
+    assert "Submitted 1 text message(s) and 1 media item(s) as one request" in runtime.replies[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -463,3 +463,78 @@ def test_pending_voice_keeps_original_position_after_later_media_arrives():
     assert submission.prompt.index("Voice transcript: Voice: first.ogg") < submission.prompt.index(
         "Document: second.pdf"
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_lost_admission_ack_does_not_report_success_or_replay():
+    from unittest.mock import AsyncMock
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "One task")
+    batch = runtime._long_batch_id
+    runtime._long_buffer_state = runtime_long.LONG_BATCH_CLOSING
+    runtime._long_finalize_update = _update()
+    original = runtime.enqueue_request
+    async def committed_then_lost(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise ConnectionError("private-upstream-details")
+    runtime.enqueue_request = AsyncMock(side_effect=committed_then_lost)
+    await runtime_long._finish_batch(runtime, batch)
+    assert len(runtime.enqueued) == 1
+    assert len(runtime.replies) == 1
+    assert "Submission is not confirmed" in runtime.replies[0]["text"]
+    assert "private-upstream-details" not in runtime.replies[0]["text"]
+    await runtime_long._finish_batch(runtime, batch)
+    assert runtime.enqueue_request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_notification_failure_cannot_prevent_or_repeat_accepted_submission():
+    from unittest.mock import AsyncMock
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "One task")
+    batch = runtime._long_batch_id
+    runtime._long_buffer_state = runtime_long.LONG_BATCH_CLOSING
+    runtime._long_finalize_update = _update()
+    runtime._reply_text = AsyncMock(side_effect=ConnectionError("notification transport lost"))
+    await runtime_long._finish_batch(runtime, batch)
+    assert len(runtime.enqueued) == 1
+    assert runtime._reply_text.await_count == 1
+    await runtime_long._finish_batch(runtime, batch)
+    assert len(runtime.enqueued) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_validation_keeps_attachment_code_and_human_cause(monkeypatch):
+    from orchestrator.multimodal_contract import MultimodalContractError
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "One task")
+    batch = runtime._long_batch_id
+    runtime._long_buffer_state = runtime_long.LONG_BATCH_CLOSING
+    runtime._long_finalize_update = _update()
+    def invalid(*args):
+        raise MultimodalContractError("private-file-path", code="MEDIA_INTEGRITY_CHANGED",
+                                      attachment_id="item-2")
+    monkeypatch.setattr(runtime_long, "consume_batch", invalid)
+    await runtime_long._finish_batch(runtime, batch)
+    assert runtime.enqueued == []
+    text = runtime.replies[-1]["text"]
+    assert "item-2" in text and "MEDIA_INTEGRITY_CHANGED" in text
+    assert "changed after intake" in text and "fcerr_" in text
+    assert "private-file-path" not in text
+
+
+@pytest.mark.asyncio
+async def test_batch_missing_admission_receipt_never_announces_success():
+    from unittest.mock import AsyncMock
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "One task")
+    batch = runtime._long_batch_id
+    runtime._long_buffer_state = runtime_long.LONG_BATCH_CLOSING
+    runtime._long_finalize_update = _update()
+    runtime.enqueue_request = AsyncMock(return_value=None)
+    await runtime_long._finish_batch(runtime, batch)
+    text = runtime.replies[-1]["text"]
+    assert "Submission is not confirmed" in text and "admission receipt" in text
+    assert "Submitting" not in text and "no model action" not in text
+    await runtime_long._finish_batch(runtime, batch)
+    assert runtime.enqueue_request.await_count == 1

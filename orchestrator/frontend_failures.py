@@ -28,10 +28,16 @@ _MEDIA_REASONS = {
 }
 
 
+class AdmissionReceiptUnavailable(RuntimeError):
+    """The caller lacks proof of admission; this never authorizes replay."""
+
+
 def _reason(error: Exception) -> str:
     from telegram.error import Forbidden, InvalidToken, NetworkError, TimedOut
     from orchestrator.session_store import SessionConflict, SessionNotFound
 
+    if isinstance(error, AdmissionReceiptUnavailable):
+        return "receipt_unavailable"
     if isinstance(error, FrontendCaptionError):
         return {"caption_too_long": "caption_too_long", "caption_empty": "caption_empty",
                 "caption_control_character": "caption_control"}.get(error.error_code, "invalid_input")

@@ -49,6 +49,11 @@ Only failures before the admission call may say no model action was started.
 An exception while awaiting admission has an unconfirmed outcome even if the
 caller did not receive a request ID; it must not claim rejection or replay the
 submission. This reporting layer never owns admission, permission or retries.
+`/long` uses the same safe reasons while retaining the failing attachment and
+contract code. It announces submission only after receiving the owner's
+nonempty admission receipt; a missing/unknown receipt does not replay the
+consumed batch. A later notification failure cannot block or repeat an already
+accepted task.
 
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
