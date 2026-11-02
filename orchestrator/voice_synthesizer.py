@@ -126,7 +126,17 @@ async def convert_audio_to_ogg(ffmpeg_cmd: str, input_path: Path, ogg_path: Path
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    try:
+        _, stderr = await proc.communicate()
+    except BaseException:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.communicate()
+        ogg_path.unlink(missing_ok=True)
+        raise
     if proc.returncode != 0 or not ogg_path.exists():
         err = stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"ffmpeg voice conversion failed: {err or f'exit_code={proc.returncode}'}")

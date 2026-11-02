@@ -337,18 +337,18 @@ def _validate_service(value: object) -> dict[str, object]:
     timeout = value.get("timeout_seconds", 25)
     maximum = value.get("max_response_bytes", 16 * 1024 * 1024)
     sample_rate = value.get("pcm_sample_rate_hz", 24000)
-    if type(timeout) not in (int, float) or not 1 <= timeout <= 120:
+    if timeout is not None and (type(timeout) not in (int, float) or not 1 <= timeout <= 120):
         raise VoiceCatalogError("service timeout_seconds is invalid")
-    if type(maximum) is not int or not 1024 <= maximum <= 32 * 1024 * 1024:
+    if maximum is not None and (type(maximum) is not int or not 1024 <= maximum <= 32 * 1024 * 1024):
         raise VoiceCatalogError("service max_response_bytes is invalid")
     if type(sample_rate) is not int or not 8000 <= sample_rate <= 96000:
         raise VoiceCatalogError("service pcm_sample_rate_hz is invalid")
-    service["timeout_seconds"] = float(timeout)
+    service["timeout_seconds"] = float(timeout) if timeout is not None else None
     service["max_response_bytes"] = maximum
     service["pcm_sample_rate_hz"] = sample_rate
     if "max_input_chars" in value:
         limit = value["max_input_chars"]
-        if type(limit) is not int or not 1 <= limit <= 100000:
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 100000):
             raise VoiceCatalogError("service max_input_chars is invalid")
         service["max_input_chars"] = limit
     return service

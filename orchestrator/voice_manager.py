@@ -83,8 +83,7 @@ def _provider_failure(
     status = getattr(exc, "status", None)
 
     if (
-        declared_code == "tts_protocol_rejected"
-        or status == 403
+        status == 403
         or ("wsserverhandshakeerror" in lowered and re.search(r"\b403\b", lowered))
     ):
         return VoiceProviderFailure(
@@ -412,8 +411,8 @@ class VoiceManager:
         )
 
     def _remember_provider_failure(self, failure: VoiceProviderFailure) -> None:
-        # An absent voice does not establish that the entire service is down.
-        if failure.code == "tts_voice_unavailable":
+        # A request/voice-specific refusal does not establish a service outage.
+        if failure.code in {"tts_voice_unavailable", "tts_response_limit", "tts_text_invalid"}:
             return
         self._provider_cooldowns[failure.provider] = (
             time.monotonic() + self.PROVIDER_FAILURE_COOLDOWN_SECONDS,
@@ -1780,10 +1779,15 @@ class VoiceManager:
                 f"_{route.provider}_{attempt}"
             )
             try:
+                provider_config = service(route.provider)
+                complete_input = (
+                    "max_input_chars" in provider_config
+                    and provider_config["max_input_chars"] is None
+                )
                 provider = build_provider(
                     route.provider,
                     ffmpeg_cmd=self.ffmpeg_cmd,
-                    provider_config=service(route.provider),
+                    provider_config=provider_config,
                     secrets=self._secrets,
                     bridge_home=self.project_root,
                 )
@@ -1793,7 +1797,7 @@ class VoiceManager:
                     stem=stem,
                     voice_name=route.voice_name,
                     rate=int(state.get("rate", 0)),
-                    max_chars=max_chars,
+                    max_chars=len(text) if complete_input and max_chars_override is None else max_chars,
                     provider_options=route.provider_options,
                 )
             except Exception as exc:

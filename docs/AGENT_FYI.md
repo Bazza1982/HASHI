@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+- Long-speech Functions candidate: explicit nullable service bounds enable complete
+  reply streaming; old running validators reject this configuration. Adopt code
+  before data. Workbench delivery and native `/say` remain separate consumers;
+  isolated synthesis is not proof of either live entry. See
+  [shared speech](HASHI_VOICE_TTS_CATALOG.md#complete-reply-services-functions-candidate).
+
 - 权限与验证：[状态](permissions/IMPLEMENTATION_STATUS.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.

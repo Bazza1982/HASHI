@@ -115,6 +115,42 @@ selected and effective service labels so the initiating Call Window can render
 one explicit downgrade notice. Agent Presence receives lifecycle events only
 and never becomes a second Call audio output.
 
+## Complete reply services (Functions candidate)
+
+A qualified streaming service may explicitly set timeout_seconds,
+max_response_bytes and max_input_chars to null. Omitted fields keep the existing
+bounded defaults; this does not relax other services or credentials, redirects,
+privacy routing, native resource admission or configured fallback policy.
+
+For such a service, VoiceManager forwards the complete reply instead of inheriting
+the historical saved 1200-character clipping. Explicit bounded consumers such as
+Call segments retain their own max_chars override. The HTTP provider uses a file
+sink with bounded buffering and a 10-second connection timeout plus a 120-second
+read-idle timeout when the overall deadline is null. Audio is converted and
+published only after normal EOF. Failure and cancellation remove processing
+intermediates and partial conversion output.
+
+A response-size or text-specific failure does not cool down an otherwise healthy
+service. Protocol refusals preserve their real HTTP status; a 413 must not be
+described as 403.
+
+This is a PAO Functions and instance-configuration change, not protected Core.
+Existing deployed catalogue validators reject null bounds. Adopt and verify the
+new Functions at every actual consumer owner before changing an existing service
+row through the revision-aware configuration writer. Preserve that row's
+discovered endpoint/model, voice mapping, secrets references and fallback policy.
+Do not copy a catalogue or overwrite unrelated instance/Agent settings.
+
+The bounded synchronous TUI/IPC and Remote audio envelopes remain bounded.
+Workbench long speech must use short authenticated segments and short HTTP
+delivery operations; removing a local API check alone merely moves the failure
+to the next hop. Native /say uses VoiceManager independently of Workbench.
+
+Focused red/green checks and isolated real 2000/5000-Han synthesis are component
+evidence. The native /say command, adopted Workers and the user's actual
+Workbench entry require separate live receipts. No source-only or local-only
+result is a claim of deployed end-to-end recovery.
+
 ## Fixed character voices
 
 A service may declare optional `language_voices`, a map from `zh`, `en`
