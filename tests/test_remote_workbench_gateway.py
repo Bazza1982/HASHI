@@ -397,7 +397,9 @@ def test_forwarder_records_safe_socket_cause_without_endpoint_or_message(monkeyp
 
     failed = _gateway_events(caplog, "local_request_failed")[-1]
     assert failed["correlation_id"] == "call-request-3"
-    assert failed["exception_type"] == "URLError" and failed["cause_type"] == "OSError"
+    assert failed["exception_type"] == "URLError"
+    # Python specializes OSError(errno) on platforms that recognize that errno.
+    assert failed["cause_type"] == type(cause).__name__
     assert failed["cause_errno"] == 104 and failed["cause_code"] == "ECONNRESET"
     assert failed["cause_syscall"] == "read"
     assert "PRIVATE" not in caplog.text and "SECRET" not in caplog.text
