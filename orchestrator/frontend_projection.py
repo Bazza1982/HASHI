@@ -535,6 +535,11 @@ def render_event_to_html(event: Mapping[str, Any]) -> str:
                 for item in block.get("items", [])
             ]
             parts.append("\n".join(kv_lines))
+        elif btype == "table":
+            headers = block.get("headers", [])
+            table_lines = [" | ".join(str(cell) for cell in headers)] if headers else []
+            table_lines.extend(" | ".join(str(cell) for cell in row) for row in block.get("rows", []))
+            parts.append("<pre>" + html.escape("\n".join(table_lines)) + "</pre>")
         elif btype == "action":
             parts.append(f"<i>[{html.escape(str(block.get('label')))}]</i>")
         elif btype == "hint":

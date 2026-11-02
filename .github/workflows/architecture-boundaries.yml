@@ -158,6 +158,7 @@ jobs:
             tests/test_browser_proxy_failure_details.py \
             tests/test_browser_gateway_phase1.py \
             tests/test_frontend_contracts.py \
+            tests/test_frontend_multiline_text.py \
             tests/test_runtime_media.py \
             tests/test_runtime_long.py \
             tests/test_frontend_failures.py \

@@ -100,6 +100,14 @@ def _string(value: Any, name: str, *, maximum: int = 512) -> str:
     return normalized
 
 
+def _multiline_text(value: Any, name: str, *, maximum: int) -> str:
+    normalized = str(value or "").strip()
+    if (not normalized or len(normalized) > maximum
+        or any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 for char in normalized)):
+        raise ValueError(f"{name} is invalid")
+    return normalized
+
+
 class FrontendCaptionError(ValueError):
     """Safe caption reason, retaining the existing ValueError catch contract."""
 
@@ -133,9 +141,19 @@ def _command_arguments(command: str, value: Any) -> list[str]:
     if command != "sys":
         if len(value) > 64:
             raise ValueError("command arguments must be a list of at most 64 values")
+        # Only command-owned prose positions accept paragraphs. Target IDs,
+        # selector modes and unknown/dynamic command arguments stay single-line.
+        first = str(value[0]).strip().casefold() if value else ""
+        text_start = (
+            0 if command in {"steer", "focus", "ticket"}
+            else 1 if command in {"hchat", "wa_send"}
+            else 0 if command == "loop" and value and first != "list" and not first.startswith("stop")
+            else None
+        )
         return [
-            _string(argument, "command argument", maximum=4096)
-            for argument in value
+            (_multiline_text if text_start is not None and index >= text_start else _string)(
+                argument, "command argument", maximum=4096)
+            for index, argument in enumerate(value)
         ]
 
     arguments = normalize_sys_arguments(value)
@@ -402,7 +420,7 @@ def normalize_frontend_operation(value: Any) -> dict[str, Any]:
                 else None
             ),
             "text": (
-                _string(raw.get("text"), "control text", maximum=65536)
+                _multiline_text(raw.get("text"), "control text", maximum=65536)
                 if raw.get("text")
                 else None
             ),
@@ -762,7 +780,7 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
             entry_obj = _object(entry, "key_value item")
             items.append({
                 "key": _string(entry_obj.get("key"), "key_value key", maximum=128),
-                "value": _string(entry_obj.get("value"), "key_value value", maximum=4096),
+                "value": _multiline_text(entry_obj.get("value"), "key_value value", maximum=4096),
             })
         return {"type": "key_value", "items": items}
     elif component_type == "table":
@@ -777,7 +795,7 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
         for r in rows_raw:
             if not isinstance(r, (list, tuple)):
                 raise ValueError("table row must be a list")
-            rows.append([_string(cell, "table cell", maximum=4096) for cell in r])
+            rows.append([_multiline_text(cell, "table cell", maximum=4096) for cell in r])
         return {"type": "table", "headers": headers, "rows": rows}
     elif component_type == "action":
         action_id = _token(raw.get("action_id"), "action_id")
@@ -798,7 +816,7 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
         level = str(raw.get("level") or "info").casefold()
         if level not in {"info", "warning", "error"}:
             raise ValueError("hint component level is invalid")
-        return {"type": "hint", "level": level, "text": _string(raw.get("text"), "hint text", maximum=1024)}
+        return {"type": "hint", "level": level, "text": _multiline_text(raw.get("text"), "hint text", maximum=1024)}
     elif component_type == "media_ref":
         return {
             "type": "media_ref",
