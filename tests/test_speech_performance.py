@@ -106,3 +106,29 @@ async def test_voice_command_and_button_persist_without_generating_a_preview(tmp
     await runtime.callback_voice(SimpleNamespace(callback_query=query), SimpleNamespace())
     assert value.get_performance() is False
     assert query.edit_message_text.await_count == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected_attempts,expected_state",[(429,2,"completed"),(None,1,"uncertain")])
+async def test_task_owner_controls_provider_retries_without_nested_fallback(tmp_path,monkeypatch,status,expected_attempts,expected_state):
+    from orchestrator.speech_tasks import SpeechTasks
+    from orchestrator.tts_providers.openai_compatible import OpenAICompatibleTTSError
+    value=manager(tmp_path);calls=[]
+    async def synthesize(**kwargs):
+        calls.append(kwargs)
+        if len(calls)==1:
+            raise OpenAICompatibleTTSError("tts_rate_limited" if status==429 else "tts_timeout",
+                "controlled failure",status=status,retryable=True)
+        return VoiceAsset("advanced","正文","正文",None,Path("test.ogg"))
+    provider=type("Provider",(),{})();provider.synthesize=synthesize
+    monkeypatch.setattr(voice_module,"build_provider",lambda *a,**kw:provider)
+    owner=SpeechTasks(tmp_path/"tasks",retry_delay=.001)
+    async def execute(_):
+        asset=await value.synthesize_reply("agent1","retry","正文",force=True,max_retries=0,performance_context={"enabled":False})
+        return {"provider":asset.provider}
+    owner.start("retry","正文","generate",{},execute)
+    for _ in range(200):
+        result=owner.status("retry")
+        if result["state"] not in {"queued","running","retry_wait"}:break
+        await __import__("asyncio").sleep(.005)
+    assert result["state"]==expected_state and len(calls)==expected_attempts
+    await owner.close()

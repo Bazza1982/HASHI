@@ -87,7 +87,12 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
             raise ValueError("Automatic performance is unavailable for this service")
         key = self._credential()
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        timeout = aiohttp.ClientTimeout(total=100, sock_connect=10, sock_read=100)
+        from orchestrator.speech_budget import remaining_speech_budget
+        planning_budget = remaining_speech_budget()
+        planning_timeout = min(100., planning_budget) if planning_budget is not None else 100.
+        if planning_budget is not None:
+            headers["X-Hashi-Speech-Budget-Ms"] = str(max(1, int(planning_timeout*1000)))
+        timeout = aiohttp.ClientTimeout(total=planning_timeout, sock_connect=10, sock_read=planning_timeout)
         async with self.session_factory(timeout=timeout, trust_env=False) as session:
             async with session.post(
                 str(self.service["base_url"]).rstrip("/") + "/speech/performance",
@@ -106,6 +111,12 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         maximum = self.service["max_response_bytes"]
         total_timeout = self.service["timeout_seconds"]
+        from orchestrator.speech_budget import remaining_speech_budget
+        task_budget = remaining_speech_budget()
+        if task_budget is not None:
+            total_timeout = min(float(total_timeout or 120), task_budget)
+            if self.service.get("location") in {"local", "lan"}:
+                headers["X-Hashi-Speech-Budget-Ms"] = str(max(1, int(total_timeout * 1000)))
         timeout = aiohttp.ClientTimeout(
             total=total_timeout, sock_connect=10, sock_read=total_timeout or 120,
         )

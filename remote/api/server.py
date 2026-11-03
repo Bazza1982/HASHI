@@ -2256,6 +2256,7 @@ def _forward_workbench_gateway_request(
         headers["X-Workbench-Token"] = admin_token
 
     desktop_request = upstream_path.split("?", 1)[0].startswith("/api/v1/desktop/")
+    speech_request = route_path == "/api/tui/speech" and normalized_method == "POST"
     hosts = (
         (_desktop_workbench_host(str(_instance_info.get("instance_id") or ""), _workbench_port),)
         if desktop_request
@@ -2382,12 +2383,12 @@ def _forward_workbench_gateway_request(
             )
             # A lost desktop input response is an unknown outcome, not permission
             # to replay a click/text against a fallback loopback address.
-            if desktop_request:
+            if desktop_request or speech_request:
                 # A later request may discover a replacement listener. Never
                 # replay this request when its outcome is uncertain.
                 break
             continue
-    if desktop_request:
+    if desktop_request or speech_request:
         _workbench_gateway_log(
             "forward_failed",
             **trace_facts,

@@ -1727,6 +1727,12 @@ class VoiceManager:
         fallback_chain = tuple(
             candidate for candidate in declared_fallback_chain if allowed(candidate)
         )
+        from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
+        if ACTIVE_SPEECH_BUDGET.get() is not None:
+            # One task owner controls attempts; never move an unknown native
+            # execution into a second provider or nested fallback retry.
+            fallback_chain = ()
+
         attempts: list[dict[str, object]] = []
         audit: dict[str, object] = {
             "event": "tts_synthesis",
@@ -1833,6 +1839,15 @@ class VoiceManager:
                         state.get("_performance_context"), route.provider, route.provider_options),
                 )
             except Exception as exc:
+                from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
+                if ACTIVE_SPEECH_BUDGET.get() is not None:
+                    from orchestrator.speech_tasks import SpeechTaskError
+                    code = str(getattr(exc, "code", "tts_generation_failed"))
+                    status = getattr(exc, "status", None)
+                    # Only explicit pre-execution rejection is safe to retry.
+                    accepted = False if status in {400, 401, 403, 404, 422, 429} else None
+                    raise SpeechTaskError(code, retryable=status == 429,
+                                          accepted=accepted) from None
                 failure = _provider_failure(
                     route.provider,
                     exc,
