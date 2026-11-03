@@ -28,21 +28,56 @@ _TEXT = {
            'saved': 'Answer received', 'closed': 'This question is no longer accepting answers.',
            'expired': 'This question has expired. No answer was received.',
            'cancelled': 'This question was cancelled.',
-           'failed': 'Answer not confirmed. Retry the same answer.'},
+           'invalid': 'Invalid answer. Choose a current option or reply with 1–4000 characters.',
+           'unavailable': 'This question is unavailable in this conversation. Refresh the question list.',
+           'changed': 'The question state changed. Refresh it and check whether your answer was received.',
+           'already_answered': 'This question already has an answer. Refresh it to check the saved answer.',
+           'failed': 'Answer not confirmed. Refresh the question and check whether it was received.'},
     'zh-CN': {'write': '自行填写', 'reply': '请回复这条问题消息，填写您的答案。',
               'saved': '已收到答复', 'closed': '这条问题已结束，无法再提交答复。',
-              'expired': '问题已过期，未收到答复。', 'cancelled': '问题已取消。', 'failed': '答复尚未确认，请重交同一答复。'},
+              'expired': '问题已过期，未收到答复。', 'cancelled': '问题已取消。',
+              'invalid': '答复无效，请选择当前选项，或回复1至4000字的答案。',
+              'unavailable': '当前会话无法读取这条问题，请刷新问题列表。',
+              'changed': '问题状态已变化，请刷新后检查答复是否已收到。',
+              'already_answered': '这条问题已有答复，请刷新后检查已保存的答案。',
+              'failed': '答复尚未确认，请刷新问题，核对是否已收到。'},
     'zh-TW': {'write': '自行填寫', 'reply': '請回覆這則問題訊息，填寫您的答案。',
               'saved': '已收到答覆', 'closed': '這則問題已結束，無法再提交答覆。',
-              'expired': '問題已過期，未收到答覆。', 'cancelled': '問題已取消。', 'failed': '答覆尚未確認，請重交同一答覆。'},
+              'expired': '問題已過期，未收到答覆。', 'cancelled': '問題已取消。',
+              'invalid': '答覆無效，請選擇目前選項，或回覆1至4000字的答案。',
+              'unavailable': '目前對話無法讀取這則問題，請重新整理問題清單。',
+              'changed': '問題狀態已變更，請重新整理後檢查答覆是否已收到。',
+              'already_answered': '這則問題已有答覆，請重新整理後檢查已儲存的答案。',
+              'failed': '答覆尚未確認，請重新整理問題，核對是否已收到。'},
     'ja': {'write': '自由に回答', 'reply': 'この質問メッセージに返信して回答してください。',
            'saved': '回答を受け取りました', 'closed': 'この質問の回答受付は終了しました。',
-           'expired': '質問の有効期限が切れました。回答はありません。', 'cancelled': '質問は取り消されました。', 'failed': '回答を確認できません。同じ回答を再送してください。'},
+           'expired': '質問の有効期限が切れました。回答はありません。', 'cancelled': '質問は取り消されました。',
+           'invalid': '無効な回答です。現在の選択肢を選ぶか、1〜4000文字で返信してください。',
+           'unavailable': 'この会話では質問を読み取れません。質問一覧を更新してください。',
+           'changed': '質問の状態が変わりました。更新して回答が届いたか確認してください。',
+           'already_answered': 'この質問には回答があります。更新して保存された回答を確認してください。',
+           'failed': '回答を確認できません。質問を更新して回答が届いたか確認してください。'},
 }
 
 
 def question_text(locale):
     return _TEXT.get(locale, _TEXT['en'])
+
+
+def question_error_text(code, locale):
+    """Render only known PAO codes, never exception text or an answer."""
+    key = {
+        'question_answer_invalid': 'invalid',
+        'question_answer_required': 'invalid',
+        'question_already_answered': 'already_answered',
+        'question_expired': 'expired',
+        'question_cancelled': 'cancelled',
+        'question_not_found': 'unavailable',
+        'question_transport_scope_invalid': 'unavailable',
+        'question_state_changed': 'changed',
+        'question_run_not_active': 'changed',
+    }.get(code, 'failed')
+    return question_text(locale)[key]
 
 
 def telegram_button(block, locale):

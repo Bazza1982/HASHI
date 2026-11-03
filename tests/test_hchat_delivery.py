@@ -171,8 +171,10 @@ def test_deliver_hchat_draft_generates_attempt_id_and_structured_failure():
     result = deliver_hchat_draft(HChatDraft(target="ying", message="hello"), from_agent="zelda", sender=failing_sender)
 
     assert result.success is False
-    assert result.delivery_status == "failed"
-    assert result.error == "RuntimeError: offline"
+    assert result.delivery_status == "unconfirmed" and result.accepted is None
+    assert result.failure.reason == "internal_error"
+    assert result.failure.error_type == "RuntimeError"
+    assert result.failure.reference in result.error and "offline" not in result.error
     assert result.retry_count == 0
     assert re.match(r"^[0-9a-f-]{36}$", result.attempt_id)
 
@@ -180,8 +182,9 @@ def test_deliver_hchat_draft_generates_attempt_id_and_structured_failure():
     assert fields["hchat_target"] == "ying"
     assert fields["hchat_delivery_attempt_id"] == result.attempt_id
     assert fields["hchat_payload_final"] == "hello"
-    assert fields["hchat_delivery_status"] == "failed"
-    assert fields["hchat_delivery_error"] == "RuntimeError: offline"
+    assert fields["hchat_delivery_status"] == "unconfirmed"
+    assert fields["hchat_delivery_error"] == result.error
+    assert fields["hchat_accepted"] is None
     assert fields["hchat_retry_count"] == 0
 
 

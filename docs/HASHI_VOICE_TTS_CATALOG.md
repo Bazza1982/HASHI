@@ -102,6 +102,14 @@ conversion. Saved Agent state contains service and voice identifiers, not
 endpoint URLs or credentials. Provider failures remain explicit and use the
 existing bounded fallback and audit path.
 
+Voice reply consumers preserve separate synthesis, asset preparation, publication,
+and delivery outcomes. `/say` renders the safe cause and diagnostic reference;
+a receipt from another endpoint cannot confirm this delivery. If publication or
+delivery acknowledgement is lost, report the outcome as unconfirmed and do not
+retry automatically. A confirmed delivery remains successful if later bookkeeping
+fails. Cancellation remains cancellation, and disabled automatic replies remain
+an ordinary no-op. This is a PAO Function/FC boundary, independent of model backend.
+
 The `/voice` and `/call` menus derive their voices and localized labels from the
 merged catalogue and paginate large catalogues. Selecting a voice persists the
 exact service ID, voice alias, and declared per-voice options in the owning
@@ -148,3 +156,18 @@ degradation, owner-mirror byte identity and failure isolation, and wire
 compatibility. Core protection and the applicable offline product suite remain
 release gates. A real endpoint test proves only that endpoint; Function adoption
 and device playback are separate live checks.
+
+
+## Instance defaults for existing and future Agents
+
+An optional top-level `default_voice` names an active preset alias in the
+merged catalogue. It seeds the provider, voice and provider options only when
+an Agent has no saved provider selection. It never enables automatic speech;
+saved reply policy, explicit provider/voice choices and other Agent settings
+remain authoritative. Unsaved defaults refresh with the catalogue revision.
+An invalid/disabled default is rejected without rewriting configuration.
+
+OpenAI-compatible services may declare a positive `max_input_chars` (up to
+100000). The provider applies the smaller of this advertised input limit and
+the caller's speech limit before building its actual request. This also bounds
+new Agents and Call speech, rather than only a one-time Agent state migration.

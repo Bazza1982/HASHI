@@ -26,6 +26,9 @@ HASHI_ROOT = Path(os.environ.get("BRIDGE_HOME") or ROOT).resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from orchestrator.hchat_submit_result import (
+    begin_hchat_dispatch, record_hchat_failure, record_hchat_response, record_hchat_rejection, stop_hchat_routing,
+)
 from remote.delivery_results import format_delivery_result
 from remote.attachments import (
     STREAM_ATTACHMENT_CHUNK_BYTES,
@@ -763,12 +766,12 @@ def send_protocol_message(
     target_instance = _normalize_instance_id(target_instance) or inline_instance
     if not to_agent or not target_instance:
         print("❌ Target must be written as agent@INSTANCE or provided with --instance.", file=sys.stderr)
-        return False
+        return record_hchat_failure(ValueError(), phase="validate")
 
     remote = _find_remote_instance(to_agent, source_instance, target_instance=target_instance)
     if not remote:
         print(f"❌ Could not resolve remote peer for {to_agent}@{target_instance}.", file=sys.stderr)
-        return False
+        return record_hchat_failure(reason="route_unavailable", phase="scope")
 
     payload = _build_message_payload(
         source_instance=source_instance,
@@ -809,7 +812,7 @@ def send_protocol_message(
             )
         except ValueError as exc:
             print(f"Private authorization proof could not be created: {exc}", file=sys.stderr)
-            return False
+            return record_hchat_failure(reason="authentication_rejected", phase="prepare")
         payload["authorization_resources"] = selected_resources
     instances = _load_instances()
     local_sidecar_base_url = _local_sidecar_base_url(source_instance, cfg, instances)
@@ -825,7 +828,7 @@ def send_protocol_message(
     remote_port = remote.get("remote_port") or remote.get("port")
     if not candidate_hosts or not remote_port:
         print(f"❌ Remote peer for {to_agent}@{target_instance} has no remote port.", file=sys.stderr)
-        return False
+        return record_hchat_failure(reason="route_unavailable", phase="configuration")
     remote_host = candidate_hosts[0]
     for candidate in candidate_hosts:
         if _probe_remote_http(candidate, int(remote_port)):
@@ -850,9 +853,10 @@ def send_protocol_message(
             f"update the peer before sending ({reason}).",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(reason="capability_missing", phase="validate")
     attachments = attachments or []
     _record_outbound_correlation(payload, state="sending", sidecar_base_url=local_sidecar_base_url)
+    begin_hchat_dispatch()
     if attachments:
         result = _send_with_attachments(
             base_url=base_url,
@@ -873,6 +877,7 @@ def send_protocol_message(
         )
     disposition = _delivery_disposition(result)
     if disposition != "failed":
+        record_hchat_response(result)
         _record_outbound_correlation(
             payload,
             state=str(result.get("state") or "accepted"),
@@ -894,7 +899,9 @@ def send_protocol_message(
         # Treat that as a completed transport exchange so callers do not
         # fail over and submit the same logical message through another path.
         return True
+    record_hchat_rejection(result, status=int(result.get("status") or 0), terminal=False)
     _record_outbound_correlation(payload, state="failed", result=result, sidecar_base_url=local_sidecar_base_url)
+    stop_hchat_routing()
     _print_delivery_receipt(
         result=result,
         from_agent=from_agent,

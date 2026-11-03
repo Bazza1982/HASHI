@@ -373,8 +373,9 @@ async def test_real_transcript_read_failure_is_terminal_and_does_not_leak_file_p
     path = _path(runtime, _session(runtime))
     path.mkdir()
     result = await try_execute_slash_command_text(runtime, _wire(), source_channel="workbench_api")
-    assert result == {"ok": False, "chat_projection_version": 1,
-                      "error_code": "chat_projection_read_unavailable", "http_status": 503}
+    assert result["ok"] is False and result["chat_projection_version"] == 1
+    assert result["error_code"] == "chat_projection_read_unavailable" and result["http_status"] == 503
+    assert result["effect_state"] == "not_requested" and result["diagnostic_ref"] in caplog.text
     assert str(tmp_path) not in caplog.text
     assert not (tmp_path / "slash_command_audit.jsonl").exists()
     runtime.enqueue_request.assert_not_awaited()

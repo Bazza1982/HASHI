@@ -13,7 +13,9 @@ import logging
 import re
 from typing import Any
 
-from orchestrator import runtime_session
+from orchestrator import runtime_session, ui_language
+from orchestrator.api_failures import operation_failure_payload
+from orchestrator.operation_failures import OperationRejected, operation_failure
 from orchestrator.chat_transcript_projection import build_chat_projection
 
 
@@ -41,6 +43,21 @@ def _error(code: str, http_status: int, *, version: int = 1) -> dict[str, Any]:
         "chat_projection_version": version,
         "error_code": "chat_projection_" + code,
         "http_status": http_status,
+    }
+
+
+def _failure(runtime: Any, error: Exception, *, code: str, phase: str, version: int) -> dict[str, Any]:
+    if phase == "read" and isinstance(error, (ValueError, TypeError)):
+        error = OperationRejected("response_invalid")
+    failure = operation_failure(error, operation="chat_projection", phase=phase)
+    try:
+        logger.warning("Chat projection failure: %s", failure.diagnostic())
+    except Exception:
+        pass
+    return {
+        **operation_failure_payload(failure, error_code="chat_projection_" + code,
+            effect_state="not_requested", locale=ui_language.configured_default_locale(runtime)),
+        "chat_projection_version": version, "http_status": 503,
     }
 
 
@@ -105,7 +122,10 @@ async def try_dispatch_chat_projection_transport(
     # Updated shared callers still forward to the selected Worker. They do not
     # derive a Session or consult their own retained generation's projection.
     if getattr(runtime, "is_function_worker_proxy", False):
-        return await runtime.execute_slash_command(text, source_channel=source_channel)
+        try:
+            return await runtime.execute_slash_command(text, source_channel=source_channel)
+        except Exception as exc:
+            return _failure(runtime, exc, code="transport_unavailable", phase="request", version=payload["version"])
     config = getattr(runtime, "global_config", None)
     if str(getattr(config, "deployment_profile", "personal") or "personal") != "personal":
         return _error(
@@ -119,8 +139,8 @@ async def try_dispatch_chat_projection_transport(
         session = runtime_session.current_session(runtime, surface="workbench", channel_key="default")
         store = runtime_session.ensure_store(runtime)
         owner_id = runtime_session.owner_id(runtime)
-    except Exception:
-        return _error("session_unavailable", 503, version=int(payload["version"]))
+    except Exception as exc:
+        return _failure(runtime, exc, code="session_unavailable", phase="session", version=payload["version"])
     try:
         projection = build_chat_projection(
             store,
@@ -131,11 +151,9 @@ async def try_dispatch_chat_projection_transport(
             after_message_ordinal=payload.get("message_cursor"),
             include_command_ui=payload["version"] == 2,
         )
-    except Exception:
-        # Neither the envelope nor transcript text belongs in the command audit
-        # or failure logs. Return a typed terminal error instead of chat fallback.
-        logger.warning("Chat projection read unavailable")
-        return _error("read_unavailable", 503, version=int(payload["version"]))
+    except Exception as exc:
+        # Never fall through to chat or log the envelope/transcript/exception text.
+        return _failure(runtime, exc, code="read_unavailable", phase="read", version=payload["version"])
     return {
         "ok": True,
         "chat_projection_version": int(payload["version"]),

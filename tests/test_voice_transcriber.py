@@ -283,3 +283,69 @@ def test_isolated_worker_rejects_missing_audio_before_model_load(
                 }
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_compute_transcription_is_shared_and_refreshes_without_local_whisper(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.delenv("HASHI_TRANSCRIPTION_PYTHON", raising=False)
+    config = tmp_path / "state" / "platform" / "transcription.json"
+    config.parent.mkdir(parents=True)
+    reference = {"node_id": "gpu", "service_id": "stt", "model_id": "sensevoice-small"}
+    config.write_text(json.dumps({"provider": "compute", "compute": reference}))
+    audio = tmp_path / "input.ogg"
+    audio.write_bytes(b"test-ogg-audio")
+    invocations = []
+
+    class Directory:
+        def __init__(self, config, *, client):
+            assert config.path == tmp_path / "compute_services.json"
+        async def refresh(self):
+            return SimpleNamespace(catalogue=self, errors={})
+        def resolve(self, ref, requirements):
+            assert ref.node_id == "gpu"
+            assert requirements.input_modalities == frozenset({"audio"})
+            assert requirements.output_modalities == frozenset({"text"})
+            return SimpleNamespace(offering=SimpleNamespace(model_id=ref.model_id))
+
+    class Client:
+        async def transcribe(self, resolved, data, *, filename, language):
+            invocations.append((resolved.offering.model_id, data, filename, language))
+            return {"text": " 中文转写成功 "}
+
+    monkeypatch.setattr(voice_transcriber, "ComputeServiceDirectory", Directory)
+    monkeypatch.setattr(voice_transcriber, "ComputeServiceClient", Client)
+    transcriber = voice_transcriber.VoiceTranscriber(language="zh")
+    monkeypatch.setattr(transcriber, "_load_model",
+                        lambda: pytest.fail("Compute must not load local Whisper"))
+    assert await transcriber.transcribe(audio) == "中文转写成功"
+    reference["model_id"] = "new-model"
+    config.write_text(json.dumps({"provider": "compute", "compute": reference}))
+    assert await transcriber.transcribe(audio) == "中文转写成功"
+    assert [item[0] for item in invocations] == ["sensevoice-small", "new-model"]
+    assert invocations[0][1:] == (b"test-ogg-audio", "utterance.ogg", "zh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    "{bad json", json.dumps({"provider": "invalid"}),
+    json.dumps({"provider": "compute", "compute": {"node_id": "missing"}}),
+])
+async def test_invalid_remote_transcription_configuration_never_falls_back_locally(
+    tmp_path, monkeypatch, payload
+):
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.delenv("HASHI_TRANSCRIPTION_PYTHON", raising=False)
+    path = tmp_path / "state" / "platform" / "transcription.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(payload)
+    audio = tmp_path / "input.wav"
+    audio.write_bytes(b"audio")
+    transcriber = voice_transcriber.VoiceTranscriber()
+    monkeypatch.setattr(transcriber, "_load_model",
+                        lambda: pytest.fail("Invalid Compute config must fail closed"))
+    result = await transcriber.transcribe(audio)
+    assert result.startswith("[Transcription error]")

@@ -7,6 +7,43 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-11-03 Nonblocking history reads and bounded search candidates
+
+PAO remains the sole history owner. Session list/get/messages/run/event and
+cross-Session history I/O and presentation projection execute outside the
+shared HTTP event loop. Each operation retains its original ownership checks,
+transaction and error semantics; worker threads do not hold a new authority.
+
+`POST /api/v1/agents/{agent_id}/history/search` is an authenticated, read-only
+Session extension, advertised separately as `agent_history_search` v1.0 with
+`literal_superset_v1`. A private JSON body contains a literal query (256-character
+maximum), bounded limit and optional opaque cursor. Search text is never put
+in a URL. The existing history signature additionally binds a keyed query
+fingerprint: owner, instance, Agent, query and older-history boundary must match;
+ordinary history and search cursors are not interchangeable.
+
+The native reader examines at most 4,000 visible user/assistant source rows or
+8MiB of text/content/context per page, returning at most 200 conservative
+candidates. Its boundary is the last **examined** row, including empty candidate
+pages; byte/row limits must not skip unexamined history. Ambiguous markup,
+entities, media-derived display text and Unicode unknown to the runtime remain
+candidates. The existing Frontend Connector performs its final public display
+projection and literal match. No second body store, persistent search index,
+model, new owner or Session binding is created.
+
+The real native capability is `limits.agent_history.version`; clients may
+also accept the older flat version field. Primary transcript-only command
+receipts still supplement a completed search. Current-conversation scope is
+resolved before filtering that scope; global historical matches can arrive
+before the primary supplement. Output/coverage caps and read failures remain
+visible. Search contexts independently reauthorize the selected message.
+
+Isolated evidence includes six HTTP blocking cases red/green and a same-data
+8-Session/5,552-message Chinese query: identical eight hits, 28 ordinary history
+responses versus two candidate responses. This proves that test case and
+request/byte savings, not production latency, natural busy-load P95 or a
+full-text indexing performance promise.
+
 ### 2026-10-31 Artifact Fingerprint
 
 PAO owns the default-OFF artifact-provenance policy, its immutable persisted Run
@@ -244,6 +281,60 @@ PAO is the sole owner of:
 
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
+
+Conversation commands preserve the failing stage, a safe cause and a per-operation
+diagnostic reference. A backend-reset rejection can retain the known previous
+Conversation selection; a failed storage/binding acknowledgement cannot prove
+that the write did not commit. Such outcomes remain unconfirmed, with a request
+to inspect current state before retrying. New-session cleanup is restricted to
+the pre-binding failure boundary: a possibly committed selection must never be
+archived as an inactive candidate. Cancellation propagates without being rendered
+as a failed command. These are shared PAO Functions, independent of Engine.
+
+Backend selection is one PAO-owned transaction: prepare the target configuration,
+initialize its adapter, establish its Engine Session, fence prior operations,
+then publish the selection and adopt the adapter without an intervening await.
+Each failure retains the owning stage and safe diagnostic facts. A published
+configuration durability error adopts the matching target in memory and reports
+the remaining uncertainty; it cannot restore an old selection over the published
+file. Old-adapter retirement and post-selection context setup may report a warning,
+but cannot relabel a committed selection as failed or automatically repeat it.
+The Boolean compatibility API reflects the actual live selection; UI consumers
+use the immutable per-call result to retain the reason and warning.
+
+Read-only account inspection also preserves typed Provider HTTP, connection,
+timeout and response-decoding failures through the command renderer. OpenRouter
+key inspection is qualified only for the concrete OpenRouter adapter; inheriting
+its chat transport does not authorize another Provider's credentials at that
+endpoint. Unsupported Providers return an explicit unsupported result without a
+request. Failures omit credential values, response bodies and transport URLs;
+redirects are not followed and each lookup performs one bounded-time GET.
+
+Scheduled-job views consume the SkillManager owner's strict read-only declaration
+snapshot. It accepts legacy BOM input, validates the displayed job collections,
+and reports separate read/parse failures with a safe cause and diagnostic reference.
+A missing file alone means an empty declaration set. Corrupt or inaccessible data
+must never be rendered as no configured jobs. Listing does not migrate active
+heartbeats, publish settings, create files or execute/toggle any job.
+
+Permission command failures retain a safe stage/category and diagnostic reference
+without disclosing protected request, owner, token or policy details. Local syntax
+errors are distinct from authoritative stale/rejected decisions and infrastructure
+failures. If a control submission lacks a confirmed outcome, the FC reports it as
+unconfirmed and never claims that no permission was granted or retries it. Failed
+control-button rendering is visible alongside an already readable request view.
+These presentation facts do not authenticate a user, create an authority or weaken
+the original private ingress, ownership, revision or policy checks.
+
+Administrator creation, deletion, deletion-preview and deletion-status failures
+retain the legacy primary API code and add a safe cause code, failing stage and
+diagnostic reference. Before dispatch, no Agent mutation has been submitted;
+a preview/status query never submits a new Agent change. An unconfirmed mutation
+is reported as unknown and never replayed. The PAO creation owner additionally
+retains proved facts: if creation succeeded before startup failed, the response
+states that the Agent already exists rather than inviting duplicate creation.
+These observed facts are immutable per-call data, not authentication or permission.
+Expected domain errors and the original administrator checks remain authoritative.
 
 A successful Engine response is deliverable only after PAO removes recognized
 internal control envelopes. A response containing only a recognized Memory Plus

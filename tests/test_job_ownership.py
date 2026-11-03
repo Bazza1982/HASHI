@@ -173,7 +173,7 @@ def test_jobs_text_displays_owner_mismatch(tmp_path):
         ),
         encoding="utf-8",
     )
-    skill_manager = SimpleNamespace(tasks_path=tasks_path)
+    skill_manager = SkillManager(tmp_path, tasks_path)
 
     text = _build_jobs_text("zelda", skill_manager)
 
@@ -200,7 +200,7 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
         encoding="utf-8",
     )
     runtime = SimpleNamespace(_ui_callback_tokens={})
-    skill_manager = SimpleNamespace(tasks_path=tasks_path)
+    skill_manager = SkillManager(tmp_path, tasks_path)
 
     text, markup = _build_jobs_with_buttons(runtime, "zelda", skill_manager, filter_agent="zelda")
 

@@ -5,7 +5,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
-from orchestrator.desktop_contract import ACTIONS, CONTROL_TTL, PIN_FIELDS, DesktopError
+from orchestrator.desktop_contract import ACTIONS, SUPPORTED_ACTIONS, CONTROL_TTL, PIN_FIELDS, DesktopError
 
 
 @dataclass(frozen=True)
@@ -63,10 +63,12 @@ class ManualDesktopBroker:
         return lease
 
     async def invoke_desktop(self, pin, *, actor_id, session_id, operation, args):
-        if operation not in ACTIONS or not actor_id or not session_id:
+        if operation not in SUPPORTED_ACTIONS or not actor_id or not session_id:
             raise DesktopError("desktop_invalid_operation")
         with self._lock:
             registration, token = self._desktop_record(pin)
+            if operation == "desktop_previews" and operation not in registration.supported_actions:
+                raise DesktopError("desktop_preview_unsupported", 501)
             lease = None
             arguments = dict(args)
             if operation == "desktop_control":
@@ -105,8 +107,11 @@ class ManualDesktopBroker:
                 raise DesktopError("desktop_target_changed", 409)
             if not response.get("ok"):
                 raise DesktopError(response.get("error_code", "desktop_worker_failed"), int(response.get("status", 503)))
+            if operation == "desktop_previews":
+                with self._lock:
+                    self._desktop_record(pin)
             result = response["result"]
-            if operation not in {"desktop_frame", "desktop_info", "desktop_input"}:
+            if operation not in {"desktop_frame", "desktop_previews", "desktop_info", "desktop_input"}:
                 self._audit("desktop_operation", actor_type="user", actor_id=actor_id, session_id=session_id,
                             capability_id=pin["capability_id"], operation=operation)
             return result

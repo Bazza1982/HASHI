@@ -28,6 +28,7 @@ CONTROL_METHODS = frozenset({
     "get_session_request", "list_session_requests", "withdraw_session_request",
     "issue_session_actions", "submit_session_action", "submit_session_decision",
     "login", "logout", "session_user", "manage_session", "session_summary", "native_login",
+    "personal_l1_login",
 })
 
 

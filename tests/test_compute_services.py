@@ -944,3 +944,45 @@ async def test_binary_invocation_keeps_audio_on_the_resolved_configured_origin(
             "openai.audio.speech",
             {"model": "minicpm-o-4.5-zh-female", "input": "hello"},
         )
+
+
+def _resolved_stt():
+    manifest = {"name": "Hashi Compute", "version": "0.1.0", "revision": 1,
+                "services": [{"id": "stt", "kind": "stt", "enabled": True,
+                              "status": "ready", "models": [{
+                                  "id": "sensevoice-small", "selected": True,
+                                  "endpoints": ["/v1/audio/transcriptions"]}]}]}
+    return parse_compute_manifest(_lan_node(), manifest).catalogue().resolve(
+        ComputeReference("studio-gpu", "stt", "sensevoice-small"))
+
+
+@pytest.mark.asyncio
+async def test_compute_transcription_posts_bounded_multipart_to_discovered_origin():
+    from aiohttp import FormData
+    factory = _FakeSessionFactory(_FakeResponse({"text": "你好"}))
+    client = ComputeServiceClient(session_factory=factory)
+    assert await client.transcribe(_resolved_stt(), b"ogg-audio",
+                                   filename="utterance.ogg", language="zh") == {"text": "你好"}
+    receipt = factory.receipt
+    assert receipt["url"] == "http://192.168.1.50:19446/v1/audio/transcriptions"
+    assert receipt["allow_redirects"] is False
+    assert receipt["session"]["trust_env"] is False
+    assert "Content-Type" not in receipt["headers"]
+    assert isinstance(receipt["data"], FormData)
+    fields = {item[0]["name"]: item[2] for item in receipt["data"]._fields}
+    assert fields == {"file": b"ogg-audio", "model": "sensevoice-small",
+                      "response_format": "json", "language": "zh"}
+    with pytest.raises(ComputeServiceError, match="audio"):
+        await client.transcribe(_resolved_stt(), b"x" * (8 * 1024 * 1024 + 1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    _FakeResponse({}, status=302), _FakeResponse({"text": "x"}, content_type="text/html"),
+    _FakeResponse(b"x" * (4 * 1024 * 1024 + 1)),
+    _FakeResponse({"text": ["invalid"]}),
+])
+async def test_compute_transcription_rejects_redirects_invalid_and_unbounded_results(response):
+    client = ComputeServiceClient(session_factory=_FakeSessionFactory(response))
+    with pytest.raises(ComputeServiceError):
+        await client.transcribe(_resolved_stt(), b"audio")

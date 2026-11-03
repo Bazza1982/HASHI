@@ -317,6 +317,28 @@ def test_health_requires_worker_token_and_returns_full_identity(tmp_path):
     assert health["protocol_version"] == CAPABILITY_PROTOCOL_VERSION
 
 
+def test_optional_monitor_preview_uses_the_manual_authenticated_worker_ingress(tmp_path):
+    calls = []
+    with _running_server(tmp_path) as state:
+        state.capability_kind = "computer_control"
+        def preview(action, args, actor, sid):
+            calls.append((action, args, actor, sid))
+            return {"display_revision": "layout-a", "previews": []}
+        state.manual_desktop = lambda: types.SimpleNamespace(handle=preview)
+        assert "desktop_previews" in state.supported_actions
+        payload = {
+            "protocol_version": CAPABILITY_PROTOCOL_VERSION, "request_id": "monitor-preview-a",
+            "identity": state.identity, "action": "desktop_previews",
+            "worker_generation": device_worker._generation_id("computer_control"),
+            "actor": {"type": "user", "id": "owner-a"}, "desktop_session_id": "session-a",
+            "args": {"display_ids": ["left"], "display_revision": "layout-a"},
+        }
+        denied, _ = _request(state, "/action", method="POST", payload=payload, token="wrong")
+        status, result = _request(state, "/action", method="POST", payload=payload)
+    assert denied == 401 and status == 200 and result["ok"]
+    assert calls == [("desktop_previews", payload["args"], "owner-a", "session-a")]
+
+
 def test_desktop_failure_preserves_safe_rpc_and_bounded_diagnostics(tmp_path, caplog):
     from orchestrator.desktop_contract import DesktopError
     from types import SimpleNamespace

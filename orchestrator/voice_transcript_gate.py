@@ -2,7 +2,8 @@
 
 Selecting Native audio is explicit authorization for the complete raw-audio
 Turn, including its derived local transcript, so native admission stores
-``safe_voice=False``.  Text-model routes retain the confirmation gate.
+``native_audio_authorized=True`` and ``safe_voice=False``. Disabling Safe Voice
+alone still requires a completed, durable transcript on text-model routes.
 """
 
 from __future__ import annotations

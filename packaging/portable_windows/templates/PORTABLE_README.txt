@@ -92,6 +92,13 @@ Main log:
 
 C:\HASHI-Portable\data\logs\bridge.log
 
+If the administrator launcher fails, keep its diagnostic reference. The popup
+shows the failed step and a local diagnostic path when the record could be saved.
+If startup is unconfirmed, check existing windows and status before trying again.
+如果管理员启动器失败，请保留提示中的诊断编号。弹窗会说明失败步骤，并在保存
+成功时显示本地诊断位置。启动状态未确认时，请先检查现有窗口和状态，再决定
+是否重试。
+
 Other USB launchers / USB 上的其他启动文件
 ------------------------------------------------
 Start_HASHI_TUI.bat opens the matching installed local copy. It does not run

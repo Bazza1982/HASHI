@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 _TOKEN = re.compile(r"^[A-Za-z0-9_]{1,100}$")
 _ATTACHMENT = re.compile(r"^att_[A-Za-z0-9_-]{1,100}$")
+_REFERENCE = re.compile(r"^stterr_[0-9a-f]{24}$")
 
 
 def sanitize_media_diagnostic(value: Any, *, attachment_id: Any = None) -> dict[str, Any]:
@@ -25,4 +26,7 @@ def sanitize_media_diagnostic(value: Any, *, attachment_id: Any = None) -> dict[
     identifier = attachment_id if attachment_id is not None else value.get("attachment_id")
     if isinstance(identifier, str) and _ATTACHMENT.fullmatch(identifier):
         output["attachment_id"] = identifier
+    reference = value.get("diagnostic_ref")
+    if isinstance(reference, str) and _REFERENCE.fullmatch(reference):
+        output["diagnostic_ref"] = reference
     return output

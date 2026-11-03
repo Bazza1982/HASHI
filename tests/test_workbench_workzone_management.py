@@ -106,6 +106,47 @@ async def test_workzone_add_edit_remove_are_revision_checked_and_keep_directorie
 
 
 @pytest.mark.asyncio
+async def test_workzone_add_then_remove_needs_no_fictitious_activation(api):
+    server, runtime, directories = api
+    original_active = {"revision": 0, "slots": []}
+    owner = SessionStore.owner_id_for(server.global_config)
+    async with TestClient(TestServer(server.app)) as client:
+        root = "/api/agents/momo/workzones"
+        added = await client.put(f"{root}/main", headers=headers(), json={
+            "expected_revision": 0, "mode": "add", "path": str(directories[0]),
+        })
+        assert added.status == 200
+        after_add = (await (await client.get(
+            "/api/agents/momo/overview", headers=headers(),
+        )).json())["overview"]["workzone"]
+        assert after_add["pending_activation"] is True
+
+        removed = await client.post(f"{root}/main/delete-if-unchanged",
+            headers=headers(), json={
+                "expected_revision": 1,
+                "authorization": "explicit_user_authorization",
+            })
+        assert removed.status == 200
+        assert (await removed.json())["revision"] == 2
+        for _ in range(2):
+            overview = await client.get(
+                "/api/agents/momo/overview", headers=headers(),
+            )
+            assert overview.status == 200
+            workzone = (await overview.json())["overview"]["workzone"]
+            assert workzone["slots"] == []
+            assert workzone["revision"] == 2
+            assert workzone["active_revision"] == 0
+            assert workzone["pending_activation"] is False
+        assert runtime._workzone_state == original_active
+        saved = server.session_store.get_agent_workzone_set(
+            owner_id=owner, agent_id="momo",
+        )
+        assert saved["revision"] == 2 and saved["slots"] == []
+        assert (directories[0] / "keep.txt").read_text(encoding="utf-8") == "one"
+
+
+@pytest.mark.asyncio
 async def test_workzone_rejects_invalid_paths_duplicates_and_missing_targets(api, tmp_path):
     server, _runtime, directories = api
     one, two, _three = directories

@@ -228,8 +228,9 @@ async def test_execute_local_say_audits_voice_side_effect(
             assert limit == 1
             return ["last delivered reply"]
 
-        async def _send_voice_reply(self, *args, **kwargs):
-            return voice_outcome
+        async def _send_voice_reply_result(self, *args, **kwargs):
+            from orchestrator.voice_reply_result import VoiceReplyResult
+            return VoiceReplyResult(voice_outcome)
 
         async def _reply_text(self, update, text):
             await update.message.reply_text(text)

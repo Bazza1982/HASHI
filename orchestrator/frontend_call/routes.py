@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from aiohttp import web
@@ -16,6 +17,9 @@ from .service import CallService
 from .tts import CatalogCallTTS
 from .video_tts import CallVideoTTS, VideoSpeechClient
 from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts
+
+
+logger = logging.getLogger(__name__)
 
 
 def register_call_api(api):
@@ -80,9 +84,66 @@ def register_call_api(api):
         "X-Content-Type-Options": "nosniff",
     }
 
+    def unexpected_response(error, *, body, stage, authenticated):
+        if not authenticated:
+            return web.json_response(
+                {"ok": False, "error_code": "call_internal_error"},
+                status=500,
+                headers=headers,
+            )
+        from orchestrator.api_failures import operation_failure_payload
+        from orchestrator.operation_failures import OperationFailed, operation_failure
+
+        phase = {
+            "invoke": "dispatch",
+            "response": "presentation",
+            "config_read": "read",
+            "body_read": "read",
+            "json": "parse",
+        }.get(stage, "scope")
+        readonly = isinstance(body, dict) and body.get("operation") in {
+            "route",
+            "context",
+            "snapshot",
+        }
+        dispatched = stage in {"invoke", "response"}
+        cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+        failure = (
+            error.failure
+            if isinstance(error, OperationFailed)
+            else operation_failure(
+                cause,
+                operation="call",
+                phase=phase,
+                unconfirmed=dispatched and not readonly,
+            )
+        )
+        try:
+            logger.error("Call API failure: %s", failure.diagnostic())
+        except Exception:
+            pass  # Existing call diagnostics are also best-effort.
+        effect = (
+            "not_requested"
+            if readonly
+            else "unconfirmed"
+            if dispatched
+            else "not_started"
+        )
+        return web.json_response(
+            operation_failure_payload(
+                failure,
+                error_code="call_internal_error",
+                effect_state=effect,
+                locale=body.get("locale") if isinstance(body, dict) else None,
+            ),
+            status=500,
+            headers=headers,
+        )
+
     async def handle_scoped(request):
         body = None  # Never inspect unauthed content for logging.
         stage = "profile"
+        authenticated = False
         started = time.monotonic()
         try:
             if api._is_governed_profile():
@@ -94,6 +155,7 @@ def register_call_api(api):
             owner = api._v1_owner_id(request)
             if not owner:
                 raise CallError("call_auth_required", 403)
+            authenticated = True
             stage = "content_type"
             if request.content_type != "application/json":
                 raise CallError("call_json_required", 415)
@@ -141,6 +203,10 @@ def register_call_api(api):
                     duration_ms=elapsed_ms(time.monotonic, started),
                     **error_facts(exc, "call_internal_error"),
                 )
+            if exc.code == "call_internal_error":
+                return unexpected_response(
+                    exc, body=body, stage=stage, authenticated=authenticated
+                )
             response = {"ok": False, "error_code": exc.code}
             if exc.code.startswith(("call_video_", "call_output_")):
                 from orchestrator import ui_language
@@ -163,10 +229,8 @@ def register_call_api(api):
                     duration_ms=elapsed_ms(time.monotonic, started),
                     **error_facts(exc, "call_internal_error"),
                 )
-            return web.json_response(
-                {"ok": False, "error_code": "call_internal_error"},
-                status=500,
-                headers=headers,
+            return unexpected_response(
+                exc, body=body, stage=stage, authenticated=authenticated
             )
 
     async def handle(request):

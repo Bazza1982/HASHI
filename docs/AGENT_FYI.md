@@ -1,35 +1,42 @@
 # HASHI Agent FYI
 
-- Fingerprint is OFF/Run-frozen. ON Shell needs durable audit; markers use
-  guarded atomic/Manifest; absolute paths need trusted Workzones. Never replay writes.
-  [PAO](HASHI_FINGERPRINT.md).
+- 历史搜索用私有POST/绑定游标，FC仍补旧记录并核验显示；读I/O不能阻塞HTTP。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
 
-- Telegram/Remote：[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md异步/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+- Standby控制有独立停止容量；租约仅存储、到期非停采，未接Call/Phone/设备；Judge/ARMED未合格。[阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md)。
 
-- 权限与验证：L1 模型超时通过 Adapter 配置传递，禁止赋值只读视图；
-  续跑日志按执行 epoch 区分，保留原操作和不可变事实检查；
-  完整 L1 前端实测仍独立验收。[状态](permissions/IMPLEMENTATION_STATUS.md)。
+- 文件库：PAO附件目录按owner/Agent签名游标补历史，不依赖页面；来源定位不换主Session。OCR/转写只读且显式启用，真实分段不造时间；OCR锁随源码发布；独立模型不进Core。[契约](HASHI_FILE_LIBRARY_CONTENT.md)。
+
+- Fingerprint默认OFF、按Run冻结；开启Shell须持久审计；marker用护栏原子替换/Manifest，绝对路径限可信Workzone，不重放写入。[PAO](HASHI_FINGERPRINT.md)。
+
+- PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，显式授权原生音频不等转写；原因跨入口/Worker保留；缺FFmpeg明确报错，不重试合成；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
+- 个人L1：认证前端决定、自动弹窗、免重复登录；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
+  Adapter设超时，只读视图禁写，保留epoch日志/不可变检查；实测独立验收。[权限](permissions/IMPLEMENTATION_STATUS.md)。
+- 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
   Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).
 
-- Task/local /sys + parked deletion: authenticated, revision-checked;
+- Task/local /sys + parked deletion: auth/revision checked; retain causes and unknown writes;
   /sys excludes global/permanent, parked needs guarded Worker, keeps chat.
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
 
-- Legacy audio needs verified ownership/safe paths; PAO settlement is
-  cancellation-safe; HERV3 checkpoint claims are immutable. [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md#1841-legacy-native-output-reconciliation),
+- Legacy audio migration needs verified ownership/safe paths; PAO settlement
+  is cancellation-safe; HERV3 checkpoint claims are immutable.
+  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md),
   [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
-- PAO strips internal envelopes before delivery; Memory+-only results fail
-  terminally, while typed audio remains deliverable.
-- HERV3 has no whole-run ceiling; preserve state/evidence. Safety, transport,
-  Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-- Move stages and confirms forward-only, without rollback. Clone uses PAO
-  snapshots/resumable retry, never Move gates/source writes. [Move/Clone](HASHI_AGENT_MOVE_V1.md).
-- Image fallback uses the selected model, same-Provider vision or LAN Compute,
-  and is visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
-  Compute uses PAO's fail-closed directory; no LAN-to-internet fallback.
-  [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+- PAO strips internal control envelopes before delivery checks. Memory+-only
+  results fail terminally; typed audio remains deliverable.
+- 习惯重置按实测恢复结果提示，快照/审计/界面共用诊断号；恢复不全保留快照，不覆盖原位置的新记录。
+- HERV3 has no whole-run size/time/call ceiling. Preserve state/evidence;
+  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
+- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
+  snapshots, resumable retries; no Move-only gates/source lifecycle writes.
+  [Move/Clone](HASHI_AGENT_MOVE_V1.md).
+- Image fallback: selected model, same-Provider vision, LAN Compute;
+  visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+- Compute：PAO[目录](HASHI_COMPUTE_SERVICE_DIRECTORY.md)精确选择local/LAN服务，转写设置逐请求重读，失败不静默跨网或回退本地。
+  TTS `default_voice`仅补未保存选择，不启用语音、不改已存策略；服务输入上限约束实际请求。Call独立profile共享[TTS目录](HASHI_VOICE_TTS_CATALOG.md)。
+  属Functions/实例配置；Core、源地址和运行采用独立验收。
 - Call frames are input-only/cleared camera-off; LAN targets are literal private
   IPv4 without redirects; preview is not vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
   Tool screenshots use native images, not Base64; Ollama/public Provider IDs
@@ -37,11 +44,12 @@
 
 ## Authority and ownership
 
-PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones/
-delivery; HERV3 owns Turns/model/tool/cost; Frontends own authentication/rendering.
-Use the narrowest Function/config owner. Core has no product policy/imports and
-requires major-migration approval, version bump, label and independent review.
-Flags grant nothing.
+PCM管Persona/Context/Memory；PAO管Agent/Session/Run/Job/Workzone/交付；
+HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
+功能放在最窄的Function/配置owner。Core不含产品策略或导入；改动须获准major迁移、
+升版本、加标签并独立复核。标志不授予权限。
+
+权限页面保留安全阶段/原因/编号；私密拒绝不泄漏对象，提交不明不谎称未授权，不重放；原认证和审批检查不变。
 
 Prove source, Worker adoption and delivery separately. Tools cannot alter
 Core/Python, read secrets or grant authority. `/reboot min|same`: one Worker;
@@ -77,29 +85,29 @@ Keep experiments, secrets, media and remote paths out of PCM/logs/chat/Git.
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
-JSON writes validate private candidates under lock/revision, then atomically
-replace. Display fallback is read-only; conflicts need fresh state/action,
-never blind retry/stale restore. [persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+JSON写入在锁和版本检查下验证私有候选，再原子替换；展示默认值只读。
+冲突须重读并重新选择，不自动重放，不用旧快照覆盖已发布结果。[配置持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
 
 Endpoint publication retries only bounded Windows rename blocking on the same
 fsynced candidate; permanent failure preserves state and never replays.
 
 ## Sessions, trust, and delivery
 
-PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Rebuild
-frontend history from PAO; caches match its current owner/Agent Session.
-Preserve order, atomic attachments and failed/cancelled isolation. Telegram
-proof remains partly uncertain; join Tool/job diagnostics.
+PAO管Conversation/Message/Run，Engine管Session/Turn；前端历史以PAO为准，缓存匹配owner/代理/会话。
+保留顺序、原子附件及失败/取消附件隔离；Telegram保留部分送达的不确定性，关联工具/任务诊断。
+会话/后端/代理操作保留阶段/原因/诊断号；如实区分已创建与启动不明；已写入不回滚、不重放，禁止清理可能已选中的新会话；退役失败不改变新后端已启用的事实。
+/credit仅查OpenRouter，其他后端不借继承发送凭据；鉴权/限流/连接/响应失败分别提示，不显示凭据或原始响应。
+语言/提问/备用设置区分冲突、存储与保存不明，按钮显示完整原因；回读实际值，不拿默认值冒充已保存。
 
 Non-voice attachments commit atomically to the Agent's ignored
 `.attachments/{session}/{message}/`; only its home reads them, and Session
 retention deletes them. Access failures differ from integrity mismatches;
 diagnostics omit paths.
 
-Telegram proactive routes are owner-only; revalidate actor/egress after restart.
-Only the owner's same-ID private chat binds. `/askme`: instance/Agent cards,
-off: plain text. Offer original-task continuation/Agent stop. `unknown` never
-cancels/retries; Codex expiry keeps authenticated partial answers.
+Telegram proactive routes: owner-only; revalidate actor/egress after restart.
+Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain
+text. Offer original-task continuation/Agent stop. `unknown` never cancels/retries;
+Codex expiry keeps authenticated partial answers. 无效答复不代表问题结束；按实际状态提示，结果不明先刷新核对。
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md), [questions](HASHI_RUN_QUESTIONS.md).
 
 CURRENT MESSAGE CONTEXT separates source/assurance/authority/destination. Only
@@ -115,13 +123,13 @@ Keep frontend send times. PAO admits Workbench/Telegram within 30/60 seconds;
 stale input needs durable confirmation. TUI exemptions need signed local proof,
 `/hchat` reverse-route correlation. HASHI3 is not production.
 
-Scheduler/recovery/`/bg` use an Agent-owned hidden Session; execution, delivery
-and receipts each finalize once. `/bg` freezes admission; schedules imply no
-chat. `/delay` and interactive `/loop` retain context.
+Scheduler/恢复/`/bg`用代理自己的隐藏会话；执行、交付、回执分开且各自只终结一次。
+`/bg`入队信息固定，计划任务不承诺聊天回复；`/delay`和交互`/loop`保留上下文。
+任务列表只读权威快照，读取/解析失败带原因/编号，不显示空清单或触发迁移。
 
 Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
-Telegram readiness requires separate Bot-bound app/ingress and a user;
-activation is Agent-only. Bounded polls preserve pending updates.
+Telegram须用户及Bot绑定的双向证据；单Agent启用空闲等待≤15m，校验凭据/创建/stop。
+回执或未知即停自动提交；状态只读、重试不重存，保留待收更新。
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 ## Engine, tools, and recovery
@@ -163,10 +171,8 @@ retains periodic definitions, and durably records `stopped` before cleanup.
 Never retry uncertain saves; HERV3 releases its Turn first. See
 [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
-Media bind draft/instance/Agent/Run; Remote grants no wider authority. Safe
-Voice confirm/discard is typed/idempotent; Codex discard ends the Run without a
-model call/error. Workbench retains `voice_message` but hides duplicate UI;
-ordinary audio stays visible. Telegram uses its renderer.
+媒体绑定草稿/实例/代理/Run，Remote不增权；SafeVoice同Run幂等确认/丢弃，各Engine正常终止且不调模型。
+Workbench保留`voice_message`来源并去重界面，普通音频保持可见；Telegram用自身renderer。
 
 Phone binds the owner's foreground Conversation. Dialogue-round HCC uses bound
 PCM/Conversation/job evidence, never raw metadata/scheduled prompts; lookups

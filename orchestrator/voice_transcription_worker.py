@@ -9,12 +9,30 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import logging
 import re
 import sys
 from pathlib import Path
 from typing import Any, BinaryIO
+
+if __package__:
+    from orchestrator.voice_transcription_result import TranscriptionFailed, transcription_failure
+else:
+    # -I excludes both cwd and the script directory. Load only the companion
+    # pinned beside this generation's worker, without adding an import root.
+    _result_name = "_hashi_voice_transcription_result"
+    _result_spec = importlib.util.spec_from_file_location(
+        _result_name, Path(__file__).with_name("voice_transcription_result.py"),
+    )
+    if _result_spec is None or _result_spec.loader is None:
+        raise ImportError("Pinned transcription result module is unavailable")
+    _result_module = importlib.util.module_from_spec(_result_spec)
+    sys.modules[_result_name] = _result_module
+    _result_spec.loader.exec_module(_result_module)
+    TranscriptionFailed = _result_module.TranscriptionFailed
+    transcription_failure = _result_module.transcription_failure
 
 PROTOCOL_VERSION = 1
 DEFAULT_MODEL_SIZE = "small"
@@ -90,22 +108,31 @@ class _ModelRuntime:
         *,
         model_size: str,
         language: str | None,
+        include_segments: bool = False,
     ) -> dict[str, Any]:
-        model, device, compute_type = self._model(model_size, language)
+        try:
+            model, device, compute_type = self._model(model_size, language)
+        except Exception as error:
+            raise TranscriptionFailed(transcription_failure(error, phase="model")) from error
         segments, info = model.transcribe(
             str(audio_path),
             language=language,
             beam_size=5,
             vad_filter=True,
         )
-        text = " ".join(
-            str(segment.text or "").replace("\x00", "").strip()
-            for segment in segments
-        ).strip()
+        parts, timed = [], []
+        for segment in segments:
+            parts.append(str(segment.text or "").replace("\x00", "").strip())
+            if include_segments:
+                timed.append({"start": segment.start, "end": segment.end, "text": parts[-1]})
+                if len(timed) > 20000:
+                    raise ValueError("transcription segment limit exceeded")
+        text = " ".join(parts).strip()
         if len(text.encode("utf-8")) > MAX_OUTPUT_BYTES // 2:
             raise ValueError("transcription text exceeded its protocol limit")
         return {
             "text": text,
+            **({"segments": timed} if include_segments else {}),
             "device": device,
             "compute_type": compute_type,
             "language": str(getattr(info, "language", "") or ""),
@@ -116,8 +143,8 @@ class _ModelRuntime:
         }
 
 
-def _request_payload(raw: str) -> dict[str, Any]:
-    value = json.loads(raw)
+def _request_payload(raw: str | dict[str, Any]) -> dict[str, Any]:
+    value = json.loads(raw) if isinstance(raw, str) else raw
     if not isinstance(value, dict):
         raise ValueError("request must be an object")
     if value.get("version") != PROTOCOL_VERSION:
@@ -137,7 +164,11 @@ def _request_payload(raw: str) -> dict[str, Any]:
     audio_path = Path(str(value.get("audio_path") or "")).resolve()
     if not audio_path.is_file():
         raise ValueError("audio file is unavailable")
+    include_segments = value.get("include_segments", False)
+    if not isinstance(include_segments, bool):
+        raise ValueError("include_segments must be a boolean")
     return {
+        "include_segments": include_segments,
         "id": request_id,
         "audio_path": audio_path,
         "model_size": model_size,
@@ -158,14 +189,25 @@ def _serve() -> int:
     runtime = _ModelRuntime()
     for raw in sys.stdin.buffer:
         request_id = ""
+        phase = "input"
         try:
-            request = _request_payload(raw.decode("utf-8"))
+            value = json.loads(raw.decode("utf-8"))
+            # A valid correlation ID survives an input rejection, so the parent
+            # receives the actual cause rather than a false protocol mismatch.
+            candidate_id = value.get("id") if isinstance(value, dict) else None
+            if isinstance(candidate_id, str) and 0 < len(candidate_id) <= 128:
+                request_id = candidate_id
+            request = _request_payload(value)
             request_id = request["id"]
+            phase = "worker"
             result = runtime.transcribe(
                 request["audio_path"],
                 model_size=request["model_size"],
                 language=request["language"],
+                **({"include_segments": True} if request["include_segments"] else {}),
             )
+            if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES - 1024:
+                raise ValueError("transcription result exceeded its protocol limit")
             payload = {
                 "version": PROTOCOL_VERSION,
                 "id": request_id,
@@ -173,12 +215,14 @@ def _serve() -> int:
                 **result,
             }
         except Exception as exc:
-            logger.exception("Isolated transcription request failed")
+            failure = transcription_failure(exc, phase=phase)
+            logger.exception("Isolated transcription failure: %s", json.dumps(failure.as_dict()))
             payload = {
                 "version": PROTOCOL_VERSION,
                 "id": request_id,
                 "ok": False,
-                "error": f"{type(exc).__name__}: {exc}"[:500],
+                "error": str(TranscriptionFailed(failure)),
+                "failure": failure.as_dict(),
             }
         _write_result(payload)
     return 0

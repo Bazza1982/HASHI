@@ -208,14 +208,16 @@ class PermissionDecisionController:
              subject.context_generation, presentation_id],
             ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
-        choices = [("approve", lifetime) for lifetime in ("task", "run", "ttl", "once")
+        choices = [("approve", lifetime, duration) for lifetime in ("task", "run", "ttl", "once")
                    if lifetime != "once" or request.operation_id]
-        choices.append(("deny", "task"))
+        # Shorter choices are derived from the policy ceiling, not extra grants.
+        choices.extend(("approve", "ttl", seconds) for seconds in (600, 3600) if seconds < duration)
+        choices.append(("deny", "task", duration))
         return tuple(self._authority.issue_decision_action(
             binding.context, request_id, revision, approved_scopes=request.scopes,
-            choice=choice, lifetime=lifetime, duration_seconds=duration,
-            presentation_id=presentation, presentation_slot=choice + "_" + lifetime,
-        ) for choice, lifetime in choices)
+            choice=choice, lifetime=lifetime, duration_seconds=seconds,
+            presentation_id=presentation, presentation_slot=choice + "_" + lifetime + "_" + str(seconds),
+        ) for choice, lifetime, seconds in choices)
 
     def submit_session_action(self, subject, action_id, *, session_token):
         if not isinstance(subject, PermissionSubject) or self._gateway.owner_from_session(session_token) != subject.owner_id:

@@ -60,6 +60,48 @@ class VoiceSynthesisError(RuntimeError):
         self.code = str(code)
         self.failures = tuple(failures)
 
+    def as_wire_result(self) -> dict:
+        """Carry this safe Function result through the existing JSON protocol."""
+        payload = {
+            "type": "hashi.voice-synthesis-failure", "version": 1,
+            "code": self.code, "reason": safe_voice_error_detail(self),
+            "failures": [
+                {**failure.as_dict(), "reason": safe_voice_error_detail(failure.reason)}
+                for failure in self.failures
+            ],
+        }
+        self.from_wire_result(payload)
+        return payload
+
+    @classmethod
+    def from_wire_result(cls, value: object) -> "VoiceSynthesisError | None":
+        if not isinstance(value, dict) or value.get("type") != "hashi.voice-synthesis-failure":
+            return None
+
+        def identifier(item: object) -> bool:
+            return isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", item) is not None
+
+        def reason(item: object) -> bool:
+            return isinstance(item, str) and 0 < len(item) <= 500
+
+        if (set(value) != {"type", "version", "code", "reason", "failures"}
+                or type(value.get("version")) is not int or value["version"] != 1
+                or not identifier(value.get("code")) or not reason(value.get("reason"))
+                or not isinstance(value.get("failures"), list) or len(value["failures"]) > 16):
+            raise ValueError("Invalid speech failure result")
+        failures = []
+        for failure in value["failures"]:
+            if (not isinstance(failure, dict)
+                    or set(failure) != {"provider", "code", "reason", "retryable"}
+                    or not identifier(failure.get("provider")) or not identifier(failure.get("code"))
+                    or not reason(failure.get("reason")) or type(failure.get("retryable")) is not bool):
+                raise ValueError("Invalid speech provider failure")
+            failures.append(VoiceProviderFailure(
+                failure["provider"], failure["code"], safe_voice_error_detail(failure["reason"]),
+                failure["retryable"],
+            ))
+        return cls(value["code"], safe_voice_error_detail(value["reason"]), failures=failures)
+
 
 def safe_voice_error_detail(value: object, *, max_chars: int = 500) -> str:
     """Keep a useful reason while removing service URLs and common secret pairs."""
@@ -111,21 +153,33 @@ def prepare_spoken_text(text: str, max_chars: int = 1200) -> str:
 
 async def convert_audio_to_ogg(ffmpeg_cmd: str, input_path: Path, ogg_path: Path):
     converter = configured_media_executable("ffmpeg") or ffmpeg_cmd
-    proc = await asyncio.create_subprocess_exec(
-        converter,
-        "-y",
-        "-i",
-        str(input_path),
-        "-ac",
-        "1",
-        "-ar",
-        "48000",
-        "-c:a",
-        "libopus",
-        str(ogg_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            converter,
+            "-y",
+            "-i",
+            str(input_path),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libopus",
+            str(ogg_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise VoiceSynthesisError(
+            "tts_audio_conversion_failed",
+            "FFmpeg audio conversion cannot start: the converter is unavailable. "
+            "Configure the instance media executable before retrying.",
+        ) from exc
+    except OSError as exc:
+        raise VoiceSynthesisError(
+            "tts_audio_conversion_failed",
+            f"FFmpeg audio conversion could not start: {safe_voice_error_detail(exc)}",
+        ) from exc
     _, stderr = await proc.communicate()
     if proc.returncode != 0 or not ogg_path.exists():
         err = stderr.decode("utf-8", errors="replace").strip()

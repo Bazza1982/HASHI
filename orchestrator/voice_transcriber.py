@@ -1,10 +1,10 @@
 """
-Local voice-to-text transcription using faster-whisper.
+Instance-configured Compute STT or isolated local faster-whisper transcription.
 
 Provides GPU-accelerated (CUDA) or CPU-based speech-to-text for all agents.
-Voice/audio messages from Telegram are transcribed locally before dispatch
-to any backend, so every backend gets plain text regardless of whether it
-supports audio files natively.
+Transcript-first voice routes use the selected service before Engine dispatch.
+PAO owns their shared confirmation and discard contract; authorized native
+voice routes consume audio independently of their derived audit transcript.
 
 Device selection priority:
   1. CUDA GPU  (if available — requires nvidia GPU + CUDA toolkit)
@@ -23,6 +23,15 @@ import os
 from pathlib import Path
 
 from orchestrator import voice_transcription_worker
+from orchestrator.config_json import read_config_json
+from orchestrator.voice_transcription_result import (
+    TranscriptionFailed, TranscriptionFailure, TranscriptionProtocolError,
+    TranscriptionResult, transcription_failure, transcription_segments,
+)
+from orchestrator.compute_services import (
+    ComputeReference, ComputeRequirements, ComputeServiceClient,
+    ComputeServiceDirectory, ComputeServicesConfig,
+)
 
 logger = logging.getLogger("VoiceTranscriber")
 
@@ -30,6 +39,18 @@ logger = logging.getLogger("VoiceTranscriber")
 DEFAULT_MODEL_SIZE = voice_transcription_worker.DEFAULT_MODEL_SIZE
 DEFAULT_LANGUAGE = None  # None = auto-detect
 EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
+
+
+def _transcription_configuration() -> tuple[Path, dict]:
+    root = Path(os.environ.get("BRIDGE_HOME") or os.environ.get("HASHI_SOURCE_ROOT")
+                or Path(__file__).resolve().parents[1])
+    try:
+        config = read_config_json(root / "state" / "platform" / "transcription.json")
+    except FileNotFoundError:
+        return root, {}
+    if config.get("provider", "local") not in {"local", "compute"}:
+        raise ValueError("transcription provider is unsupported")
+    return root, config
 
 
 def _external_python() -> str:
@@ -123,31 +144,82 @@ class VoiceTranscriber:
         return "cpu", "int8"
 
     async def transcribe(self, audio_path: str | Path) -> str:
-        """
-        Transcribe an audio file to text.
+        """Compatibility text API; errors contain safe codes and a diagnostic reference."""
+        return (await self.transcribe_result(audio_path)).legacy_text()
 
-        Runs the model in a thread executor to avoid blocking the event loop.
-        Returns the transcribed text, or an error message string prefixed
-        with [Transcription error] on failure.
-        """
-        audio_path = Path(audio_path)
-        if not audio_path.exists():
-            return f"[Transcription error] File not found: {audio_path}"
-
+    async def transcribe_result(self, audio_path: str | Path, *, include_segments: bool = False) -> TranscriptionResult:
+        """Return immutable facts for this call, independently of Engine and PAO state."""
+        phase = "input"
         try:
-            external_python = _external_python()
-            if external_python:
-                return await self._transcribe_external(audio_path, external_python)
-            loop = asyncio.get_running_loop()
-            async with self._lock:
-                # Lazy load on first call
-                if self._model is None:
-                    await loop.run_in_executor(None, self._load_model)
-            text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
-            return text
-        except Exception as e:
-            logger.error(f"Transcription failed for {audio_path}: {e}", exc_info=True)
-            return f"[Transcription error] {e}"
+            audio_path = Path(audio_path)
+            if not audio_path.is_file():
+                raise FileNotFoundError()
+            phase = "configuration"
+            root, config = _transcription_configuration()
+            if config.get("provider") == "compute":
+                phase = "compute"
+                text = await self._transcribe_compute(audio_path, root, config)
+            else:
+                external_python = _external_python()
+                if external_python:
+                    phase = "external"
+                    text = await self._transcribe_external(audio_path, external_python, include_segments=True) if include_segments else await self._transcribe_external(audio_path, external_python)
+                else:
+                    loop = asyncio.get_running_loop()
+                    phase = "model"
+                    async with self._lock:
+                        if self._model is None:
+                            await loop.run_in_executor(None, self._load_model)
+                    phase = "local"
+                    if include_segments:
+                        text = await loop.run_in_executor(None, lambda: self._transcribe_sync(str(audio_path), include_segments=True))
+                    else:
+                        text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
+            segments = ()
+            if include_segments and isinstance(text, dict):
+                segments = transcription_segments(text.get("segments", []))
+                text = text.get("text")
+            if not isinstance(text, str):
+                raise TranscriptionProtocolError()
+            return TranscriptionResult(text=text, segments=segments)
+        except Exception as error:
+            failure = transcription_failure(error, phase=phase)
+            logger.exception("Transcription failure: %s", json.dumps(failure.as_dict()))
+            return TranscriptionResult(failure=failure)
+
+    async def _transcribe_compute(self, audio_path: Path, root: Path, config: dict) -> str:
+        reference = config.get("compute")
+        if not isinstance(reference, dict):
+            raise ValueError("transcription Compute reference is required")
+        selected = ComputeReference(**reference)
+        suffix = audio_path.suffix.casefold()
+        if suffix not in {".wav", ".ogg", ".mp3", ".m4a", ".webm", ".flac", ".mp4", ".aac"}:
+            raise ValueError("transcription audio format is unsupported")
+        # Bound the read as well as the HTTP upload, including files that grow.
+        with audio_path.open("rb") as handle:
+            audio = handle.read(8 * 1024 * 1024 + 1)
+        if not 1 <= len(audio) <= 8 * 1024 * 1024:
+            raise ValueError("transcription audio exceeds the service upload limit")
+        async with self._lock:
+            client = ComputeServiceClient()
+            directory = ComputeServiceDirectory(
+                ComputeServicesConfig(root / "compute_services.json"), client=client
+            )
+            refreshed = await directory.refresh()
+            resolved = refreshed.catalogue.resolve(
+                selected,
+                ComputeRequirements(
+                    input_modalities=frozenset({"audio"}),
+                    output_modalities=frozenset({"text"}),
+                    protocols=frozenset({"openai.audio.transcriptions"}),
+                    locations=frozenset({"local", "lan"}),
+                ),
+            )
+            result = await client.transcribe(
+                resolved, audio, filename="utterance" + suffix, language=self.language
+            )
+        logger.info("Compute transcription complete: %d chars", len(result["text"]))
+        return str(result["text"]).strip()
 
     def _detach_external_process(self):
         process = self._external_process
@@ -209,10 +281,10 @@ class VoiceTranscriber:
         for _ in range(1000):
             raw = await process.stdout.readline()
             if not raw:
-                raise RuntimeError("isolated transcription worker exited without a result")
+                raise TranscriptionProtocolError("isolated transcription worker exited without a result")
             total_bytes += len(raw)
             if total_bytes > voice_transcription_worker.MAX_OUTPUT_BYTES:
-                raise RuntimeError("isolated transcription worker output exceeded its limit")
+                raise TranscriptionProtocolError("isolated transcription worker output exceeded its limit")
             line = raw.decode("utf-8", errors="replace").strip()
             if not line.startswith(voice_transcription_worker.RESULT_PREFIX):
                 continue
@@ -221,19 +293,20 @@ class VoiceTranscriber:
                     line[len(voice_transcription_worker.RESULT_PREFIX) :]
                 )
             except json.JSONDecodeError as exc:
-                raise RuntimeError(
+                raise TranscriptionProtocolError(
                     "isolated transcription worker returned invalid JSON"
                 ) from exc
             if not isinstance(payload, dict):
-                raise RuntimeError("isolated transcription worker returned an invalid result")
-            if payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION:
-                raise RuntimeError("isolated transcription worker protocol does not match")
-            if str(payload.get("id") or "") != request_id:
-                raise RuntimeError("isolated transcription worker response ID does not match")
+                raise TranscriptionProtocolError("isolated transcription worker returned an invalid result")
+            if (type(payload.get("version")) is not int
+                    or payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION):
+                raise TranscriptionProtocolError("isolated transcription worker protocol does not match")
+            if payload.get("id") != request_id:
+                raise TranscriptionProtocolError("isolated transcription worker response ID does not match")
             return payload
-        raise RuntimeError("isolated transcription worker returned too many log lines")
+        raise TranscriptionProtocolError("isolated transcription worker returned too many log lines")
 
-    async def _transcribe_external(self, audio_path: Path, python: str) -> str:
+    async def _transcribe_external(self, audio_path: Path, python: str, *, include_segments: bool = False):
         async with self._lock:
             process = await self._ensure_external_process(python)
             self._external_request_sequence += 1
@@ -244,6 +317,7 @@ class VoiceTranscriber:
                 "audio_path": str(audio_path.resolve()),
                 "model_size": self.model_size,
                 "language": self.language,
+                **({"include_segments": True} if include_segments else {}),
             }
             try:
                 process.stdin.write(
@@ -254,13 +328,14 @@ class VoiceTranscriber:
                     self._read_external_result(process, request_id),
                     timeout=EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS,
                 )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 await self.aclose()
                 raise
         if not payload.get("ok"):
-            raise RuntimeError(
-                str(payload.get("error") or "isolated transcription worker failed")[:500]
-            )
+            failure = TranscriptionFailure.from_dict(payload.get("failure"))
+            if failure is None:
+                failure = transcription_failure(TranscriptionProtocolError(), phase="external")
+            raise TranscriptionFailed(failure)
         self._device = str(payload.get("device") or "") or None
         self._compute_type = str(payload.get("compute_type") or "") or None
         logger.info(
@@ -269,9 +344,9 @@ class VoiceTranscriber:
             str(payload.get("language") or "unknown"),
             float(payload.get("duration") or 0.0),
         )
-        return str(payload.get("text") or "").strip()
+        return payload if include_segments else str(payload.get("text") or "").strip()
 
-    def _transcribe_sync(self, audio_path: str) -> str:
+    def _transcribe_sync(self, audio_path: str, *, include_segments: bool = False):
         """Synchronous transcription (runs in executor thread)."""
         segments, info = self._model.transcribe(
             audio_path,
@@ -286,13 +361,15 @@ class VoiceTranscriber:
             f"(probability={lang_prob:.2f}), duration={info.duration:.1f}s"
         )
 
-        parts = []
+        parts, timed = [], []
         for segment in segments:
             parts.append(segment.text.strip())
+            if include_segments:
+                timed.append({"start": segment.start, "end": segment.end, "text": segment.text})
 
         text = " ".join(parts).strip()
         logger.info(f"Transcription complete: {len(text)} chars")
-        return text
+        return {"text": text, "segments": timed} if include_segments else text
 
 
 # Module-level singleton — shared by all agents

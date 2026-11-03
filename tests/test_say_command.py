@@ -18,6 +18,7 @@ from orchestrator import runtime_session
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
+from orchestrator.voice_reply_result import VoiceReplyResult
 from orchestrator.say_command import (
     SaySelection,
     is_speakable_final_reply,
@@ -96,12 +97,12 @@ async def test_cmd_say_forces_voice_even_when_voice_replies_are_off():
                 "force": force,
             }
         )
-        return True
+        return VoiceReplyResult(True)
 
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
         _load_recent_visible_assistant_texts=lambda update, limit: ["last assistant reply"],
-        _send_voice_reply=send_voice,
+        _send_voice_reply_result=send_voice,
         _reply_text=lambda update, text: replies.append(text),
     )
     update = SimpleNamespace(
@@ -123,12 +124,12 @@ async def test_cmd_say_reads_three_delivered_replies_oldest_first():
 
     async def send_voice(chat_id, text, request_id, force=False):
         calls.append(text)
-        return True
+        return VoiceReplyResult(True)
 
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
         _load_recent_visible_assistant_texts=lambda update, limit: ["third", "second", "first"],
-        _send_voice_reply=send_voice,
+        _send_voice_reply_result=send_voice,
     )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=123), effective_chat=SimpleNamespace(id=456)
@@ -144,7 +145,7 @@ async def test_cmd_say_partial_range_reports_available_count():
 
     async def send_voice(chat_id, text, request_id, force=False):
         spoken.append(text)
-        return True
+        return VoiceReplyResult(True)
 
     async def reply_text(update, text):
         notices.append(text)
@@ -152,7 +153,7 @@ async def test_cmd_say_partial_range_reports_available_count():
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
         _load_recent_visible_assistant_texts=lambda update, limit: ["third", "second", "first"],
-        _send_voice_reply=send_voice,
+        _send_voice_reply_result=send_voice,
         _reply_text=reply_text,
     )
     update = SimpleNamespace(

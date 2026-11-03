@@ -348,6 +348,48 @@ async def test_handle_document_downloads_and_enqueues(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['download', 'store', 'admit'])
+async def test_media_failure_preserves_stage_cause_and_admission_uncertainty(tmp_path, monkeypatch, phase):
+    import errno
+    import re
+    from unittest.mock import AsyncMock
+    from orchestrator import telegram_media_admission
+    runtime = _runtime(tmp_path)
+    runtime.global_config = SimpleNamespace(ui_language='zh-CN')
+    update = _update(document=SimpleNamespace(file_name='notes.txt', file_id='file-1'), caption='first\nsecond')
+    private = 'private-token-caption-and-url'
+    if phase == 'download':
+        runtime.download_media = AsyncMock(side_effect=OSError(errno.ENOSPC, private))
+    elif phase == 'store':
+        monkeypatch.setattr(telegram_media_admission, 'admit_telegram_media',
+                            lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(private)))
+    else:
+        original = runtime.enqueue_request
+        async def committed_then_lost(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise RuntimeError(private)
+        runtime.enqueue_request = AsyncMock(side_effect=committed_then_lost)
+    await runtime_media.handle_document(runtime, update, SimpleNamespace())
+    feedback = runtime.replies[-1]['text']
+    assert private not in feedback
+    if phase == 'download':
+        assert '下载附件' in feedback and '磁盘可用空间不足' in feedback
+        assert '尚未提交' in feedback and runtime.enqueued == []
+    elif phase == 'store':
+        assert '保存附件' in feedback and '访问被拒绝' in feedback
+        assert '尚未提交' in feedback and runtime.enqueued == []
+    else:
+        assert '提交任务' in feedback and '提交结果尚未确认' in feedback
+        assert '尚未提交' not in feedback
+        assert len(runtime.enqueued) == 1
+        assert runtime.enqueue_request.await_count == 1
+    reference = re.search(r'fcerr_[0-9a-f]{24}', feedback)
+    assert reference, feedback
+    diagnostics = '\n'.join(message for _, message in runtime.error_logger.messages)
+    assert reference.group() in diagnostics and private not in diagnostics
+
+
+@pytest.mark.asyncio
 async def test_download_media_retries_transient_telegram_timeout(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     runtime.app.bot = _FlakyBot()

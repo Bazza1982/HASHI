@@ -335,6 +335,7 @@ class VoiceManager:
             self._voice_catalog_error = exc
         self._voice_catalog_signature = self._catalog_signature()
         self.VOICE_PRESETS = self.voice_catalog.presets
+        self._apply_catalog_default_state()
         self._provider_cooldowns: dict[str, tuple[float, VoiceProviderFailure]] = {}
         self.voice_audit_path = self.workspace_dir / "logs" / "voice_synthesis.jsonl"
         self._voice_audit_lock = threading.Lock()
@@ -367,6 +368,32 @@ class VoiceManager:
         self.VOICE_PRESETS = catalog.presets
         self._voice_catalog_error = None
         self._voice_catalog_signature = signature
+        self._apply_catalog_default_state()
+
+    def _catalog_default_voice(self) -> tuple[str, str] | None:
+        """Prefer the instance Compute Kokoro voice for a new Agent's /voice."""
+        for service_id, preferred in (
+            ("hashi-compute-kokoro", "hc_k_zf_001"),
+            ("hashi-compute-minicpm", "hc_m_zf_001"),
+        ):
+            if service_id not in self.voice_catalog.service_ids:
+                continue
+            aliases = list(self.voice_catalog.voice_ids(service_id))
+            if not aliases:
+                continue
+            alias = preferred if preferred in aliases else aliases[0]
+            preset = self.voice_catalog.preset(alias)
+            return service_id, str(preset["voice_name"])
+        return None
+
+    def _apply_catalog_default_state(self) -> None:
+        """Use a configured Compute voice for Agents with no saved choice."""
+        self.DEFAULT_STATE = copy.deepcopy(type(self).DEFAULT_STATE)
+        if self.catalog_path is None:
+            return
+        selected = self._catalog_default_voice()
+        if selected is not None:
+            self.DEFAULT_STATE["provider"], self.DEFAULT_STATE["voice_name"] = selected
 
     def _require_voice_catalog(self) -> None:
         self._refresh_voice_catalog()
@@ -1034,7 +1061,14 @@ class VoiceManager:
         )
 
     def _normalise_state(self, data: dict) -> dict:
+        self._refresh_voice_catalog()
         merged = copy.deepcopy(self.DEFAULT_STATE)
+        # Instance defaults seed unsaved selections; an explicit Agent choice
+        # (including an OS provider or a null voice) remains authoritative.
+        if "provider" not in data and self.voice_catalog.default_voice is not None:
+            preset = self.voice_catalog.preset(self.voice_catalog.default_voice)
+            for key in ("provider", "voice_name", "provider_options"):
+                merged[key] = copy.deepcopy(preset[key])
         merged.update(data)
         if not isinstance(merged.get("provider_options"), dict):
             merged["provider_options"] = {}
@@ -1053,10 +1087,10 @@ class VoiceManager:
         try:
             return self._normalise_state(dict(read_config_json(self.state_path)))
         except FileNotFoundError:
-            return copy.deepcopy(self.DEFAULT_STATE)
+            return self._normalise_state({})
         except (OSError, ValueError, TypeError):
             # Reads remain backwards compatible and fail to safe defaults.
-            return copy.deepcopy(self.DEFAULT_STATE)
+            return self._normalise_state({})
 
     def _update(self, mutate: Callable[[dict], None], *, retries: int = 4) -> dict:
         """Fresh-read mutation that never overwrites corrupt or newer state."""
@@ -1069,7 +1103,7 @@ class VoiceManager:
             state = self._normalise_state(dict(document))
         except FileNotFoundError:
             revision = None
-            state = copy.deepcopy(self.DEFAULT_STATE)
+            state = self._normalise_state({})
         except (OSError, ValueError, TypeError) as exc:
             raise RuntimeError(
                 f"Voice state is unreadable; no settings were changed: {exc}"

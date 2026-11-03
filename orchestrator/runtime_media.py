@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut
 
 from orchestrator import runtime_long, ui_language
+from orchestrator.frontend_failures import frontend_failure
 from orchestrator.media_utils import is_image_file
 from orchestrator.multimodal_contract import (
     attachment_manifest,
@@ -23,6 +25,7 @@ from orchestrator.multimodal_contract import (
     request_content_is_voice_origin,
 )
 from orchestrator.runtime_common import _print_user_message
+from orchestrator.voice_transcription_result import TranscriptionFailed, TranscriptionFailure, transcribe_audio
 from orchestrator.voice_transcript_gate import (
     complete_native_audio_response,
     release_deferred_transcript,
@@ -452,8 +455,10 @@ async def handle_media_message(
         summary,
         transport_metadata=_transport_metadata(update, filename),
     )
+    phase = "download"
     try:
         local_path = await runtime.download_media(file_id, filename)
+        phase = "validate"
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
         if reservation_id is not None and runtime_long.complete_media(
             runtime,
@@ -473,6 +478,7 @@ async def handle_media_message(
         )
         from orchestrator.telegram_media_admission import admit_telegram_media
 
+        phase = "store"
         rendered_prompt, request_content, request_metadata = await asyncio.to_thread(
             admit_telegram_media,
             runtime,
@@ -484,6 +490,7 @@ async def handle_media_message(
                 "ingress_transport": "telegram",
             },
         )
+        phase = "admit"
         await runtime.enqueue_request(
             chat_id,
             rendered_prompt,
@@ -495,11 +502,15 @@ async def handle_media_message(
     except Exception as e:
         if reservation_id is not None:
             runtime_long.discard_media_reservation(runtime, reservation_id)
-        runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
+        failure = frontend_failure(e, phase=phase, submission_state=(
+            "unconfirmed" if phase == "admit" else "not_submitted"))
+        runtime.error_logger.exception("Frontend media failure: " + json.dumps(failure.diagnostic()))
+        locale = ui_language.preferred_locale(runtime, update)
         try:
             await runtime._reply_text(
                 update,
-                ui_language.tr("media.failed", kind=_media_kind_label(media_kind)),
+                ui_language.tr("media.failed", locale=locale, kind=_media_kind_label(media_kind))
+                + "\n" + failure.render(locale=locale),
             )
         except Exception:
             pass
@@ -930,6 +941,11 @@ class VoiceIngressError(ValueError):
     This is not the Session-native audio confirmation transport.
     """
 
+    def __init__(self, code: str, *, failure: Any = None):
+        super().__init__(code)
+        fact = TranscriptionFailure.from_dict(failure)
+        self.failure = fact.as_dict() if fact else None
+
 
 async def enqueue_api_voice(
     runtime: Any,
@@ -979,13 +995,16 @@ async def enqueue_api_voice(
         audio_digest = await asyncio.to_thread(
             lambda: hashlib.sha256(Path(local_path).read_bytes()).hexdigest()
         )
-        transcript = str(await get_transcriber().transcribe(local_path)).strip()
+        outcome = await transcribe_audio(get_transcriber(), local_path)
     except Exception as exc:
-        raise VoiceIngressError("voice_transcription_unavailable") from exc
-    if transcript.startswith("[Transcription error]"):
-        raise VoiceIngressError("voice_transcription_unavailable")
-    if not transcript:
-        raise VoiceIngressError("voice_transcription_empty")
+        from orchestrator.voice_transcription_result import transcription_failure
+
+        failure = transcription_failure(exc, phase="input")
+        raise VoiceIngressError("voice_transcription_unavailable", failure=failure.as_dict()) from exc
+    if not outcome.ok:
+        code = "voice_transcription_empty" if outcome.failure.code == "TRANSCRIPTION_EMPTY" else "voice_transcription_unavailable"
+        raise VoiceIngressError(code, failure=outcome.failure.as_dict()) from TranscriptionFailed(outcome.failure)
+    transcript = outcome.text
     safe_voice_required = safe_voice_at_start or bool(
         getattr(runtime, "_safevoice_enabled", False)
     )
@@ -1057,6 +1076,19 @@ async def enqueue_api_voice(
     )
 
 
+async def _report_voice_transcription_failure(runtime: Any, update: Any,
+                                              failure: TranscriptionFailure, *,
+                                              submission_state: str) -> None:
+    public = frontend_failure(TranscriptionFailed(failure), phase="transcribe",
+                              submission_state=submission_state)
+    runtime.error_logger.error("Voice transcription failure: " + json.dumps(public.diagnostic()))
+    locale = ui_language.preferred_locale(runtime, update)
+    try:
+        await runtime._reply_text(update, public.render(locale=locale))
+    except Exception as notice_error:
+        runtime.error_logger.error(f"Voice error notice unconfirmed ({type(notice_error).__name__}); no replay")
+
+
 async def handle_voice_or_audio(
     runtime: Any,
     update: Any,
@@ -1071,8 +1103,11 @@ async def handle_voice_or_audio(
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
     _print_user_message(runtime.name, f"Transcribing {filename}...", media_tag=media_kind)
+    phase, admission_started, submitted = "download", False, False
+    transcript_state = None
     try:
         local_path = await runtime.download_media(file_id, filename)
+        phase = "validate"
         backend = getattr(runtime.backend_manager, "current_backend", None)
         manager = getattr(runtime, "voice_manager", None)
         native_enabled = getattr(manager, "native_audio_enabled", None)
@@ -1111,9 +1146,11 @@ async def handle_voice_or_audio(
 
         from orchestrator.voice_transcriber import get_transcriber
 
+        phase = "transcribe"
         transcriber = get_transcriber()
         if native_audio:
-            transcript_task = asyncio.create_task(transcriber.transcribe(local_path))
+            transcript_task = asyncio.create_task(transcribe_audio(transcriber, local_path))
+            phase = "store"
             request_content, manifest, request_metadata = (
                 _admit_native_telegram_audio(
                     runtime,
@@ -1138,6 +1175,7 @@ async def handle_voice_or_audio(
                 "attachment_id": attachment_id,
                 # Choosing Native is explicit authorization for the complete
                 # raw-audio Turn, including its one derived audit transcript.
+                "native_audio_authorized": True,
                 "safe_voice": False,
                 "confirmation_requested": False,
                 "confirmation_presented": False,
@@ -1187,6 +1225,7 @@ async def handle_voice_or_audio(
             registry[attachment_id] = transcript_state
             request_metadata["voice_transcript_key"] = attachment_id
             request_metadata["safe_voice"] = False
+            phase, admission_started = "admit", True
             request_id = await runtime.enqueue_request(
                 update.effective_chat.id,
                 caption,
@@ -1195,33 +1234,35 @@ async def handle_voice_or_audio(
                 request_metadata=request_metadata,
                 request_content=request_content,
             )
+            submitted = isinstance(request_id, str) and bool(request_id.strip())
+            phase = "transcribe"
             if request_id:
                 transcript_state["request_id"] = str(request_id)
                 registry[str(request_id)] = transcript_state
 
-            transcript = await transcript_task
-            if transcript.startswith("[Transcription error]"):
+            outcome = await transcript_task
+            transcript = outcome.text
+            if not outcome.ok:
+                transcript_state["failure"] = outcome.failure.as_dict()
                 transcript_state["status"] = "unavailable"
                 transcript_state["ready_event"].set()
                 transcript_state["release_event"].set()
-                runtime.error_logger.error(
-                    f"Voice transcription failed for {filename}: {transcript}"
-                )
-                await runtime._reply_text(
-                    update,
-                    ui_language.tr("media.local_transcription_unavailable"),
-                )
+                await _report_voice_transcription_failure(runtime, update, outcome.failure,
+                    submission_state="submitted" if submitted else "unconfirmed")
                 store = getattr(runtime, "session_store", None)
                 recorder = getattr(store, "record_voice_transcript", None)
                 if callable(recorder) and request_id:
+                    phase = "store"
                     recorder(
                         request_id=str(request_id),
                         attachment_id=attachment_id,
                         text="",
                         provenance="local_stt",
                         safe_voice_state="unavailable",
+                        failure=outcome.failure.as_dict(),
                     )
                 if store is not None:
+                    phase = "cleanup"
                     local_path.unlink(missing_ok=True)
                 return
 
@@ -1237,6 +1278,7 @@ async def handle_voice_or_audio(
             store = getattr(runtime, "session_store", None)
             recorder = getattr(store, "record_voice_transcript", None)
             if callable(recorder) and request_id:
+                phase = "store"
                 recorder(
                     request_id=str(request_id),
                     attachment_id=attachment_id,
@@ -1252,27 +1294,17 @@ async def handle_voice_or_audio(
             }:
                 transcript_state["release_event"].set()
             if store is not None:
+                phase = "cleanup"
                 local_path.unlink(missing_ok=True)
             return
 
-        transcript = await transcriber.transcribe(local_path)
-
-        if transcript.startswith("[Transcription error]"):
-            runtime.error_logger.error(f"Voice transcription failed for {filename}: {transcript}")
-            locale = ui_language.preferred_locale(runtime, update)
-            kind_key = f"safevoice.kind.{media_kind.lower()}"
-            localized_kind = ui_language.tr(kind_key, locale=locale)
-            if localized_kind == kind_key:
-                localized_kind = media_kind.lower()
-            await runtime._reply_text(
-                update,
-                ui_language.tr(
-                    "safevoice.transcription_failed",
-                    locale=locale,
-                    kind=localized_kind,
-                ),
-            )
+        outcome = await transcribe_audio(transcriber, local_path)
+        if not outcome.ok:
+            await _report_voice_transcription_failure(runtime, update, outcome.failure,
+                                                       submission_state="not_submitted")
             return
+        transcript = outcome.text
+        phase = "validate"
 
         _print_user_message(runtime.name, transcript, media_tag="Transcription")
         prompt = f"[Voice message transcription] {transcript}"
@@ -1330,6 +1362,7 @@ async def handle_voice_or_audio(
                     ),
                 ]
             ])
+            phase = "publish"
             safevoice_title = (
                 f"*{ui_language.tr('safevoice.confirm_long', locale=locale)}*"
                 if batch_pending_key
@@ -1350,18 +1383,29 @@ async def handle_voice_or_audio(
                 f"{media_kind}: {filename}",
             ):
                 return
+            phase, admission_started = "admit", True
             await runtime.enqueue_request(
                 update.effective_chat.id, prompt, "voice_transcript",
                 f"{media_kind}: {filename}",
                 request_metadata={"ingress_transport": "telegram"},
             )
     except Exception as e:
-        runtime.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
+        public_error = e
+        if (isinstance(transcript_state, dict) and admission_started
+                and not transcript_state["ready_event"].is_set()):
+            from orchestrator.voice_transcription_result import transcription_failure
+
+            transcript_state["status"] = "unavailable"
+            fact = transcription_failure(e, phase="record" if phase == "store" else "processing")
+            transcript_state["failure"] = fact.as_dict()
+            public_error = TranscriptionFailed(fact)
+            transcript_state["ready_event"].set()
+            transcript_state["release_event"].set()
+        failure = frontend_failure(public_error, phase=phase, submission_state=(
+            "submitted" if submitted else "unconfirmed" if admission_started else "not_submitted"))
+        runtime.error_logger.exception("Voice media failure: " + json.dumps(failure.diagnostic()))
         try:
-            await runtime._reply_text(
-                update,
-                ui_language.tr("media.failed", kind=_media_kind_label(media_kind)),
-            )
+            await runtime._reply_text(update, failure.render(locale=ui_language.preferred_locale(runtime, update)))
         except Exception:
             pass
 

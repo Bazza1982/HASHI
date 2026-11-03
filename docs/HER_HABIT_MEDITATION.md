@@ -247,6 +247,16 @@ Recoverable reset snapshots live at:
 workspaces/<agent>/backend_state/her_habit_resets/<snapshot-id>/
 ```
 
+A failed reset carries its original stage, safe cause and diagnostic reference
+through the manifest, Habit audit and visible error card. Preparation failures
+leave records unmoved. Before each directory move, reset records the attempted
+source/target pair, so recovery can detect a move whose acknowledgement was lost.
+Recovery never overwrites a newly occupied original location. It compares the
+original inventory and remaining snapshot paths before reporting `rolled_back`;
+failed or unreadable restoration is recorded as `rollback_incomplete` or
+`rollback_unconfirmed`, with the recovery snapshot retained. A successful reset
+keeps the established recoverable snapshot and switch/audit behavior.
+
 New and updated content is rejected rather than truncated when it exceeds the
 compact contract: title 48 characters/10 words, metadata 400 characters/60
 words, or body 2,000 characters/250 words. Existing over-limit records remain

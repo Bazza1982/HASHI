@@ -273,7 +273,8 @@ async def test_failed_forward_is_logged_and_never_raised(tmp_path: Path):
         {"success": False, "error": "backend failed", "source": "text"},
     )
     assert calls == 1
-    assert any("peer offline" in line for line in runtime.logger.messages)
+    assert any("hchat_dispatch_internal_error" in line and "operr_" in line for line in runtime.logger.messages)
+    assert all("peer offline" not in line for line in runtime.logger.messages)
 
 
 @pytest.mark.asyncio

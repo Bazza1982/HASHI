@@ -5,13 +5,16 @@ import asyncio
 import base64
 import hmac
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from aiohttp import web
-from orchestrator.desktop_contract import SESSION_TTL, MAX_FRAME_BYTES, DesktopError, fields, identifier, view_options, validate_input
+from orchestrator.desktop_contract import SESSION_TTL, MAX_FRAME_BYTES, DesktopError, fields, identifier, preview_options, view_options, validate_input
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,11 +64,12 @@ class DesktopSessionService:
         if not hmac.compare_digest(owner, record.owner) or not hmac.compare_digest(client, record.client):
             raise DesktopError("desktop_session_forbidden", 403)
         record.expires = self.clock()+SESSION_TTL
-        mapping = {"frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
+        mapping = {"previews": "desktop_previews", "frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
         if op not in mapping: raise DesktopError("desktop_invalid_operation")
         if op == "frame":
             args = {"after_frame": str(b.get("after_frame", ""))[:160]}
             if "refresh_profile" in b: args["refresh_profile"] = b["refresh_profile"]
+        elif op == "previews": args = preview_options(b.get("options"))
         elif op == "view": args = view_options(b.get("options"))
         elif op == "input": args = {"lease_id": identifier(b.get("lease_id"), "lease"), "event": validate_input(b.get("event"))}
         elif op == "control":
@@ -74,11 +78,14 @@ class DesktopSessionService:
             if args["mode"] != "acquire": args["lease_id"] = identifier(b.get("lease_id"), "lease")
         else: args = {}
         async def call():
-            return await self.broker().invoke_desktop(record.binding, actor_id=owner, session_id=sid,
-                                                      operation=mapping[op], args=args)
+            result = await self.broker().invoke_desktop(record.binding, actor_id=owner, session_id=sid,
+                                                        operation=mapping[op], args=args)
+            if op == "previews" and (self.sessions.get(sid) is not record or record.expires <= self.clock()):
+                raise DesktopError("desktop_session_expired", 410)
+            return result
         # Input is ordered separately from the frame request. Frames never hold
         # the session's mutation lock or wait behind slow keyboard rendering.
-        if op == "frame": return await call()
+        if op in {"frame", "previews"}: return await call()
         async with record.lock:
             try:
                 return await call()
@@ -97,8 +104,27 @@ class DesktopSessionService:
 
 def register_desktop_api(api):
     service = DesktopSessionService(lambda: getattr(api.orchestrator, "capability_broker", None))
+
+    def unavailable(error, *, phase, dispatched, readonly, headers):
+        from orchestrator import ui_language
+        from orchestrator.api_failures import operation_failure_payload
+        from orchestrator.operation_failures import operation_failure
+
+        failure = operation_failure(error, operation="desktop", phase=phase,
+                                    unconfirmed=dispatched and not readonly)
+        try:
+            logger.error("Desktop operation failure: %s", failure.diagnostic())
+        except Exception:
+            pass  # A failed diagnostic sink must not replace the response.
+        effect = "not_requested" if readonly else "unconfirmed" if dispatched else "not_started"
+        return web.json_response(operation_failure_payload(
+            failure, error_code="desktop_unavailable", effect_state=effect,
+            locale=ui_language.preferred_locale(api),
+        ), status=503, headers=headers)
+
     async def handle(request):
         headers = {"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"}
+        authenticated, dispatched, readonly, phase = False, False, False, "scope"
         try:
             if not getattr(getattr(api, "global_config", None), "desktop_enabled", False) and os.environ.get("HASHI_DESKTOP_ENABLED") != "1":
                 raise DesktopError("desktop_disabled", 404)
@@ -110,13 +136,17 @@ def register_desktop_api(api):
                 raise DesktopError("desktop_auth_required", 403)
             owner = api._v1_owner_id(request)
             if not owner: raise DesktopError("desktop_auth_required", 403)
+            authenticated, phase = True, "parse"
             if request.content_type != "application/json": raise DesktopError("desktop_json_required", 415)
             raw = bytearray()
             async for chunk in request.content.iter_chunked(8192):
                 raw.extend(chunk)
                 if len(raw) > 32768: raise DesktopError("desktop_request_too_large", 413)
             body = json.loads(raw)
+            readonly = isinstance(body, dict) and body.get("operation") in {"targets", "frame", "previews"}
+            phase, dispatched = "read" if readonly else "dispatch", True
             result = await service.run(owner, body)
+            phase = "presentation"
             if body["operation"] == "frame":
                 meta = result.get("meta")
                 headers["X-Desktop-Meta"] = json.dumps(meta, ensure_ascii=True, separators=(",", ":"))
@@ -132,10 +162,14 @@ def register_desktop_api(api):
             return web.json_response({"ok": True, **result}, headers=headers)
         except DesktopError as exc:
             return web.json_response({"ok": False, **exc.projection()}, status=exc.status, headers=headers)
-        except (ValueError, TypeError, KeyError):
-            return web.json_response({"ok": False, "error_code": "desktop_invalid_request"}, status=400, headers=headers)
-        except Exception:
-            return web.json_response({"ok": False, "error_code": "desktop_unavailable"}, status=503, headers=headers)
+        except (ValueError, TypeError, KeyError) as exc:
+            if not dispatched:
+                return web.json_response({"ok": False, "error_code": "desktop_invalid_request"}, status=400, headers=headers)
+            return unavailable(exc, phase=phase, dispatched=dispatched, readonly=readonly, headers=headers)
+        except Exception as exc:
+            if not authenticated:
+                return web.json_response({"ok": False, "error_code": "desktop_unavailable"}, status=503, headers=headers)
+            return unavailable(exc, phase=phase, dispatched=dispatched, readonly=readonly, headers=headers)
     async def cleanup(_app):
         await service.close()
     api.app.router.add_post("/api/v1/desktop/operation", handle)

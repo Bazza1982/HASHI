@@ -1,5 +1,52 @@
 # HASHI Native Audio Chat — Product Requirements and Technical Design
 
+## November 3: native conversion failures
+
+Speech providers share the Functions audio converter. If its configured or
+PATH-selected FFmpeg cannot start, the result identifies audio conversion and
+retains a safe cause; a missing executable explicitly asks for instance media
+configuration. This is a non-retryable conversion failure, not evidence that
+Windows SAPI synthesis itself failed. No provider, privacy setting, dependency
+environment or executable choice is silently replaced. Real SAPI/WAV output,
+FFmpeg/Opus conversion and the original Workbench player remain distinct
+acceptance stages; unavailable runtime configuration does not qualify playback.
+The same bounded, versioned failure result crosses the existing Worker JSON
+exchange, preserving its code and safe provider reasons in the authenticated
+speech API. Invalid failure results are not audio assets and never trigger a
+replayed synthesis request. The protected Core protocol is unchanged.
+
+## November 2: shared transcription outcomes (HASHI5 candidate)
+
+The Functions transcription owner returns one immutable per-call result:
+transcript text or a bounded failure code, observed stage, error type and
+diagnostic reference. Known dependency names use a fixed allowlist. Neither
+public outcomes nor the compatibility text API echo exception messages, paths,
+credentials or service response bodies. Empty transcription is a distinct
+failure. Compute selection and the no-silent-fallback rule remain unchanged.
+Cancellation closes the old isolated STT exchange before another recording can
+reuse its pipe; cancellation remains cancellation, never a usable transcript.
+
+Telegram, WhatsApp (including reclassified audio), basic uploads, Session API
+and native Function Worker input consume that shared result. PAO records its
+safe failure facts with the original attachment/Run Event. The same shared
+Engine boundary projects them for Codex, HER and other Engines before any
+transcript-dependent action. Confirmation, current-Run fences and native raw
+audio authorization retain their existing semantics. A transcription warning
+does not promise that every backend can continue on raw audio.
+A transcript-recording exception settles unavailable waiters and signals both
+completion events; it cannot leave a transcript consumer hanging or replay the
+already admitted native Turn. Post-success temporary-file cleanup remains a
+separate stage and does not revoke a durable transcript.
+
+Basic voice rejections retain their existing API code and status, with safe
+cause and diagnostic fields. Functions carries this typed rejection through
+the existing JSON RPC result; the protected Core protocol is unchanged.
+A transport acknowledgement is separate from request admission. Missing
+receipts or unknown outcomes never authorize automatic resubmission.
+
+This candidate's source checks, running Functions adoption, real STT success,
+external frontend acceptance and production rollout are separate gates.
+
 ## Document control
 
 | Field | Value |
@@ -115,6 +162,17 @@ The following decisions are fixed for the first implementation:
     work stages, and the derived local transcript therefore bypass Safe Voice.
     Safe Voice retains its confirm-or-discard design only for transcript-first
     text-model voice routes. No correction editor is added.
+15. PAO applies the same-Run voice decision before calling any Engine. A
+    durable discard ends the Run normally with `safe_voice_discarded`, without
+    a backend error or model/tool execution. Memory-only decisions, stale
+    Sessions/fences and unreleased or unavailable transcripts cannot authorize
+    execution. Confirmation waits revalidate the current Run afterward.
+    Text consumers receive the durable local transcript. Engines declaring
+    canonical voice input keep the voice-origin attachment and media routing;
+    their gated transcript is a projection of PAO's durable release. They do
+    not own a separate confirmation policy. Authorized raw-audio Turns keep
+    running independently of STT; a completed native answer is not cancelled
+    or replayed by an unrelated audit-transcript outcome.
 
 ## 3. Goals
 

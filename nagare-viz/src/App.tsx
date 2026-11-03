@@ -5,6 +5,7 @@ import {
   fetchRunEvents,
   fetchRunSnapshot,
   submitRun,
+  saveWorkflowFile,
   type ApiRunArtifactsResponse,
   type ApiRunEventsResponse,
   type ApiRunSnapshotResponse,
@@ -120,6 +121,10 @@ export default function App() {
   const [runOverlayLoading, setRunOverlayLoading] = useState(false);
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
   const [savedSource, setSavedSource] = useState<string | null>(null);
+  const [saveFailure, setSaveFailure] = useState<{ documentId: string; message: string } | null>(null);
+  const saveAttemptRef = useRef(0);
+  const activeDocumentRef = useRef(correlationId);
+  activeDocumentRef.current = correlationId;
   const [autoSave, setAutoSave] = useState(false);
   const autoSaveTimerRef = useRef<number | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -242,18 +247,20 @@ export default function App() {
 
   const saveToFile = async (source: string) => {
     if (!currentFilePath) return;
+    const attempt = ++saveAttemptRef.current;
+    const documentId = correlationId;
+    const isCurrent = () => attempt === saveAttemptRef.current && documentId === activeDocumentRef.current;
+    setSaveFailure(null);
     try {
-      const res = await fetch("/api/workflows/write", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: currentFilePath, content: source }),
-      });
-      if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+      await saveWorkflowFile(currentFilePath, source);
+      if (!isCurrent()) return;
       setSavedSource(source);
       setDirty(false);
       pushLog(createLog("info", "workflow.saved", `Saved to ${currentFilePath}`));
     } catch (error) {
+      if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : "Save failed";
+      setSaveFailure({ documentId, message });
       pushLog(createLog("error", "workflow.save_failed", message));
     }
   };
@@ -662,6 +669,11 @@ export default function App() {
         onRun={handleRun}
         onToggleAutoSave={() => setAutoSave((v) => !v)}
       />
+      {saveFailure?.documentId === correlationId ? (
+        <div className="warning-item error" role="alert">
+          Workflow save: {saveFailure.message}
+        </div>
+      ) : null}
       <input
         ref={fileInputRef}
         hidden

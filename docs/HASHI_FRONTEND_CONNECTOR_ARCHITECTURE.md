@@ -32,6 +32,61 @@ current-Run, content-integrity and exact-file fences remain unchanged. Native
 voice admission retains its existing transcript and retention policy. See the
 [October 10 repair](repairs/TELEGRAM_MEDIA_ADMISSION_20261010.md).
 
+Attachment captions are human text: input `attachment_ref` and output
+`media_ref` preserve paragraph breaks (LF/CRLF) and tabs. Their existing 4096
+and 512 character limits stay unchanged. Other control characters are rejected
+with a safe reason code, never by echoing the caption. This exception applies
+only to captions; connector IDs, attachment IDs and authority fields retain
+their stricter validation. Connector/live adoption is a separate gate.
+
+Pre-admission media failures preserve their observed download, validation,
+attachment-store or admission stage. Functions maps typed errors to safe,
+localized causes and correlates a generated diagnostic reference with the
+existing error logger. Exception text, HTTP bodies, credentials and captions
+are excluded from the public detail. Telegram's shared photo/document/video
+handler and WhatsApp download/storage use this presentation contract.
+Only failures before the admission call may say no model action was started.
+An exception while awaiting admission has an unconfirmed outcome even if the
+caller did not receive a request ID; it must not claim rejection or replay the
+submission. This reporting layer never owns admission, permission or retries.
+`/long` uses the same safe reasons while retaining the failing attachment and
+contract code. It announces submission only after receiving the owner's
+nonempty admission receipt; a missing/unknown receipt does not replay the
+consumed batch. A later notification failure cannot block or repeat an already
+accepted task.
+
+Legacy JSON and multipart chat use the same receipt rule. An empty/non-string
+request ID or an exception at admission produces a safe correlated
+`chat_admission_unconfirmed` response with `accepted: null` and
+`retry_safe: false`. Earlier accepted files keep their request IDs; later files
+are not submitted. Safe Voice confirmation/discard and transfer receipts keep
+their own contracts. Once an ID is confirmed, optional identity-lookup failure
+retains acceptance and adds a safe diagnostic warning instead of inviting replay.
+Workbench respects an explicit replay prohibition both on the initial response
+and during queued recovery. Its error view retains a bounded, correlated public
+message; malformed details use the existing localized unknown-result fallback.
+
+Desktop and Call unexpected errors retain a safe cause, observed stage and
+diagnostic reference across the Functions API, authenticated Workbench relay,
+client error and visible surface. A dispatched mutation remains unconfirmed;
+read-only queries do not claim a new mutation. Backend/service exceptions are
+not relabeled as invalid request JSON. Existing auth, opt-in, input ordering,
+domain refusals and cancellation remain authoritative. Raw exception text,
+desktop contents, media and credentials never enter the public detail.
+Workbench validates the bounded public fields and clears old details when a
+different error occurs. Call hangup retains its unknown end state and cause.
+Diagnostic sink failures cannot replace the public error response.
+
+Workzone validation retains finite reasons for missing/non-folder, duplicate,
+home-workspace and native-Windows path failures without changing path rules.
+Protected Workzone, parked-topic and local /sys mutations retain pre-write
+read/validation versus unconfirmed persistence failures. Original owner,
+revision, local-only and confirmation checks are unchanged; a missing write
+acknowledgement never rolls back or replays the owner's operation. Workbench
+carries the safe detail through its management relay and dialog/batch notice.
+Known pre-write failures count as failed, while unconfirmed writes stop a batch
+and retain its actual completed/remaining counts.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed
@@ -100,6 +155,27 @@ A stopped Agent stays stopped. The save and activation outcomes are separate:
 busy, unavailable or unknown activation retains the committed credential,
 reports `activation_status=pending` with a safe error code, and never replays
 the credential write or widens the request into a shared/all-Agent reboot.
+
+The Functions credential owner now retains one credential-free continuation
+for a busy Agent, for at most 15 minutes. Before every submission it rechecks
+the saved revision, Agent creation identity, stop epoch and actual activity;
+replacement, deletion, stopping or unavailable activity ends the wait. Only a
+pre-admission busy rejection without a durable receipt may be resubmitted.
+An accepted receipt, durable target-busy result or unknown acknowledgement
+never starts another automatic operation. PAO remains the sole lifecycle owner.
+
+Credential status GET is observational. It projects waiting, expiry, an opaque
+operation ID and explicit retry availability without saving or activating.
+`POST /api/admin/agents/{agent}/telegram-activation` accepts only
+`expected_revision` and `expected_lifecycle_id`; management authentication and
+both current bindings are required. It retries adoption of an already saved
+credential, accepts no token and never starts a stopped Agent. The Workbench
+proxy retains only these public fields and the dialog updates its status while
+open. Expiry has a token-free retry control. Closing the page does not cancel
+the server-owned wait; shared Functions shutdown cancels it. Waits are not
+recovered across Functions restart: the saved credential remains intact and
+the current status exposes explicit activation. Older Workers without a
+creation identity retain their prior one-shot/manual recovery behavior.
 
 After Worker cutover, shared Functions refresh the configuration through its
 existing owner before reconciling Telegram receivers. A new Bot is not polled
@@ -1309,6 +1385,15 @@ Failure returns `ok: false`, a stable `chat_projection_*` error code and
 `http_status`. Invalid requests and read failures are terminal before ordinary
 command handling, command audit capture or model admission. The envelope and
 transcript body are not written to command or failure logs.
+
+Read failures now retain the finite cause, failure phase and a correlated public
+reference through both shared HTTP and Worker RPC paths. Raw exception text,
+transcript paths and content never cross this boundary. The result explicitly
+reports a read-only failure; it does not fall through to chat or submit an action.
+Workbench relays only the validated public explanation, retains cached messages,
+and scopes the notice to the affected conversation. A later successful read clears
+the notice even when its snapshot or empty delta has not changed. Existing query,
+authentication, polling cadence, failure thresholds and connection fences remain.
 
 HTTP and Worker callers share `build_chat_projection`, so message identity,
 context fences, byte cursors, half-record handling and recent-Run discovery

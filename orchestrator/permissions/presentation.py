@@ -86,6 +86,18 @@ def request_list_card(page: SessionRequestPage) -> str:
     return "\n".join(lines)
 
 
+def request_prompt_card(view: SessionRequestView) -> str:
+    """Compact button-first view; diagnostics and typed commands stay in detail."""
+    request = view.request
+    lines = [card_title("🛡️", ui_language.tr("safety.request")), "", f"<b>{_state(view)}</b>"]
+    for scope in request.scopes:
+        actions = ", ".join(_label("action." + action) for action in scope.actions)
+        lines.append(f"{escape(scope.resource)} · {actions}")
+    if request.purpose:
+        lines.extend(("", escape(request.purpose)))
+    return "\n".join(lines)
+
+
 def request_detail_card(view: SessionRequestView) -> str:
     request = view.request
     expires = datetime.fromtimestamp(request.expires_at, timezone.utc).isoformat(timespec="seconds")

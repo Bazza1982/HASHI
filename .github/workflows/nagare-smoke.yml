@@ -91,5 +91,14 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      - name: Test nagare-viz
+        run: npm test
+
+      - name: Install UI test browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify save errors in the page
+        run: npm run test:ui
+
       - name: Build nagare-viz
         run: npm run build

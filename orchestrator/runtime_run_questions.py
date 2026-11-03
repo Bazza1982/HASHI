@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from orchestrator import runtime_session, ui_language
-from orchestrator.frontend_run_questions import question_text
+from orchestrator.frontend_run_questions import question_error_text, question_text
 from orchestrator.run_questions import QuestionError, RunQuestions
 from orchestrator.session_store import SessionConflict, SessionNotFound
 
@@ -20,6 +20,13 @@ def _question(runtime, update, qid):
         chat_id=str(update.effective_chat.id))
 
 
+def _answer_error_text(error, locale):
+    code = (error.code if isinstance(error, QuestionError) else
+            'question_not_found' if isinstance(error, SessionNotFound) else
+            'question_state_changed')
+    return question_error_text(code, locale)
+
+
 async def handle_callback(runtime, update, context):
     query = update.callback_query
     if not runtime._is_authorized_user(update.effective_user.id):
@@ -27,10 +34,11 @@ async def handle_callback(runtime, update, context):
         return
     if not await runtime._telegram_channel_allowed(update, source_channel='telegram_callback'):
         return
-    ui = question_text(ui_language.preferred_locale(runtime, update))
+    locale = ui_language.preferred_locale(runtime, update)
+    ui = question_text(locale)
     match = re.fullmatch(CALLBACK_PATTERN, str(query.data or ''))
     if not match:
-        await query.answer(ui['closed'], show_alert=True)
+        await query.answer(ui['invalid'], show_alert=True)
         return
     qid, choice = match.groups()
     try:
@@ -43,7 +51,8 @@ async def handle_callback(runtime, update, context):
                           q['options'][int(choice)].get('system_action') == 'stop')
             if not retry_stop:
                 label = (ui['failed'] if stop_unconfirmed else
-                         ui['saved'] if q['state'] in ('answered', 'consumed') else ui['closed'])
+                         ui['saved'] if q['state'] in ('answered', 'consumed') else
+                         question_error_text('question_' + q['state'], locale))
                 await query.answer(label, show_alert=True)
                 return
         if choice == 'text':
@@ -75,8 +84,8 @@ async def handle_callback(runtime, update, context):
             if not result or not result.get('ok'):
                 await query.answer(ui['failed'], show_alert=True)
                 return
-    except (QuestionError, SessionConflict, SessionNotFound):
-        await query.answer(ui['closed'], show_alert=True)
+    except (QuestionError, SessionConflict, SessionNotFound) as exc:
+        await query.answer(_answer_error_text(exc, locale), show_alert=True)
         return
     except Exception as exc:
         runtime.logger.warning('Question answer outcome unconfirmed (%s)', type(exc).__name__)
@@ -118,7 +127,8 @@ async def handle_text_reply(runtime, update):
     if len(ids) != 1:
         return False
     # The caller has already checked actor authorization and the enterprise gate.
-    ui = question_text(ui_language.preferred_locale(runtime, update))
+    locale = ui_language.preferred_locale(runtime, update)
+    ui = question_text(locale)
     try:
         qid = ids.pop()
         q = _question(runtime, update, qid)
@@ -126,8 +136,8 @@ async def handle_text_reply(runtime, update):
             question_id=qid, payload={'text': message.text,
                 'idempotency_key': f'telegram:reply:{update.effective_chat.id}:{message.message_id}'})
         text = ui['saved']
-    except (QuestionError, SessionConflict, SessionNotFound):
-        text = ui['closed']
+    except (QuestionError, SessionConflict, SessionNotFound) as exc:
+        text = _answer_error_text(exc, locale)
     except Exception as exc:
         runtime.logger.warning('Question reply outcome unconfirmed (%s)', type(exc).__name__)
         text = ui['failed']
