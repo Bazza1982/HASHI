@@ -1,6 +1,6 @@
 # 权限系统实施与证据状态
 
-更新日期：2026-11-03。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。后续 L1 修复在既有 HASHI3 分支进行；原 feature-permission-sys 阶段作为历史保留。Core 不变。用户本轮明确要求补齐 Workbench 自动弹窗、一键审批与时长选择，个人 L1 的按钮点击即视为用户决定；不要求反复身份验证。
+更新日期：2026-11-04。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。后续 L1 修复在既有 HASHI3 分支进行；原 feature-permission-sys 阶段作为历史保留。Core 不变。用户本轮明确要求补齐 Workbench 自动弹窗、一键审批与时长选择，个人 L1 的按钮点击即视为用户决定；不要求反复身份验证。
 
 本期源码已完成权限服务、真实 HERV3 接入、公共认证/审批、受控工具、媒体/原服务、计费与恢复接线。Windows 实体脚本的启动问题已经解决并通过组件资格。当前提交的最终回归、GitHub 检查及审阅状态以 PR #118 的最新提交为准；旧提交的绿色检查不能代替新版本。
 
@@ -9,6 +9,12 @@
 2026-10-31 HASHI3 L1 实测发现并修复模型工厂写入 Adapter 只读超时属性的问题，改走既有配置超时合同。真实 Adapter 回归同组测试旧代码 2 failed / 2 passed，修复后 4 passed；直接模型/超时/L0 消费组合 18 passed。本项离线修复不代表完整 L1 前端实测通过，实际采用与后续问题记入当轮证据及共享白板。
 
 L1 后续真实审批测试证实：应用令牌不能代替人类会话，测试人类账户能批准并撤销指定 lease；但续跑时重新装配的上下文触发旧事件编号冲突。运行日志现按真实 ExecutionEpoch 区分新事件，原 Run/Turn/operation 与物理用量身份保留，同 epoch 的不可变事实检查继续拒绝冲突。接入 canonical observer 的两项私有 IPC 组合回归从 2 failed 变为 2 passed；完整权限/直接合同组合 616 passed，HERV3/最小 Core/Function 合同 24 passed；实体续跑与实际前端仍待本轮复验。
+
+## 2026-11-04：发现状态修复与采用窗口
+
+真实 H3 测试已生成有效待批申请（期限未到、0 claim、无文件），但未加载临时安装描述的共享 API 返回正常空列表。现修复为：已配置但 frontend controller 未加载，或配置不可读时，返回明确不可用；未安装的实例保留原空视图。复用原配置读取者，身份／Session／generation 先核验，正常已绑定查询和审批权威不改变。有效用例 RED 3 failed／6 passed → 发现及精确点击 GREEN 14 passed。
+
+采用前的有限普通服务已经实际 exit0／Job stopped，配置及两处 ACL 完整恢复。H3 /reboot max 预检被小霞忙碌状态拒绝，Core／shared／Workers 尚未切换；此为采用阻碍，不视为页面通过。后续实例空闲后使用正常 shared handoff 验证，不能以源码或旧页面证据代替实际采用。生产正式验收与完整 L2 WAC 仍独立保留。
 
 ## 2026-11-03：接手与 SCM 生命周期
 

@@ -71,3 +71,12 @@ L1 续跑保留原 Run、Turn、工具调用及 operation 身份，但新的 Exe
 新测试注册辅助器只操作 manifest-owned 独立服务和新普通账户，不接管既有注册；身份变化、配置冲突和已提交耐久性错误先保全对账。配方、注入边界及完整 L2 尚需条件见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。组件与完整安装／用户前端验收分别记录。
 
 实体 SCM 探针确认四场景预期及服务自管拒绝，但主机 User Profile Service 仍持有两个新账户 hive，正常配置回收未成功；整轮组件资格不通过。新失败策略仅禁用 manifest／SID／marker 仍匹配的测试账户并核实结果，保留 profile、所有权和失败，不对替换账户操作，不将禁用冒充卸载成功。原生服务、进程和新增 service-logon right 已清理。不得为重跑而继续在同一共享主机制造此类 profile；完整安装 WAC 推荐独立可维护 Windows 测试环境，不擅自重启或改动共享系统服务。详见组件资格的实体结果。
+
+
+## 发现接口的未采用状态（2026-11-04）
+
+实际 HASHI3 复验中，权限服务已保存有效待批申请，期限未到、0 claim、无文件效果；共享 API 在未配置服务时启动，permission_control 尚未绑定，因此此前返回了正常空列表。安装描述保存与 shared owner 的实际采用必须分别处理；不在只读发现请求中启动服务或替换 shared。
+
+Frontend Connector 的 Functions 投影现在在控制器为空时，使用原配置读取者检查当前持久配置。已保存 permission_service 但尚未加载，或配置无法可靠读取时，返回原有 503／permission_requests_unavailable；未安装的实例保持原只读空视图。身份与 Session／generation 检查仍在配置读取之前，已绑定控制器仍走原权威。不改变批准、范围、期限、重放或 Run 续跑规则，也不把普通问题答案当授权。
+
+同组实际 API／配置／权威回归：旧代码 3 failed／6 passed，修复后发现与精确点击相关 14 passed。无 controller 的失败状态保留有效 pending 和 0 decision，不创建假空权威。H3 正常 /reboot max 采用尝试已被小霞忙碌保护拒绝，未强制切换；源码、运行采用和真实页面结果继续分别记录。
