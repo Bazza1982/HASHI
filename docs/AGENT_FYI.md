@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+- Speech review fixes: confirmed failures have one idempotent retry successor;
+  logical readings freeze routed voice/options/direction, and Call applies manual
+  guidance after language routing. [Protocol](HASHI_SPEECH_PERFORMANCE.md).
+
 - Advanced speech repair: an explicit native-language voice now takes precedence
   over service language defaults; cross-language character mapping remains.
   The prerecorded-sample generator loads the instance catalogue and its adapters,

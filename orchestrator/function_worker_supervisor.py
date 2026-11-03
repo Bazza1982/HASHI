@@ -1226,6 +1226,7 @@ class AgentRuntimeHandle:
         *,
         operation: str = "generate",
         performance_context: dict | None = None,
+        retry_of: str | None = None,
     ) -> dict[str, Any]:
         from orchestrator.voice_synthesizer import VoiceSynthesisError
 
@@ -1237,6 +1238,7 @@ class AgentRuntimeHandle:
                 "source_language": str(source_language or ""),
                 "operation": operation,
                 "performance_context": performance_context,
+                **({"retry_of": retry_of} if retry_of is not None else {}),
             },
             timeout=120,
         )

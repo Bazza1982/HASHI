@@ -18,8 +18,8 @@ def checked_plan(value, model):
     return dict(value)
 
 
-async def prepare(manager, text, build_provider):
-    state = manager._load()
+async def prepare(manager, text, build_provider, *, state=None):
+    state = manager._load() if state is None else state
     if state.get("performance") is not True and not (state.get("manual_direction") or {}).get("enabled"):
         return {"enabled": False}
     manager._require_voice_catalog()

@@ -10946,6 +10946,9 @@ class WorkbenchApiServer:
         source_language = str(payload.get("source_language") or "").strip()
         operation = payload.get("operation", "generate")
         performance_context = payload.get("performance_context")
+        retry_of = payload.get("retry_of")
+        if retry_of is not None and (not isinstance(retry_of, str) or not retry_of or len(retry_of) > 160):
+            return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
         if (operation not in {"generate", "prepare", "start_generate", "start_prepare", "status", "cancel"}
                 or (performance_context is not None and not isinstance(performance_context, dict))):
             return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
@@ -10975,6 +10978,8 @@ class WorkbenchApiServer:
                 kwargs["operation"] = operation
             if performance_context is not None:
                 kwargs["performance_context"] = performance_context
+            if retry_of is not None:
+                kwargs["retry_of"] = retry_of
             result = method(text, request_id, source_language or None, **kwargs)
             if inspect.isawaitable(result):
                 result = await result

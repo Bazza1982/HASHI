@@ -12,7 +12,7 @@ Compute owns model selection, the short open-ended direction prompt, input sampl
 
 The existing authenticated `/api/tui/speech` operation accepts `operation:"prepare"`, whole reading text and its request ID. It returns `performance_context` without generating audio or an owner-mirror notification. The caller carries this context in subsequent bounded synthesis requests; both shared Functions and the Agent Worker forward it through the existing typed RPC envelope.
 
-Workbench reads authoritative voice preferences once before a logical reading. If automatic performance is enabled, it prepares once before splitting playback batches and provider requests. Direct HASHI TTS replies prepare once in VoiceManager. Turning the preference off prevents old contexts from applying; changing providers invalidates a prepared context rather than misrouting it. Explicit manual instructions retain precedence.
+Workbench reads authoritative voice preferences once before a logical reading. When speech-reading-selection-v1 is negotiated, it prepares once before splitting playback batches and provider requests, even with performance off. Direct HASHI TTS replies prepare once in VoiceManager. A prepared logical reading freezes its effective routed voice, rate, provider options, catalogue and direction in bounded server-side state. Settings changes apply to the next reading; all segments of the current reading retain that snapshot. An expired/lost reference requires a new reading, while completed task results remain recoverable. Legacy unbound contexts are invalidated by provider/direction changes. Explicit manual instructions retain precedence.
 
 Audio metadata reports requested/applied status, reason, plan correlation ID and preparation time; it excludes the instructions themselves. A failed or unsupported judgment displays a plain-reading notice. A successful prompt is experimental model direction, not an acoustic or subjective-quality guarantee.
 
@@ -36,7 +36,7 @@ which selects expressive synthesis without any Qwen/9B invocation. It does not
 change the spoken text or selected voice. Voice segments reuse the prepared
 context; call segments reuse their frozen profile. An unsupported provider
 rejects manual synthesis rather than silently invoking a planner. A changed
-voice/manual context requires a new reading.
+legacy voice/manual context requires a new reading. Call applies its frozen direction after each utterance resolves its effective language/voice; language switching never overwrites it or changes the selected preset.
 
 Workbench renders a bounded textarea attached only to the server-issued manual
 save action. The value travels through the existing authenticated command
@@ -46,3 +46,13 @@ action. Ordinary callbacks cannot accept text. Telegram retains the explicit
 /voice manual <on|off|TEXT> and /call manual <on|off|TEXT> command forms.
 The recording stores the actual manual source and direction separately from the
 body, so replay needs neither planning nor synthesis.
+
+
+## Confirmed failure and retry
+A new attempt carries retry_of referencing a confirmed failed task with the
+same phase, text digest and selection. Each failure has at most one successor;
+replaying that successor is idempotent. A later failed successor can itself be
+retried. Active, cancelled, expired and uncertain outcomes cannot authorize a
+new attempt. Workbench retains completed subsegments until the playback part
+is saved, and only retries the failed remainder. Lost acknowledgements use
+status retrieval under the same identity.

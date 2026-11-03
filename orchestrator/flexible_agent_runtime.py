@@ -3570,6 +3570,7 @@ class FlexibleAgentRuntime:
             "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
             "performance": self.voice_manager.get_performance() or self.voice_manager.get_manual_direction()["enabled"],
             "speech_task_protocol": "speech-tasks-v1",
+            "speech_reading_protocol": "speech-reading-selection-v1",
         }
 
     def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:
@@ -3589,6 +3590,7 @@ class FlexibleAgentRuntime:
         *,
         operation: str = "generate",
         performance_context: dict | None = None,
+        retry_of: str | None = None,
     ) -> dict[str, Any]:
         """Generate a bounded local-presentation asset without any Bot send."""
         from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
@@ -3604,18 +3606,19 @@ class FlexibleAgentRuntime:
                     return owner.cancel(request_id)
                 selection = self.voice_manager._load()
                 # Store only a digest of configuration, never credentials or utterances.
-                selection_key = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
+                selection_id = (performance_context or {}).get("selection_id")
+                selection_key = selection_id or hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
                 phase = operation.removeprefix("start_")
                 async def execute(_deadline):
                     current = hashlib.sha256(json.dumps(self.voice_manager._load(), sort_keys=True).encode()).hexdigest()
-                    if current != selection_key:
+                    if not selection_id and current != selection_key:
                         raise SpeechTaskError("speech_voice_changed", accepted=False)
                     return await self.synthesize_tui_speech(
                         text, request_id, source_language, operation=phase,
                         performance_context=performance_context)
                 return owner.start(request_id, text, phase,
                                    {"selection": selection_key, "language": source_language,
-                                    "performance_context": performance_context}, execute)
+                                    "performance_context": performance_context}, execute, retry_of=retry_of)
             except SpeechTaskError as exc:
                 return {"task_error": exc.code, "accepted": exc.accepted, "retryable": exc.retryable}
             except ValueError as exc:
@@ -3623,7 +3626,7 @@ class FlexibleAgentRuntime:
                     return {"task_error": "speech_split_required", "accepted": False}
                 raise
         if operation == "prepare":
-            return {"performance_context": await self.voice_manager.prepare_performance(text),
+            return {"performance_context": await self.voice_manager.prepare_reading(text, source_language=source_language),
                     "request_id": request_id}
         if operation != "generate":
             raise ValueError("Unknown speech operation")

@@ -925,6 +925,32 @@ class VoiceManager:
         from orchestrator.speech_performance import prepare
         return await prepare(self, text, build_provider)
 
+    async def prepare_reading(self, text: str, *, source_language=None) -> dict:
+        from copy import deepcopy
+        from uuid import uuid4
+        from orchestrator.speech_performance import prepare
+        state = deepcopy(self._load())
+        self._require_voice_catalog()
+        catalog = deepcopy(self.voice_catalog)
+        route = resolve_tts_route(
+            provider=state["provider"], voice_name=state.get("voice_name"),
+            provider_options=state.get("provider_options") or {},
+            requested_style=self._voice_profile_from_state(state), text=text,
+            source_language=source_language, presets=catalog.presets,
+            profiles=self.VOICE_PROFILES, provider_profiles=catalog.routing_profiles())
+        context = await prepare(self, text, build_provider, state=state)
+        ident = uuid4().hex
+        context = {**context, "selection_id": ident}
+        readings = getattr(self, "_reading_selections", None)
+        if readings is None:
+            readings = self._reading_selections = {}
+        # Bounded per-Agent control state; no text or credentials leave this process.
+        if len(readings) >= 64:
+            readings.pop(next(iter(readings)))
+        state["_frozen_route"] = route
+        readings[ident] = (state, catalog, deepcopy(context))
+        return context
+
     def voice_menu_text(self) -> str:
         state = self._load()
         native = self._native_policy_from_state(state)
@@ -1628,11 +1654,16 @@ class VoiceManager:
         source_surface: str = "unknown",
         performance_context: dict | None = None,
     ) -> VoiceAsset | None:
-        state = self._load()
+        from copy import deepcopy
+        selection_id = (performance_context or {}).get("selection_id")
+        frozen = getattr(self, "_reading_selections", {}).get(selection_id) if selection_id else None
+        if selection_id and frozen is None:
+            raise VoiceSynthesisError("speech_voice_changed", "The reading selection expired; start a new reading.")
+        state = deepcopy(frozen[0]) if frozen else self._load()
         if not force and not state.get("enabled"):
             return None
         from orchestrator.speech_performance import checked_context, metadata, notice
-        context = (
+        context = deepcopy(frozen[2]) if frozen else (
             checked_context(performance_context) if performance_context is not None
             else await self.prepare_performance(text)
         ) if state.get("performance") is True or (state.get("manual_direction") or {}).get("enabled") else {"enabled": False}
@@ -1652,6 +1683,7 @@ class VoiceManager:
             max_chars_override=max_chars_override,
             source_language=source_language,
             source_surface=source_surface,
+            catalog=frozen[1] if frozen else None,
         )
         if result.effective_provider_options.get("instructions") and context.get("source") != "manual":
             context = {**context, "plan": None, "reason": "manual_instructions"}
@@ -1677,6 +1709,7 @@ class VoiceManager:
         catalog: VoiceCatalog | None = None,
         provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
         output_dir: Path | None = None,
+        performance_context: dict | None = None,
     ) -> ConfiguredTTSResult:
         """Synthesize one explicit selection through the shared TTS platform.
 
@@ -1692,6 +1725,7 @@ class VoiceManager:
             "voice_profile": requested_style,
             "rate": int(rate),
             "max_chars": max(1, int(max_chars)),
+            "_performance_context": performance_context,
         }
         return await self._synthesize_configured_state(
             agent_name=agent_name,
@@ -1755,7 +1789,7 @@ class VoiceManager:
             if max_chars_override is not None
             else int(state.get("max_chars", 1200))
         )
-        primary_route = resolve_tts_route(
+        primary_route = state.get("_frozen_route") or resolve_tts_route(
             provider=primary_name,
             voice_name=state.get("voice_name"),
             provider_options=state.get("provider_options") or {},
@@ -1776,7 +1810,7 @@ class VoiceManager:
             candidate for candidate in declared_fallback_chain if allowed(candidate)
         )
         from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
-        if ACTIVE_SPEECH_BUDGET.get() is not None:
+        if ACTIVE_SPEECH_BUDGET.get() is not None or state.get("_frozen_route"):
             # One task owner controls attempts; never move an unknown native
             # execution into a second provider or nested fallback retry.
             fallback_chain = ()
@@ -1888,7 +1922,7 @@ class VoiceManager:
                 )
             except Exception as exc:
                 from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
-                if ACTIVE_SPEECH_BUDGET.get() is not None:
+                if ACTIVE_SPEECH_BUDGET.get() is not None or state.get("_frozen_route"):
                     from orchestrator.speech_tasks import SpeechTaskError
                     code = str(getattr(exc, "code", "tts_generation_failed"))
                     status = getattr(exc, "status", None)

@@ -23,6 +23,7 @@ class SpeechTasks:
             id TEXT PRIMARY KEY, fingerprint TEXT, phase TEXT, state TEXT,
             created REAL, seen REAL, expires REAL, budget TEXT, attempts INTEGER,
             result TEXT, error TEXT)""")
+        self.db.execute("CREATE TABLE IF NOT EXISTS speech_retries (failed_id TEXT PRIMARY KEY, attempt_id TEXT UNIQUE)")
         self.db.execute("UPDATE speech_tasks SET state='uncertain',error='speech_owner_restarted' WHERE state IN ('queued','running','retry_wait','cancelling')")
         self.db.commit()
         self.estimator = SpeechBudgetEstimator(self.db)
@@ -48,14 +49,14 @@ class SpeechTasks:
         self._update(ident, seen=now)
         value = dict(request_id=ident, state=state, phase=row["phase"],
                      budget=json.loads(row["budget"]), attempts=row["attempts"],
-                     can_retry=False, remaining_seconds=max(0., row["created"] + json.loads(row["budget"]).get("total_seconds", 0.) - now))
+                     can_retry=state == "failed", remaining_seconds=max(0., row["created"] + json.loads(row["budget"]).get("total_seconds", 0.) - now))
         if state == "completed":
             value["result"] = json.loads(row["result"])
         if row["error"]:
             value["error_code"] = row["error"]
         return value
 
-    def start(self, ident, text, phase, selection, execute):
+    def start(self, ident, text, phase, selection, execute, *, retry_of=None):
         if self.closed:
             raise SpeechTaskError("speech_owner_closed", accepted=False)
         if not isinstance(ident, str) or not ident or len(ident) > 160:
@@ -69,12 +70,21 @@ class SpeechTasks:
             if existing[0] != fingerprint:
                 raise SpeechTaskError("speech_request_conflict", accepted=False)
             return self.status(ident)
+        if retry_of is not None:
+            successor = self.db.execute("SELECT attempt_id FROM speech_retries WHERE failed_id=?", (retry_of,)).fetchone()
+            if successor is not None:
+                raise SpeechTaskError("speech_retry_not_allowed", accepted=False)
+            previous = self.db.execute("SELECT fingerprint,state FROM speech_tasks WHERE id=?", (retry_of,)).fetchone()
+            if previous is None or previous["state"] != "failed" or previous["fingerprint"] != fingerprint:
+                raise SpeechTaskError("speech_retry_not_allowed", accepted=False)
         if self.db.execute("SELECT COUNT(*) FROM speech_tasks").fetchone()[0] >= 10000:
             raise SpeechTaskError("speech_task_capacity", accepted=False)
         if len(self.running) >= 4:
             raise SpeechTaskError("speech_queue_full", retryable=True, accepted=False)
         budget = self.estimator.estimate(text,phase=phase,profile=str(selection.get("selection", "default")))
         now = time.time()
+        if retry_of is not None:
+            self.db.execute("INSERT INTO speech_retries VALUES (?,?)", (retry_of, ident))
         self.db.execute("INSERT INTO speech_tasks (id,fingerprint,phase,state,created,seen,expires,budget,attempts) VALUES (?,?,?,?,?,?,?,?,0)",
                         (ident,fingerprint,phase,"queued",now,now,now+600,json.dumps(budget.public())))
         self.db.commit()

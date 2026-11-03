@@ -65,6 +65,11 @@ async def test_call_frozen_direction_is_independent_from_voice_and_reaches_all_s
     from orchestrator.voice_manager import VoiceManager
     catalog=_voice_catalog()
     catalog["services"][0]["automatic_performance"]=True
+    catalog["services"][0]["language_voices"]={"zh":"premium_one","ja":"premium_ja"}
+    catalog["voices"].append({
+        "id":"premium_ja","service":"compute-premium","voice_name":"premium-ja",
+        "label":"Japanese","language":"Japanese","locale":"ja-JP","gender":"female",
+        "provider_options":{"temperature": .4}})
     config=_shared_config(tmp_path,catalog_payload=catalog)
     settings=CallSettings.__new__(CallSettings)
     settings.config=config;settings.owner="owner";settings.agent="agent"
@@ -86,9 +91,13 @@ async def test_call_frozen_direction_is_independent_from_voice_and_reaches_all_s
     call=Call(owner="owner",binding={"call_id":"call-1","agent_id":"agent"},profile=profile,targets=targets,
         fingerprint="fingerprint",expires=100,started=0,locale="zh-CN",tts_catalog=frozen)
     tts=CatalogCallTTS(manager,temp_root=tmp_path/"call-media")
-    for i,text in enumerate(("first","second")):
+    texts=("这是第一段中文。","これは日本語の文章です。","这是最后一段中文。")
+    for i,text in enumerate(texts):
         await tts.synthesize(call,text,privacy_level=0,request_id=str(i))
-    assert len(built)==2
+    assert len(built)==3
+    assert [k["voice_name"] for k in built]==["premium-1","premium-ja","premium-1"]
+    assert [k["text"] for k in built]==list(texts)
+    assert call.profile["tts"]["voice_id"]=="premium_one"
     assert all(k["provider_options"]["performance_plan"]["instructions"]=="calm call direction" for k in built)
     assert manager.get_manual_direction()["instructions"]=="different voice direction"
     settings.command(["manual","off"])
