@@ -127,7 +127,10 @@ class CatalogCallTTS:
         catalog = call.tts_catalog
         if catalog is None:
             raise CallError("call_tts_catalog_invalid", 503)
-        if call.tts_effective_service and call.tts_effective_service != call.profile["tts"]["target_id"]:
+        if (
+            call.tts_effective_service
+            and call.tts_effective_service != call.profile["tts"]["target_id"]
+        ):
             provider = call.tts_effective_service
             voice_name = call.tts_effective_voice
             provider_options = dict(call.tts_effective_options)
@@ -136,16 +139,26 @@ class CatalogCallTTS:
                 call, catalog
             )
         context = None
-        manual=call.profile.get("manual_direction") or {}
+        manual = call.profile.get("manual_direction") or {}
         if manual.get("enabled"):
             from orchestrator.manual_speech_direction import validate
-            manual=validate(manual)
-            if (catalog.service(provider).get("automatic_performance") is False
-                    or catalog.service(provider).get("location") not in {"local","lan"}):
+
+            manual = validate(manual)
+            if catalog.service(provider).get(
+                "automatic_performance"
+            ) is False or catalog.service(provider).get("location") not in {
+                "local",
+                "lan",
+            }:
                 raise CallError("call_manual_direction_unsupported", 409)
             from orchestrator.manual_speech_direction import plan
-            context = {"enabled": True, "provider": provider, "source": "manual",
-                       "plan": plan(manual, catalog.service(provider)["model"])}
+
+            context = {
+                "enabled": True,
+                "provider": provider,
+                "source": "manual",
+                "plan": plan(manual, catalog.service(provider)["model"]),
+            }
         selected = str(call.profile["tts"]["target_id"])
 
         self.temp_root.mkdir(parents=True, exist_ok=True)
@@ -166,9 +179,10 @@ class CatalogCallTTS:
                     source_language=call.locale,
                     source_surface="call",
                     catalog=catalog,
-                    provider_allowed=lambda _service_id, service: self._privacy_allows(
-                        service, privacy_level
-                    ) and (not manual.get("enabled") or _service_id == provider),
+                    provider_allowed=lambda _service_id, service: (
+                        self._privacy_allows(service, privacy_level)
+                        and (not manual.get("enabled") or _service_id == provider)
+                    ),
                     output_dir=Path(temp_dir),
                 )
                 audio = result.asset.ogg_path.read_bytes()

@@ -435,12 +435,18 @@ class CallConfig:
 
     @staticmethod
     def validate_profile(value, targets):
-        if not isinstance(value, dict) or set(value) - {"stt", "tts", "vision", "manual_direction"}:
+        if not isinstance(value, dict) or set(value) - {
+            "stt",
+            "tts",
+            "vision",
+            "manual_direction",
+        }:
             raise CallError("call_profile_invalid")
         result = {}
         if "manual_direction" in value:
             from orchestrator.manual_speech_direction import validate
-            result["manual_direction"]=validate(value["manual_direction"])
+
+            result["manual_direction"] = validate(value["manual_direction"])
         for kind in ("stt", "tts", "vision"):
             slot = value.get(kind)
             if kind == "vision" and slot is None:
