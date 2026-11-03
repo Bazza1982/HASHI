@@ -220,6 +220,7 @@ class HERv2Adapter(BaseBackend):
             tool_request_mode="native",
             recovery_mode="reconstruct_safe",
             reasoning_transport="absent",
+            voice_input_mode="canonical",
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):

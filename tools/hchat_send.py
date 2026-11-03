@@ -48,6 +48,10 @@ from remote.internet_address import (  # noqa: E402
     parse_hchat_address,
 )
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
+from orchestrator.hchat_submit_result import (  # noqa: E402
+    HChatSubmission, begin_hchat_dispatch, capture_hchat_submission, record_hchat_failure,
+    record_hchat_transport_failure, record_hchat_response, record_hchat_rejection, record_hchat_group,
+)
 from orchestrator.hchat_delivery_status import (  # noqa: E402
     default_hchat_conversation_id,
 )
@@ -292,7 +296,7 @@ def _hchat_channel_egress_allowed(
         from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
     except Exception as exc:
         print(f"❌ HChat enterprise channel gate unavailable: {exc}", file=sys.stderr)
-        return False
+        return record_hchat_failure(exc, phase="validate")
 
     bridge_home = Path(str(global_cfg.get("bridge_home") or ROOT))
     gate = EnterpriseChannelGate.from_global_config(
@@ -321,7 +325,7 @@ def _hchat_channel_egress_allowed(
     if result.allowed:
         return True
     print(f"❌ HChat egress denied by enterprise channel policy: {result.reason}", file=sys.stderr)
-    return False
+    return record_hchat_failure(reason="channel_blocked", phase="validate")
 
 
 def _is_local_agent(cfg: dict, agent_name: str) -> bool:
@@ -523,6 +527,7 @@ def _print_hchat_result_receipt(
     text: str,
 ) -> bool:
     """Project confirmation-aware receiver state and report delivery success."""
+    record_hchat_response(result)
     state = str(result.get("state") or "").strip().lower()
     if state in {"awaiting_confirmation", "confirming", "pending_confirmation"}:
         print(f"🟠 Hchat waiting for confirmation ({label}): {from_agent} → {target}")
@@ -875,7 +880,7 @@ def _send_via_local_workbench(
             in_reply_to=in_reply_to,
         ):
             return True
-    return False
+    return record_hchat_failure(reason="route_unavailable", phase="scope", preserve=True)
 
 
 def _workbench_hosts_for_route(route: dict) -> list[str]:
@@ -1048,7 +1053,7 @@ def _register_hchat_outbound_correlation(
             f"{exc}",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(exc, reason="correlation_failed" if isinstance(exc, ValueError) else None, phase="persist")
 
 
 def _configured_exchange_instance(cfg: dict, instances: dict) -> str | None:
@@ -1145,6 +1150,8 @@ def _local_exchange_request(
     shared_token = _shared_token_for_protocol()
     base_url = _local_exchange_sidecar_url(cfg)
     if not shared_token or not base_url:
+        if payload is not None:
+            record_hchat_failure(reason="authentication_rejected" if not shared_token else "route_unavailable", phase="configuration")
         return 503, {
             "ok": False,
             "code": "LOCAL_EXCHANGE_AUTH_UNAVAILABLE",
@@ -1156,6 +1163,7 @@ def _local_exchange_request(
         else b""
     )
     url = f"{base_url}{path}"
+    phase = "prepare"
     try:
         headers = build_client_auth_headers(
             url=url,
@@ -1177,7 +1185,11 @@ def _local_exchange_request(
             # This is the authenticated loopback hop to HASHI's own Remote
             # sidecar, whose optional certificate may be locally generated.
             request_options["context"] = ssl._create_unverified_context()
+        phase = "request"
+        if payload is not None:
+            begin_hchat_dispatch()
         with urllib_request.urlopen(request, **request_options) as response:
+            phase = "read"
             result = json.loads(response.read().decode("utf-8"))
             return int(getattr(response, "status", 200)), (
                 result if isinstance(result, dict) else {}
@@ -1188,7 +1200,14 @@ def _local_exchange_request(
         except Exception:
             result = {"ok": False, "code": f"HTTP_{exc.code}"}
         return int(exc.code), result if isinstance(result, dict) else {}
-    except Exception:
+    except Exception as exc:
+        if payload is not None:
+            if phase == "prepare":
+                record_hchat_failure(exc, phase=phase)
+            elif isinstance(exc, (ValueError, UnicodeError)):
+                record_hchat_failure(reason="response_invalid", phase=phase, accepted=None)
+            else:
+                record_hchat_transport_failure(exc, phase=phase)
         return 503, {"ok": False, "code": "LOCAL_EXCHANGE_UNAVAILABLE"}
 
 
@@ -1228,6 +1247,7 @@ def _send_via_exchange_transport(
     )
     state = str(result.get("state") or "")
     if status < 300 and result.get("ok") and state in {"accepted", "delivered"}:
+        record_hchat_response(result)
         _print_hchat_queue_receipt(
             "independent Exchange",
             from_agent,
@@ -1240,7 +1260,9 @@ def _send_via_exchange_transport(
         f"({str(result.get('code') or state or f'HTTP_{status}')}).",
         file=sys.stderr,
     )
-    return False
+    if result.get("code") in {"LOCAL_EXCHANGE_AUTH_UNAVAILABLE", "LOCAL_EXCHANGE_UNAVAILABLE"}:
+        return False
+    return record_hchat_rejection(result, status=status)
 
 
 def _check_exchange_transport_route(
@@ -1304,12 +1326,12 @@ def _send_via_protocol_transport(
 ) -> bool:
     shared_token = _shared_token_for_protocol()
     if not shared_token:
-        return False
+        return record_hchat_failure(reason="capability_missing", phase="configuration")
     try:
         from tools.protocol_send import send_protocol_message
     except Exception as exc:
         print(f"⚠️ Protocol transport unavailable: {format_delivery_result(transport_error=str(exc))}", file=sys.stderr)
-        return False
+        return record_hchat_failure(exc, phase="prepare")
     authorization_kwargs = {}
     if private_credential_ids:
         authorization_kwargs["private_credential_ids"] = private_credential_ids
@@ -1334,12 +1356,12 @@ def _send_via_protocol_transport(
         protocol_kwargs["message_type"] = message_type
     if in_reply_to is not None:
         protocol_kwargs["in_reply_to"] = in_reply_to
-    return send_protocol_message(
-        f"{to_agent}@{target_instance}",
-        from_agent,
-        text,
-        **protocol_kwargs,
-    )
+    try:
+        return send_protocol_message(
+            f"{to_agent}@{target_instance}", from_agent, text, **protocol_kwargs,
+        )
+    except (URLError, TimeoutError, OSError) as exc:
+        return record_hchat_transport_failure(exc)
 
 
 def _send_via_workbench(
@@ -1363,20 +1385,20 @@ def _send_via_workbench(
 ) -> bool:
     if not expected_instance:
         print("❌ Hchat Workbench route has no expected instance identity.", file=sys.stderr)
-        return False
+        return record_hchat_failure(reason="route_unavailable", phase="validate")
     if not _probe_workbench_health(host, port, expected_instance):
         print(
             f"❌ Hchat Workbench identity check failed ({host}:{port}, expected {expected_instance}).",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(reason="authentication_rejected", phase="validate")
     if not _workbench_supports_message_freshness(host, port):
         print(
             "❌ Hchat Workbench peer does not support complete freshness/status protection; "
             "update the peer before sending.",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(reason="capability_missing", phase="validate")
     url = f"http://{host}:{port}/api/chat"
     full_text = (
         text
@@ -1434,7 +1456,7 @@ def _send_via_workbench(
             )
         except ValueError as exc:
             print(f"Private authorization proof could not be created: {exc}", file=sys.stderr)
-            return False
+            return record_hchat_failure(reason="authentication_rejected", phase="prepare")
         payload["private_authorization_binding"] = binding
     from orchestrator.message_context import seal_connector_evidence
 
@@ -1457,9 +1479,14 @@ def _send_via_workbench(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    phase = "request"
+    begin_hchat_dispatch()
     try:
         with urllib_request.urlopen(req, timeout=10) as resp:
+            phase = "read"
             result = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(result, dict):
+                return record_hchat_failure(reason="response_invalid", phase="read", accepted=None)
             if result.get("ok"):
                 return _print_hchat_result_receipt(
                     result,
@@ -1469,10 +1496,18 @@ def _send_via_workbench(
                     text=text,
                 )
             print(f"❌ Hchat API error: {result.get('error', 'unknown')}", file=sys.stderr)
-            return False
-    except URLError as e:
-        print(f"❌ Hchat {label} API connection failed ({host}:{port}): {e}", file=sys.stderr)
-        return False
+            return record_hchat_rejection(result, status=int(getattr(resp, "status", 0)))
+    except HTTPError as exc:
+        try:
+            result = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            result = {}
+        return record_hchat_rejection(result if isinstance(result, dict) else {}, status=exc.code)
+    except (URLError, TimeoutError, OSError) as exc:
+        print(f"❌ Hchat {label} API connection failed ({host}:{port}): {type(exc).__name__}", file=sys.stderr)
+        return record_hchat_transport_failure(exc, phase=phase)
+    except (ValueError, UnicodeError):
+        return record_hchat_failure(reason="response_invalid", phase=phase, accepted=None)
 
 
 def _send_via_remote(
@@ -1524,7 +1559,7 @@ def _send_via_remote(
             f"❌ Hchat Remote identity check failed ({host}:{port}, expected {expected_endpoint or 'unknown'}).",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(reason="authentication_rejected", phase="validate")
     protocol_status = _read_http_json(f"{scheme}://{host}:{port}/protocol/status")
     protocol_capabilities = {
         str(value)
@@ -1539,7 +1574,7 @@ def _send_via_remote(
             "update the peer before sending.",
             file=sys.stderr,
         )
-        return False
+        return record_hchat_failure(reason="capability_missing", phase="validate")
     for url in (f"{scheme}://{host}:{port}/hchat",):
         req = urllib_request.Request(
             url,
@@ -1547,12 +1582,17 @@ def _send_via_remote(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        phase = "request"
+        begin_hchat_dispatch()
         try:
             kwargs = {"timeout": 10}
             if url.startswith("https://"):
                 kwargs["context"] = ssl._create_unverified_context()
             with urllib_request.urlopen(req, **kwargs) as resp:
+                phase = "read"
                 result = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(result, dict):
+                    return record_hchat_failure(reason="response_invalid", phase="read", accepted=None)
                 if result.get("ok"):
                     return _print_hchat_result_receipt(
                         result,
@@ -1562,10 +1602,18 @@ def _send_via_remote(
                         text=text,
                     )
                 print(f"❌ Remote /hchat error via {url}: {result.get('error', 'unknown')}", file=sys.stderr)
-        except URLError as e:
-            print(f"❌ Remote /hchat connection failed ({url}): {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"❌ Remote /hchat unexpected error ({url}): {e}", file=sys.stderr)
+                return record_hchat_rejection(result, status=int(getattr(resp, "status", 0)))
+        except HTTPError as exc:
+            try:
+                result = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                result = {}
+            return record_hchat_rejection(result if isinstance(result, dict) else {}, status=exc.code)
+        except (URLError, TimeoutError, OSError) as exc:
+            print(f"❌ Remote /hchat connection failed: {type(exc).__name__}", file=sys.stderr)
+            return record_hchat_transport_failure(exc, phase=phase)
+        except Exception as exc:
+            return record_hchat_failure(exc, phase=phase, accepted=None)
     return False
 
 
@@ -1740,7 +1788,7 @@ def _send_via_exchange(
     return False
 
 
-def send_hchat(
+def _send_hchat(
     to_agent: str,
     from_agent: str,
     text: str,
@@ -1768,9 +1816,12 @@ def send_hchat(
         originated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if not idempotency_key:
         idempotency_key = f"hchat:{message_id}"
-    cfg = _load_config()
-    local_port = _get_workbench_port(cfg)
-    instance_id = _get_instance_id(cfg)
+    try:
+        cfg = _load_config()
+        local_port = _get_workbench_port(cfg)
+        instance_id = _get_instance_id(cfg)
+    except Exception as exc:
+        return record_hchat_failure(exc, phase="configuration")
     source_instance = _normalize_instance_id(source_instance) or instance_id
     selected_attachments = [Path(path) for path in (attachments or [])]
     reply_route = reply_route_override or _build_reply_route(cfg)
@@ -1778,7 +1829,7 @@ def send_hchat(
         parsed_target = parse_hchat_address(to_agent)
     except AddressError:
         print(f"❌ Invalid HChat address: {to_agent}", file=sys.stderr)
-        return False
+        return record_hchat_failure(ValueError(), phase="validate")
     if isinstance(parsed_target, PublicAddress):
         if selected_attachments:
             print(
@@ -1786,13 +1837,13 @@ def send_hchat(
                 "Exchange remains text-only.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         if target_instance:
             print(
                 "❌ A complete public address cannot be combined with --instance.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(ValueError(), phase="validate")
         if not _hchat_channel_egress_allowed(
             cfg,
             from_agent=from_agent,
@@ -1800,14 +1851,14 @@ def send_hchat(
             target_instance=parsed_target.instance_address,
             source_instance=source_instance,
         ):
-            return False
+            return record_hchat_failure(reason="channel_blocked", phase="validate", preserve=True)
         if private_credential_ids or authorization_resources:
             print(
                 "❌ Exchange v1 has no negotiated private/resource proof "
                 "capability; refusing to downgrade the request.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         return _send_via_exchange_transport(
             cfg,
             destination=parsed_target,
@@ -1836,17 +1887,17 @@ def send_hchat(
                 "❌ HChat attachments require one explicit cross-instance target.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         if target_instance:
             print("❌ Group delivery does not support cross-instance routing. Use local @group only.", file=sys.stderr)
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         group_name = to_agent[1:]
         members = _resolve_group_members(cfg, group_name, exclude_self=from_agent)
         if not members:
             print(f"❌ Group '{group_name}' not found or has no members.", file=sys.stderr)
-            return False
+            return record_hchat_failure(reason="target_not_found", phase="scope")
         results = [
-            send_hchat(
+            send_hchat_result(
                 member,
                 from_agent,
                 text,
@@ -1858,7 +1909,8 @@ def send_hchat(
             )
             for member in members
         ]
-        succeeded = sum(results)
+        record_hchat_group(results)
+        succeeded = sum(item.handled for item in results)
         print(f"📢 Group @{group_name}: {succeeded}/{len(members)} queued.")
         return succeeded > 0
 
@@ -1869,7 +1921,7 @@ def send_hchat(
         target_instance=target_instance,
         source_instance=source_instance,
     ):
-        return False
+        return record_hchat_failure(reason="channel_blocked", phase="validate", preserve=True)
 
     if not target_instance:
         if selected_attachments:
@@ -1877,7 +1929,7 @@ def send_hchat(
                 "❌ HChat attachments require agent@INSTANCE on the LAN.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         if _is_local_agent(cfg, to_agent):
             if (
                 message_type != "delivery_status"
@@ -1912,9 +1964,9 @@ def send_hchat(
             print(f"❌ Local API failed for {to_agent}.", file=sys.stderr)
             return False
         if _print_moved_agent_hint(to_agent):
-            return False
+            return record_hchat_failure(reason="target_not_found", phase="scope", preserve=True)
         print(f"❌ {to_agent} is not a local agent on {instance_id}. Cross-instance delivery requires agent@INSTANCE.", file=sys.stderr)
-        return False
+        return record_hchat_failure(reason="target_not_found", phase="scope", preserve=True)
 
     if target_instance == instance_id.upper():
         if selected_attachments:
@@ -1922,7 +1974,7 @@ def send_hchat(
                 "❌ HChat attachment v2 currently supports cross-instance LAN delivery only.",
                 file=sys.stderr,
             )
-            return False
+            return record_hchat_failure(reason="capability_missing", phase="validate")
         if _is_local_agent(cfg, to_agent):
             if (
                 message_type != "delivery_status"
@@ -1957,9 +2009,9 @@ def send_hchat(
             print(f"❌ Local API failed for {to_agent}@{target_instance}.", file=sys.stderr)
             return False
         if _print_moved_agent_hint(to_agent):
-            return False
+            return record_hchat_failure(reason="target_not_found", phase="scope", preserve=True)
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
-        return False
+        return record_hchat_failure(reason="target_not_found", phase="scope", preserve=True)
 
     if (
         message_type != "delivery_status"
@@ -2086,7 +2138,16 @@ def send_hchat(
         print(f"❌ Failed to deliver to {to_agent}@{target_instance}. Target instance may be offline.", file=sys.stderr)
     else:
         print(f"❌ Could not deliver message to {to_agent}. Agent not found on any active instance.", file=sys.stderr)
-    return False
+    return record_hchat_failure(reason="route_unavailable", phase="scope", preserve=True)
+
+
+def send_hchat_result(*args, **kwargs) -> HChatSubmission:
+    return capture_hchat_submission(_send_hchat, *args, **kwargs)
+
+
+def send_hchat(*args, **kwargs) -> bool:
+    """Compatibility boolean: receiver-handled terminal states stop failover."""
+    return send_hchat_result(*args, **kwargs).handled
 
 
 def check_hchat_route(

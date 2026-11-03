@@ -123,3 +123,109 @@ async def test_free_text_reply_uses_question_scope_and_preserves_unicode(tmp_pat
     assert answer['answer']['text'] == '蓝色，保留中文'
     original.from_user.id = 999
     assert await handle_text_reply(runtime, update) is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_callback_answer_keeps_card_pending_and_explains_rejection(tmp_path):
+    from tests.test_frontend_attachment_tool import _ToolRuntime
+    from orchestrator.runtime_run_questions import handle_callback
+    service, session, run, question = running(tmp_path)
+    runtime = _ToolRuntime(tmp_path, service.store)
+    runtime.name = 'zelda'
+    runtime.global_config.ui_language = 'zh-CN'
+    runtime._is_authorized_user = lambda uid: uid == 7
+    runtime._telegram_channel_allowed = AsyncMock(return_value=True)
+    query = SimpleNamespace(data=f"rq:{question['question_id']}:9", id='invalid-choice',
+                            answer=AsyncMock(), edit_message_reply_markup=AsyncMock())
+    update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7),
+                             effective_chat=SimpleNamespace(id=7))
+    await handle_callback(runtime, update, None)
+    text = query.answer.await_args.args[0]
+    assert '答复无效' in text and '已结束' not in text
+    query.edit_message_reply_markup.assert_not_awaited()
+    answer = service.get_answer(request_id=run.request_id, agent_id='zelda',
+                                question_id=question['question_id'])
+    assert answer['state'] == 'pending' and not answer.get('answer')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text', ['', 'x' * 4001])
+async def test_invalid_text_answer_is_not_reported_as_a_closed_question(tmp_path, text):
+    from tests.test_frontend_attachment_tool import _ToolRuntime
+    from orchestrator.frontend_run_questions import question_blocks, telegram_button
+    from orchestrator.runtime_run_questions import handle_text_reply
+    service, session, run, question = running(tmp_path)
+    runtime = _ToolRuntime(tmp_path, service.store)
+    runtime.name = 'zelda'
+    runtime.global_config.ui_language = 'zh-CN'
+    runtime.app.bot.id = 123
+    runtime._reply_text = AsyncMock()
+    button = telegram_button(question_blocks(question)[-1], 'zh-CN')
+    original = SimpleNamespace(from_user=SimpleNamespace(id=123),
+                               reply_markup=SimpleNamespace(inline_keyboard=[[button]]))
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=7),
+        message=SimpleNamespace(reply_to_message=original, text=text, message_id=201))
+    assert await handle_text_reply(runtime, update) is True
+    feedback = runtime._reply_text.await_args.args[1]
+    assert '答复无效' in feedback and '已结束' not in feedback
+    answer = service.get_answer(request_id=run.request_id, agent_id='zelda',
+                                question_id=question['question_id'])
+    assert answer['state'] == 'pending' and not answer.get('answer')
+    with service.store._connection() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_callback_explains_actual_terminal_question_state(tmp_path):
+    from tests.test_frontend_attachment_tool import _ToolRuntime
+    from orchestrator.runtime_run_questions import handle_callback
+    service, session, run, question = running(tmp_path)
+    service.cancel(request_id=run.request_id, agent_id='zelda', question_id=question['question_id'])
+    runtime = _ToolRuntime(tmp_path, service.store)
+    runtime.name = 'zelda'
+    runtime.global_config.ui_language = 'zh-CN'
+    runtime._is_authorized_user = lambda uid: uid == 7
+    runtime._telegram_channel_allowed = AsyncMock(return_value=True)
+    query = SimpleNamespace(data=f"rq:{question['question_id']}:0", id='cancelled-choice',
+                            answer=AsyncMock())
+    update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7),
+                             effective_chat=SimpleNamespace(id=7))
+    await handle_callback(runtime, update, None)
+    assert query.answer.await_args.args[0] == '问题已取消。'
+    assert service.store.get_run(run.run_id)['state'] == 'running'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure,expected', [
+    ('conflict', '状态已变化'),
+    ('missing', '无法读取'),
+    ('unknown', '尚未确认'),
+])
+async def test_question_lookup_failure_never_claims_closed_or_echoes_private_errors(tmp_path, monkeypatch, failure, expected):
+    from tests.test_frontend_attachment_tool import _ToolRuntime
+    from orchestrator import runtime_run_questions
+    from orchestrator.session_store import SessionConflict, SessionNotFound
+    service, session, run, question = running(tmp_path)
+    runtime = _ToolRuntime(tmp_path, service.store)
+    runtime.name = 'zelda'
+    runtime.global_config.ui_language = 'zh-CN'
+    runtime._is_authorized_user = lambda uid: uid == 7
+    runtime._telegram_channel_allowed = AsyncMock(return_value=True)
+    query = SimpleNamespace(data=f"rq:{question['question_id']}:0", id='failed-lookup',
+                            answer=AsyncMock(), edit_message_reply_markup=AsyncMock())
+    update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7),
+                             effective_chat=SimpleNamespace(id=7))
+    errors = {'conflict': SessionConflict('private-secret-value'),
+              'missing': SessionNotFound('private-secret-value'),
+              'unknown': QuestionError('private-secret-value')}
+    def unavailable(*args):
+        raise errors[failure]
+    monkeypatch.setattr(runtime_run_questions, '_question', unavailable)
+    await runtime_run_questions.handle_callback(runtime, update, None)
+    feedback = query.answer.await_args.args[0]
+    assert expected in feedback
+    assert '已结束' not in feedback and 'private-secret-value' not in feedback
+    query.edit_message_reply_markup.assert_not_awaited()
+    answer = service.get_answer(request_id=run.request_id, agent_id='zelda',
+                                question_id=question['question_id'])
+    assert answer['state'] == 'pending' and not answer.get('answer')

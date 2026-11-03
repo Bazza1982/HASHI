@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -21,8 +22,17 @@ def _scheduler_endpoint(audit_context: Mapping[str, Any] | None) -> tuple[str, s
 
 def _render_result(status: int, payload: dict[str, Any]) -> str:
     if status >= 400 or payload.get("ok") is False:
-        detail = str(payload.get("error") or payload.get("message") or "request failed")
-        return f"Error: HASHI Scheduler API request failed ({status}): {detail}"
+        raw_code = payload.get("error_code")
+        code = (raw_code if isinstance(raw_code, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}", raw_code) else "")
+        details = []
+        for key in ("error", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in details:
+                details.append(value.strip())
+        reason = f" [{code}]" if code else ""
+        detail = ": " + " ".join(details) if details else ""
+        return f"Error: HASHI Scheduler API request failed ({status}){reason}{detail}"
     authoritative = {
         "authority": "HASHI Scheduler",
         "namespace": "hashi_scheduler",
@@ -154,7 +164,20 @@ async def execute_hashi_scheduler_tool(
         else:
             return f"Error: unsupported HASHI Scheduler tool '{tool_name}'"
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        return f"Error: HASHI Scheduler API is unavailable: {type(exc).__name__}: {exc}"
+        if isinstance(exc, asyncio.TimeoutError):
+            code, detail = "scheduler_api_timeout", "The API response timed out."
+        elif isinstance(exc, aiohttp.ServerDisconnectedError):
+            code, detail = "scheduler_api_disconnected", "The connection closed before the response."
+        elif isinstance(exc, aiohttp.ClientConnectionError):
+            code, detail = "scheduler_api_connection_failed", "The API connection could not be established."
+        else:
+            code, detail = "scheduler_api_response_failed", "The API response could not be read."
+        outcome = (
+            "No task change was requested."
+            if tool_name in {"hashi_scheduler_list", "hashi_scheduler_status", "hashi_scheduler_run_history"}
+            else "The change result is unconfirmed; check task status before retrying."
+        )
+        return f"Error: HASHI Scheduler API [{code}]: {detail} {outcome}"
     except (TypeError, ValueError) as exc:
         return f"Error: invalid HASHI Scheduler tool arguments: {exc}"
 

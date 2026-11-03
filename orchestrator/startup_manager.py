@@ -5,6 +5,7 @@ import importlib
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from orchestrator.bootstrap_logging import AnimMute
@@ -269,7 +270,12 @@ class StartupManager:
             remote_lifecycle = importlib.import_module(
                 "orchestrator.remote_lifecycle"
             )
-            result = await remote_lifecycle.ensure_remote_started(root)
+            code_root = getattr(global_config, "project_root", None)
+            source_options = (
+                {"code_root": code_root}
+                if root and code_root and Path(root).resolve() != Path(code_root).resolve() else {}
+            )
+            result = await remote_lifecycle.ensure_remote_started(root, **source_options)
         except Exception as exc:
             result = {
                 "ok": False,

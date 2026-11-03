@@ -8,6 +8,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$LogPath,
 
+    [string]$CodeRoot = "",
+
     [string]$PythonArgs = "",
 
     [string]$PythonArgsBase64 = ""
@@ -39,6 +41,9 @@ if ($LogDir) {
 }
 
 Set-Location $HashiRoot
+if ($CodeRoot) {
+    $env:PYTHONPATH = [System.IO.Path]::GetFullPath($CodeRoot)
+}
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONLEGACYWINDOWSSTDIO = "utf-8"

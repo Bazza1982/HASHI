@@ -2196,9 +2196,56 @@ def _with_remote_workbench_ingress_evidence(
 
 
 class WorkbenchGatewayError(ConnectionError):
-    def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int):
+    def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int, failure=None):
         self.code, self.accepted, self.retryable, self.status = code, accepted, retryable, status
+        self.failure = failure
         super().__init__(code)
+
+
+def _workbench_upstream_failure(error: Exception, *, method: str, phase: str, desktop=False):
+    import errno
+    import socket
+    from http.client import HTTPException as HTTPClientError
+    from orchestrator.operation_failures import OperationRejected, operation_failure
+
+    source = error.reason if isinstance(error, URLError) and isinstance(error.reason, Exception) else error
+    number = getattr(source, "errno", None)
+    if phase == "read" and isinstance(source, HTTPClientError):
+        reason = "response_invalid"
+    elif phase == "validate":
+        reason = "target_invalid"
+    elif isinstance(source, ConnectionRefusedError) or number in {errno.ECONNREFUSED, 10061}:
+        reason = "connection_refused"
+    elif isinstance(source, socket.gaierror):
+        reason = "name_not_resolved"
+    elif isinstance(source, ConnectionResetError) or number in {errno.ECONNRESET, errno.ECONNABORTED, 10054}:
+        reason = "connection_reset"
+    else:
+        reason = None
+    not_started = phase == "validate" or (phase == "request" and reason in {"connection_refused", "name_not_resolved"})
+    accepted = False if not_started else None
+    unconfirmed = method not in {"GET", "HEAD"} and accepted is None
+    failure = operation_failure(OperationRejected(reason) if reason else source,
+        operation="workbench_gateway", phase=phase, unconfirmed=unconfirmed)
+    return WorkbenchGatewayError(
+        "request_outcome_unknown" if desktop and not not_started else "local_workbench_unavailable",
+        accepted=accepted, retryable=not unconfirmed, status=502 if desktop and not not_started else 503,
+        failure=failure,
+    )
+
+
+def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: str):
+    from orchestrator.api_failures import operation_failure_payload
+    from orchestrator.operation_failures import OperationRejected, operation_failure
+
+    effect = "not_requested" if method in {"GET", "HEAD"} else "not_started" if error.accepted is False else "unconfirmed"
+    failure = error.failure or operation_failure(OperationRejected("backend_unavailable"),
+        operation="workbench_gateway", phase="validate" if error.accepted is False else "request",
+        unconfirmed=effect == "unconfirmed")
+    _workbench_gateway_log("operation_failed", **failure.diagnostic())
+    return {**operation_failure_payload(failure, error_code=error.code, effect_state=effect),
+        "code": error.code, "detail": error.code, "error": error.code,
+        "retryable": error.retryable}
 
 
 def _desktop_workbench_host(instance_id: str, port: int) -> str:
@@ -2235,6 +2282,8 @@ def _forward_workbench_gateway_request(
     timeout: float | None = None,
 ) -> tuple[int, bytes, dict[str, str]]:
     """Relay one authenticated request to this instance's loopback Workbench API."""
+    from http.client import HTTPException as HTTPClientError
+
     normalized_method = str(method or "").upper()
     if normalized_method not in _WORKBENCH_GATEWAY_METHODS:
         raise ValueError("unsupported Workbench gateway method")
@@ -2272,17 +2321,16 @@ def _forward_workbench_gateway_request(
         attempt_count=len(hosts),
         timeout_ms=int(1000 * (_workbench_gateway_timeout() if timeout is None else timeout)),
     )
-    last_error: Exception | None = None
+    last_error: WorkbenchGatewayError | None = None
     for attempt, host in enumerate(hosts, start=1):
         attempt_started = time.monotonic()
-        url = local_http_url(_workbench_port, upstream_path, host=host)
-        request_data = body_bytes if normalized_method != "GET" else None
-        upstream = urllib_request.Request(
-            url,
-            data=request_data,
-            headers=headers,
-            method=normalized_method,
-        )
+        try:
+            url = local_http_url(_workbench_port, upstream_path, host=host)
+            request_data = body_bytes if normalized_method != "GET" else None
+            upstream = urllib_request.Request(url, data=request_data, headers=headers, method=normalized_method)
+        except (ValueError, TypeError) as exc:
+            raise _workbench_upstream_failure(exc, method=normalized_method, phase="validate") from None
+        phase = "request"
         host_kind = "loopback_ipv6" if ":" in host else "loopback_ipv4" if host == "127.0.0.1" else "local_alias"
         _workbench_gateway_log(
             "local_request_started",
@@ -2297,6 +2345,7 @@ def _forward_workbench_gateway_request(
                 upstream,
                 timeout=_workbench_gateway_timeout() if timeout is None else timeout,
             ) as response:
+                phase = "read"
                 _workbench_gateway_log(
                     "local_response_headers",
                     **trace_facts,
@@ -2357,7 +2406,10 @@ def _forward_workbench_gateway_request(
                 attempt=attempt,
                 status=exc.code,
             )
-            content = exc.read()
+            try:
+                content = exc.read()
+            except (URLError, TimeoutError, OSError, HTTPClientError) as read_error:
+                raise _workbench_upstream_failure(read_error, method=normalized_method, phase="read", desktop=desktop_request) from None
             _workbench_gateway_log(
                 "local_response_body_completed",
                 **trace_facts,
@@ -2370,8 +2422,8 @@ def _forward_workbench_gateway_request(
                 response_producer="local_workbench",
             )
             return exc.code, content, response_headers
-        except (URLError, TimeoutError, OSError) as exc:
-            last_error = exc
+        except (URLError, TimeoutError, OSError, HTTPClientError) as exc:
+            last_error = _workbench_upstream_failure(exc, method=normalized_method, phase=phase, desktop=desktop_request)
             _workbench_gateway_log(
                 "local_request_failed",
                 **trace_facts,
@@ -2381,35 +2433,22 @@ def _forward_workbench_gateway_request(
                 duration_ms=int((time.monotonic() - attempt_started) * 1000),
                 **_workbench_gateway_error_facts(exc),
             )
-            # A lost desktop input response is an unknown outcome, not permission
-            # to replay a click/text against a fallback loopback address.
-            if desktop_request or speech_request:
-                # A later request may discover a replacement listener. Never
-                # replay this request when its outcome is uncertain.
+            # Mutating requests may fail over only after a proved pre-connect
+            # refusal/name-resolution failure. Missing acknowledgements are not replay permission.
+            if desktop_request or speech_request or (normalized_method not in {"GET", "HEAD"} and last_error.accepted is None):
                 break
             continue
-    if desktop_request or speech_request:
-        _workbench_gateway_log(
-            "forward_failed",
-            **trace_facts,
-            method=normalized_method,
-            api_path=_workbench_gateway_token(route_path),
-            duration_ms=int((time.monotonic() - total_started) * 1000),
-            error_code="request_outcome_unknown",
-            response_producer="remote_gateway",
-        )
-        raise WorkbenchGatewayError("request_outcome_unknown", accepted=None, retryable=False, status=502)
     _workbench_gateway_log(
         "forward_failed",
         **trace_facts,
         method=normalized_method,
         api_path=_workbench_gateway_token(route_path),
         duration_ms=int((time.monotonic() - total_started) * 1000),
-        error_code="local_workbench_unavailable",
+        error_code=last_error.code if last_error else "local_workbench_unavailable",
         response_producer="remote_gateway",
-        **(_workbench_gateway_error_facts(last_error) if last_error else {}),
+        failure=last_error.failure.diagnostic() if last_error and last_error.failure else None,
     )
-    raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
+    raise last_error or _workbench_upstream_failure(ConnectionError(), method=normalized_method, phase="request")
 
 
 def _observe_detached_workbench_gateway(
@@ -3074,15 +3113,11 @@ def create_app(
                 duration_ms=int((time.monotonic() - route_started) * 1000),
                 error_code=exc.code, response_producer="remote_gateway",
             )
-            return JSONResponse(status_code=exc.status, content={
-                "ok": False, "code": exc.code, "error": exc.code,
-                "accepted": exc.accepted, "retryable": exc.retryable,
-            }, headers=trace_headers)
+            return JSONResponse(status_code=exc.status,
+                content=_workbench_gateway_failure_payload(exc, method=request.method),
+                headers={**trace_headers, "Cache-Control": "no-store"})
         except ConnectionError as exc:
-            logger.warning(
-                "Workbench gateway upstream unavailable: type=%s",
-                type(exc).__name__,
-            )
+            failure = _workbench_upstream_failure(exc, method=request.method, phase="request")
             _workbench_gateway_log(
                 "proxy_response_ready", **trace_facts, method=request.method,
                 api_path=safe_api_path, status=503,
@@ -3091,12 +3126,8 @@ def create_app(
             )
             return JSONResponse(
                 status_code=503,
-                content={
-                    "ok": False,
-                    "error": "Local Workbench API unavailable",
-                    "detail": "local_workbench_unavailable",
-                },
-                headers=trace_headers,
+                content=_workbench_gateway_failure_payload(failure, method=request.method),
+                headers={**trace_headers, "Cache-Control": "no-store"},
             )
         headers = {**trace_headers, **headers}
         _workbench_gateway_log(

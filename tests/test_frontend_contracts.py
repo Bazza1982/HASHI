@@ -9,6 +9,7 @@ from orchestrator.frontend_connector_registry import (
 from orchestrator.frontend_contracts import (
     build_frontend_ingress_envelope,
     normalize_command_invocation,
+    normalize_content_component,
     normalize_delivery_intent,
     normalize_delivery_receipt,
     normalize_frontend_ingress_envelope,
@@ -223,6 +224,50 @@ def test_delivery_receipt_distinguishes_proof_from_ambiguous_outcome():
         }
     )
     assert unknown["status"] == "unknown"
+
+
+def _caption_component(direction, caption, *, identity="att-1"):
+    if direction == "input":
+        return normalize_frontend_operation({"kind": "message", "content": [{
+            "type": "attachment_ref", "attachment_id": identity, "caption": caption,
+        }]})["content"][0]
+    return normalize_content_component({
+        "type": "media_ref", "group_id": "grp-1", "attachment_id": identity, "caption": caption,
+    })
+
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+@pytest.mark.parametrize("separator", ["\n", "\r\n", "\t"])
+def test_attachment_caption_keeps_paragraphs_without_changing_message_kind(direction, separator):
+    caption = "第一段 🌸" + separator + "Second paragraph"
+    result = _caption_component(direction, caption)
+    assert result["caption"] == caption
+    assert result["attachment_id"] == "att-1"
+    assert result["type"] == ("attachment_ref" if direction == "input" else "media_ref")
+
+
+@pytest.mark.parametrize("direction,maximum", [("input", 4096), ("output", 512)])
+def test_multiline_caption_has_the_existing_size_limit(direction, maximum):
+    assert _caption_component(direction, "a" * (maximum - 2) + "\nb")["caption"].endswith("\nb")
+    with pytest.raises(ValueError, match="caption") as caught:
+        _caption_component(direction, "a" * (maximum - 1) + "\nb")
+    assert caught.value.error_code == "caption_too_long"
+    assert caught.value.maximum == maximum
+
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+@pytest.mark.parametrize("control", ["\x00", "\x0b", "\x1b", "\x7f"])
+def test_caption_rejects_non_text_controls_with_a_safe_reason(direction, control):
+    with pytest.raises(ValueError, match="caption") as caught:
+        _caption_component(direction, "first" + control + "second")
+    assert caught.value.error_code == "caption_control_character"
+    assert "first" not in str(caught.value)
+
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+def test_multiline_caption_never_relaxes_attachment_identity(direction):
+    with pytest.raises(ValueError, match="attachment_id"):
+        _caption_component(direction, "first\nsecond", identity="att-1\nother")
 
 
 def test_media_group_preserves_order_and_declares_retention():

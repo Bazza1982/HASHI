@@ -13,6 +13,36 @@ from orchestrator.background_jobs import BackgroundJobManager
 from tools.tool_audit import record_tool_action
 
 
+def test_diagnostics_search_older_request_evidence_without_claiming_safe_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_diagnostics, "_MAX_LOG_BYTES", 128)
+    record_tool_action(
+        workspace_dir=tmp_path, tool_name="file_write", tool_call_id="older-write",
+        arguments={"path": "result.txt"}, output="saved", is_error=False, duration_ms=1,
+        audit_context={"request_id": "req-older"},
+        details={"effect_receipt": {"kind": "write", "readback": True}},
+    )
+    with (tmp_path / "tool_action_audit.jsonl").open("a", encoding="utf-8") as stream:
+        for index in range(20):
+            stream.write(json.dumps({"request_id": "other", "tool_name": f"tool-{index}"}) + "\n")
+
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-older")
+
+    assert any(item["tool_call_id"] == "older-write" for item in report["tool_actions"])
+    assert report["safe_retry_evidence"]["status"] != "present"
+
+
+def test_diagnostics_mark_a_scan_limit_as_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_diagnostics, "_MAX_DIAGNOSTIC_SCAN_BYTES", 128, raising=False)
+    (tmp_path / "tool_action_audit.jsonl").write_text(
+        "".join(json.dumps({"request_id": "other", "padding": "x" * 50}) + "\n" for _ in range(10)),
+        encoding="utf-8",
+    )
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-target")
+    assert report["evidence"]["tool_log_suffix_truncated"] is True
+    assert report["reconciliation"]["evidence_limited"] is True
+    assert report["safe_retry_evidence"]["status"] != "present"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('job_query_fails', [False, True])
 async def test_effect_reconciliation_awaits_real_worker_facade_and_preserves_writes(tmp_path, job_query_fails):
@@ -31,6 +61,42 @@ async def test_effect_reconciliation_awaits_real_worker_facade_and_preserves_wri
     assert summary['confirmed_write_count'] == 1
     assert summary['unverified_action_count'] == 0
     assert summary['evidence_limited'] is job_query_fails
+
+
+def test_media_reason_survives_terminal_projection_without_private_data(tmp_path):
+    response = BackendResponse(
+        text="", duration_ms=1, is_success=False, error_code="MEDIA_UNAVAILABLE",
+        stream_metadata={
+            "attachment_id": "att_1234",
+            "media_diagnostic": {"phase": "read_grant", "reason": "safe_open_failed",
+                                 "error_type": "PermissionError", "errno": 13,
+                                 "path": "private document content"},
+        },
+    )
+    fields = runtime_pipeline.backend_diagnostic_fields(response)
+    assert fields["media_diagnostic"] == {
+        "attachment_id": "att_1234", "phase": "read_grant", "reason": "safe_open_failed",
+        "error_type": "PermissionError", "errno": 13,
+    }
+    local_log = runtime_pipeline.backend_failure_diagnostics(response)
+    assert local_log["media_diagnostic"] == fields["media_diagnostic"]
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        _runtime(tmp_path), "req-media", {"success": False, **fields},
+    )
+    report = request_diagnostics.build_request_diagnostics(workspace_dir=tmp_path, request_id="req-media")
+    assert report["terminal"]["media_diagnostic"] == fields["media_diagnostic"]
+    assert "private document content" not in json.dumps(report)
+
+
+def test_media_diagnostic_rejects_private_identifiers_and_invalid_fields():
+    from orchestrator.media_diagnostics import sanitize_media_diagnostic
+
+    assert sanitize_media_diagnostic({"phase": "read_grant", "reason": "C:\\private\\file"}) == {}
+    assert sanitize_media_diagnostic(
+        {"phase": "read_grant", "reason": "safe_open_failed", "errno": True,
+         "winerror": 2**40, "error_type": "private document"},
+        attachment_id="C:\\private\\file",
+    ) == {"phase": "read_grant", "reason": "safe_open_failed"}
 
 
 def test_no_change_and_missing_or_corrupt_evidence_are_distinct(tmp_path):

@@ -7,6 +7,12 @@ from collections.abc import Mapping
 
 VERSION = 1
 ACTIONS = frozenset({"desktop_info", "desktop_frame", "desktop_view", "desktop_control", "desktop_input", "desktop_close"})
+# Optional extensions must not make older desktop Workers undiscoverable.
+SUPPORTED_ACTIONS = ACTIONS | {"desktop_previews"}
+PREVIEW_MAX_DISPLAYS = 4
+PREVIEW_MAX_BYTES = 40 * 1024
+PREVIEW_INTERVAL = 2.0
+PREVIEW_TTL_MS = 4000
 PIN_FIELDS = ("instance_id", "capability_id", "device_id", "user_session_id", "worker_generation")
 MAX_FRAME_BYTES = 512 * 1024
 ULTRA_FRAME_BYTES = 256 * 1024
@@ -62,8 +68,20 @@ def frame_interval_seconds(profile, *, idle: bool) -> float:
     return FRAME_INTERVAL_SECONDS[profile][int(idle)]
 
 
+def preview_options(value) -> dict:
+    v = fields(value, {"display_ids", "display_revision"}, {"display_ids", "display_revision"})
+    ids = v["display_ids"]
+    if not isinstance(ids, list) or not 1 <= len(ids) <= PREVIEW_MAX_DISPLAYS:
+        raise DesktopError("desktop_invalid_display")
+    if any(not isinstance(item, str) or not 1 <= len(item) <= 128 for item in ids):
+        raise DesktopError("desktop_invalid_display")
+    if len(set(ids)) != len(ids):
+        raise DesktopError("desktop_invalid_display")
+    return {"display_ids": list(ids), "display_revision": identifier(v["display_revision"], "display_revision")}
+
+
 def view_options(value) -> dict:
-    v = fields(value, {"display_id", "display_ids", "small", "crop"})
+    v = fields(value, {"display_id", "display_ids", "small", "crop", "sequence"})
     single, multiple = "display_id" in v, "display_ids" in v
     if single == multiple:
         raise DesktopError("desktop_invalid_display")
@@ -89,7 +107,8 @@ def view_options(value) -> dict:
     crop = {k: unit(n) for k, n in crop.items()}
     if crop["width"] < .05 or crop["height"] < .05 or crop["x"] + crop["width"] > 1.000001 or crop["y"] + crop["height"] > 1.000001:
         raise DesktopError("desktop_invalid_crop")
-    return {**selection, "small": v.get("small", False), "crop": crop}
+    sequence = {"sequence": integer(v["sequence"], 1, 2**53 - 1)} if "sequence" in v else {}
+    return {**selection, "small": v.get("small", False), "crop": crop, **sequence}
 
 
 def validate_input(value) -> dict:

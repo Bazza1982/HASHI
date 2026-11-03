@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from adapters.timeout_policy import IDLE_TIMEOUT_KEY, apply_timeout_layers
+
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.permissions.authority import PermissionDenied
@@ -47,10 +49,14 @@ class ConfiguredModelFactory:
                 if set(options) - _PUBLIC_OPTIONS:
                     raise PermissionDenied("a profile contains non-public inference options")
                 driver = manager.create_herv3_provider_backend(*target)
+                drivers[target] = driver
                 driver.config.workspace_dir = self.private_workspace
                 driver.config.system_md = None
-                driver.IDLE_TIMEOUT_SEC = float(config.user_idle_timeout_s)
-                drivers[target] = driver
+                driver.config.extra = apply_timeout_layers(
+                    driver.config.extra, engine=target[0],
+                    backend_extra=driver.config.extra,
+                    persisted_override={IDLE_TIMEOUT_KEY: config.user_idle_timeout_s},
+                )
                 if not await driver.initialize():
                     raise PermissionDenied("the selected model transport could not initialize")
                 public.append({"engine": target[0], "model": target[1], "extra": options})

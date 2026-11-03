@@ -210,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     unknown = sorted(set(routes).difference(ROUTE_MODELS))
     if not routes or unknown:
         payload = {"status": "error", "error": "invalid OCR model route"}
-        print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False))
+        print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=True))
         return 2
     try:
         payload = run(args.image.resolve(), args.model_root.resolve(), routes)
@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": f"PaddleOCR worker failed: {type(exc).__name__}",
         }
         return_code = 1
-    print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False))
+    print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=True))
     return return_code
 
 

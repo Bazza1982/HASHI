@@ -11,6 +11,7 @@ from typing import Any
 
 from orchestrator.path_presentation import display_user_path
 from orchestrator.process_execution import is_wsl
+from orchestrator.workzone_errors import WorkzonePathError
 
 STATE_FILENAME = "workzone.json"
 WORKZONE_SLOT_IDS = ("main",) + tuple(str(number) for number in range(1, 10))
@@ -89,9 +90,10 @@ def _normalize_workzone_input(raw_path: str) -> Path:
 def resolve_workzone_input(raw_path: str, project_root: Path, workspace_dir: Path) -> Path:
     raw = (raw_path or "").strip()
     if not raw:
-        raise ValueError("missing path")
+        raise WorkzonePathError("workzone_path_missing", "missing path")
     if os.name == "nt" and workzone_path_kind(raw) == "posix":
-        raise ValueError(
+        raise WorkzonePathError(
+            "workzone_windows_path_required",
             "POSIX absolute path is not valid on native Windows; use a Windows "
             "path or a WSL UNC path"
         )
@@ -102,16 +104,16 @@ def resolve_workzone_input(raw_path: str, project_root: Path, workspace_dir: Pat
     else:
         candidate = candidate.resolve()
     if candidate.is_file():
-        raise ValueError(f"path is a file, not a directory: {candidate}")
+        raise WorkzonePathError("workzone_path_is_file", f"path is a file, not a directory: {candidate}")
     if not candidate.is_dir():
-        raise ValueError(f"path is not an existing directory: {candidate}")
+        raise WorkzonePathError("workzone_path_not_directory", f"path is not an existing directory: {candidate}")
     if was_relative:
         try:
             candidate.relative_to(project_root.resolve())
         except ValueError:
             logger.warning("Relative workzone path resolved outside project_root: %s", candidate)
     if candidate == workspace_dir.resolve():
-        raise ValueError("path is the agent home workspace; use /workzone off instead")
+        raise WorkzonePathError("workzone_path_is_agent_home", "path is the agent home workspace; use /workzone off instead")
     if candidate == workspace_dir.resolve().parent:
         logger.warning("Workzone path is the workspaces parent, which is usually not a task directory: %s", candidate)
     return candidate

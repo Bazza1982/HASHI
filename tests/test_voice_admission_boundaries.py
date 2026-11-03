@@ -81,8 +81,13 @@ async def test_actual_multipart_route_preserves_scope_and_only_typed_pre_admissi
         form.add_field("media_type", "voice")
         form.add_field("files", b"audio", filename="voice.webm", content_type="audio/webm")
         response = await client.post("/api/chat", data=form)
-        assert response.status == 500
-        assert response.content_type != "application/json"
+        assert response.status == 503
+        failure = await response.json()
+        assert failure["error_code"] == "chat_admission_unconfirmed"
+        assert failure["accepted"] is None and failure["retry_safe"] is False
+        assert failure["cause_code"] == "internal_error"
+        assert failure["diagnostic_ref"] in failure["message"]
+        assert "voice_safe_confirmation_required" not in failure["message"]
 
 
 @pytest.mark.asyncio

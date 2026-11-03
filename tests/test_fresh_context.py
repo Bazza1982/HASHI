@@ -416,9 +416,10 @@ async def test_new_backend_reset_failure_keeps_previous_channel_binding(tmp_path
             owner_id="user:123", agent_id="arale"
         )
     } == {default["session_id"], previous["session_id"]}
-    assert replies[-1] == (
+    assert replies[-1].splitlines()[0] == (
         "Could not start a new Session. The previous channel binding remains active."
     )
+    assert "session_new_reset_backend_internal_error" in replies[-1] and "operr_" in replies[-1]
 
 
 @pytest.mark.asyncio
@@ -443,9 +444,10 @@ async def test_use_backend_reset_failure_keeps_binding_and_unfinished_inputs(tmp
     ] == default["session_id"]
     assert runtime_long.is_batch_active(runtime) is True
     assert runtime._pending_voice == {"456": {"prompt": "voice draft"}}
-    assert replies[-1] == (
+    assert replies[-1].splitlines()[0] == (
         "Could not switch Sessions. The previous channel binding remains active."
     )
+    assert "session_use_reset_backend_internal_error" in replies[-1] and "operr_" in replies[-1]
 
 
 @pytest.mark.asyncio
@@ -494,9 +496,10 @@ async def test_fresh_backend_reset_failure_keeps_generation_and_inputs(tmp_path)
     ] == 1
     assert runtime_long.is_batch_active(runtime) is True
     assert runtime._pending_voice == {"456": {"prompt": "voice draft"}}
-    assert replies[-1] == (
+    assert replies[-1].splitlines()[0] == (
         "Could not start a fresh context. The previous Session generation remains active."
     )
+    assert "session_fresh_reset_backend_internal_error" in replies[-1] and "operr_" in replies[-1]
 
 
 @pytest.mark.asyncio
@@ -562,7 +565,8 @@ async def test_archive_backend_reset_failure_keeps_session_and_inputs(tmp_path):
         "session_id"
     ] == current["session_id"]
     assert runtime_long.is_batch_active(runtime) is True
-    assert replies[-1] == "Could not archive the Session safely. Its records were retained."
+    assert replies[-1].splitlines()[0] == "Could not archive the Session safely. Its records were retained."
+    assert "session_archive_reset_backend_internal_error" in replies[-1] and "operr_" in replies[-1]
 
 
 @pytest.mark.asyncio

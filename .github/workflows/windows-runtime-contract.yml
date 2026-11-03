@@ -3,6 +3,9 @@ name: Windows runtime contract
 on:
   push:
     paths:
+      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "tests/test_portable_bootstrap_failure_details.py"
+      - "tests/test_portable_windows_packaging.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"
@@ -33,6 +36,9 @@ on:
       - ".github/workflows/windows-runtime-contract.yml"
   pull_request:
     paths:
+      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "tests/test_portable_bootstrap_failure_details.py"
+      - "tests/test_portable_windows_packaging.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"
@@ -88,12 +94,16 @@ jobs:
           fi
       - name: Install runtime and test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]"
-      - name: Verify native Windows audit, shell, path, argv, and process contracts
+      - name: Verify native Windows runtime and portable startup contracts
         run: >-
           python -m pytest -q
           tests/test_runtime_contract.py
           tests/test_function_generation.py
           tests/test_process_execution.py
+          tests/test_agent_pcm_edit.py
+          tests/test_agent_pcm_api.py
           tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
           tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_fails_fast_when_durable_store_is_unavailable
           tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta
+          tests/test_portable_bootstrap_failure_details.py
+          tests/test_portable_windows_packaging.py

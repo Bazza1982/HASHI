@@ -708,6 +708,7 @@ def admit_frontend_ingress(
     idempotency_key = f"{connector_id}:{request_id}"
     blocks = content_blocks or ([{"type": "text", "text": text}] if text else None)
 
+    from orchestrator.fingerprint.runtime import admission_policy
     try:
         accepted = store.accept_run(
             session_id=session_id,
@@ -721,6 +722,7 @@ def admit_frontend_ingress(
             content=blocks,
             parent_run_id=parent_run_id,
             response_preferences=response_preferences,
+            fingerprint_policy=admission_policy(runtime),
             delivery_route=delivery_route,
             agent_workspace=getattr(runtime, "workspace_dir", None),
         )

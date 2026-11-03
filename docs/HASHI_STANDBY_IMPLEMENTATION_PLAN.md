@@ -372,4 +372,112 @@ PRD SB-xx 对应证据：
 剩余阻断与下个任务：
 ```
 
-**本次文档交付只完成方案编制与源码抽查，不将以上任何实施关卡标记通过。**
+**原文档交付只完成方案编制与源码抽查，不将以上任何实施关卡标记通过。**
+
+## 15. 实施记录：S0 与 S1 控制子集（2026-11-03）
+
+本节记录实际实现，前文各阶段目标保持有效。历史文档中的
+`feature-standby` 与当时“仅文档”限制属于原轮次；本次集中接手获准在既有
+非生产 checkout/main 施工，不创建新分支或工作树，不代表生产发布获准。
+
+**已实现：**PAO/Functions 的严格有界 Profile schema、原文与用户确认解释、
+默认无输入/无记录/无外发、config_json 私有版本检查；SessionStore schema 33
+控制扩展；owner/Agent/Conversation/generation 归属、控制 revision/epoch、
+幂等操作回执与原 ID 查询；配置、暂停、结束和“仅本次控制记录”的删除。
+控制表只保存 ID、版本和状态，保存的 Profile 在配置 owner，环境正文不进入
+新表或普通 Message。读取不产生采集/模型请求；配置损坏或 Agent 不在线不会
+阻止已存在控制记录的结束入口。新控制记录及操作回执具有容量/保留边界。
+
+`POST /api/v1/standby/operation` 采用已有 Backend API 身份、部署 Profile
+限制和 no-store；拒绝跨 scope、未知字段、重复 JSON key、非有限数与超大请求。
+原生 capabilities 明确区分 control_available 与 media/armed_available。
+共享动态命令注册提供 `/standby [status]`，只读状态用现有卡片与语言目录，
+不启动假 Call、不播放开场，不创建第二个模型 Provider 或 Agent。
+
+**仍未实现/不可启用：**S2 媒体租约与 Call/Phone 仲裁、连续采集、S3 合格 Judge、
+S4 完整 Agent 临时内容保留与选择性清理、S5 受管会议材料/递纸条、客户端采集面板。
+这些入口统一返回 `standby_capability_unqualified`，预检逐项说明资格缺口；
+SHADOW/ARMED、自动整理、记忆、升格产物均未开放。当前只允许 CONFIGURED/
+PAUSED/STOPPED 的控制子集；不能据此宣称 G1、完整后端或任何实际待命体验通过。
+
+S0 实际调用核对与阻断矩阵：
+
+| 原生路径 | 已有能力 | Standby 资格/阻断 |
+|---|---|---|
+| Call routes/ports/adapters | 认证、原生 Session 检查、现有媒体配置和调用 | 不启动 Call；设备租约及 Standby 处理资格未接入 |
+| Call admit → PAO Run/Message | 普通用户交谈持久化/执行 | 不满足临时环境文字/工具/compact/记忆清理，禁止升级 |
+| transient_live_media | 当前轮图像不写 Session | 不是完整环境正文/派生内容的保留契约 |
+| Phone worker_actions/ephemeral factory | 既有 Phone 无工具一次推断、隐私兼容检查 | Phone 提示词与资格不能冒充 Standby Judge，未调用 |
+| SessionStore | 原生事务与现有聊天权威 | 只增加控制扩展；不保存媒体、转写或 Judge 原始结果 |
+| config_json | 私有文件、跨进程锁、乐观并发 | Profile 保存复用；冲突或已提交耐久性未知不得盲重试 |
+
+删除当前控制记录只能报告 `control_only=true` 与
+`external_copies=not_created`，不宣称 PCM/Engine/备份的全局删除或物理擦除。
+不得让后续实现直接借用此控制子集开放 ACTIVE：媒体租约、每阶段提交屏障、
+真实内容 owner/TTL/恢复、预算与停止的容量隔离必须先完成相应验收。
+
+红绿：新增真实临时 SessionStore、并发事务、config CAS、aiohttp/authentication、
+共享命令与双语卡片测试；首轮在旧版本缺少模块处失败，随后实际控制/API通过。
+现有 SessionStore/Call ports 回归亦已执行。完整清单与实际命令/结果在原白板卡，
+不以此段说明替代真实设备、语言语义质量或 8 小时验收。
+
+## 16. S2 第一增量：共享租约存储（2026-11-03）
+
+**仅存储实现，不是 S2 通过或媒体已经可用。**PAO/Functions 的
+`orchestrator/frontend_capture.py` 由 SessionStore schema 34 安装和调用，
+共用原生数据库、连接和事务，不创建媒体数据库、设备进程或模型调用。
+控制表仍按第 15 节保存 ID/版本/状态；新增两张采集表也只保存 scope、
+许可、代次、期限和短期去重元数据，不保存环境正文或媒体。
+
+- 同 owner/instance 只保留一个活动许可，不信任浏览器 device_id；跨 Worker
+  由 `BEGIN IMMEDIATE` 获取。不同 owner/instance 分开，不干预其他实例或应用。
+- 15 秒许可、5 秒续期；续期序号去重、迟到或过期请求不恢复已停止许可。
+  状态查询不续期；已观察到的时钟回退或 Conversation 代次变化撤销许可。
+- Call/Phone 抢占协议先在同一事务暂停 Standby、推进持久 epoch，再返回
+  STOP_PENDING；收到停采回执前不给新许可。通话结束不自动恢复 Standby。
+- 无停采回执仅标 REVOKING，不声称物理 track 已释放；旧回执不能影响新许可。
+  获取容量和短期幂等记录有限，释放不被获取预算阻断。
+- 原生存储层可接收 Standby 内部许可，但必须有 ACTIVE 控制及准确 epoch。
+  当前公开 Standby 服务仍拒绝全部 live operation；没有开放绕过资格的新入口。
+
+验证：真实临时 SessionStore、两个独立 Python 子进程/连接争用，旧许可
+迟到回执、续期去重、会话撤权、时钟回退、抢占持久围栏及容量满仍可停止。
+首轮 8 项 RED（旧版无接口）→GREEN；补充围栏 2 项 RED→GREEN。
+新增 12 项连同原控制与 SessionStore 检查共 93 通过，无真实设备/模型调用。
+
+**下一增量仍必须完成：**认证接口、原生 Call/Phone 接纳及重新连接、浏览器
+实际取流前的共同许可、独立到期停止/晚到 permission 处理、上传/输出围栏、
+原 Call/Phone 全部回归，以及有界音频/视觉 ingress、后台/锁屏/物理 track
+资格。浏览器到期屏障的协议检查不等于物理停止证据。不得把此存储增量
+用于开放 Standby；S1 的停止容量隔离、S3–S5 与客户端仍未完成。
+
+接线前的停止规则补正：服务器许可到期只撤销使用权，不是网页物理停采证明。
+未获停采回执的 EXPIRED 许可也不释放 owner 媒体锁；合格原生计时器实际停采
+后可以提交回执，网页仅凭超时不能替代它。旧首轮“到期即可另取许可”的
+协议期待已用更严格的可观测停止检查替换，新增对应 RED→GREEN 证据。
+丢失首个获取回执时，完全相同请求可回读原许可及失效状态以完成停止，
+不会续期或重新采集；不同请求体不获旧许可凭据。
+
+## 17. S1 安全停止补齐与 S2 控制围栏（2026-11-03）
+
+PAO/Functions、SessionStore schema 35：普通操作回执达到 4096 上限时，
+配置仍被拒绝，pause/end/delete_data 改用每个既有控制记录一个应急回执槽；
+不删除普通回执腾空间，不扩大启动预算。应急槽和原控制一起有界并按保留期
+清理；相同最新请求可读回，相同 ID 换内容仍冲突。被后续应急请求替代的旧
+ID 可能不再保留，应查询当前控制状态；查无回执不是“未执行”的证明。
+旧请求的 revision/epoch 已过期，不能因此再次推进状态或重放动作。
+
+暂停、结束和删除控制数据在同一原生事务推进控制 epoch 并撤销匹配的
+Standby 采集许可；不依赖稍后的轮询或进程内回调，不影响同 owner 的新
+Call/Phone 或其他 owner。采集状态、续期及原请求回读另核对当前控制
+lifecycle/epoch/disposal，其他 Worker 改权、控制删除或崩溃错失回调时同样
+拒绝旧许可。撤权保留 REVOKING/EXPIRED 占用，仍需停采回执后才释放；
+控制结束或 control-only 响应不是物理设备已停采证明。
+
+新增原生存储/双连接/容量/幂等检查首轮 12 RED、1 原行为通过，修复后
+整个 Standby 40 通过；再经真实 aiohttp 认证接口验证满额时结束、断线
+Agent、损坏 Profile、未认证/跨代次拒绝和原 ID 回查，并与原 SessionStore
+合跑共 114 通过，无真实采集或模型调用。普通会话及其他媒体许可隔离保留。
+
+本节只补齐上述控制/存储路径；媒体认证接口、Call/Phone 与浏览器共同
+取流、实际释放、连续有界 ingress、S3–S5 和真实设备资格仍未完成。

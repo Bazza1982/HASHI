@@ -11,10 +11,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Literal, Mapping
 
-from orchestrator.agent_creation import AgentCreationService, AgentCreationSpec
+from orchestrator.agent_creation import AgentCreationError, AgentCreationService, AgentCreationSpec
+from orchestrator.operation_failures import OperationFailed, operation_failure
 from orchestrator.agent_deletion import AgentDeletionService
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
@@ -45,6 +46,14 @@ class AgentManagementError(Exception):
         super().__init__(message)
         self.error_code = error_code
         self.status_code = status_code
+
+
+class AgentOperationFailure(OperationFailed):
+    """Per-call failure plus facts already established by the PAO owner."""
+
+    def __init__(self, failure, *, observed):
+        super().__init__(failure)
+        self.observed = MappingProxyType(dict(observed))
 
 
 @dataclass(frozen=True)
@@ -655,130 +664,163 @@ class AgentManagementManager:
         }
 
     async def _create(self, action: AgentManagementAction) -> dict:
-        payload = action.payload
-        spec = AgentCreationSpec(
-            name=action.agent_id or "",
-            backend=str(payload.get("backend") or ""),
-            display_name=(
-                str(payload["display_name"])
-                if payload.get("display_name") is not None
-                else None
-            ),
-            model=str(payload["model"]) if payload.get("model") is not None else None,
-            provider=str(payload["provider"]) if payload.get("provider") is not None else None,
-            effort=str(payload["effort"]) if payload.get("effort") is not None else None,
-            is_active=bool(payload.get("is_active", False)),
-            restricted=bool(payload.get("restricted", False)),
-        )
-        result = self._creation().create(spec)
-        lifecycle = {
-            "ok": True,
-            "status": "inactive",
-            "message": "Agent was created inactive; no start was requested.",
-        }
-        status = 201
-        if result.is_active:
-            manager = getattr(self.kernel, "agent_lifecycle", None)
-            request_start = getattr(manager, "request_start_agent", None)
-            if callable(request_start):
-                lifecycle = await request_start(
-                    result.name,
-                    deactivate_on_failure_revision=result.config_revision,
-                )
-                if lifecycle.get("ok"):
-                    status = 202
+        phase = "configuration"
+        observed = {"agent_created": False, "start_requested": False, "start_confirmed": None}
+        try:
+            payload = action.payload
+            spec = AgentCreationSpec(
+                name=action.agent_id or "",
+                backend=str(payload.get("backend") or ""),
+                display_name=(
+                    str(payload["display_name"])
+                    if payload.get("display_name") is not None
+                    else None
+                ),
+                model=str(payload["model"]) if payload.get("model") is not None else None,
+                provider=str(payload["provider"]) if payload.get("provider") is not None else None,
+                effort=str(payload["effort"]) if payload.get("effort") is not None else None,
+                is_active=bool(payload.get("is_active", False)),
+                restricted=bool(payload.get("restricted", False)),
+            )
+            phase = "provision"
+            observed["agent_created"] = None
+            result = self._creation().create(spec)
+            observed["agent_created"] = True
+            lifecycle = {
+                "ok": True,
+                "status": "inactive",
+                "message": "Agent was created inactive; no start was requested.",
+            }
+            status = 201
+            if result.is_active:
+                phase = "prepare"
+                manager = getattr(self.kernel, "agent_lifecycle", None)
+                request_start = getattr(manager, "request_start_agent", None)
+                if callable(request_start):
+                    phase = "start"
+                    observed["start_requested"] = True
+                    lifecycle = await request_start(
+                        result.name,
+                        deactivate_on_failure_revision=result.config_revision,
+                    )
+                    observed["start_confirmed"] = lifecycle.get("ok") if isinstance(lifecycle, Mapping) and type(lifecycle.get("ok")) is bool else None
+                    phase = "read"
+                    if lifecycle.get("ok"):
+                        status = 202
+                    else:
+                        configuration_warning = None
+                        try:
+                            phase = "persist"
+                            self._admin.set_agent_active(
+                                result.name,
+                                False,
+                                expected_revision=result.config_revision,
+                                allow_last_active_deactivation=True,
+                            )
+                        except ConfigConflictError:
+                            configuration_warning = (
+                                "Agent configuration changed while startup was failing"
+                            )
+                        except ConfigDurabilityError:
+                            configuration_warning = (
+                                "inactive state was committed but directory durability "
+                                "could not be confirmed"
+                            )
+                        phase = "read"
+                        return {
+                            "creation": result,
+                            "agent_row": self._agent_row(result.name),
+                            "lifecycle": lifecycle,
+                            "status": 503,
+                            "error": str(
+                                lifecycle.get("message") or "Agent startup was rejected."
+                            ),
+                            "error_code": "agent_start_failed",
+                            **(
+                                {"configuration_warning": configuration_warning}
+                                if configuration_warning
+                                else {}
+                            ),
+                        }
                 else:
-                    configuration_warning = None
-                    try:
-                        self._admin.set_agent_active(
-                            result.name,
-                            False,
-                            expected_revision=result.config_revision,
-                            allow_last_active_deactivation=True,
-                        )
-                    except ConfigConflictError:
-                        configuration_warning = (
-                            "Agent configuration changed while startup was failing"
-                        )
-                    except ConfigDurabilityError:
-                        configuration_warning = (
-                            "inactive state was committed but directory durability "
-                            "could not be confirmed"
-                        )
-                    return {
-                        "creation": result,
-                        "agent_row": self._agent_row(result.name),
-                        "lifecycle": lifecycle,
-                        "status": 503,
-                        "error": str(
-                            lifecycle.get("message") or "Agent startup was rejected."
-                        ),
-                        "error_code": "agent_start_failed",
-                        **(
-                            {"configuration_warning": configuration_warning}
-                            if configuration_warning
-                            else {}
-                        ),
-                    }
-            else:
-                start = getattr(self.kernel, "start_agent", None)
-                if callable(start):
-                    ok, message = await start(result.name)
-                    lifecycle = {
-                        "ok": bool(ok),
-                        "message": str(message),
-                    }
-                else:
-                    lifecycle = {
-                        "ok": False,
-                        "message": "Agent lifecycle service is unavailable.",
-                    }
-                if not lifecycle["ok"]:
-                    configuration_warning = None
-                    try:
-                        self._admin.set_agent_active(
-                            result.name,
-                            False,
-                            expected_revision=result.config_revision,
-                            allow_last_active_deactivation=True,
-                        )
-                    except ConfigConflictError:
-                        configuration_warning = (
-                            "Agent configuration changed while startup was failing"
-                        )
-                        logger.exception(
-                            "Could not confirm inactive state after Agent creation failure: %s",
-                            result.name,
-                        )
-                    except ConfigDurabilityError:
-                        configuration_warning = (
-                            "inactive state was committed but directory durability "
-                            "could not be confirmed"
-                        )
-                    return {
-                        "creation": result,
-                        "agent_row": self._agent_row(result.name),
-                        "lifecycle": lifecycle,
-                        "status": 503,
-                        "error": lifecycle["message"],
-                        "error_code": "agent_start_failed",
-                        **(
-                            {"configuration_warning": configuration_warning}
-                            if configuration_warning
-                            else {}
-                        ),
-                    }
-        return {
-            "creation": result,
-            "agent_row": self._agent_row(result.name),
-            "lifecycle": lifecycle,
-            "status": status,
-        }
+                    start = getattr(self.kernel, "start_agent", None)
+                    if callable(start):
+                        phase = "start"
+                        observed["start_requested"] = True
+                        ok, message = await start(result.name)
+                        observed["start_confirmed"] = ok if type(ok) is bool else None
+                        phase = "read"
+                        lifecycle = {
+                            "ok": bool(ok),
+                            "message": str(message),
+                        }
+                    else:
+                        lifecycle = {
+                            "ok": False,
+                            "message": "Agent lifecycle service is unavailable.",
+                        }
+                    if not lifecycle["ok"]:
+                        configuration_warning = None
+                        try:
+                            phase = "persist"
+                            self._admin.set_agent_active(
+                                result.name,
+                                False,
+                                expected_revision=result.config_revision,
+                                allow_last_active_deactivation=True,
+                            )
+                        except ConfigConflictError:
+                            configuration_warning = (
+                                "Agent configuration changed while startup was failing"
+                            )
+                            logger.exception(
+                                "Could not confirm inactive state after Agent creation failure: %s",
+                                result.name,
+                            )
+                        except ConfigDurabilityError:
+                            configuration_warning = (
+                                "inactive state was committed but directory durability "
+                                "could not be confirmed"
+                            )
+                        phase = "read"
+                        return {
+                            "creation": result,
+                            "agent_row": self._agent_row(result.name),
+                            "lifecycle": lifecycle,
+                            "status": 503,
+                            "error": lifecycle["message"],
+                            "error_code": "agent_start_failed",
+                            **(
+                                {"configuration_warning": configuration_warning}
+                                if configuration_warning
+                                else {}
+                            ),
+                        }
+            phase = "read"
+            return {
+                "creation": result,
+                "agent_row": self._agent_row(result.name),
+                "lifecycle": lifecycle,
+                "status": status,
+            }
+
+
+
+        except (AgentCreationError, AgentManagementError):
+            raise
+        except Exception as exc:
+            failure = operation_failure(
+                exc, operation="agent_create", phase=phase,
+                unconfirmed=observed["agent_created"] is not False,
+            )
+            logger.error("Agent creation operation failure: %s observed=%s", failure.diagnostic(), observed)
+            raise AgentOperationFailure(failure, observed=observed) from None
 
 
 __all__ = [
     "AgentManagementAction",
     "AgentManagementAdmission",
     "AgentManagementError",
+    "AgentOperationFailure",
     "AgentManagementManager",
 ]

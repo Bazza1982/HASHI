@@ -489,12 +489,6 @@ class TelegramCredentialService:
                 error_code="telegram_credential_shared",
                 status_code=409,
             )
-        if not context.authorized_user_configured:
-            raise TelegramCredentialError(
-                "Configure the authorized Telegram user locally first.",
-                error_code="telegram_owner_not_configured",
-                status_code=409,
-            )
         if context.configured and not replace_existing:
             raise TelegramCredentialError(
                 "Confirm replacement of the existing Telegram credential.",
@@ -566,7 +560,10 @@ class TelegramCredentialService:
             runtime_active=runtime_active,
         )
         result.update(
-            activation_required="agent_restart" if runtime_active else None,
+            activation_required=(
+                "agent_restart"
+                if runtime_active and published_context.authorized_user_configured else None
+            ),
             replaced=context.configured,
             verified_bot=bot,
         )

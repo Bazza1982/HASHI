@@ -335,6 +335,7 @@ class VoiceManager:
             self._voice_catalog_error = exc
         self._voice_catalog_signature = self._catalog_signature()
         self.VOICE_PRESETS = self.voice_catalog.presets
+        self._apply_catalog_default_state()
         self._provider_cooldowns: dict[str, tuple[float, VoiceProviderFailure]] = {}
         self.voice_audit_path = self.workspace_dir / "logs" / "voice_synthesis.jsonl"
         self._voice_audit_lock = threading.Lock()
@@ -367,6 +368,32 @@ class VoiceManager:
         self.VOICE_PRESETS = catalog.presets
         self._voice_catalog_error = None
         self._voice_catalog_signature = signature
+        self._apply_catalog_default_state()
+
+    def _catalog_default_voice(self) -> tuple[str, str] | None:
+        """Prefer the instance Compute Kokoro voice for a new Agent's /voice."""
+        for service_id, preferred in (
+            ("hashi-compute-kokoro", "hc_k_zf_001"),
+            ("hashi-compute-minicpm", "hc_m_zf_001"),
+        ):
+            if service_id not in self.voice_catalog.service_ids:
+                continue
+            aliases = list(self.voice_catalog.voice_ids(service_id))
+            if not aliases:
+                continue
+            alias = preferred if preferred in aliases else aliases[0]
+            preset = self.voice_catalog.preset(alias)
+            return service_id, str(preset["voice_name"])
+        return None
+
+    def _apply_catalog_default_state(self) -> None:
+        """Use a configured Compute voice for Agents with no saved choice."""
+        self.DEFAULT_STATE = copy.deepcopy(type(self).DEFAULT_STATE)
+        if self.catalog_path is None:
+            return
+        selected = self._catalog_default_voice()
+        if selected is not None:
+            self.DEFAULT_STATE["provider"], self.DEFAULT_STATE["voice_name"] = selected
 
     def _require_voice_catalog(self) -> None:
         self._refresh_voice_catalog()

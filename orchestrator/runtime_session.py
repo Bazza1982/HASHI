@@ -658,6 +658,7 @@ def accept_request(
         if explicit_expected_generation is not None
         else int(session["context_generation"])
     )
+    from orchestrator.fingerprint.runtime import admission_policy
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
@@ -690,6 +691,7 @@ def accept_request(
             if isinstance(metadata.get("_run_delivery_route"), Mapping)
             else None
         ),
+        fingerprint_policy=admission_policy(runtime),
         agent_workspace=getattr(runtime, "workspace_dir", None),
     )
     return session, accepted, resolved_owner, surface, channel_key
@@ -2311,7 +2313,9 @@ async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
         if inspect.isawaitable(result):
             result = await result
         if result is False:
-            raise RuntimeError("backend refused to start a new session")
+            from orchestrator.operation_failures import OperationRejected
+
+            raise OperationRejected("backend_refused")
         return "session"
     return "stateless"
 
@@ -2362,56 +2366,77 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
     # hold the selected Session for any remaining work in the same command.
 
 
+def _log_session_failure(runtime: Any, error: Exception, *, operation: str, phase: str):
+    from orchestrator.operation_failures import operation_failure
+
+    failure = operation_failure(
+        error, operation="session_" + operation, phase=phase,
+        unconfirmed=phase in {"create", "bind", "save", "archive", "default", "activate", "cleanup"},
+    )
+    diagnostic_logger = getattr(runtime, "logger", None)
+    write = getattr(diagnostic_logger, "error", None) or getattr(diagnostic_logger, "exception", None)
+    if not callable(write):
+        write = logger.error
+    write("Session operation failure: %s", failure.diagnostic())
+    return failure
+
+
+async def _reply_session_failure(runtime: Any, update: Any, error: Exception, *, operation: str, phase: str) -> None:
+    failure = _log_session_failure(runtime, error, operation=operation, phase=phase)
+    if phase == "reset_backend":
+        summary = ui_language.tr("session." + operation + "_failed")
+    else:
+        summary = ui_language.tr(
+            "session.operation_incomplete",
+            operation=ui_language.tr("session.operation." + operation),
+            state=ui_language.tr(
+                "session.operation_unconfirmed" if failure.unconfirmed else "session.operation_not_completed",
+            ),
+        )
+    await runtime._reply_text(update, summary + "\n" + failure.render())
+
+
 async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime_busy(runtime):
         await runtime._reply_text(update, ui_language.tr("session.busy"))
         return
-    _surface, _channel_key, resolved_owner, _explicit_session_id = (
-        _update_session_route(runtime, update)
-    )
-    title = " ".join(
-        str(value).strip()
-        for value in (getattr(context, "args", None) or [])
-        if str(value).strip()
-    ).strip()
-    session = ensure_store(runtime).create_session(
-        owner_id=resolved_owner,
-        agent_id=runtime.name,
-        title=title or "New session",
-    )
-    logger = getattr(runtime, "logger", None)
+    session = None
+    phase = "read"
     try:
-        await _reset_cli_backend(runtime, reason="cmd_new_session")
-        await _bind_session(runtime, update, session["session_id"])
-    except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
-        if logger is not None:
-            logger.exception("Could not activate new Session safely")
-        try:
-            ensure_store(runtime).archive_session(
-                session["session_id"], deleted=True
-            )
-        except Exception:  # noqa: BLE001 - best-effort cleanup after activation failure
-            if logger is not None:
-                logger.warning(
-                    "Could not archive the inactive Session after activation failure",
-                    exc_info=True,
-                )
-        await runtime._reply_text(
-            update,
-            ui_language.tr("session.new_failed"),
+        _surface, _channel_key, resolved_owner, _explicit_session_id = (
+            _update_session_route(runtime, update)
         )
+        title = " ".join(
+            str(value).strip()
+            for value in (getattr(context, "args", None) or [])
+            if str(value).strip()
+        ).strip()
+        phase = "create"
+        session = ensure_store(runtime).create_session(
+            owner_id=resolved_owner, agent_id=runtime.name, title=title or "New session",
+        )
+        phase = "reset_backend"
+        await _reset_cli_backend(runtime, reason="cmd_new_session")
+        phase = "bind"
+        await _bind_session(runtime, update, session["session_id"])
+        phase = "activate"
+        _discard_session_transients(runtime)
+        _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
+    except Exception as exc:  # noqa: BLE001 - provider and store boundary
+        # No binding was attempted in this phase. A bind/activation exception may
+        # follow a committed selection, so it must never trigger this cleanup.
+        if session is not None and phase == "reset_backend":
+            try:
+                ensure_store(runtime).archive_session(session["session_id"], deleted=True)
+            except Exception as cleanup_error:  # noqa: BLE001 - original failure stays authoritative
+                _log_session_failure(runtime, cleanup_error, operation="new", phase="cleanup")
+        await _reply_session_failure(runtime, update, exc, operation="new", phase=phase)
         return
-    _discard_session_transients(runtime)
-    _prepare_clean_context(
-        runtime, disable_saved_memory=False, clear_session_primer=True
-    )
     await runtime._reply_text(
         update,
-        ui_language.tr(
-            "session.new_active", session_id=html.escape(session["session_id"])
-        ),
+        ui_language.tr("session.new_active", session_id=html.escape(session["session_id"])),
         parse_mode="HTML",
     )
 
@@ -2423,22 +2448,21 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
     if runtime_busy(runtime):
         await runtime._reply_text(update, ui_language.tr("session.fresh_busy"))
         return
-    session = current_session_for_update(runtime, update)
+    phase = "read"
     try:
+        session = current_session_for_update(runtime, update)
+        phase = "reset_backend"
         await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
+        phase = "save"
         updated = ensure_store(runtime).start_fresh_generation(
-            session["session_id"], reason="user_fresh"
+            session["session_id"], reason="user_fresh",
         )
-    except Exception as exc:
-        logger = getattr(runtime, "logger", None)
-        if logger is not None:
-            logger.exception("Could not activate fresh Session generation: %s", exc)
-        await runtime._reply_text(update, ui_language.tr("session.fresh_failed"))
+        phase = "activate"
+        _discard_session_transients(runtime)
+        _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
+    except Exception as exc:  # noqa: BLE001 - provider and store boundary
+        await _reply_session_failure(runtime, update, exc, operation="fresh", phase=phase)
         return
-    _discard_session_transients(runtime)
-    _prepare_clean_context(
-        runtime, disable_saved_memory=False, clear_session_primer=True
-    )
     try:
         from orchestrator.context_compaction import cancel_runtime_compaction
 
@@ -2449,9 +2473,7 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
             logger.warning("Could not cancel old Session compaction on /fresh: %s", exc)
     await runtime._reply_text(
         update,
-        ui_language.tr(
-            "session.fresh_started", generation=updated["context_generation"]
-        ),
+        ui_language.tr("session.fresh_started", generation=updated["context_generation"]),
     )
 
 
@@ -2507,43 +2529,39 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
         return
     args = list(getattr(context, "args", None) or [])
     if not args:
-        await runtime._reply_text(
-            update, ui_language.tr("session.usage_use"), parse_mode="HTML"
-        )
+        await runtime._reply_text(update, ui_language.tr("session.usage_use"), parse_mode="HTML")
         return
     if runtime_busy(runtime):
         await runtime._reply_text(update, ui_language.tr("session.busy"))
         return
+    phase = "read"
     try:
         _surface, _channel_key, resolved_owner, _explicit_session_id = (
             _update_session_route(runtime, update)
         )
         session = _select_session(
-            runtime,
-            " ".join(str(arg) for arg in args),
-            explicit_owner_id=resolved_owner,
+            runtime, " ".join(str(arg) for arg in args), explicit_owner_id=resolved_owner,
         )
-    except SessionNotFound:
-        await runtime._reply_text(update, ui_language.tr("session.not_found"))
-        return
-    try:
+        phase = "reset_backend"
         await _reset_cli_backend(runtime, reason="cmd_use_session")
+        phase = "bind"
         await _bind_session(runtime, update, session["session_id"])
-    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
-        logger = getattr(runtime, "logger", None)
-        if logger is not None:
-            logger.exception("Could not activate selected Session safely")
-        await runtime._reply_text(update, ui_language.tr("session.use_failed"))
+        phase = "activate"
+        _discard_session_transients(runtime)
+        _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
+    except SessionNotFound as exc:
+        if phase == "read":
+            await runtime._reply_text(update, ui_language.tr("session.not_found"))
+        else:
+            await _reply_session_failure(runtime, update, exc, operation="use", phase=phase)
         return
-    _discard_session_transients(runtime)
-    _prepare_clean_context(
-        runtime, disable_saved_memory=False, clear_session_primer=True
-    )
+    except Exception as exc:  # noqa: BLE001 - provider and store boundary
+        await _reply_session_failure(runtime, update, exc, operation="use", phase=phase)
+        return
     await runtime._reply_text(
         update,
         ui_language.tr(
-            "session.using",
-            session_id=html.escape(session["session_id"]),
+            "session.using", session_id=html.escape(session["session_id"]),
             title=html.escape(session["title"]),
         ),
         parse_mode="HTML",
@@ -2570,36 +2588,29 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
     del context
     if not runtime._is_authorized_user(update.effective_user.id):
         return
-    session = current_session_for_update(runtime, update)
-    if bool(session.get("is_default")):
-        await runtime._reply_text(
-            update, "the permanent default Session cannot be archived"
-        )
-        return
+    phase = "read"
     try:
+        session = current_session_for_update(runtime, update)
+        if bool(session.get("is_default")):
+            await runtime._reply_text(update, "the permanent default Session cannot be archived")
+            return
+        phase = "reset_backend"
         await _reset_cli_backend(runtime, reason="cmd_archive_session")
+        phase = "archive"
         ensure_store(runtime).archive_session(session["session_id"])
+        phase = "default"
         default = ensure_store(runtime).ensure_default_session(
-            owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name
+            owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name,
         )
+        phase = "bind"
         await _bind_session(runtime, update, default["session_id"])
-    except SessionConflict as exc:
-        await runtime._reply_text(update, str(exc))
+        phase = "activate"
+        _discard_session_transients(runtime)
+        _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
+    except Exception as exc:  # noqa: BLE001 - provider and store boundary
+        await _reply_session_failure(runtime, update, exc, operation="archive", phase=phase)
         return
-    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
-        logger = getattr(runtime, "logger", None)
-        if logger is not None:
-            logger.exception("Could not archive Session safely")
-        await runtime._reply_text(update, ui_language.tr("session.archive_failed"))
-        return
-    _discard_session_transients(runtime)
-    _prepare_clean_context(
-        runtime, disable_saved_memory=False, clear_session_primer=True
-    )
-    await runtime._reply_text(
-        update,
-        ui_language.tr("session.archived"),
-    )
+    await runtime._reply_text(update, ui_language.tr("session.archived"))
 
 
 def _utc_now_for_promotion() -> str:

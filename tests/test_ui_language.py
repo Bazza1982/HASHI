@@ -375,7 +375,7 @@ async def test_backend_success_notice_reports_saved_mode_in_selected_language(mo
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.config = SimpleNamespace(allowed_backends=[{"engine": "codex-cli"}])
     runtime.backend_manager = SimpleNamespace(
-        agent_mode="fixed", switch_backend=AsyncMock(return_value=True),
+        agent_mode="fixed", switch_backend_result=AsyncMock(return_value=SimpleNamespace(switched=True, issue=None)),
         current_backend=SimpleNamespace(capabilities=SimpleNamespace(supports_sessions=True)),
     )
     runtime._evaluate_enterprise_policy = lambda *a, **kw: SimpleNamespace(allowed=True)

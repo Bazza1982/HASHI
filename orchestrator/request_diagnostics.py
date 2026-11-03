@@ -8,7 +8,9 @@ evidence remain owned by their existing ledgers and receipts.
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -16,6 +18,8 @@ from typing import Any, Iterable, Mapping
 FORMAT = "hashi-request-diagnostics-v1"
 _SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_LOG_BYTES = 16 * 1024 * 1024
+_MAX_DIAGNOSTIC_SCAN_BYTES = 128 * 1024 * 1024
+_MAX_DIAGNOSTIC_RECORD_BYTES = 4 * 1024 * 1024
 _MAX_ACTIONS = 256
 _FILE_WRITE_TOOLS = frozenset({"file_write", "apply_patch"})
 
@@ -85,6 +89,56 @@ def _read_recent_jsonl(path: Path) -> tuple[list[dict[str, Any]], bool]:
         else:
             incomplete = True
     return rows, incomplete
+
+
+def _read_matching_jsonl(path: Path, request_id: str) -> tuple[list[dict[str, Any]], bool]:
+    """Search a bounded snapshot for one request without loading the whole ledger."""
+    matches: deque[dict[str, Any]] = deque(maxlen=_MAX_ACTIONS + 1)
+    incomplete = False
+    try:
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            end = before.st_size
+            offset = max(0, end - _MAX_DIAGNOSTIC_SCAN_BYTES)
+            handle.seek(offset)
+
+            def discard_record() -> None:
+                while handle.tell() < end:
+                    part = handle.readline(min(_MAX_DIAGNOSTIC_RECORD_BYTES, end - handle.tell()))
+                    if not part or part.endswith(b"\n"):
+                        break
+
+            if offset:
+                incomplete = True
+                discard_record()
+            while handle.tell() < end:
+                remaining = end - handle.tell()
+                raw_line = handle.readline(min(_MAX_DIAGNOSTIC_RECORD_BYTES + 1, remaining))
+                if not raw_line:
+                    incomplete = True
+                    break
+                if len(raw_line) > _MAX_DIAGNOSTIC_RECORD_BYTES or not raw_line.endswith(b"\n"):
+                    incomplete = True
+                    if raw_line and not raw_line.endswith(b"\n"):
+                        discard_record()
+                    continue
+                try:
+                    row = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    incomplete = True
+                    continue
+                if not isinstance(row, Mapping):
+                    incomplete = True
+                elif str(row.get("request_id") or row.get("task_id") or "") == request_id:
+                    matches.append(dict(row))
+            after = os.fstat(handle.fileno())
+            if after.st_size != end or after.st_mtime_ns != before.st_mtime_ns:
+                incomplete = True
+    except FileNotFoundError:
+        return [], False
+    except OSError:
+        return list(matches), True
+    return list(matches), incomplete
 
 
 def _tool_action(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
@@ -171,12 +225,13 @@ def build_request_diagnostics(
     workspace = Path(workspace_dir)
     terminal_projection = _read_json(projection_path(workspace, request))
 
-    tool_rows, tool_truncated = _read_recent_jsonl(
-        workspace / "tool_action_audit.jsonl"
-    )
-    smart_rows, smart_truncated = _read_recent_jsonl(
-        workspace / "tool_ledger.jsonl"
-    )
+    if _include_reconciliation:
+        tool_rows, tool_truncated = _read_matching_jsonl(workspace / "tool_action_audit.jsonl", request)
+        smart_rows, smart_truncated = _read_matching_jsonl(workspace / "tool_ledger.jsonl", request)
+    else:
+        # Automatic terminal reconciliation remains bounded to the recent suffix.
+        tool_rows, tool_truncated = _read_recent_jsonl(workspace / "tool_action_audit.jsonl")
+        smart_rows, smart_truncated = _read_recent_jsonl(workspace / "tool_ledger.jsonl")
     actions = [
         _tool_action(row, source="tool_action_audit")
         for row in tool_rows

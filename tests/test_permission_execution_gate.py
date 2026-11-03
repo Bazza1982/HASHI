@@ -139,7 +139,10 @@ async def test_approval_resumes_original_immutable_file_operation(environment, t
     arguments["content"] = "changed after request"
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    result = await asyncio.wait_for(task, 1)
+    # This bounds a stalled operation, not its performance. Loaded Windows
+    # runners may need over one second for the post-write threaded SQLite
+    # receipt check; approval and immutable-argument assertions stay unchanged.
+    result = await asyncio.wait_for(task, 10)
     assert result.state == "succeeded"
     assert result.operation_id == "operation"
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "original"

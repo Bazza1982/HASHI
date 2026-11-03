@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from orchestrator.hchat_submit_result import HChatSubmission, capture_hchat_submission
+from orchestrator.operation_failures import OperationFailure
 
-SendHChatCallable = Callable[..., bool]
+
+SendHChatCallable = Callable[..., bool | HChatSubmission]
 
 HCHAT_TARGET_METADATA_KEY = "hchat_frozen_target"
 _FENCED_JSON_RE = re.compile(r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -44,6 +47,9 @@ class HChatDeliveryResult:
     error: str | None
     latency_ms: float
     user_report: str | None = None
+    accepted: bool | None = None
+    failure: OperationFailure | None = None
+    recipient_results: tuple[HChatSubmission, ...] = ()
 
 
 def parse_hchat_draft(raw: str) -> HChatDraft:
@@ -145,19 +151,14 @@ def deliver_hchat_draft(
 
     logical_attempt_id = attempt_id or str(uuid.uuid4())
     start = time.perf_counter()
-    error: str | None = None
-    try:
-        sender_kwargs = {}
-        if attachments:
-            sender_kwargs["attachments"] = [Path(path) for path in attachments]
-        success = bool(sender_fn(target, clean_from, message, **sender_kwargs))
-    except Exception as exc:
-        success = False
-        error = f"{type(exc).__name__}: {exc}"
-    if not success and error is None:
-        error = "send_hchat returned false"
+    sender_kwargs = {}
+    if attachments:
+        sender_kwargs["attachments"] = [Path(path) for path in attachments]
+    submission = capture_hchat_submission(sender_fn, target, clean_from, message, **sender_kwargs)
+    success = submission.handled
+    error = submission.failure.render() if submission.failure else None
     latency_ms = (time.perf_counter() - start) * 1000
-    status = "queued" if success else "failed"
+    status = submission.status
 
     return HChatDeliveryResult(
         success=success,
@@ -170,12 +171,13 @@ def deliver_hchat_draft(
         error=error,
         latency_ms=latency_ms,
         user_report=draft.user_report,
+        accepted=submission.accepted, failure=submission.failure, recipient_results=submission.recipients,
     )
 
 
 def _load_send_hchat() -> SendHChatCallable:
     module = importlib.import_module("tools.hchat_send")
-    return module.send_hchat
+    return module.send_hchat_result
 
 
 def hchat_delivery_receipt_text(
@@ -185,7 +187,15 @@ def hchat_delivery_receipt_text(
 ) -> str:
     from orchestrator import ui_language
 
-    if result.delivery_status == "sent":
+    if result.delivery_status == "group_result":
+        title = ui_language.tr("hchat.delivery.group_result", locale=locale, target=result.target,
+            total=len(result.recipient_results), accepted=sum(item.accepted is True for item in result.recipient_results),
+            unknown=sum(item.accepted is None for item in result.recipient_results),
+            terminal=sum(item.handled and item.accepted is False for item in result.recipient_results),
+            failed=sum(not item.handled and item.accepted is False for item in result.recipient_results))
+    elif result.delivery_status in {"awaiting_confirmation", "confirmed", "discarded", "expired", "superseded", "unconfirmed"}:
+        title = ui_language.tr("hchat.delivery." + result.delivery_status, locale=locale, target=result.target)
+    elif result.delivery_status == "sent":
         title = ui_language.tr(
             "hchat.delivery.sent", locale=locale, target=result.target
         )
@@ -203,14 +213,14 @@ def hchat_delivery_receipt_text(
         ui_language.tr("hchat.delivery.message", locale=locale),
         result.message,
     ]
-    if not result.success:
+    if not result.success or result.failure:
         parts.extend(
             [
                 "",
                 ui_language.tr(
                     "hchat.delivery.reason",
                     locale=locale,
-                    error=result.error or "unknown error",
+                    error=result.failure.render(locale=locale) if result.failure else result.error or "unknown error",
                 ),
             ]
         )
@@ -240,6 +250,8 @@ def hchat_delivery_log_fields(result: HChatDeliveryResult) -> dict[str, object]:
         "hchat_delivery_error": result.error,
         "hchat_delivery_latency_ms": result.latency_ms,
         "hchat_retry_count": result.retry_count,
+        "hchat_accepted": result.accepted,
+        **({"hchat_failure": result.failure.diagnostic()} if result.failure else {}),
     }
 
 

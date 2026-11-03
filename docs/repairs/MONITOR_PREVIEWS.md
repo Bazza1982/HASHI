@@ -1,0 +1,13 @@
+# Independent monitor previews
+
+Manual Remote Desktop keeps the existing authenticated owner, client, desktop-session and pinned Worker generation. `previews` maps to the optional `desktop_previews` action. The mandatory `ACTIONS` set is unchanged, so older Workers remain discoverable and support direct screen selection; optional preview requests are rejected before transport when not advertised.
+
+A preview request supplies the current full display revision and 1–4 unique display IDs. The Worker validates membership and revision before capture and rechecks the layout afterwards. Each capture preserves the physical display aspect ratio within 320×180 and encodes at most 40 KiB. One batch is admitted per two seconds for the whole controller. Capture contention is refused immediately. Images exist in memory only, never enter the main view/frame history, never become input receipts, and do not renew a control lease. Encoding holds no input guard.
+
+Opening a manual desktop creates its Worker session without taking control. Previews require that live session. A close during transport/capture or a Worker replacement discards prepared results at the appropriate owner boundary. No secondary Agent/Run/model action, permission grant, background capture loop, standalone daemon or Core contract is introduced.
+
+Workbench opens previews only with the picker visible, the desktop mode active, and the page foreground. It aborts and clears pictures on close, concealment, connection/session/layout changes or unmount; late results cannot enter another scope. The proxy and browser validate the bounded public preview response. Errors remain local to the picker and cannot disconnect the main view or replay input.
+
+Manual view selection also accepts an optional positive safe-integer sequence, advertised by `view_sequence_supported`. The existing Worker session rejects superseded intentions and conflicting reuse before changing its view; identical repeats preserve the view revision. The sequence is not part of view geometry, input receipts or authorization. Older unsequenced sessions remain compatible. Workbench serializes/coalesces mutations and only commits its displayed current selection after matching frame readback.
+
+Qualification uses synthetic four-display images and the authenticated Worker RPC, Broker, Functions session, Workbench proxy, and real browser components. Existing input, leases, streaming, fullscreen, touch and multi-selection regressions remain required. Physical multi-monitor/phone acceptance and adoption by a separately installed Windows Worker are separate release checks. This work does not enable desktop capture or change production settings.

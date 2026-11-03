@@ -1005,6 +1005,18 @@ class AgentRuntimeHandle:
                 "idempotency_key": idempotency_key,
             },
         )
+        if isinstance(result, Mapping):
+            from orchestrator.runtime_media import VoiceIngressError
+            from orchestrator.voice_transcription_result import TranscriptionFailure
+
+            failure = TranscriptionFailure.from_dict(result.get("failure"))
+            if (result.get("type") == "hashi.voice-admission-rejection"
+                    and type(result.get("version")) is int and result.get("version") == 1
+                    and isinstance(result.get("code"), str)
+                    and result.get("code") in {"voice_transcription_unavailable", "voice_transcription_empty"}
+                    and failure is not None):
+                raise VoiceIngressError(str(result["code"]), failure=failure.as_dict())
+            raise FunctionWorkerError("Invalid media admission result; verify the original request")
         if result:
             self._outstanding_request_ids.add(str(result))
         return None if result is None else str(result)
@@ -1215,20 +1227,26 @@ class AgentRuntimeHandle:
         operation: str = "generate",
         performance_context: dict | None = None,
     ) -> dict[str, Any]:
-        return dict(
-            await self._route(
-                "runtime.tui_speech",
-                {
-                    "text": str(text),
-                    "request_id": str(request_id),
-                    "source_language": str(source_language or ""),
-                    "operation": operation,
-                    "performance_context": performance_context,
-                },
-                timeout=120,
-            )
-            or {}
+        from orchestrator.voice_synthesizer import VoiceSynthesisError
+
+        result = await self._route(
+            "runtime.tui_speech",
+            {
+                "text": str(text),
+                "request_id": str(request_id),
+                "source_language": str(source_language or ""),
+                "operation": operation,
+                "performance_context": performance_context,
+            },
+            timeout=120,
         )
+        try:
+            failure = VoiceSynthesisError.from_wire_result(result)
+        except ValueError:
+            raise FunctionWorkerError("Invalid speech result; verify the original request") from None
+        if failure is not None:
+            raise failure
+        return dict(result or {})
 
     async def set_command_menu(self, *, chat_id: int, locale: str) -> bool:
         return bool(

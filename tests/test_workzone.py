@@ -90,9 +90,14 @@ def test_workzone_accepts_windows_absolute_paths(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)
     project = tmp_path / "project"
     workspace = project / "workspaces" / "agent"
-    zone = Path("/mnt/c/Users/tester/projects/demo")
+    mount_root = tmp_path / "mounts"
+    zone = mount_root / "c" / "Users" / "tester" / "projects" / "demo"
     workspace.mkdir(parents=True)
     zone.mkdir(parents=True, exist_ok=True)
+    # Exercise the real drive translation against an isolated mount. CI and
+    # ordinary users must never need to create a host-level /mnt/c directory.
+    monkeypatch.setattr(workzone_module, "Path", lambda value:
+        mount_root if str(value) == "/mnt" else Path(value))
 
     resolved = resolve_workzone_input(r"C:\Users\tester\projects\demo", project, workspace)
 

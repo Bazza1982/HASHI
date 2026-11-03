@@ -728,6 +728,8 @@ def main():
         description="HASHI command-line tool",
     )
     sub = parser.add_subparsers(dest="cmd")
+    from orchestrator.fingerprint.cli import configure_parser as configure_fingerprint_parser
+    configure_fingerprint_parser(sub)
 
     wa_parser = sub.add_parser("whatsapp", help="WhatsApp setup and management")
     wa_parser.add_argument(
@@ -899,6 +901,8 @@ def main():
             raise SystemExit(cmd_auth_xai(getattr(args, "action", "status")))
         auth_parser.print_help()
         raise SystemExit(2)
+    elif args.cmd == "fingerprint":
+        raise SystemExit(args.func(args))
     elif args.cmd == "enterprise":
         if hasattr(args, "func"):
             raise SystemExit(args.func(args))

@@ -1111,10 +1111,23 @@ class WhatsAppTransport:
     # Voice handling
     # ------------------------------------------------------------------
 
+    async def _report_media_failure(self, chat_key: str, error: Exception, *, phase: str):
+        from orchestrator.frontend_failures import frontend_failure
+
+        failure = frontend_failure(error, phase=phase, submission_state="not_submitted")
+        logger.error("WhatsApp media failure: %s", json.dumps(failure.diagnostic()), exc_info=error)
+        locale = getattr(getattr(self, "global_cfg", None), "ui_language", None)
+        try:
+            await self._send_text(chat_key, failure.render(locale=locale))
+        except Exception as notice_error:
+            logger.warning("WhatsApp error notice unconfirmed (%s); no replay", type(notice_error).__name__)
+
     async def _handle_voice(self, msg, chat_key: str) -> str | None:
         """Download WhatsApp voice/audio and transcribe locally."""
+        phase = "download"
         try:
             from orchestrator.voice_transcriber import get_transcriber
+            from orchestrator.voice_transcription_result import TranscriptionFailed, transcribe_audio
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             local_path = self._media_dir / f"wa_voice_{ts}.ogg"
@@ -1140,23 +1153,22 @@ class WhatsAppTransport:
                     "Proceeding anyway.", audio_data[:8]
                 )
 
+            phase = "store"
             local_path.write_bytes(audio_data)
             logger.debug(f"Voice saved to {local_path} ({len(audio_data)} bytes)")
 
-            transcriber = get_transcriber()
-            transcript = await transcriber.transcribe(local_path)
-
-            if transcript.startswith("[Transcription error]"):
-                logger.error(f"Voice transcription failed: {transcript}")
-                await self._send_text(chat_key, "Failed to transcribe voice message.")
+            phase = "transcribe"
+            outcome = await transcribe_audio(get_transcriber(), local_path)
+            if not outcome.ok:
+                await self._report_media_failure(chat_key, TranscriptionFailed(outcome.failure), phase=phase)
                 return None
+            transcript = outcome.text
 
             logger.info(f"Voice transcribed: {len(transcript)} chars")
             return f"[Voice message transcription] {transcript}"
 
         except Exception as e:
-            logger.error(f"Voice handling error: {e}", exc_info=True)
-            await self._send_text(chat_key, "Failed to process voice message.")
+            await self._report_media_failure(chat_key, e, phase=phase)
             return None
 
     def _detect_media_kind(self, msg) -> str | None:
@@ -1280,8 +1292,7 @@ class WhatsAppTransport:
                 return None, None
             data = await self._client.download_any(root_msg)
         except Exception as e:
-            logger.error(f"Failed to download WhatsApp {media_kind}: {e}", exc_info=True)
-            await self._send_text(chat_key, f"Failed to download {media_kind} message.")
+            await self._report_media_failure(chat_key, e, phase="download")
             return None, None
 
         if not data:
@@ -1312,7 +1323,11 @@ class WhatsAppTransport:
             ext = mime_map.get(mime.lower(), "")
 
         local_path = self._media_dir / f"wa_{media_kind}_{ts}{ext}"
-        local_path.write_bytes(data)
+        try:
+            local_path.write_bytes(data)
+        except Exception as exc:
+            await self._report_media_failure(chat_key, exc, phase="store")
+            return None, None
 
         caption = ""
         for cap_name in ("Caption", "caption", "Text", "text"):
@@ -1344,28 +1359,28 @@ class WhatsAppTransport:
 
     async def _reclassify_as_voice(self, audio_data: bytes, chat_key: str) -> tuple:
         """Handle audio data that was misclassified as non-voice media."""
+        phase = "store"
         try:
             from orchestrator.voice_transcriber import get_transcriber
+            from orchestrator.voice_transcription_result import TranscriptionFailed, transcribe_audio
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             local_path = self._media_dir / f"wa_voice_{ts}.ogg"
             local_path.write_bytes(audio_data)
             logger.info("Reclassified voice saved: %s (%d bytes)", local_path, len(audio_data))
 
-            transcriber = get_transcriber()
-            transcript = await transcriber.transcribe(local_path)
-
-            if transcript.startswith("[Transcription error]"):
-                logger.error(f"Voice transcription failed after reclassify: {transcript}")
-                await self._send_text(chat_key, "Failed to transcribe voice message.")
+            phase = "transcribe"
+            outcome = await transcribe_audio(get_transcriber(), local_path)
+            if not outcome.ok:
+                await self._report_media_failure(chat_key, TranscriptionFailed(outcome.failure), phase=phase)
                 return None, None
+            transcript = outcome.text
 
             logger.info(f"Reclassified voice transcribed: {len(transcript)} chars")
             return f"[Voice message transcription] {transcript}", "voice_transcript"
 
         except Exception as e:
-            logger.error(f"Reclassify-as-voice error: {e}", exc_info=True)
-            await self._send_text(chat_key, "Failed to process voice message.")
+            await self._report_media_failure(chat_key, e, phase=phase)
             return None, None
 
     # ------------------------------------------------------------------

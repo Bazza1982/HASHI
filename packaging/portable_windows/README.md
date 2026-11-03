@@ -47,6 +47,14 @@ TUI without another menu. HASHI and all child runtime processes inherit the
 administrator token. Installation success and subsequent startup failure are
 reported independently.
 
+If the unelevated launcher fails, its popup identifies the failed preparation or
+elevation step and a local diagnostic reference. A cancelled UAC request is known
+not to have started the elevated child. Other errors after launch was requested
+remain unconfirmed; check existing windows and state before another attempt.
+The popup gives the per-user diagnostic JSON path only when writing it succeeded.
+The record contains safe categories and process-error codes, not raw exceptions,
+installation arguments, tokens or source-machine paths.
+
 Local API discovery is strict. HASHI always binds its Backend API to
 `127.0.0.1`, prefers the configured port, and asks Windows for a free port if
 that port is occupied. Once health and instance identity are verified, the

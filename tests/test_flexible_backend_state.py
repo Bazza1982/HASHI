@@ -617,7 +617,7 @@ async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path)
     before = _read_state(workspace)
     initialize_calls = []
 
-    async def fake_create(engine, target_model=None, target_provider=None):
+    async def fake_create(engine, target_model=None, target_provider=None, *, raise_on_failure=False):
         initialize_calls.append((engine, target_model, target_provider))
         return None
 

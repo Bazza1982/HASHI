@@ -510,7 +510,68 @@ async def test_replace_rejects_stale_secret_revision_after_verification(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_shared_reference_and_missing_owner_fail_closed_before_verification(tmp_path):
+@pytest.mark.parametrize("token_first", [True, False])
+async def test_token_and_user_can_be_saved_independently_in_either_order(
+    tmp_path, monkeypatch, token_first,
+):
+    from orchestrator.telegram_access import TelegramAccessService
+
+    async def verify(_token):
+        return {"id": 123, "username": "safe_bot"}
+
+    server = _server(tmp_path, verifier=verify, configured=False, authorized_id=0,
+                     runtime_active=True)
+    calls = []
+    async def activate(runtime, command, **kwargs):
+        calls.append((runtime.name, command))
+        return {"ok": True, "result": {"accepted": True,
+                "record": {"id": "activation-test", "status": "accepted"}}}
+    monkeypatch.setattr(workbench_api_module, "try_execute_slash_command_text", activate)
+    server.orchestrator.runtimes = [SimpleNamespace(
+        name="lily", is_function_worker_proxy=True,
+        get_runtime_metadata=lambda: {"telegram_scoped_access_protocol": 2,
+                                     "worker_phase": "ACTIVE", "worker_accepting": True},
+    )]
+    users = TelegramAccessService(config_path=tmp_path / "agents.json",
+                                  secrets_path=tmp_path / "secrets.json")
+    headers = {"X-Workbench-Token": ADMIN_TOKEN}
+
+    async def add_user():
+        status = server.telegram_access_service.status("lily")
+        response = await server.handle_admin_agent_telegram_access_change(_Request(
+            headers=headers, payload={"expected_revision": status["revision"],
+                                      "scope": "global", "action": "add", "user_id": "42"},
+        ))
+        assert response.status == 200
+
+    if not token_first:
+        await add_user()
+        assert server.telegram_credential_service.status("lily")["configured"] is False
+    status = server.telegram_credential_service.status("lily")
+    response = await server.handle_admin_agent_telegram_credential_replace(_Request(
+        headers=headers, payload={"token": NEW_TOKEN,
+                                  "expected_revision": status["credential_revision"],
+                                  "replace_existing": False},
+    ))
+    assert response.status == 200
+    saved = json.loads(response.text)
+    assert saved["configured"] is True
+    assert saved["bidirectional_ready"] is False
+    assert NEW_TOKEN not in response.text
+    if token_first:
+        assert users.status("lily")["primary_user_id"] is None
+        assert saved["activation_status"] == "user_required"
+        assert saved["activation_required"] is None
+        assert calls == []
+        await add_user()
+    assert calls == [("lily", "/reboot min")]
+    assert users.status("lily")["primary_user_id"] == "42"
+    assert read_config_json(tmp_path / "secrets.json")["lily.telegram"] == NEW_TOKEN
+    assert server.telegram_credential_service.status("lily")["authorized_user_configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_shared_reference_fails_closed_before_verification(tmp_path):
     calls = []
 
     async def verify(token):
@@ -530,22 +591,6 @@ async def test_shared_reference_and_missing_owner_fail_closed_before_verificatio
         )
     assert shared_error.value.error_code == "telegram_credential_shared"
 
-    owner_server = _server(
-        tmp_path / "owner",
-        verifier=verify,
-        configured=False,
-        authorized_id=0,
-    )
-    owner_status = owner_server.telegram_credential_service.status("lily")
-    assert owner_status["authorized_user_configured"] is False
-    with pytest.raises(TelegramCredentialError) as owner_error:
-        await owner_server.telegram_credential_service.replace(
-            "lily",
-            token=NEW_TOKEN,
-            expected_revision=owner_status["credential_revision"],
-            replace_existing=False,
-        )
-    assert owner_error.value.error_code == "telegram_owner_not_configured"
     assert calls == []
 
 

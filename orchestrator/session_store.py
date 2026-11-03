@@ -469,7 +469,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 30
+    SCHEMA_VERSION = 35
 
     def __init__(
         self,
@@ -685,6 +685,7 @@ class SessionStore:
                     source TEXT NOT NULL,
                     message_context_json TEXT NOT NULL DEFAULT '{}',
                     delivery_route_json TEXT NOT NULL DEFAULT '{}',
+                    fingerprint_policy_json TEXT NOT NULL DEFAULT '{}',
                     requested_mode TEXT,
                     effective_mode TEXT,
                     response_preferences_json TEXT NOT NULL DEFAULT '{}',
@@ -1636,6 +1637,10 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "delivery_route_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "fingerprint_policy_json" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN fingerprint_policy_json TEXT NOT NULL DEFAULT '{}'"
+                )
             message_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(messages)").fetchall()
@@ -1704,6 +1709,12 @@ class SessionStore:
                 self._promote_legacy_session_workzones(connection)
             if stored_schema_version < 29:
                 self._revert_legacy_terminal_recovery(connection)
+            from orchestrator import attachment_catalogue
+            attachment_catalogue.install_schema(connection)
+            from orchestrator.standby.store import install_schema as install_standby_schema
+            install_standby_schema(connection)
+            from orchestrator.frontend_capture import install_schema as install_capture_schema
+            install_capture_schema(connection)
             pcm_forget_session.install_schema(connection)
             pcm_forget_preview.install_schema(connection)
             connection.execute(
@@ -2176,6 +2187,12 @@ class SessionStore:
             result["message_context"] = _json_object(
                 result.pop("message_context_json")
             )
+        if "fingerprint_policy_json" in result:
+            from orchestrator.fingerprint.models import FingerprintPolicy
+            frozen = json.loads(result.pop("fingerprint_policy_json"))
+            if not isinstance(frozen, dict):
+                raise ValueError("corrupt frozen fingerprint policy")
+            result["fingerprint_policy"] = FingerprintPolicy.from_snapshot(frozen).snapshot()
         if "delivery_route_json" in result:
             result["delivery_route"] = _json_object(
                 result.pop("delivery_route_json")
@@ -3078,6 +3095,22 @@ class SessionStore:
             return self._session_dict(row)
 
     def ensure_default_session(self, *, owner_id: str, agent_id: str) -> dict[str, Any]:
+        owner = str(owner_id).strip()
+        agent = str(agent_id).strip().lower()
+        if not owner or not agent:
+            raise ValueError("owner_id and agent_id are required")
+        # Existing Sessions are a pure WAL read. Acquiring a writer lock here
+        # queues every roster/overview read behind an unrelated transaction.
+        # A missing row still uses create_session's atomic recheck and insert.
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM sessions
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                     AND is_default = 1""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+        if row is not None:
+            return self._session_dict(row)
         return self.create_session(
             owner_id=owner_id,
             agent_id=agent_id,
@@ -3283,6 +3316,66 @@ class SessionStore:
                 params,
             ).fetchall()
         return [self._run_dict(row) for row in rows]
+
+    def media_capture_acquire(self, *, owner_id, binding, capture_id, purpose,
+                              issued_at, now=None, standby_id=None, standby_epoch=None):
+        """Serialize cross-Worker capture admission through native storage."""
+        from orchestrator.frontend_capture import acquire
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return acquire(connection, instance_id=self.instance_id, owner_id=owner_id,
+                binding=binding, capture_id=capture_id, purpose=purpose,
+                issued_at=issued_at, now=time() if now is None else now,
+                standby_id=standby_id, standby_epoch=standby_epoch)
+
+    def _media_capture_operate(self, operation, *, owner_id, binding, capture_id,
+                               lease_token, epoch, now=None, sequence=None, stopped=None):
+        from orchestrator.frontend_capture import operate
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return operate(connection, operation=operation, instance_id=self.instance_id,
+                owner_id=owner_id, binding=binding, capture_id=capture_id,
+                lease_token=lease_token, epoch=epoch, now=time() if now is None else now,
+                sequence=sequence, stopped=stopped)
+
+    def media_capture_status(self, **request):
+        return self._media_capture_operate("status", **request)
+
+    def media_capture_renew(self, **request):
+        return self._media_capture_operate("renew", **request)
+
+    def media_capture_release(self, **request):
+        return self._media_capture_operate("release", **request)
+
+    def standby_control(self, *, owner_id, body, now=None):
+        """Commit only Standby-owned controls through the native transaction."""
+        from orchestrator.standby.store import control
+        from time import time
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return control(connection, instance_id=self.instance_id, owner_id=owner_id,
+                           body=body, now=time() if now is None else now)
+
+    def standby_snapshot(self, *, owner_id, binding, standby_id):
+        from orchestrator.standby.store import snapshot
+        with self._lock, self._connection() as connection:
+            return snapshot(connection, instance_id=self.instance_id, owner_id=owner_id,
+                            binding_value=binding, standby_id=standby_id)
+
+    def standby_recent(self, *, owner_id, binding, now=None):
+        from orchestrator.standby.store import recent
+        from time import time
+        with self._lock, self._connection() as connection:
+            return recent(connection, instance_id=self.instance_id, owner_id=owner_id,
+                          binding_value=binding, now=time() if now is None else now)
+
+    def standby_operation_status(self, *, owner_id, agent_id, operation_id):
+        from orchestrator.standby.store import operation_status
+        with self._lock, self._connection() as connection:
+            return operation_status(connection, instance_id=self.instance_id, owner_id=owner_id,
+                                    agent_id=agent_id, operation_id=operation_id)
 
     def preview_pcm_forget(
         self, *, owner_id: str, agent_id: str, session_id: str,
@@ -3856,7 +3949,9 @@ class SessionStore:
         owner = str(owner_id)
         agent = str(agent_id).lower()
         default = self.ensure_default_session(owner_id=owner, agent_id=agent)
-        with self._lock, self._connection() as connection:
+        # This snapshot only selects an existing binding. Establishment below
+        # retains its write lock, transaction and competing-binding recheck.
+        with self._connection() as connection:
             current = connection.execute(
                 """
                 SELECT s.* FROM channel_bindings AS b
@@ -4114,9 +4209,12 @@ class SessionStore:
         response_preferences: Mapping[str, Any] | None = None,
         message_context: Mapping[str, Any] | None = None,
         delivery_route: Mapping[str, Any] | None = None,
+        fingerprint_policy: Mapping[str, Any] | None = None,
         expected_context_generation: int | None = None,
         agent_workspace: Path | str | None = None,
     ) -> AcceptedRun:
+        from orchestrator.fingerprint.models import FingerprintPolicy
+        frozen_fingerprint = FingerprintPolicy.from_snapshot(dict(fingerprint_policy or {})).snapshot()
         clean = str(text or "").strip()
         if display_text is not None and not isinstance(display_text, str):
             raise ValueError("display_text must be a string")
@@ -4439,10 +4537,10 @@ class SessionStore:
                     run_id, session_id, user_message_id, agent_id, request_id,
                     idempotency_key, request_digest, source, requested_mode,
                     effective_mode, response_preferences_json, message_context_json,
-                    delivery_route_json,
+                    delivery_route_json, fingerprint_policy_json,
                     context_generation, state, parent_run_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -4458,6 +4556,7 @@ class SessionStore:
                     _json(dict(response_preferences or {})),
                     _json(dict(message_context or {})),
                     _json(dict(delivery_route or {})),
+                    _json(frozen_fingerprint),
                     generation,
                     parent_run_id,
                     now,
@@ -7842,7 +7941,11 @@ class SessionStore:
         text: str,
         provenance: str,
         safe_voice_state: str,
+        failure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from orchestrator.voice_transcription_result import TranscriptionFailure
+
+        failure_fact = TranscriptionFailure.from_dict(failure)
         clean = str(text or "").strip()
         state = str(safe_voice_state or "released").strip().casefold()
         if state not in {
@@ -7939,6 +8042,7 @@ class SessionStore:
                     "text": clean,
                     "provenance": str(provenance or "local_stt"),
                     "safe_voice_state": state,
+                    **({"failure": failure_fact.as_dict()} if state == "unavailable" and failure_fact else {}),
                 },
                 outbox=True,
             )
@@ -7951,13 +8055,14 @@ class SessionStore:
                     status="degraded",
                     phase="transcription",
                     summary=(
-                        "Local voice transcription is unavailable; the native "
-                        "audio response will continue."
+                        (failure_fact.message + " " if failure_fact else "Local voice transcription is unavailable. ")
+                        + "Transcript-dependent actions cannot start."
                     ),
                     detail={
                         "transcript_id": transcript_id,
                         "attachment_id": str(attachment_id),
                         "warning_code": "local_stt_unavailable",
+                        **({"failure": failure_fact.as_dict()} if failure_fact else {}),
                     },
                     outbox=True,
                 )
@@ -9665,6 +9770,23 @@ class SessionStore:
             raise SessionNotFound("agent history anchor was not found")
         return self._agent_history_boundary(dict(row))
 
+    def attachment_catalogue_page(self, *, owner_id, agent_ids, after=0, limit=50):
+        """Read only committed, owner-visible attachment messages across Agents."""
+        from orchestrator import attachment_catalogue
+        with self._connection() as connection:
+            page = attachment_catalogue.read_page(connection, instance_id=self.instance_id,
+                owner_id=owner_id, agent_ids=agent_ids, after=after, limit=limit)
+        return {**page, "messages": [self._message_dict(row) for row in page["messages"]]}
+
+    def attachment_catalogue_source(self, *, owner_id, agent_ids, session_id, message_id, attachment_id):
+        """Resolve one immutable historical source without selecting its Session."""
+        from orchestrator import attachment_catalogue
+        with self._connection() as connection:
+            source = attachment_catalogue.read_source(connection, instance_id=self.instance_id,
+                owner_id=owner_id, agent_ids=agent_ids, session_id=session_id,
+                message_id=message_id, attachment_id=attachment_id)
+        return {**source, "messages": [self._message_dict(row) for row in source["messages"]]}
+
     def agent_history_page(
         self,
         *,
@@ -9672,6 +9794,7 @@ class SessionStore:
         agent_id: str,
         before: Mapping[str, Any] | None = None,
         limit: int = 200,
+        candidate_query: str | None = None,
     ) -> dict[str, Any]:
         """Read one chronological, cross-Session page of visible Agent history.
 
@@ -9721,9 +9844,12 @@ class SessionStore:
                     boundary["message_id"],
                 ]
             )
-        params.append(bounded + 1)
+        from orchestrator.history_search import MAX_SCAN_ROWS, collect_candidates
+        if candidate_query is not None:
+            clauses.append("m.role IN ('user','assistant')")
+        params.append((MAX_SCAN_ROWS if candidate_query is not None else bounded) + 1)
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
+            cursor = connection.execute(
                 f"""
                 SELECT m.*, r.request_id,
                        r.state AS run_state,
@@ -9737,18 +9863,27 @@ class SessionStore:
                 LIMIT ?
                 """,
                 params,
-            ).fetchall()
-        has_more = len(rows) > bounded
-        page_rows = rows[:bounded]
+            )
+            if candidate_query is None:
+                rows = cursor.fetchall()
+                has_more = len(rows) > bounded
+                page_rows = rows[:bounded]
+                last_examined = page_rows[-1] if page_rows else None
+                scanned = len(page_rows)
+            else:
+                page_rows, last_examined, has_more, scanned = collect_candidates(
+                    cursor, query=candidate_query, limit=bounded)
+
         next_boundary = (
-            self._agent_history_boundary(dict(page_rows[-1]))
-            if has_more and page_rows
+            self._agent_history_boundary(dict(last_examined))
+            if has_more and last_examined is not None
             else None
         )
         return {
             "messages": [self._message_dict(row) for row in reversed(page_rows)],
             "history_complete": not has_more,
             "next_boundary": next_boundary,
+            **({"scanned_messages": scanned} if candidate_query is not None else {}),
         }
 
     def visible_message_attachment(
@@ -13062,6 +13197,26 @@ class SessionStore:
                 "resolution": resolved,
                 "duplicate": False,
             }
+
+    def frontend_delivery_task_result(
+        self, *, session_id: str, owner_id: str, event_id: str,
+        connector_id: str, endpoint_id: str,
+    ) -> dict[str, Any] | None:
+        """Read bounded outcome evidence for exactly one owned delivery target."""
+        self.get_session(str(session_id), owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT task_id, state, last_error_code FROM connector_delivery_tasks "
+                "WHERE session_id=? AND event_id=? AND connector_id=? AND endpoint_id=? "
+                "ORDER BY created_at DESC, task_id DESC LIMIT 1",
+                (str(session_id), str(event_id), str(connector_id), str(endpoint_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "outbox_id": str(row["task_id"]), "state": str(row["state"]),
+            "error_code": str(row["last_error_code"] or ""),
+        }
 
     def frontend_delivery_receipts(
         self,

@@ -77,6 +77,48 @@ async def test_command_transport_targets_selected_session_and_rejects_stale_gene
 
 
 @pytest.mark.asyncio
+async def test_new_owner_is_used_without_restarting_the_worker(tmp_path, monkeypatch):
+    from types import MethodType
+    from orchestrator.config_json import write_config_json
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.telegram_access import TelegramAccessService
+
+    config_path, secrets_path = tmp_path / "agents.json", tmp_path / "secrets.json"
+    write_config_json(config_path, {
+        "global": {"authorized_id": 0, "owner_scope_id": "user:0"},
+        "agents": [{"name": "agent"}],
+    })
+    write_config_json(secrets_path, {})
+    runtime = _runtime()
+    runtime.global_config.authorized_id = 0
+    runtime.global_config.owner_scope_id = "user:0"
+    runtime.global_config.config_path = config_path
+    runtime.global_config.secrets_path = secrets_path
+    runtime._authorized_telegram_ids = (0,)
+    runtime._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, runtime)
+    users = TelegramAccessService(config_path=config_path, secrets_path=secrets_path)
+    state = users.status("agent")
+    users.change("agent", expected_revision=state["revision"],
+                 scope="global", action="add", user_id="7")
+    monkeypatch.setattr("orchestrator.command_interaction_bridge._catalogue",
+                        lambda _runtime, _locale: {"ok": True, "commands": [{"name": "reboot"}]})
+
+    result = await try_execute_slash_command_text(
+        runtime, _wire(), source_channel="workbench_api",
+    )
+    assert result["ok"] is True
+    assert runtime.global_config.authorized_id == 7
+    assert runtime.global_config.owner_scope_id == "user:0"
+
+    config_path.write_text("{broken", encoding="utf-8")
+    denied = await try_execute_slash_command_text(
+        runtime, _wire(), source_channel="workbench_api",
+    )
+    assert denied["ok"] is False
+    assert denied["error_code"] == "command_menu_forbidden"
+
+
+@pytest.mark.asyncio
 async def test_existing_runtime_slash_entry_dispatches_menu_inside_worker(monkeypatch):
     observed = []
 

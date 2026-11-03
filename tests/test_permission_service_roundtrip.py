@@ -47,7 +47,8 @@ from tests.test_permission_provider_park import tool
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native private pipe")
 @pytest.mark.asyncio
-async def test_sdk_service_her_human_approval_new_epoch_and_single_effect(tmp_path):
+@pytest.mark.parametrize("context_refresh", [False, True])
+async def test_sdk_service_her_human_approval_new_epoch_and_single_effect(tmp_path, context_refresh):
     store, session, accepted, fence, context = setup_run(tmp_path)
     signing, approval, stop_key = (Ed25519PrivateKey.generate() for _ in range(3))
     observer = SupervisorReceiptIssuer(key_id="test-observer", signing_key=stop_key)
@@ -165,7 +166,10 @@ async def test_sdk_service_her_human_approval_new_epoch_and_single_effect(tmp_pa
         config_holder = SimpleNamespace(get_tool_definitions=lambda: [])
         from orchestrator.permissions.host_protocol import unpack
         config = unpack(command(config_holder)["config"])
-        audit = DurableAuditLog(primary_path=tmp_path / "audit.jsonl", fallback_path=tmp_path / "audit-fallback.jsonl")
+        audit = DurableAuditLog(
+            primary_path=tmp_path / "audit.jsonl", fallback_path=tmp_path / "audit-fallback.jsonl",
+            canonical_observer=lambda record: coordinator.record_runtime_event(her_turn, record),
+        )
 
         async def worker_run(binding, recovery=None):
             executor = client.execution_registry(binding)
@@ -182,7 +186,8 @@ async def test_sdk_service_her_human_approval_new_epoch_and_single_effect(tmp_pa
             runtime = HERv2Runtime(config=config, provider=provider, ledger_store=LedgerStore(tmp_path / ("engine-" + binding.context.execution_epoch)),
                                   audit_log=audit, workzone_ref=str(tmp_path))
             try:
-                return await executor.run_her(runtime, "Write report", accepted.request_id, binding=binding)
+                prompt = ("Fresh PCM context " + binding.context.execution_epoch + "\n\n" if context_refresh else "") + "Write report"
+                return await executor.run_her(runtime, prompt, accepted.request_id, binding=binding)
             except PermissionPark as park:
                 return park
 
@@ -221,5 +226,16 @@ async def test_sdk_service_her_human_approval_new_epoch_and_single_effect(tmp_pa
         assert authority.decision_count(first.result.request_id) == 1
         assert len({item.request_id for item in meters}) == 2
         assert all(item.request_id.startswith("permission-provider:") for item in meters)
+        import json
+        records = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+        assert {row["payload"].get("execution_epoch") for row in records} >= {
+            binding.context.execution_epoch, successor.context.execution_epoch,
+        }
+        from orchestrator.her_v2.session_store import HerSessionStoreError
+        existing = next(row for row in records if row["event"] == "request_received")
+        with pytest.raises(HerSessionStoreError, match="different immutable facts"):
+            coordinator.record_runtime_event(her_turn, {
+                **existing, "payload": {**existing["payload"], "request": "changed within the same epoch"},
+            })
     finally:
         await service.close()

@@ -150,6 +150,7 @@ async def test_runtime_jobs_handle_flexible_xferkey_transfer():
 
 
 def test_jobs_panel_uses_short_tokenized_callbacks_for_long_job_ids(tmp_path):
+    from orchestrator.skill_manager import SkillManager
     tasks_path = tmp_path / "tasks.json"
     long_id = "lin_yueru-loop-hashi-remote-watchdog-7d"
     tasks_path.write_text(
@@ -172,7 +173,7 @@ def test_jobs_panel_uses_short_tokenized_callbacks_for_long_job_ids(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.name = "lin_yueru"
     runtime.global_config = SimpleNamespace(project_root=tmp_path)
-    runtime.skill_manager = SimpleNamespace(tasks_path=tasks_path)
+    runtime.skill_manager = SkillManager(tmp_path, tasks_path)
 
     text, markup = runtime_jobs._build_jobs_with_buttons(runtime, runtime.name, runtime.skill_manager, filter_agent=runtime.name)
 
