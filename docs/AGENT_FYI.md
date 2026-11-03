@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- Speech: manual /voice and /call direction, frozen reading voice and confirmed-failure retry. [PAO](HASHI_SPEECH_PERFORMANCE.md).
+
 - 历史搜索用私有POST/绑定游标，FC仍补旧记录并核验显示；读I/O不能阻塞HTTP。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
 
 - Standby控制有独立停止容量；租约仅存储、到期非停采，未接Call/Phone/设备；Judge/ARMED未合格。[阶段](HASHI_STANDBY_IMPLEMENTATION_PLAN.md)。
@@ -195,11 +197,8 @@ closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` and `/call` share privacy-checked routing before publish/cache. AP
-prefers VideoTTS unless `video_tts_supported: false`; otherwise use audio.
-Groups are bounded and ordered. Audio failure holds video; fallback stays
-group-local, stale tails cancel, late jobs only signal recovery, and audio stays
-serial. See [language voices](HASHIKO_LANGUAGE_VOICES.md),
+`/voice`、`/call` 发布/缓存前按隐私路由。AP 优先 VideoTTS（`video_tts_supported: false` 转音频）。
+分组有界有序；音频失败暂停视频，降级仅本组；旧尾取消，迟到任务仅提示恢复，音频串行。See [language voices](HASHIKO_LANGUAGE_VOICES.md),
 [Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and

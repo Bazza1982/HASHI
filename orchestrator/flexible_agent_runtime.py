@@ -3568,6 +3568,9 @@ class FlexibleAgentRuntime:
             "reply_mode": self.voice_manager.get_reply_mode(),
             "reply_content": str(policy.get("reply_content") or "audio_and_text"),
             "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
+            "performance": self.voice_manager.get_performance() or self.voice_manager.get_manual_direction()["enabled"],
+            "speech_task_protocol": "speech-tasks-v1",
+            "speech_reading_protocol": "speech-reading-selection-v1",
         }
 
     def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:
@@ -3584,8 +3587,49 @@ class FlexibleAgentRuntime:
         text: str,
         request_id: str,
         source_language: str | None = None,
+        *,
+        operation: str = "generate",
+        performance_context: dict | None = None,
+        retry_of: str | None = None,
     ) -> dict[str, Any]:
         """Generate a bounded local-presentation asset without any Bot send."""
+        from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
+        if operation in {"start_prepare", "start_generate", "status", "cancel"}:
+            from orchestrator.speech_tasks import SpeechTasks, SpeechTaskError
+            owner = getattr(self, "_speech_tasks", None)
+            if owner is None:
+                owner = self._speech_tasks = SpeechTasks(Path(self.workspace_dir) / "state" / "speech-tasks")
+            try:
+                if operation == "status":
+                    return owner.status(request_id)
+                if operation == "cancel":
+                    return owner.cancel(request_id)
+                selection = self.voice_manager._load()
+                # Store only a digest of configuration, never credentials or utterances.
+                selection_id = (performance_context or {}).get("selection_id")
+                selection_key = selection_id or hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
+                phase = operation.removeprefix("start_")
+                async def execute(_deadline):
+                    current = hashlib.sha256(json.dumps(self.voice_manager._load(), sort_keys=True).encode()).hexdigest()
+                    if not selection_id and current != selection_key:
+                        raise SpeechTaskError("speech_voice_changed", accepted=False)
+                    return await self.synthesize_tui_speech(
+                        text, request_id, source_language, operation=phase,
+                        performance_context=performance_context)
+                return owner.start(request_id, text, phase,
+                                   {"selection": selection_key, "language": source_language,
+                                    "performance_context": performance_context}, execute, retry_of=retry_of)
+            except SpeechTaskError as exc:
+                return {"task_error": exc.code, "accepted": exc.accepted, "retryable": exc.retryable}
+            except ValueError as exc:
+                if str(exc) == "speech_split_required":
+                    return {"task_error": "speech_split_required", "accepted": False}
+                raise
+        if operation == "prepare":
+            return {"performance_context": await self.voice_manager.prepare_reading(text, source_language=source_language),
+                    "request_id": request_id}
+        if operation != "generate":
+            raise ValueError("Unknown speech operation")
 
         spoken = str(text or "").strip()
         if not spoken:
@@ -3600,6 +3644,8 @@ class FlexibleAgentRuntime:
             force=True,
             source_language=source_language or ui_language.preferred_locale(self),
             source_surface="workbench",
+            **({"max_retries": 0} if ACTIVE_SPEECH_BUDGET.get() is not None else {}),
+            **({"performance_context": performance_context} if performance_context is not None else {}),
         )
         if asset is None:
             raise RuntimeError("TTS is unavailable for this Agent")
@@ -3655,6 +3701,7 @@ class FlexibleAgentRuntime:
             "style_applied": asset.style_applied,
             "style_reason": asset.style_reason,
             "notice": asset.notice,
+            "performance": asset.performance,
             "request_id": str(request_id or ""),
         }
 
@@ -4657,6 +4704,20 @@ class FlexibleAgentRuntime:
                 ),
             ],
         ]
+        rows.append([
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("voice.performance.on"), self.voice_manager.get_performance()),
+                callback_data="voice:performance:on"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("voice.performance.off"), not self.voice_manager.get_performance()),
+                callback_data="voice:performance:off"),
+        ])
+        from orchestrator.manual_speech_direction import input_button
+        manual=self.voice_manager.get_manual_direction()
+        rows.append([input_button("voice:manual:save", manual)])
+        rows.append([
+            InlineKeyboardButton(selected_label(ui_language.tr("voice.manual.on"), manual["enabled"]), callback_data="voice:manual:on"),
+            InlineKeyboardButton(selected_label(ui_language.tr("voice.manual.off"), not manual["enabled"]), callback_data="voice:manual:off")])
         profile_buttons = [
             InlineKeyboardButton(
                 selected_label(
@@ -5298,6 +5359,17 @@ class FlexibleAgentRuntime:
                 message = self.voice_manager.set_voice_profile(value)
                 preview_profile = value
                 preview_renderers = ("native", "tts")
+            elif action == "manual":
+                if value == "save":
+                    message=self.voice_manager.set_manual_direction(True, getattr(query, "input_text", None))
+                elif value in {"on", "off"}:
+                    message=self.voice_manager.set_manual_direction(value == "on")
+                else:
+                    raise ValueError("Invalid manual direction action")
+            elif action == "performance":
+                if value not in {"on", "off"}:
+                    raise ValueError("performance must be on or off")
+                message = self.voice_manager.set_performance(value == "on")
             elif action == "content":
                 message = self.voice_manager.set_native_reply_content(value)
             # Keep callbacks from already-open legacy menus valid until those
@@ -5320,6 +5392,9 @@ class FlexibleAgentRuntime:
                 render_view = f"voices:{page}"
                 preview_preset = value
         except Exception as e:
+            if action == "manual":
+                await query.edit_message_text(self.voice_manager.voice_menu_text(),
+                    reply_markup=self._voice_keyboard(), parse_mode="HTML")
             await query.answer(str(e), show_alert=True)
             return
 
@@ -6724,6 +6799,27 @@ class FlexibleAgentRuntime:
             )
             return
         mode = args[0].lower()
+        if mode == "manual":
+            try:
+                if len(args)<2:
+                    raise ValueError("/voice manual <on|off|TEXT>")
+                value=" ".join(args[1:])
+                self.voice_manager.set_manual_direction(value.lower() != "off",
+                    None if value.lower() in {"on","off"} else value)
+                await self._reply_text(update, self.voice_manager.voice_menu_text(),
+                    reply_markup=self._voice_keyboard(), parse_mode="HTML")
+            except ValueError as exc:
+                await self._reply_text(update, html.escape(str(exc)))
+            return
+        if mode == "performance":
+            if len(args) != 2 or args[1].lower() not in {"on", "off"}:
+                await self._reply_text(update, ui_language.tr("voice.usage_command",
+                    command="/voice performance <on|off>"))
+                return
+            self.voice_manager.set_performance(args[1].lower() == "on")
+            await self._reply_text(update, self.voice_manager.voice_menu_text(),
+                reply_markup=self._voice_keyboard(), parse_mode="HTML")
+            return
         if mode in {"providers", "list"}:
             await self._reply_text(update, self.voice_manager.provider_hints())
             return

@@ -32,6 +32,7 @@ from orchestrator.tts_voice_previews import (
     DEFAULT_TTS_VOICE_PREVIEW_ASSET_ROOT,
     TTS_VOICE_PREVIEW_KIND,
     TTS_VOICE_PREVIEW_TEXT,
+    get_tts_voice_preview_assets,
 )
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_preview_bundle import (
@@ -77,7 +78,7 @@ def _write_manifest(path: Path, manifest: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     os.replace(temporary, path)
 
@@ -139,26 +140,27 @@ async def generate(args: argparse.Namespace) -> Path:
             allowed_formats=("ogg", "mp3"),
         )
 
-    aliases = args.aliases or list(VoiceManager.VOICE_PRESETS)
-    unknown = [alias for alias in aliases if alias not in VoiceManager.VOICE_PRESETS]
-    if unknown:
-        raise ValueError(f"Unknown voice preset aliases: {', '.join(unknown)}")
-    completed = {
-        (str(entry.get("profile")), str(entry.get("renderer")))
-        for entry in manifest["entries"]
-        if isinstance(entry, dict)
-    }
-    failures: list[dict] = []
     manager = VoiceManager(
         bridge_home / "state" / "preview-generator",
         bridge_home / "media",
         ffmpeg_cmd=ffmpeg,
+        catalog_path=bridge_home / "voice_catalog.json",
+        project_root=bridge_home,
     )
+    manager._require_voice_catalog()
+    aliases = args.aliases or list(manager.VOICE_PRESETS)
+    unknown = [alias for alias in aliases if alias not in manager.VOICE_PRESETS]
+    if unknown:
+        raise ValueError(f"Unknown voice preset aliases: {', '.join(unknown)}")
+    failures: list[dict] = []
 
     for alias in aliases:
-        if {(alias, "tts"), (alias, "tts_mp3")} <= completed and not args.force:
+        preset = manager._preset_payload(alias) or manager.VOICE_PRESETS[alias]
+        if not args.force and all(
+            get_tts_voice_preview_assets(alias, preset, telegram=telegram, root=output_root)
+            for telegram in (True, False)
+        ):
             continue
-        preset = manager._preset_payload(alias) or VoiceManager.VOICE_PRESETS[alias]
         provider_name = str(preset["provider"]).strip().casefold()
         locale = str(preset["locale"])
         script = TTS_VOICE_PREVIEW_TEXT[locale]
@@ -166,7 +168,11 @@ async def generate(args: argparse.Namespace) -> Path:
         voice_id = _stable_voice_id(provider_name, voice_name)
         started = time.monotonic()
         try:
-            provider = build_provider(provider_name, ffmpeg_cmd=ffmpeg)
+            provider = build_provider(
+                provider_name, ffmpeg_cmd=ffmpeg,
+                provider_config=manager.voice_catalog.service(provider_name),
+                bridge_home=bridge_home,
+            )
             provider_options = dict(preset.get("provider_options") or {})
             if provider_name in {"kokoro", "coqui"}:
                 provider_options.setdefault("python_exe", sys.executable)
@@ -257,7 +263,7 @@ async def generate(args: argparse.Namespace) -> Path:
         allowed_formats=("ogg", "mp3"),
     )
     expected = {
-        (str(VoiceManager.VOICE_PRESETS[alias]["locale"]), alias, renderer)
+        (str(manager.VOICE_PRESETS[alias]["locale"]), alias, renderer)
         for alias in aliases
         for renderer in ("tts", "tts_mp3")
     }

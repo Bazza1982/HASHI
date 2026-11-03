@@ -193,6 +193,14 @@ async def initialize(runtime: Any) -> bool:
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
+    speech_tasks = getattr(runtime, "_speech_tasks", None)
+    clean_speech = True
+    if speech_tasks is not None:
+        clean_speech = await _run_shutdown_step(
+            runtime, speech_tasks.close(), label="speech-tasks", timeout_s=5.0,
+        )
+        if clean_speech:
+            runtime._speech_tasks = None
     permission_owner = getattr(runtime, "permission_runs", None)
     clean_permissions = True
     if permission_owner is not None:
@@ -238,7 +246,7 @@ async def shutdown(runtime: Any) -> None:
         runtime._scheduled_retry_tasks,
         label="retry-tasks",
     )
-    clean = clean_permissions and clean_promotion and clean_incremental and clean_retry
+    clean = clean_speech and clean_permissions and clean_promotion and clean_incremental and clean_retry
     clean = (
         await _cancel_tasks(
             runtime,
