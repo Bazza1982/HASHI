@@ -26,6 +26,8 @@ async def test_new_attempt_requires_confirmed_failure_and_same_payload(tmp_path)
         assert (await settled(owner, "second"))["result"] == {"audio": "saved"}
         owner.start("second", "body", "generate", {}, success, retry_of="first")
         with pytest.raises(SpeechTaskError):
+            owner.start("extra", "body", "generate", {}, success, retry_of="first")
+        with pytest.raises(SpeechTaskError):
             owner.start("wrong", "different", "generate", {}, success, retry_of="first")
         async def uncertain(_): raise ConnectionError("delivery lost")
         owner.start("unknown", "body", "generate", {}, uncertain)
@@ -40,9 +42,16 @@ async def test_new_attempt_requires_confirmed_failure_and_same_payload(tmp_path)
         await owner.close()
 
 @pytest.mark.asyncio
-async def test_logical_reading_freezes_voice_rate_options_and_manual_direction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("manual_enabled", [False, True])
+async def test_logical_reading_freezes_voice_rate_options_and_manual_direction(tmp_path, monkeypatch, manual_enabled):
     value = manager(tmp_path)
-    value.set_manual_direction(True, "温柔，清晰")
+    import json
+    document = json.loads(value.catalog_path.read_text()) if hasattr(value, "catalog_path") else json.loads((tmp_path/"voice_catalog.json").read_text())
+    document["services"][0]["language_voices"] = {"zh":"advanced_voice","ja":"advanced_ja"}
+    document["voices"].append({"id":"advanced_ja","service":"advanced","voice_name":"japanese",
+        "label":"Japanese","language":"Japanese","locale":"ja-JP","gender":"female"})
+    (tmp_path/"voice_catalog.json").write_text(json.dumps(document))
+    value.set_manual_direction(manual_enabled, "温柔，清晰")
     built = []
     class Provider:
         async def synthesize(self, **kw):
@@ -51,7 +60,7 @@ async def test_logical_reading_freezes_voice_rate_options_and_manual_direction(t
         async def prepare_performance(self, *a):
             pytest.fail("manual mode must skip planner")
     monkeypatch.setattr(module, "build_provider", lambda *a, **kw: Provider())
-    context = await value.prepare_reading("完整中文，然后日本語です。", source_language="zh-CN")
+    context = await value.prepare_reading("整体中文介绍。" * 20 + "これは日本語です。", source_language="zh-CN")
     await value.synthesize_reply("agent", "one", "第一段", force=True, max_retries=0, performance_context=context)
     state = value._load()
     state.update(voice_name="changed", rate=70, provider_options={"temperature": .9})
@@ -61,5 +70,11 @@ async def test_logical_reading_freezes_voice_rate_options_and_manual_direction(t
     for key in ("voice_name", "rate", "provider_options"):
         assert built[0][key] == built[1][key]
     assert [x["text"] for x in built] == ["第一段", "日本語です。"]
-    assert built[0]["provider_options"]["performance_plan"]["instructions"] == "温柔，清晰"
-
+    assert [x["voice_name"] for x in built] == ["chosen", "chosen"]
+    if manual_enabled:
+        assert built[0]["provider_options"]["performance_plan"]["instructions"] == "温柔，清晰"
+    else:
+        assert "performance_plan" not in built[0]["provider_options"]
+    value._reading_selections.clear()
+    with pytest.raises(module.VoiceSynthesisError, match="start a new reading"):
+        await value.synthesize_reply("agent", "expired", "正文", force=True, performance_context=context)
