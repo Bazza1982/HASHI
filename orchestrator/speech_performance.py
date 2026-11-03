@@ -20,12 +20,19 @@ def checked_plan(value, model):
 
 async def prepare(manager, text, build_provider):
     state = manager._load()
-    if state.get("performance") is not True:
+    if state.get("performance") is not True and not (state.get("manual_direction") or {}).get("enabled"):
         return {"enabled": False}
     manager._require_voice_catalog()
     selected = state["provider"]
     service = manager.voice_catalog.service(selected)
     context = {"enabled": True, "provider": selected, "plan": None, "reason": "unsupported"}
+    manual=state.get("manual_direction") or {}
+    if manual.get("enabled"):
+        from orchestrator.manual_speech_direction import plan
+        if service.get("adapter") != "openai_compatible" or (service.get("automatic_performance") is False or service.get("location") not in {"local","lan"}):
+            raise ValueError(ui_language.tr("voice.manual.unsupported"))
+        context.update(plan=plan(manual, service["model"]), reason=None, source="manual")
+        return context
     if (service.get("automatic_performance") is False
             or service.get("adapter") != "openai_compatible"
             or service.get("location") not in {"local", "lan"}):
@@ -62,6 +69,10 @@ def checked_context(value):
 def options_for(context, provider, options):
     result = dict(options or {})
     if context and context.get("enabled") and provider == context.get("provider") and context.get("plan"):
+        if context.get("source") == "manual":
+            result.pop("instructions", None)
+            result.update(performance=True, performance_plan=context["plan"])
+            return result
         # Explicit manual instructions retain precedence over automatic direction.
         if not result.get("instructions"):
             result.update(performance=True, performance_plan=context["plan"])
@@ -75,7 +86,7 @@ def metadata(context, provider):
     applied = plan.get("applied") is True and provider == context.get("provider")
     return {"requested": True, "applied": applied, "plan_id": plan.get("plan_id"),
             "reason": None if applied else context.get("reason") or "provider_changed",
-            "planning_ms": plan.get("planning_ms"), "sampled": plan.get("sampled", False)}
+            "source": context.get("source", "automatic"), "planning_ms": plan.get("planning_ms"), "sampled": plan.get("sampled", False)}
 
 
 def notice(performance, existing, *, locale=None):

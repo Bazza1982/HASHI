@@ -405,6 +405,10 @@ class Capture:
                             # Raw callback data stays server-side.
                             actions[key] = (callback, resolved[0])
                             item = {"text": label, "button_id": key, "disabled": False}
+                            field=button.get("hashi_text_input")
+                            if isinstance(field, Mapping) and callback.startswith(("voice:manual:save","call:manualsave:")):
+                                item["text_input"]={"label":str(field.get("label",""))[:100],
+                                    "value":str(field.get("value",""))[:500],"max_length":500}
                         else:
                             item["reason"] = "callback_unavailable"
                 elif not special and url and callback is None:
@@ -551,6 +555,14 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
     if action is None:
         raise InteractionError("command_menu_button_invalid", 400)
     data, fingerprint = action
+    field=next((item.get("text_input") for row in menu.rows for item in row
+        if item.get("button_id")==payload.get("button_id")), None)
+    input_text=payload.get("input_text")
+    if field is not None:
+        if not isinstance(input_text,str) or not input_text.strip() or len(input_text)>500:
+            raise InteractionError("command_menu_input_invalid",422)
+    elif input_text is not None:
+        raise InteractionError("command_menu_input_invalid",422)
     resolved = capture.resolve_callback(data)
     if not resolved or resolved[0] != fingerprint:
         raise InteractionError("command_menu_handler_changed")
@@ -559,6 +571,7 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
     _disable_action_rows(menu, "processing")
     capture._record(menu)
     query = CapturedQuery(capture, menu, data, actor_id)
+    query.input_text=input_text
     try:
         handler_result = await invoke(resolved, query)
     except BaseException:

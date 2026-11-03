@@ -135,6 +135,16 @@ class CatalogCallTTS:
             provider, voice_name, provider_options = self._initial_selection(
                 call, catalog
             )
+        manual=call.profile.get("manual_direction") or {}
+        if manual.get("enabled"):
+            from orchestrator.manual_speech_direction import validate
+            manual=validate(manual)
+            if (catalog.service(provider).get("automatic_performance") is False
+                    or catalog.service(provider).get("location") not in {"local","lan"}):
+                raise CallError("call_manual_direction_unsupported", 409)
+            from orchestrator.manual_speech_direction import plan
+            provider_options.pop("instructions", None)
+            provider_options.update(performance=True, performance_plan=plan(manual, catalog.service(provider)["model"]))
         selected = str(call.profile["tts"]["target_id"])
 
         self.temp_root.mkdir(parents=True, exist_ok=True)
@@ -156,7 +166,7 @@ class CatalogCallTTS:
                     catalog=catalog,
                     provider_allowed=lambda _service_id, service: self._privacy_allows(
                         service, privacy_level
-                    ),
+                    ) and (not manual.get("enabled") or _service_id == provider),
                     output_dir=Path(temp_dir),
                 )
                 audio = result.asset.ogg_path.read_bytes()

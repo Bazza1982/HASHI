@@ -3471,7 +3471,7 @@ class FlexibleAgentRuntime:
             "reply_mode": self.voice_manager.get_reply_mode(),
             "reply_content": str(policy.get("reply_content") or "audio_and_text"),
             "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
-            "performance": self.voice_manager.get_performance(),
+            "performance": self.voice_manager.get_performance() or self.voice_manager.get_manual_direction()["enabled"],
             "speech_task_protocol": "speech-tasks-v1",
         }
 
@@ -4609,6 +4609,12 @@ class FlexibleAgentRuntime:
                 selected_label(ui_language.tr("voice.performance.off"), not self.voice_manager.get_performance()),
                 callback_data="voice:performance:off"),
         ])
+        from orchestrator.manual_speech_direction import input_button
+        manual=self.voice_manager.get_manual_direction()
+        rows.append([input_button("voice:manual:save", manual)])
+        rows.append([
+            InlineKeyboardButton(selected_label(ui_language.tr("voice.manual.on"), manual["enabled"]), callback_data="voice:manual:on"),
+            InlineKeyboardButton(selected_label(ui_language.tr("voice.manual.off"), not manual["enabled"]), callback_data="voice:manual:off")])
         profile_buttons = [
             InlineKeyboardButton(
                 selected_label(
@@ -5250,6 +5256,13 @@ class FlexibleAgentRuntime:
                 message = self.voice_manager.set_voice_profile(value)
                 preview_profile = value
                 preview_renderers = ("native", "tts")
+            elif action == "manual":
+                if value == "save":
+                    message=self.voice_manager.set_manual_direction(True, getattr(query, "input_text", None))
+                elif value in {"on", "off"}:
+                    message=self.voice_manager.set_manual_direction(value == "on")
+                else:
+                    raise ValueError("Invalid manual direction action")
             elif action == "performance":
                 if value not in {"on", "off"}:
                     raise ValueError("performance must be on or off")
@@ -5276,6 +5289,9 @@ class FlexibleAgentRuntime:
                 render_view = f"voices:{page}"
                 preview_preset = value
         except Exception as e:
+            if action == "manual":
+                await query.edit_message_text(self.voice_manager.voice_menu_text(),
+                    reply_markup=self._voice_keyboard(), parse_mode="HTML")
             await query.answer(str(e), show_alert=True)
             return
 
@@ -6676,6 +6692,18 @@ class FlexibleAgentRuntime:
             )
             return
         mode = args[0].lower()
+        if mode == "manual":
+            try:
+                if len(args)<2:
+                    raise ValueError("/voice manual <on|off|TEXT>")
+                value=" ".join(args[1:])
+                self.voice_manager.set_manual_direction(value.lower() != "off",
+                    None if value.lower() in {"on","off"} else value)
+                await self._reply_text(update, self.voice_manager.voice_menu_text(),
+                    reply_markup=self._voice_keyboard(), parse_mode="HTML")
+            except ValueError as exc:
+                await self._reply_text(update, html.escape(str(exc)))
+            return
         if mode == "performance":
             if len(args) != 2 or args[1].lower() not in {"on", "off"}:
                 await self._reply_text(update, ui_language.tr("voice.usage_command",

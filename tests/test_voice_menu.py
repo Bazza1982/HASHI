@@ -503,6 +503,8 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
         ["✓ Audio + text", "Audio only"],
         ["🗣️ Choose default TTS voice"],
         ["Performance on", "✓ Performance off"],
+        ["Save and enable"],
+        ["Manual on", "✓ Manual off"],
         ["👩 Warm", "✓ 👩 Clear"],
         ["👨 Warm", "👨 Calm"],
     ]
@@ -512,6 +514,8 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
         ["voice:content:both", "voice:content:audio"],
         ["voice:view:voices"],
         ["voice:performance:on", "voice:performance:off"],
+        ["voice:manual:save"],
+        ["voice:manual:on", "voice:manual:off"],
         ["voice:profile:warm_female", "voice:profile:clear_female"],
         ["voice:profile:warm_male", "voice:profile:calm_male"],
     ]

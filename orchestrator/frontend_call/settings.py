@@ -78,6 +78,10 @@ class CallSettings:
         ]
         rows = []
         title = tr("call.title")
+        manual=profile.get("manual_direction") or {"enabled":False,"instructions":""}
+        facts.append(f"<b>{escape(tr('voice.manual.label'))}</b> · " + ("ON" if manual["enabled"] else "OFF"))
+        if manual["enabled"]:
+            facts.append(escape(manual["instructions"]))
         if page == "home":
             facts.append(escape(tr("call.companion_modes")))
             rows = [
@@ -85,6 +89,7 @@ class CallSettings:
                     button(tr("call.stt"), "view", "stt"),
                     button(tr("call.tts"), "view", "tts"),
                 ],
+                [button(tr("voice.manual.label"), "view", "manual")],
                 [
                     button(tr("call.vision"), "view", "vision"),
                     button(tr("call.advanced"), "view", "advanced"),
@@ -164,6 +169,13 @@ class CallSettings:
                 )
             if navigation:
                 rows.append(navigation)
+        elif page == "manual":
+            from orchestrator.manual_speech_direction import input_button
+            title=tr("voice.manual.label")
+            facts.append("<code>/call manual &lt;on|off|TEXT&gt;</code>")
+            rows.append([input_button(f"call:manualsave::{rev}", manual)])
+            rows.append([button(selected_label(tr("voice.manual.on"), manual["enabled"]), "manual", "on"),
+                         button(selected_label(tr("voice.manual.off"), not manual["enabled"]), "manual", "off")])
         elif page == "advanced":
             title = tr("call.advanced")
             for kind in ("stt", "tts", "vision"):
@@ -218,7 +230,7 @@ class CallSettings:
             action=tr("call.voice.action" if page == "voice" else "call.action"),
         ), InlineKeyboardMarkup(rows)
 
-    def apply(self, action, value, revision):
+    def apply(self, action, value, revision, input_text=None):
         ctx = self.config.context(self.owner, self.agent)
         if revision != ctx["revision"][:12]:
             raise CallError("call_configuration_changed", 409)
@@ -232,7 +244,18 @@ class CallSettings:
                 raise CallError("call_menu_invalid")
             return "home"
         profile = copy.deepcopy(ctx["profile"])
-        if action == "target":
+        if action in {"manual", "manualsave"}:
+            from orchestrator.manual_speech_direction import validate
+            manual=dict(profile.get("manual_direction") or {"enabled":False,"instructions":""})
+            if action == "manualsave":
+                manual.update(enabled=True, instructions=input_text)
+            elif value in {"on","off"}:
+                manual["enabled"]=value=="on"
+            else:
+                raise CallError("call_menu_invalid")
+            profile["manual_direction"]=validate(manual)
+            page="manual"
+        elif action == "target":
             kind, index = value.split(".", 1)
             if kind not in ("stt", "tts", "vision"):
                 raise CallError("call_menu_invalid")
@@ -311,6 +334,13 @@ class CallSettings:
     def command(self, args):
         action = args[0].casefold() if args else "menu"
         ctx = self.config.context(self.owner, self.agent)
+        if action == "manual":
+            if len(args)==1:
+                return "manual"
+            value=" ".join(args[1:])
+            if value.lower() in {"on","off"}:
+                return self.apply("manual", value.lower(), ctx["revision"][:12])
+            return self.apply("manualsave", "", ctx["revision"][:12], value)
         if action in ("menu", "status"):
             return "home"
         if action in ("activate", "deactivate") and len(args) == 1:
@@ -360,7 +390,7 @@ async def callback(runtime, update, context):
     try:
         _, action, value, revision = query.data.split(":", 3)
         settings = CallSettings(runtime)
-        text, keyboard = settings.render(settings.apply(action, value, revision))
+        text, keyboard = settings.render(settings.apply(action, value, revision, getattr(query, "input_text", None)))
         telegram = (
             str(
                 getattr(update, "_hashi_session_surface", None) or "telegram"
@@ -401,6 +431,9 @@ async def callback(runtime, update, context):
                     update, ui_language.tr("call.voice.preview.unavailable")
                 )
     except (CallError, ValueError, IndexError, KeyError, StopIteration) as exc:
+        if locals().get("action") in {"manual", "manualsave"}:
+            text, keyboard = settings.render("manual")
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
         await query.answer(
             ui_language.tr("call.error") + " · " + str(exc), show_alert=True
         )

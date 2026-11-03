@@ -881,6 +881,19 @@ class VoiceManager:
         self._update(lambda state: state.update(performance=enabled))
         return ui_language.tr("voice.performance.updated")
 
+    def get_manual_direction(self) -> dict:
+        return dict(self._load().get("manual_direction") or {"enabled": False, "instructions": ""})
+
+    def set_manual_direction(self, enabled: bool, instructions=None) -> str:
+        from orchestrator.manual_speech_direction import validate
+        value=self.get_manual_direction()
+        value["enabled"]=enabled
+        if instructions is not None:
+            value["instructions"]=instructions
+        value=validate(value)
+        self._update(lambda state: state.update(manual_direction=value))
+        return ui_language.tr("voice.performance.updated")
+
     async def prepare_performance(self, text: str) -> dict:
         from orchestrator.speech_performance import prepare
         return await prepare(self, text, build_provider)
@@ -911,6 +924,10 @@ class VoiceManager:
             "Voice",
             current=current,
             facts=[
+                f"<b>{html.escape(ui_language.tr('voice.manual.label'))}</b> · "
+                + ("ON" if self.get_manual_direction()["enabled"] else "OFF"),
+                html.escape(self.get_manual_direction()["instructions"]),
+                f"<code>/voice manual &lt;on|off|TEXT&gt;</code>",
                 f"<b>{html.escape(ui_language.tr('voice.field.mode'))}</b>",
                 ui_language.tr("voice.performance.state",
                     state="ON" if self.get_performance() else "OFF"),
@@ -1591,7 +1608,11 @@ class VoiceManager:
         context = (
             checked_context(performance_context) if performance_context is not None
             else await self.prepare_performance(text)
-        ) if state.get("performance") is True else {"enabled": False}
+        ) if state.get("performance") is True or (state.get("manual_direction") or {}).get("enabled") else {"enabled": False}
+        if context.get("source") == "manual":
+            manual=state.get("manual_direction") or {}
+            if not manual.get("enabled") or manual.get("instructions") != (context.get("plan") or {}).get("instructions"):
+                raise VoiceSynthesisError("tts_performance_context_changed", "The manual direction changed; start a new reading.")
         if context.get("enabled") and context.get("provider") != state["provider"]:
             raise VoiceSynthesisError("tts_performance_context_changed", "The voice selection changed; start a new reading.")
         state["_performance_context"] = context
@@ -1605,7 +1626,7 @@ class VoiceManager:
             source_language=source_language,
             source_surface=source_surface,
         )
-        if result.effective_provider_options.get("instructions"):
+        if result.effective_provider_options.get("instructions") and context.get("source") != "manual":
             context = {**context, "plan": None, "reason": "manual_instructions"}
         performance = metadata(context, result.asset.provider)
         return replace(result.asset, performance=performance,

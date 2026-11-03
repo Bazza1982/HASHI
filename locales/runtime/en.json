@@ -331,7 +331,7 @@
     "menu.think.enabled_other": "Shows genuine provider-returned reasoning when available. Model commentary stays under /commentary.",
     "menu.think.disabled_her": "HER provider reasoning is hidden; /commentary and /verbose are unaffected.",
     "menu.think.disabled_other": "Provider reasoning is hidden; /commentary, progress, and typing are unaffected.",
-  "menu.think.unavailable_effect": "The active backend does not expose a reasoning stream, so this toggle has no effect here. Final answers, commentary, and technical progress are unaffected.",
+    "menu.think.unavailable_effect": "The active backend does not expose a reasoning stream, so this toggle has no effect here. Final answers, commentary, and technical progress are unaffected.",
     "menu.setting.workspace": "workspace setting",
     "menu.setting.immediate_persistent_reboot": "Changes apply immediately and persist across reboot.",
     "menu.commentary.execution_mode": "HERV3 model effort",
@@ -2935,7 +2935,14 @@
     "ingress_confirmation.state_retryable": "The confirmation could not be completed safely. The original confirmation remains available to retry.",
     "ingress_confirmation.store_unavailable": "This message was blocked because its freshness could not be safely confirmed. Please send it again if it is still needed.",
     "ingress_confirmation.not_found": "This confirmation is no longer available.",
-    "ingress_confirmation.identity_mismatch": "This confirmation does not belong to this chat or message."
+    "ingress_confirmation.identity_mismatch": "This confirmation does not belong to this chat or message.",
+    "voice.manual.label": "Manual performance direction",
+    "voice.manual.save": "Save and enable",
+    "voice.manual.on": "Manual on",
+    "voice.manual.off": "Manual off",
+    "voice.manual.empty": "Enter a performance direction before enabling.",
+    "voice.manual.invalid": "Use up to 500 characters.",
+    "voice.manual.unsupported": "Manual direction requires an advanced voice."
   },
   "commands": {
     "safety": "View permission status",

@@ -21,3 +21,28 @@ Audio metadata reports requested/applied status, reason, plan correlation ID and
 Implementation and offline checks do not hot-adopt a Function generation. MSI adoption must verify both the shared service and Agent Workers after the user-directed hot `/reboot max`; do not cold restart Core. Compute and Workbench use their own immutable deployment paths.
 
 Validation covers default OFF, persistence and command/button controls, one plan across chunking, no stale ON-to-OFF state, failed preparation, cancellation, unchanged text/voice payloads, native audio delivery and existing Function handoff checks. Live checks and source/runtime identities belong in dated receipts; they are separate from this protocol.
+
+## Manual direction
+The user approved independent manual controls in both /voice and /call.
+VoiceManager owns /voice's revisioned manual_direction; CallConfig owns /call's
+per-owner/Agent profile, frozen at call creation. Each stores enabled and a
+trimmed instruction string of at most 500 Unicode characters. Enabling an empty
+value is rejected. Saving valid text enables manual direction. Turning it off
+retains the text and restores that entrance's prior behavior.
+
+Manual direction precedes automatic planning. HASHI creates a bounded prepared
+plan locally and sends it through the existing validated performance_plan API,
+which selects expressive synthesis without any Qwen/9B invocation. It does not
+change the spoken text or selected voice. Voice segments reuse the prepared
+context; call segments reuse their frozen profile. An unsupported provider
+rejects manual synthesis rather than silently invoking a planner. A changed
+voice/manual context requires a new reading.
+
+Workbench renders a bounded textarea attached only to the server-issued manual
+save action. The value travels through the existing authenticated command
+interaction with its revision, connection and Session fences; the browser never
+submits callback data. Empty/oversized input is rejected before consuming the
+action. Ordinary callbacks cannot accept text. Telegram retains the explicit
+/voice manual <on|off|TEXT> and /call manual <on|off|TEXT> command forms.
+The recording stores the actual manual source and direction separately from the
+body, so replay needs neither planning nor synthesis.
