@@ -9,8 +9,8 @@
 - Fingerprint默认OFF、按Run冻结；开启Shell须持久审计；marker用护栏原子替换/Manifest，绝对路径限可信Workzone，不重放写入。[PAO](HASHI_FINGERPRINT.md)。
 
 - PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，显式授权原生音频不等转写；原因跨入口/Worker保留；缺FFmpeg明确报错，不重试合成；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
-- 个人L1一键免重登；范围/版本/时长/幂等/原操作续跑不变，governed/L2除外。
-  Adapter超时走配置；epoch日志不可变。已配未加载报不可用；SCM须实体独立验收，完整L2未过保持partial。[权限](permissions/IMPLEMENTATION_STATUS.md)。
+- 个人L1免重登；范围/版本/时长/幂等/epoch不变，governed/L2除外。NP四按钮、原操作续跑和Task终态撤权已实测；已配未加载报不可用。
+  SCM清理未过、完整L2保持partial；不得为重跑累积共享主机profile。[权限](permissions/IMPLEMENTATION_STATUS.md)。
 - 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.

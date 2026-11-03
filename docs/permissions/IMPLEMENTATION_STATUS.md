@@ -2,25 +2,38 @@
 
 更新日期：2026-11-04。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。后续 L1 修复在既有 HASHI3 分支进行；原 feature-permission-sys 阶段作为历史保留。Core 不变。用户本轮明确要求补齐 Workbench 自动弹窗、一键审批与时长选择，个人 L1 的按钮点击即视为用户决定；不要求反复身份验证。
 
-本期源码已完成权限服务、真实 HERV3 接入、公共认证/审批、受控工具、媒体/原服务、计费与恢复接线。Windows 实体脚本的启动问题已经解决并通过组件资格。当前提交的最终回归、GitHub 检查及审阅状态以 PR #118 的最新提交为准；旧提交的绿色检查不能代替新版本。
+本期源码已完成权限服务、真实 HERV3 接入、公共认证/审批、受控工具、媒体/原服务、计费与恢复接线。Windows 实体脚本的启动问题已经解决并通过组件资格。本轮在既有 HASHI3 main 接手；已合并基线为 HASHI PR #127 与 Workbench PR #26。本轮新增源码提交、运行版本、页面证据与生产交付分别核实；旧提交的绿色检查不能代替当前版本。
 
 完整安装的 Windows WAC、实际前端验收及生产采用仍是独立交付事实。未完成这些组合验收的环境继续显示 partial/unknown，不显示整体 L2 已验证。此前分批结果与失败记录见 [历史](IMPLEMENTATION_HISTORY_20261030.md)；原始产品要求仍以 [PRD](PRD.md)、[ACCEPTANCE](ACCEPTANCE.md)、[Windows L2](L2_WINDOWS.md) 为准。
 
 2026-10-31 HASHI3 L1 实测发现并修复模型工厂写入 Adapter 只读超时属性的问题，改走既有配置超时合同。真实 Adapter 回归同组测试旧代码 2 failed / 2 passed，修复后 4 passed；直接模型/超时/L0 消费组合 18 passed。本项离线修复不代表完整 L1 前端实测通过，实际采用与后续问题记入当轮证据及共享白板。
 
-L1 后续真实审批测试证实：应用令牌不能代替人类会话，测试人类账户能批准并撤销指定 lease；但续跑时重新装配的上下文触发旧事件编号冲突。运行日志现按真实 ExecutionEpoch 区分新事件，原 Run/Turn/operation 与物理用量身份保留，同 epoch 的不可变事实检查继续拒绝冲突。接入 canonical observer 的两项私有 IPC 组合回归从 2 failed 变为 2 passed；完整权限/直接合同组合 616 passed，HERV3/最小 Core/Function 合同 24 passed；实体续跑与实际前端仍待本轮复验。
+L1 后续真实审批测试证实：应用令牌不能代替人类会话，测试人类账户能批准并撤销指定 lease；但续跑时重新装配的上下文触发旧事件编号冲突。运行日志现按真实 ExecutionEpoch 区分新事件，原 Run/Turn/operation 与物理用量身份保留，同 epoch 的不可变事实检查继续拒绝冲突。接入 canonical observer 的两项私有 IPC 组合回归从 2 failed 变为 2 passed；完整权限/直接合同组合 616 passed，HERV3/最小 Core/Function 合同 24 passed；此为历史组合回归；本轮实体续跑与实际页面结果见下节。
 
-## 2026-11-04：发现状态修复与采用窗口
+## 2026-11-04：发现状态修复与 NP 页面验收
 
 真实 H3 测试已生成有效待批申请（期限未到、0 claim、无文件），但未加载临时安装描述的共享 API 返回正常空列表。现修复为：已配置但 frontend controller 未加载，或配置不可读时，返回明确不可用；未安装的实例保留原空视图。复用原配置读取者，身份／Session／generation 先核验，正常已绑定查询和审批权威不改变。有效用例 RED 3 failed／6 passed → 发现及精确点击 GREEN 14 passed。
 
-采用前的有限普通服务已经实际 exit0／Job stopped，配置及两处 ACL 完整恢复。H3 /reboot max 预检被小霞忙碌状态拒绝，Core／shared／Workers 尚未切换；此为采用阻碍，不视为页面通过。后续实例空闲后使用正常 shared handoff 验证，不能以源码或旧页面证据代替实际采用。生产正式验收与完整 L2 WAC 仍独立保留。
+当前功能提交 `cd0f9cad` 的完整权限与 FYI 回归为 **69 文件、627 passed**。先前采用因其它 Worker 忙碌被拒绝，未强制切换；空闲后通过标准 `/reboot max` 完整采用同一提交，12 个 Worker 与 shared 的源码版本一致，Core 进程和源码保持不变。
+
+通过实际 NP Workbench（5185，配套版本 `b98778be`）对自有临时 Agent／Session 执行四种原生弹窗按钮，审批通过浏览器点击，未使用私有决定 RPC 或补造人类登录：
+
+| 按钮 | 权威与真实效果 | 本轮结果 |
+| --- | --- | --- |
+| 批准一次 | 批准前无 claim／文件；原 operation 一次成功写入，once 被消费；任务终态撤权 | 通过 |
+| 拒绝访问 | request=denied，无 lease、无 claim、无目标文件；原 Run 正常完成 | 通过 |
+| 允许 10 分钟 | 从服务端批准提交起精确 600 秒；原 operation 一次写入，任务提前结束即撤权 | 通过 |
+| 批准本任务使用 | lifetime=task，原 operation 一次写入，Task 完成即撤权 | 通过 |
+
+页面刷新后重新打开同一 Session，未决请求仍能重新发现。本轮没有等待 600 秒自然到期，也没有逐一点击 1 小时／4 小时预设；这些期限边界的回归与本轮按钮实体结果分开。四个 Run 均 completed，无错误码；三项获批操作各一条成功 claim，拒绝项为零，全部 Task 已完成、lease 均已撤销。
+
+有限普通服务已经 exit0／Job stopped，临时 Worker 已停止，原配置按 revision 完整恢复，两处目录 ACL 已恢复。再次等到空闲后，经标准 shared handoff 清除旧 controller 缓存；11 个正常 Worker 采用 `cd0f9cad`，未安装状态查询恢复 200 空视图，Core 保持原进程和源码。原生弹窗截图、浏览器步骤、authority／claim／lease、文件效果、两次采用及收尾回执保留在本轮忽略的证据目录。此为 Agent 通过真实 NP 页面的验收，不等于用户手工验收、全部 L1 CASE、生产采用或完整 L2 WAC。
 
 ## 2026-11-03：接手与 SCM 生命周期
 
 HASHI PR #127、Workbench PR #26 已合并；本轮开始时 HASHI3 和 Workbench NP 都是既有 main 的干净检出。开始核对时 NP5185 已连接 HASHI3，两个运行版本与各自已合并的基线一致。正常连接范围内的原自有 L1 Session 待批查询返回 200，Workbench 发现／交互回归 7 通过；空列表不代表完成新的点击验收，生产正式验收仍单独保留。
 
-L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复用原 Safety／Runner 安装核验，增加明确外部停止／实际就绪合同。同组入口 RED 10 失败；入口、SCM 状态及测试注册所有权聚焦 GREEN 30 通过。原生 SCM 组件配方已执行：两名独立普通账户的四种场景按预期，实际 service SID 与禁止自管均通过；全部服务注册／进程及新增 service-logon right 已清理。但 Windows User Profile Service 仍持有两名测试用户的 hive；正常卸载／删除接口未能释放，整轮组件资格保持未通过。两账户已按 manifest／SID 核对后禁用，配置及所有权证据保留；不重启或强行操作同机系统服务。本轮 SCM 代码仅本地提交及独立 capsule 采用；HASHI3 shared／Workers 未采用新代码，未推送或发布。完整 L2 继续未验收。详见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。
+L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复用原 Safety／Runner 安装核验，增加明确外部停止／实际就绪合同。同组入口 RED 10 失败；入口、SCM 状态及测试注册所有权聚焦 GREEN 30 通过。原生 SCM 组件配方已执行：两名独立普通账户的四种场景按预期，实际 service SID 与禁止自管均通过；全部服务注册／进程及新增 service-logon right 已清理。但 Windows User Profile Service 仍持有两名测试用户的 hive；正常卸载／删除接口未能释放，整轮组件资格保持未通过。两账户已按 manifest／SID 核对后禁用，配置及所有权证据保留；不重启或强行操作同机系统服务。原生 SCM 试验使用独立 capsule；其源码已随本轮验证版本被 HASHI3 Functions 采用，但这不等于独立 SCM 安装已合格。2026-11-04 收尾只读复核确认四项服务注册仍不存在、两账户仍禁用且无新增 rights，两个 profile 仍 loaded。新增源码未推送或发布。完整 L2 继续未验收。详见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。
 
 ## 个人 L1 按钮交互修复
 
@@ -69,12 +82,12 @@ L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复
 
 | 交付事实 | 核对位置 / 状态 |
 | --- | --- |
-| 本地完整提交 | 原 feature-permission-sys 分支，代码、测试、文档整体交付；以最终 HEAD 为准 |
-| GitHub 收到与 PR 可审阅 | 以 PR #118 当前 head、检查及 draft/ready 状态为准 |
+| 本地源码与测试 | HASHI3 既有 main 的三项功能提交已完整提交；本轮验收记录另有文档收尾提交，见 Git 日志 |
+| GitHub 收到与 PR 可审阅 | 已合并基线 HASHI #127／Workbench #26；本轮新增提交未推送，无新增 PR |
 | Windows 脚本入口/launcher 组件 | 已通过；证据保留实际 SID、OS、Python 版本、逐文件摘要和清理结果 |
-| 完整独立安装/WAC 及前端组合 | 尚未在当前实例执行，保持发布门 |
+| 完整独立安装/WAC | SCM 原生四场景行为按预期，但 profile 回收未过；完整 L2 仍保持发布门 |
 | 生产源码同步 | 未进行 |
-| 运行服务/Worker/页面采用 | 未进行 |
-| 用户实际前端验收 | 未进行 |
+| 运行服务/Worker/页面采用 | HASHI3 Functions 已采用并验证 cd0f9cad；NP 页面四按钮实测通过；临时服务／配置／ACL 已恢复。文档收尾不代表新功能代次 |
+| 用户手工前端验收 | 未进行；本轮实际浏览器操作由 Agent 完成 |
 
-没有启动或重启 HASHI 实例，没有安装持久服务，没有修改生产源码。一次性资格进程和测试 IPC 不等于运行中采用。详细取舍见 [当前实施决定](IMPLEMENTATION_DECISION_20261030.md)，源码关系见 [CODE_MAP](CODE_MAP.md#map-11--当前实现与边界2026-10-30)。
+本轮只在指定 HASHI3 范围实际采用 Functions，没有冷重启 Core、安装生产持久服务或修改生产源码。一次性资格进程和测试 IPC 不等于完整 L2 安装合格。详细取舍见 [当前实施决定](IMPLEMENTATION_DECISION_20261030.md)，源码关系见 [CODE_MAP](CODE_MAP.md#map-11--当前实现与边界2026-10-30)。

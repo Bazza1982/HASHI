@@ -79,4 +79,12 @@ L1 续跑保留原 Run、Turn、工具调用及 operation 身份，但新的 Exe
 
 Frontend Connector 的 Functions 投影现在在控制器为空时，使用原配置读取者检查当前持久配置。已保存 permission_service 但尚未加载，或配置无法可靠读取时，返回原有 503／permission_requests_unavailable；未安装的实例保持原只读空视图。身份与 Session／generation 检查仍在配置读取之前，已绑定控制器仍走原权威。不改变批准、范围、期限、重放或 Run 续跑规则，也不把普通问题答案当授权。
 
-同组实际 API／配置／权威回归：旧代码 3 failed／6 passed，修复后发现与精确点击相关 14 passed。无 controller 的失败状态保留有效 pending 和 0 decision，不创建假空权威。H3 正常 /reboot max 采用尝试已被小霞忙碌保护拒绝，未强制切换；源码、运行采用和真实页面结果继续分别记录。
+同组实际 API／配置／权威回归：旧代码 3 failed／6 passed，修复后发现与精确点击相关 14 passed。无 controller 的失败状态保留有效 pending 和 0 decision，不创建假空权威。H3 首次正常 /reboot max 被忙碌保护拒绝，未强制切换；随后空闲窗口实际采用与页面结果另见本轮状态记录。
+
+## NP 实测与收尾边界（2026-11-04）
+
+个人 L1 的决定仍走已登记前端按钮与原权威。当前 HASHI3 的真实 NP 页面验证批准一次、本任务、10 分钟及拒绝四条路径，核对同一 operation 的真实文件效果、成功 claim 与 Task 终态撤权；页面刷新后重开原 Session 仍发现 pending。10 分钟从批准提交精确计时 600 秒，本轮只验证任务提前结束的回收，不把它写成自然到期实体测试。原 Run 续跑成功，没有为测试改写运行、授权或物理用量状态。
+
+临时服务、测试 Worker、配置和目录 ACL 均单独确认关闭／恢复。shared API 曾保留启动时 controller，因此配置撤回后仍需同一标准 Functions 采用路径刷新；等待空闲，遵守忙碌保护，不以只读发现、任意属性注入或 Core 冷重启代替采用。恢复后未安装状态返回原 200 空视图。
+
+这是指定 HASHI3 与 NP Workbench 的证据，不能传播成生产、其它实例或完整 L2 的授权与验收。SCM 的遗留 Windows profile 继续保持失败与所有权记录，两个账户已禁用、rights 已撤除；完整安装推荐可维护的独立 Windows 测试环境，不能在同一共享主机反复新增账户或强行操作系统服务。
