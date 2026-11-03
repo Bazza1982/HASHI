@@ -21,7 +21,9 @@ from orchestrator.permissions.capsule import qualify_capsule
 from orchestrator.permissions.windows_ipc import current_process_user_sid
 from orchestrator.permissions.windows_security import require_nonadmin_identity
 from orchestrator.permissions.windows_service import RUNNING, STOPPED, ServiceHost
-from scripts.permissions.windows_test_identity import DisposableTestIdentity, WindowsAccounts, CleanupUnverified
+from scripts.permissions.windows_test_identity import (
+    DisposableTestIdentity, WindowsAccounts, CleanupUnverified, quarantine_identity,
+)
 from scripts.permissions.windows_test_profile import DisposableWindowsProfile, WindowsProfiles
 from scripts.permissions.windows_test_service import (
     DisposableTestService, NativeServiceLogonRights, NativeTestServices,
@@ -192,8 +194,15 @@ def run_probe(arguments):
                 assert accounts.info(identity.name) is None
                 assert "SeServiceLogonRight" not in rights.list(identity.sid)
             except BaseException as error:
-                cleanup_errors.append({"name": identity.name, "sid": identity.sid,
-                                       "error": type(error).__name__ + ": " + str(error)})
+                retained = {"name": identity.name, "sid": identity.sid,
+                            "error": type(error).__name__ + ": " + str(error)}
+                try:
+                    retained["quarantine"] = quarantine_identity(
+                        accounts, output / (owner["role"] + "-account.json"),
+                    )
+                except BaseException as quarantine_error:
+                    retained["quarantine_error"] = type(quarantine_error).__name__ + ": " + str(quarantine_error)
+                cleanup_errors.append(retained)
         report = {
             "version": 1, "component_only": True, "source_commit": capsule.manifest["source_commit"],
             "capsule_sha256": capsule.digest,

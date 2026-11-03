@@ -12,9 +12,9 @@ L1 后续真实审批测试证实：应用令牌不能代替人类会话，测�
 
 ## 2026-11-03：接手与 SCM 生命周期
 
-HASHI PR #127、Workbench PR #26 已合并；本轮开始时 HASHI3 和 Workbench NP 都是既有 main 的干净检出。NP5185 当前已连接 HASHI3，两个运行源码与各自已合并 main 一致。正常连接范围内的原自有 L1 Session 待批查询返回 200，Workbench 发现／交互回归 7 通过；空列表不代表完成新的点击验收，生产正式验收仍单独保留。
+HASHI PR #127、Workbench PR #26 已合并；本轮开始时 HASHI3 和 Workbench NP 都是既有 main 的干净检出。开始核对时 NP5185 已连接 HASHI3，两个运行版本与各自已合并的基线一致。正常连接范围内的原自有 L1 Session 待批查询返回 200，Workbench 发现／交互回归 7 通过；空列表不代表完成新的点击验收，生产正式验收仍单独保留。
 
-L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复用原 Safety／Runner 安装核验，增加明确外部停止／实际就绪合同。同组入口 RED 10 失败；入口、SCM 状态及测试注册所有权聚焦 GREEN 30 通过。原生 SCM 组件配方已实现，实体运行和完整安装分别记录，不提前宣布通过。完整 L2 继续未验收。详见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。
+L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复用原 Safety／Runner 安装核验，增加明确外部停止／实际就绪合同。同组入口 RED 10 失败；入口、SCM 状态及测试注册所有权聚焦 GREEN 30 通过。原生 SCM 组件配方已执行：两名独立普通账户的四种场景按预期，实际 service SID 与禁止自管均通过；全部服务注册／进程及新增 service-logon right 已清理。但 Windows User Profile Service 仍持有两名测试用户的 hive；正常卸载／删除接口未能释放，整轮组件资格保持未通过。两账户已按 manifest／SID 核对后禁用，配置及所有权证据保留；不重启或强行操作同机系统服务。本轮 SCM 代码仅本地提交及独立 capsule 采用；HASHI3 shared／Workers 未采用新代码，未推送或发布。完整 L2 继续未验收。详见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。
 
 ## 个人 L1 按钮交互修复
 

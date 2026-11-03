@@ -33,3 +33,14 @@
 该原生配方的 payload 专门验证 SCM 生命周期及 OS 身份控制，并非整个 Safety／Runner 安装、HERV3、文件／网络代理及可信审批组合。因此其通过只能记为组件资格。
 
 独立完整安装器、账户及目录／进程控制边界、普通 Worker 的实际 L2 闭环、审批环境隔离、撤权与故障恢复等仍按 [Windows L2](L2_WINDOWS.md) 和 [ACCEPTANCE](ACCEPTANCE.md) 完成。完整 WAC 未通过时，展示继续保持 partial／unknown。生产采用与用户实际前端验收另记。
+
+
+## 2026-11-03 实体结果与当前边界
+
+完整提交构建的独立 capsule 已实际执行四场景。两账户 SID 不同、实际 token 非管理员、service SID 存在；修改／启动／停止／删除自身 SCM 注册均被 OS 拒绝。正常 Safety／Runner 退出码为 0，启动失败及清理失败均为服务特定错误 1066／1。四个实际 PID 及注册最终都不存在，新增 service-logon right 均已撤销。
+
+整轮组件资格仍为 **未通过**：SCM 注册和进程消失后，Windows User Profile Service 仍持有两个新账户及其 Classes hive 的真实句柄。只读句柄证据与 Operational 记录保留；正常 RegUnLoadKey 返回 5，受支持的 LoadUserProfile／UnloadUserProfile 自有租约成功释放但未消除 OS 原引用，DeleteProfile 返回文件在用错误 32。没有强行关闭系统句柄、修改系统策略或重启共享系统服务。
+
+已新增失败收尾：仅对 manifest、SID、marker 全匹配的新测试账户进行禁用，核实禁用后保留原所有权回执及 profile，不能把它们记为已清理。账号不存在、身份被替换或禁用无法观察时明确保留失败。当前两名临时账户已实际禁用，新增登录权限已撤销；不得继续在此共享生产主机重复制造同类 profile 来“重跑通过”。
+
+后续完整安装／卸载 WAC 推荐在可独立维护和恢复的 Windows 测试环境执行。HASHI3 的源码开发与离线验证可以继续；任何影响同机生产的系统服务维护均需另行明确范围。该边界不降低完整 L2 验收条件。

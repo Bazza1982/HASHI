@@ -99,6 +99,19 @@ def recover_identity(api, manifest: Path) -> None:
     _write_manifest(path, value)
 
 
+def quarantine_identity(api, manifest: Path) -> dict:
+    """Disable only a still-owned test account when profile cleanup is blocked."""
+    value = _validate_manifest(json.loads(Path(manifest).read_text(encoding="utf-8")))
+    info = api.info(value["name"])
+    if (value["state"] != "created" or value["sid"] is None or info is None
+            or info.get("sid") != value["sid"] or info.get("comment") != value["marker"]):
+        raise CleanupUnverified("test account quarantine ownership is not proven")
+    api.disable(value["name"])
+    if not api.disabled(value["name"]):
+        raise CleanupUnverified("test account disable is unconfirmed")
+    return {"name": value["name"], "sid": value["sid"], "disabled": True}
+
+
 class DisposableTestIdentity:
     """Own a uniquely named test account and its durable cleanup record."""
 
@@ -297,6 +310,37 @@ class WindowsAccounts:
         finally:
             if buffer:
                 self.net.NetApiBufferFree(buffer)
+
+    def _flags(self, name: str) -> int:
+        if not _NAME.fullmatch(name):
+            raise ValueError("a disposable test account name is required")
+        buffer = ctypes.c_void_p()
+        status = self.net.NetUserGetInfo(None, name, 1, ctypes.byref(buffer))
+        if status:
+            raise OSError(status, "cannot inspect disposable account flags")
+        try:
+            user = ctypes.cast(buffer, ctypes.POINTER(_UserInfo1)).contents
+            if user.name.casefold() != name.casefold():
+                raise CleanupUnverified("account name changed")
+            return int(user.flags)
+        finally:
+            self.net.NetApiBufferFree(buffer)
+
+    def disable(self, name: str) -> None:
+        flags = wintypes.DWORD(self._flags(name) | 0x2)  # UF_ACCOUNTDISABLE
+        error = wintypes.DWORD()
+        operation = self.net.NetUserSetInfo
+        operation.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+        ]
+        operation.restype = wintypes.DWORD
+        status = operation(None, name, 1008, ctypes.byref(flags), ctypes.byref(error))
+        if status:
+            raise OSError(status, "cannot disable disposable account")
+
+    def disabled(self, name: str) -> bool:
+        return bool(self._flags(name) & 0x2)
 
     def delete(self, name: str) -> None:
         status = self.net.NetUserDel(None, name)

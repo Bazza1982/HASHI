@@ -8,6 +8,7 @@ from scripts.permissions.windows_test_identity import (
     DisposableTestIdentity,
     WindowsAccounts,
     recover_identity,
+    quarantine_identity,
 )
 
 
@@ -186,3 +187,45 @@ def test_group_resolution_does_not_hide_system_errors(monkeypatch):
     with pytest.raises(OSError) as error:
         api._local_group_sids("Administrators")
     assert error.value.errno == 5
+
+
+def test_quarantine_disables_only_owned_account_and_preserves_cleanup_manifest(tmp_path):
+    api = FakeAccounts()
+    path = tmp_path / "identity.json"
+    identity = DisposableTestIdentity(api, path)
+    identity.__enter__()
+    before = path.read_bytes()
+    disabled = set()
+    api.disable = disabled.add
+    api.disabled = lambda name: name in disabled
+    result = quarantine_identity(api, path)
+    assert result == {"name": identity.name, "sid": identity.sid, "disabled": True}
+    assert disabled == {identity.name} and api.deleted == []
+    assert path.read_bytes() == before
+    recover_identity(api, path)
+    assert api.deleted == [identity.name]
+
+
+@pytest.mark.parametrize("field", ["comment", "sid"])
+def test_quarantine_never_disables_replaced_or_foreign_identity(tmp_path, field):
+    api = FakeAccounts()
+    path = tmp_path / "identity.json"
+    identity = DisposableTestIdentity(api, path)
+    identity.__enter__()
+    api.users[identity.name][field] = "different owner"
+    api.disable = lambda *_args: pytest.fail("foreign account was modified")
+    with pytest.raises(CleanupUnverified, match="ownership"):
+        quarantine_identity(api, path)
+    assert api.deleted == []
+
+
+def test_quarantine_reports_failed_disable_observation(tmp_path):
+    api = FakeAccounts()
+    path = tmp_path / "identity.json"
+    identity = DisposableTestIdentity(api, path)
+    identity.__enter__()
+    api.disable = lambda *_args: None
+    api.disabled = lambda *_args: False
+    with pytest.raises(CleanupUnverified, match="unconfirmed"):
+        quarantine_identity(api, path)
+    assert api.deleted == []
