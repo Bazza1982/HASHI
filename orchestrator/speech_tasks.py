@@ -94,9 +94,9 @@ class SpeechTasks:
                 token = ACTIVE_SPEECH_BUDGET.set(dict(deadline=attempt_deadline,native_seconds=budget.native_seconds))
                 started = time.monotonic()
                 try:
-                    async with asyncio.timeout_at(attempt_deadline):
+                    async with asyncio.timeout_at(attempt_deadline) as timeout_scope:
                         result = await execute(attempt_deadline)
-                    if time.monotonic() >= attempt_deadline:
+                    if timeout_scope.expired() or time.monotonic() >= attempt_deadline:
                         raise TimeoutError("Speech generation budget exhausted")
                     if self.status(ident)["state"] == "cancelling":
                         raise asyncio.CancelledError()

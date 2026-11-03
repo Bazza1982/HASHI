@@ -113,3 +113,17 @@ async def test_deadline_cannot_publish_a_result_from_executor_suppressing_cancel
     value=await settled(owner,"deadline")
     assert value["state"]=="uncertain" and "result" not in value
     await owner.close()
+
+def test_short_cold_sample_does_not_make_normal_segments_impossible(tmp_path):
+    owner=SpeechTasks(tmp_path)
+    owner.estimator.observe("default","generate","爱",30.)
+    budget=owner.estimator.estimate("这是正常长度的爱情故事。"*9)
+    assert budget.native_seconds <= 120
+    owner.db.close()
+
+def test_short_planning_sample_does_not_reject_a_long_logical_reading(tmp_path):
+    owner=SpeechTasks(tmp_path)
+    owner.estimator.observe("default","prepare","爱",8.)
+    budget=owner.estimator.estimate("爱情故事"*1250,phase="prepare")
+    assert 40 <= budget.native_seconds <= 90
+    owner.db.close()

@@ -46,15 +46,17 @@ class SpeechBudgetEstimator:
             (profile, phase)).fetchall()
         if phase == "prepare":
             # Bounded planning prompt and output, including prefill, cold load and queue.
-            samples = [seconds / max(1., amount) for amount, seconds in rows]
+            samples = [max(0., seconds-40.) / min(4000., amount) for amount, seconds in rows if amount >= 256.]
             rate = max(.009, sorted(samples)[math.ceil(len(samples)*.95)-1] if samples else 0)
-            native = 22. + min(units, 4000.) * rate + 18.
+            native = min(90., 40. + min(units, 4000.) * rate)
             audio = 0.
             reserve = 22.
         else:
             audio = units / 5.
             # Conservative initial RTF; observed full-stage cost can only raise it.
-            samples = [max(0., seconds-8.) / max(.2, amount/5.) for amount, seconds in rows]
+            # Short cold samples mostly measure fixed loading/prefill, not RTF.
+            # Do not multiply that fixed cost by a later long utterance.
+            samples = [max(0., seconds-24.) / (amount/5.) for amount, seconds in rows if amount >= 20.]
             rate = max(2.0, sorted(samples)[math.ceil(len(samples)*.95)-1] if samples else 0)
             reserve = 20.  # Unknown residency/queue: reserve, never assume a warm GPU.
             expected = 4. + reserve + audio * rate
