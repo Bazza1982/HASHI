@@ -368,20 +368,30 @@ def build_service(path, *, runner=None, checkpoint_writer=None, audit_writer=Non
         raise
 
 
-async def serve(path):
+async def serve(path, *, stopped=None, on_ready=None):
+    """Serve under foreground signals or an explicit SCM-owned stop event."""
     application, endpoints = build_service(path)
-    loop, stopped = asyncio.get_running_loop(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    external_stop = stopped is not None
+    stopped = stopped if external_stop else asyncio.Event()
     previous = {}
-    for kind in (signal.SIGINT, signal.SIGTERM):
-        previous[kind] = signal.getsignal(kind)
-        signal.signal(kind, lambda *args: loop.call_soon_threadsafe(stopped.set))
     try:
+        if not external_stop:
+            for kind in (signal.SIGINT, signal.SIGTERM):
+                previous[kind] = signal.getsignal(kind)
+                signal.signal(kind, lambda *args: loop.call_soon_threadsafe(stopped.set))
+        if stopped.is_set():
+            return
         await application.start(endpoints)
+        if not stopped.is_set() and on_ready is not None:
+            on_ready()
         await stopped.wait()
     finally:
-        await application.close()
-        for kind, handler in previous.items():
-            signal.signal(kind, handler)
+        try:
+            await application.close()
+        finally:
+            for kind, handler in previous.items():
+                signal.signal(kind, handler)
 
 
 def main(argv=None):
