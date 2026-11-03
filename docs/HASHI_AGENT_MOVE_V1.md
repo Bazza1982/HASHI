@@ -1,5 +1,30 @@
 # HASHI Agent Move v1
 
+## Source departure projection (2026-11-04)
+
+PAO records source instance identity, source Agent lifecycle and package-keyed
+departure history with successful source cleanup. The admin-only complete-Agent
+Backend API projection optionally includes `agent_departures` (schema 1): source
+instance identity and completed events with package ID, Agent ID, lifecycle ID,
+`source_cleaned` state and completion time. Each event must agree with the final
+source journal. Pending, cancelled or failed cleanup is not a departure fact;
+ordinary filtered Agent reads do not expose this audit. Legacy audit entries
+without enough source/lifecycle evidence remain unqualified.
+
+An authenticated frontend must bind these facts to its verified source and
+connection epoch. It may retire exactly that source lifecycle's membership and
+legacy references after positive completion; roster absence or temporary
+disconnection is never sufficient evidence. This projection does not copy target
+groups, alter permissions or remove chat data. History is retained by package
+so a later same-name Agent move cannot hide an earlier completed departure.
+
+An optional `returns` collection qualifies a new assignment for the same lifecycle
+only when the current configured Agent matches a completed, runtime-verified
+incoming Move journal for this source, later than its last departure. This does
+not restore any old membership. An unfinished import or a same-name recreation
+is not a return receipt. Consumers persist applied departure package IDs so
+replaying an old departure cannot erase a deliberate post-return assignment.
+
 ## Purpose
 
 `/move` transfers one durable Agent identity between HASHI instances. `/clone`

@@ -1023,6 +1023,11 @@ def test_terminal_transfer_journal_does_not_reserve_released_target_id(tmp_path)
 
 def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
     source, target, package_path = _roots(tmp_path)
+    configured = json.loads((source / "agents.json").read_text())
+    configured["agents"][0]["agent_lifecycle_id"] = "a" * 32
+    _write_json(source / "agents.json", configured)
+    create_agent_move_package(source, "zelda", package_path, source_instance="HASHI1",
+        include_agent_secrets=True, secret_passphrase="shared-secret", schema_version=3)
     staged = stage_agent_move(
         target,
         package_path.read_bytes(),
@@ -1080,6 +1085,7 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
                              target_instance="HASHI2", target_agent_id="zelda")
     assert (source / "agents.json").read_bytes() == before
     assert (source / "workspaces" / "zelda").exists()
+    assert service.completed_agent_departures(source)["events"] == [], "failed cleanup cannot retire groups"
     del config["agents"][1]["telegram_token_key"]
     _write_json(source / "agents.json", config)
 
@@ -1091,6 +1097,15 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         target_agent_id="zelda",
     )
     assert cleaned["status"] == "source_cleaned"
+    departures = service.completed_agent_departures(source)
+    assert departures["source_instance_id"] == "HASHI1"
+    assert len(departures["events"]) == 1
+    departure = departures["events"][0]
+    assert departure["package_id"] == staged["package_id"]
+    assert departure["agent_id"] == "zelda"
+    assert departure["agent_lifecycle_id"] == cleaned["source_agent_lifecycle_id"]
+    assert departure["state"] == "source_cleaned"
+    assert service.completed_agent_departures(target)["events"] == []
     assert cleaned["conversation_history_retirement"]["skipped"] is True
     remaining = json.loads((source / "agents.json").read_text())
     assert remaining["groups"]["local"]["members"] == ["anchor", "zelda@HASHI2"]
@@ -1110,13 +1125,42 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
     )
     assert moved_agent_destination(source, "ZELDA")["address"] == "zelda@HASHI2"
 
+    # A real Move back preserves lifecycle identity. It must not resurrect old
+    # groups, but a frontend may permit a deliberate new assignment after this receipt.
+    target_config = json.loads((target / "agents.json").read_text())
+    target_config["agents"].append(dict(remaining["agents"][0]))
+    _write_json(target / "agents.json", target_config)
+    return_path = tmp_path / "return.hashi-agent"
+    create_agent_move_package(target, "zelda", return_path, source_instance="HASHI2",
+        include_agent_secrets=True, secret_passphrase="shared-secret", schema_version=3)
+    returning = stage_agent_move(source, return_path.read_bytes(),
+        expected_sha256=package_sha256(return_path), source_instance="HASHI2",
+        target_instance="HASHI1", secret_passphrase="shared-secret", operation="move",
+        target_agent_id="zelda")
+    commit_agent_move(source, returning["package_id"], secret_passphrase="shared-secret")
+    assert service.completed_agent_departures(source).get("returns", []) == []
+    deactivate_source_agent(target, "zelda", returning["package_id"], target_instance="HASHI1")
+    activate_agent_move(source, returning["package_id"])
+    finalize_agent_move(source, returning["package_id"], runtime_online=True)
+    cleanup_source_agent(target, returning["package_id"], source_secret_keys=["zelda"],
+        target_instance="HASHI1", target_agent_id="zelda")
+    receipt = service.completed_agent_departures(source)["returns"][0]
+    assert receipt["package_id"] == returning["package_id"]
+    assert receipt["agent_lifecycle_id"] == departure["agent_lifecycle_id"]
+    assert receipt["state"] == "target_completed"
+
     recreated = json.loads((source / "agents.json").read_text())
+    recreated["agents"] = [row for row in recreated["agents"] if row["name"] != "zelda"]
     recreated["agents"].append({
         "name": "zelda", "workspace_dir": "workspaces/zelda-new",
         "type": "flex", "is_active": True,
     })
     _write_json(source / "agents.json", recreated)
     assert moved_agent_destination(source, "zelda") is None
+    assert service.completed_agent_departures(source)["events"] == [departure], "recreation cannot erase the departure fact"
+    service._record_moved_agent(source, agent_id="zelda", package_id="later-move",
+        target_instance="HASHI2", target_agent_id="zelda", agent_lifecycle_id="c" * 32)
+    assert service.completed_agent_departures(source)["events"] == [departure], "a later unfinished move cannot hide an earlier completed incarnation"
 
 
 def test_schema5_move_cleanup_archives_source_history_and_rejects_unknown_owner(
@@ -1796,3 +1840,4 @@ def test_return_move_replaces_and_can_restore_dormant_source_copy(tmp_path):
     assert (
         source / "workspaces" / "zelda" / "memory" / "facts.md"
     ).read_text() == "fact"
+# HASHI-Fingerprint: hfp_fd528f27466e42869674ed9c995eb9aa
