@@ -1,10 +1,6 @@
 # HASHI Agent FYI
 
-<!-- Lifecycle ownership notes: 2026-11-04 -->
-- CLI preserves selected identity; stop verifies processes, listeners and the
-  operating-system lock. [Lifecycle](HASHI_INSTANCE_CLI_LIFECYCLE.md).
-- Complete-Agent admin projection exposes authenticated lifecycle-bound source
-  departures; absence/offline is not retirement. [Move](HASHI_AGENT_MOVE_V1.md).
+- [实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)保身份/验退出；[迁出](HASHI_AGENT_MOVE_V1.md)凭证收尾。
 
 - Speech: manual /voice and /call direction, frozen reading voice and confirmed-failure retry. [PAO](HASHI_SPEECH_PERFORMANCE.md).
 
