@@ -200,10 +200,6 @@ def page_new_tool_results(adapter, messages, first_result):
     # UTF-8 bytes are a conservative page-size allowance, not a claimed token
     # count. The exact, complete next payload still passes the native probe.
     allowance = remaining // len(results)
-    if allowance < 1024:
-        # Do not invite repeated reads of footer-only pages. The next call
-        # closes tools and is independently counted without future schemas.
-        adapter._ollama_context_closing = True
     for row in results:
         original = row.get("content", "")
         if not isinstance(original, str):
@@ -223,6 +219,11 @@ def page_new_tool_results(adapter, messages, first_result):
         elif len(original.encode("utf-8")) <= allowance:
             continue
         path, digest = _save_result(adapter, original)
+        if allowance < 1024:
+            # Only a result that actually needs a small page closes tools.
+            # Fitting results retain future reads, subject to native admission.
+            # Reprobe the changed closing payload without future schemas.
+            adapter._ollama_context_closing = True
         metadata = {
             "saved_result": str(path), "sha256": digest,
             "total_chars": len(original), "shown_chars": 0, "next_line": 1,

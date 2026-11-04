@@ -648,7 +648,7 @@ def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
     assert tts_manifest["schema_version"] == 1
     assert tts_manifest["version"] == "v1"
     assert tts_manifest["kind"] == "tts_voice_presets"
-    assert len(tts_manifest["entries"]) == 62
+    assert len(tts_manifest["entries"]) == 108
     for entry in tts_manifest["entries"]:
         payload = (tts_preview_root / entry["path"]).read_bytes()
         if entry["format"] == "ogg":

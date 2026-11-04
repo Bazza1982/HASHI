@@ -48,8 +48,11 @@ small context. Backend-level legacy opt-ins retain the existing margin. This
 does not reduce response headroom or authorize a tool replay. Complete new
 results that fit their estimated token share and the exact encoded request
 remain visible; UTF-8 byte size alone must not turn a usable one-line JSON
-search result into an empty page. Larger results retain the existing private
-paging source. The changed final payload is independently admitted. Character
+search result into an empty page. An allowance below 1,024 alone does not close
+tools: fitting results retain successive reads while native admission allows.
+Only genuinely small pages close future reads to avoid footer-only recursion;
+larger results retain the existing private paging source.
+The changed final payload is independently admitted. Character
 and native token checks still govern every physical call after privacy
 filtering. Protected input that cannot fit fails explicitly rather than being
 truncated. A soft projection target that cannot fit is recorded as unmet;

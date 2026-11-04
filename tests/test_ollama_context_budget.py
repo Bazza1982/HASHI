@@ -122,7 +122,7 @@ def test_small_model_retains_usable_one_line_search_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_small_model_can_read_history_references_before_closing_tools(tmp_path):
+async def test_small_model_can_read_history_references_before_closing_tools(tmp_path, monkeypatch):
     from tools.registry import ToolRegistry
 
     adapter = _adapter(tmp_path, capacity=8192)
@@ -130,42 +130,68 @@ async def test_small_model_can_read_history_references_before_closing_tools(tmp_
         "ollama_native_context": True, "response_headroom_tokens": 2048,
         "ollama_max_input_chars": 25000,
     })
-    marker = tmp_path / "older-evidence.txt"
-    marker.write_text("EARLIER_VALUE_FOUND_BY_READ", encoding="utf-8")
+    markers = [tmp_path / "older-evidence.txt", tmp_path / "follow-up-evidence.txt"]
+    for index, marker in enumerate(markers):
+        marker.write_text(f"EARLIER_VALUE_FOUND_BY_READ_{index}", encoding="utf-8")
     adapter.tool_registry = ToolRegistry(
         allowed_tools=["file_read"], access_root=tmp_path,
         workspace_dir=tmp_path, secrets={},
     )
-    reads = 0
+    executed = []
+    execute = adapter.tool_registry.execute
+
+    async def observe_read(tool_name, arguments, tool_call_id=""):
+        result = await execute(tool_name, arguments, tool_call_id)
+        executed.append((tool_call_id, arguments["path"], result.output))
+        return result
+
+    monkeypatch.setattr(adapter.tool_registry, "execute", observe_read)
+    requests = []
 
     def respond(request):
-        nonlocal reads
         payload = json.loads(request.content)
+        requests.append(payload)
         probe = payload["options"]["num_predict"] == 1
-        result = next((m["content"] for m in payload["messages"] if m["role"] == "tool"), None)
+        results = [m for m in payload["messages"] if m["role"] == "tool"]
         message = {"content": ""}
         if not probe:
-            if result is not None:
-                message["content"] = result
+            if len(results) == 2:
+                message["content"] = "\n".join(m["content"] for m in results)
             elif payload.get("tools"):
-                reads += 1
                 message["tool_calls"] = [{"function": {
-                    "name": "file_read", "arguments": {"path": str(marker)},
+                    "name": "file_read", "arguments": {"path": str(markers[len(results)])},
                 }}]
             else:
                 message["content"] = "Reference cannot be read because tools were closed."
         return httpx.Response(200, json={
             "message": message, "done": True, "done_reason": "length" if probe else "stop",
-            "prompt_eval_count": 4800 if result else 4500,
-            "eval_count": 1 if probe else 40,
+            "prompt_eval_count": [4085, 4500, 4800][len(results)],
+            # The existing small-model values leave only 946 after the first read.
+            "eval_count": 1 if probe else 345,
         })
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         adapter.client = client
-        response = await adapter.generate_response("Read the earlier saved evidence.", "small-history-read")
+        response = await adapter.generate_response(
+            "Read both saved references, then report.", "small-history-read"
+        )
     assert response.is_success, response.error
-    assert "EARLIER_VALUE_FOUND_BY_READ" in response.text
-    assert response.tool_call_count == reads == 1
+    assert response.tool_call_count == len(executed) == 2
+    assert [path for _, path, _ in executed] == [str(marker) for marker in markers]
+    assert all(f"EARLIER_VALUE_FOUND_BY_READ_{i}" in response.text for i in range(2))
+    assert len(requests) == 6  # Three admitted generations, each with its own probe.
+    assert all(p.get("tools") for p in requests)
+    assert all(p["options"]["num_ctx"] == 8192 for p in requests)
+    assert [p["options"]["num_predict"] for p in requests] == [1, 2048] * 3
+    assert requests[0]["messages"] == requests[-1]["messages"][:2]
+    calls = [call for row in requests[-1]["messages"]
+             for call in row.get("tool_calls", [])]
+    results = [row for row in requests[-1]["messages"] if row["role"] == "tool"]
+    ids = [call["id"] for call in calls]
+    assert len(set(ids)) == 2
+    assert [row["tool_call_id"] for row in results] == ids == [x[0] for x in executed]
+    assert [row["tool_name"] for row in results] == ["file_read"] * 2
+    assert [row["content"] for row in results] == [x[2] for x in executed]
 
 
 def test_reference_projection_preserves_authority_recovery_and_full_source(tmp_path):
