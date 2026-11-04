@@ -1,0 +1,30 @@
+{
+  "api_url": "https://vlm.example.invalid",
+  "model": "vision-model",
+  "api_key": null,
+  "max_tokens": 512,
+  "temperature": 0.2,
+  "timeout_s": 300,
+  "retries": 2,
+  "max_side": 1280,
+  "max_mb": 1.5,
+  "mode_questions": {},
+  "regions": [
+    {
+      "id": "heading",
+      "label": "Heading mentioned",
+      "subject": "a document heading",
+      "keywords": [
+        "heading",
+        "title"
+      ],
+      "verify_bands": [
+        [
+          0,
+          0.5
+        ]
+      ],
+      "cut_markers": []
+    }
+  ]
+}
