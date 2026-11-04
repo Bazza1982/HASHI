@@ -13,6 +13,161 @@ from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from tests.test_ollama_context_pilot import _adapter
 
 
+@pytest.mark.parametrize("detail", ["archived evidence line. " * 220, "历史详情逐轮累积。" * 180])
+def test_direct_small_model_bounds_accumulated_history_and_retains_sources(tmp_path, detail):
+    from pathlib import Path
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.pcm import render_pcm_document
+    from tools.registry import ToolRegistry
+
+    pcm = tmp_path / "agent.md"
+    pcm.write_text(render_pcm_document(
+        persona="KEEP_PERSONA", system="KEEP_SYSTEM", memory="",
+    ), encoding="utf-8")
+    adapter = _adapter(tmp_path, capacity=8192)
+    adapter.config.extra["model_capabilities"]["local-qwen"].update({
+        "ollama_native_context": True, "response_headroom_tokens": 2048,
+        "ollama_max_input_chars": 25000,
+    })
+    adapter.tool_registry = ToolRegistry(
+        allowed_tools=["file_read", "log_query"], access_root=tmp_path,
+        workspace_dir=tmp_path, secrets={},
+    )
+    assembler = BridgeContextAssembler(BridgeMemoryStore(tmp_path), pcm)
+    history = []
+    projected_history = False
+    for sequence in range(1, 13):
+        history.append({
+            "sequence": sequence, "user_text": f"Completed step {sequence}",
+            "assistant_text": detail + f" LATEST_DETAILS_{sequence}",
+            "user_ts": "2026-11-04T00:00:00Z",
+            "assistant_ts": "2026-11-04T00:00:01Z",
+        })
+        source = assembler.build_prompt_payload(
+            "KEEP_CURRENT_TASK", "ollama-api", recent_exchanges=history,
+            extra_sections=[("ACTIVE RECOVERY", "UNRESOLVED_EFFECT_RECEIPT", {
+                "key": "active_recovery", "protected": True,
+            })],
+        )
+        original = deepcopy(source)
+        projected = adapter.project_pcm_payload(source, render_prompt=assembler._render_pcm_prompt)
+        wire = adapter._build_payload(adapter._initial_messages(projected["final_prompt"], None)[0])
+        chars = len(json.dumps({k: v for k, v in wire.items()
+                               if k not in {"options", "keep_alive", "stream"}}))
+        assert chars <= 25000, (sequence, chars)
+        assert source == original
+        for marker in ("KEEP_CURRENT_TASK", "KEEP_SYSTEM", "KEEP_PERSONA", "UNRESOLVED_EFFECT_RECEIPT"):
+            assert marker in projected["final_prompt"]
+        assert f"LATEST_DETAILS_{sequence}" in projected["final_prompt"]
+        projection = projected.get("audit", {}).get("model_reference_projection", {})
+        history_keys = [key for key in projection.get("projected_keys", [])
+                        if key.startswith("recent_exchange:")]
+        if history_keys:
+            projected_history = True
+            saved = Path(projection["saved_reference"]).read_bytes()
+            assert hashlib.sha256(saved).hexdigest() == projection["sha256"]
+            sources = {row["key"]: row["text"] for row in json.loads(saved)}
+            original_rows = {row["key"]: row["text"] for row in source["transport_snapshot"]["sections"]}
+            assert all(sources[key] == original_rows[key] for key in history_keys)
+            assert "not complete summaries" in projected["final_prompt"]
+            assert str(projection["saved_reference"]) in projected["final_prompt"]
+    assert projected_history
+    adapter.config.model = "another-model"
+    assert adapter.project_pcm_payload(source, render_prompt=assembler._render_pcm_prompt) == source
+
+
+def test_small_model_preserves_oversized_protected_input(tmp_path):
+    from adapters.openrouter_api import ProviderContextCapacityPreflightError
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.pcm import render_pcm_document
+
+    pcm = tmp_path / "agent.md"
+    pcm.write_text(render_pcm_document(persona="KEEP_PERSONA", system="KEEP_SYSTEM", memory=""), encoding="utf-8")
+    adapter = _adapter(tmp_path, capacity=8192)
+    adapter.config.extra["model_capabilities"]["local-qwen"].update({
+        "ollama_native_context": True, "response_headroom_tokens": 2048,
+        "ollama_max_input_chars": 25000,
+    })
+    assembler = BridgeContextAssembler(BridgeMemoryStore(tmp_path), pcm)
+    current = "当前任务必须保留。" * 1000
+    source = assembler.build_prompt_payload(current, "ollama-api", recent_exchanges=[])
+    projected = adapter.project_pcm_payload(source, render_prompt=assembler._render_pcm_prompt)
+    assert current in projected["final_prompt"]
+    wire = adapter._build_payload(adapter._initial_messages(projected["final_prompt"], None)[0])
+    with pytest.raises(ProviderContextCapacityPreflightError):
+        adapter._preflight_payload_capacity(wire)
+
+
+def test_small_model_retains_usable_one_line_search_result(tmp_path):
+    from adapters.ollama_capacity import page_new_tool_results
+
+    adapter = _adapter(tmp_path, capacity=8192)
+    adapter.config.extra["model_capabilities"]["local-qwen"].update({
+        "ollama_native_context": True, "response_headroom_tokens": 2048,
+        "ollama_max_input_chars": 25000,
+    })
+    adapter._ollama_prompt_tokens = 4085
+    adapter._ollama_last_output_tokens = 345
+    evidence = json.dumps({
+        "matches": [{"term": "EARLIER_KEY", "excerpt":
+                     "历史上下文。" * 20 + " EARLIER_KEY=RECOVERED_RANDOM_VALUE " + "后续上下文。" * 20}],
+        "coverage": {"complete": False}, "can_continue": True,
+        "metadata": "safe source metadata " * 30,
+    }, ensure_ascii=False)
+    messages = [{"role": "user", "content": "Find earlier evidence."},
+                {"role": "tool", "tool_call_id": "read-1", "content": evidence}]
+    page_new_tool_results(adapter, messages, 1)
+    assert "EARLIER_KEY=RECOVERED_RANDOM_VALUE" in messages[1]["content"]
+    assert json.loads(messages[1]["content"])["matches"][0]["excerpt"].endswith("后续上下文。" * 20)
+
+
+@pytest.mark.asyncio
+async def test_small_model_can_read_history_references_before_closing_tools(tmp_path):
+    from tools.registry import ToolRegistry
+
+    adapter = _adapter(tmp_path, capacity=8192)
+    adapter.config.extra["model_capabilities"]["local-qwen"].update({
+        "ollama_native_context": True, "response_headroom_tokens": 2048,
+        "ollama_max_input_chars": 25000,
+    })
+    marker = tmp_path / "older-evidence.txt"
+    marker.write_text("EARLIER_VALUE_FOUND_BY_READ", encoding="utf-8")
+    adapter.tool_registry = ToolRegistry(
+        allowed_tools=["file_read"], access_root=tmp_path,
+        workspace_dir=tmp_path, secrets={},
+    )
+    reads = 0
+
+    def respond(request):
+        nonlocal reads
+        payload = json.loads(request.content)
+        probe = payload["options"]["num_predict"] == 1
+        result = next((m["content"] for m in payload["messages"] if m["role"] == "tool"), None)
+        message = {"content": ""}
+        if not probe:
+            if result is not None:
+                message["content"] = result
+            elif payload.get("tools"):
+                reads += 1
+                message["tool_calls"] = [{"function": {
+                    "name": "file_read", "arguments": {"path": str(marker)},
+                }}]
+            else:
+                message["content"] = "Reference cannot be read because tools were closed."
+        return httpx.Response(200, json={
+            "message": message, "done": True, "done_reason": "length" if probe else "stop",
+            "prompt_eval_count": 4800 if result else 4500,
+            "eval_count": 1 if probe else 40,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("Read the earlier saved evidence.", "small-history-read")
+    assert response.is_success, response.error
+    assert "EARLIER_VALUE_FOUND_BY_READ" in response.text
+    assert response.tool_call_count == reads == 1
+
+
 def test_reference_projection_preserves_authority_recovery_and_full_source(tmp_path):
     adapter = _adapter(tmp_path)
     recovery = {

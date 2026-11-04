@@ -29,6 +29,12 @@ _CLOSING_NOTICE = (
 )
 
 
+def encoded_input_chars(payload):
+    """Use the managed native owner's complete encoded-input contract."""
+    return len(json.dumps({key: value for key, value in payload.items()
+                           if key not in {"options", "keep_alive", "stream"}}))
+
+
 def closing_messages(messages):
     rows = list(messages)
     notice = {"role": "user", "content": _CLOSING_NOTICE}
@@ -123,9 +129,15 @@ async def check_native_capacity(
             "Ollama did not provide a valid bounded capacity probe; full generation "
             "was not started and no tools were executed by the probe."
         )
+    # The historical 2K closure margin can consume a third of a small model's
+    # usable input. Exact-model opt-ins scale that tool margin, preserving the
+    # independent output reserve and every final native admission check.
+    close_margin = 2048
+    if adapter._model_context_options().get("ollama_native_context") is True:
+        close_margin = min(close_margin, capacity.usable_input_tokens // 6)
     if (
         allow_close and payload.get("tools")
-        and result.prompt_tokens > capacity.usable_input_tokens - 2048
+        and result.prompt_tokens > capacity.usable_input_tokens - close_margin
     ):
         # Reclaim future tool schemas, not the task or completed evidence.
         # The changed final payload must pass its own native probe. Never
@@ -194,7 +206,21 @@ def page_new_tool_results(adapter, messages, first_result):
         adapter._ollama_context_closing = True
     for row in results:
         original = row.get("content", "")
-        if not isinstance(original, str) or len(original.encode("utf-8")) <= allowance:
+        if not isinstance(original, str):
+            continue
+        if adapter._model_context_options().get("ollama_native_context") is True:
+            from tools.token_tracker import estimate_tokens
+
+            # UTF-8 bytes are much larger than tokens for JSON/search results.
+            # Preserve a complete useful result when its estimated token share
+            # and the exact next encoded payload fit. Native admission still
+            # proves the actual changed request before any further generation.
+            char_limit = adapter._model_context_options().get("ollama_max_input_chars")
+            chars_fit = (char_limit is None
+                         or encoded_input_chars(adapter._build_payload(messages)) <= char_limit)
+            if estimate_tokens(original) <= allowance and chars_fit:
+                continue
+        elif len(original.encode("utf-8")) <= allowance:
             continue
         path, digest = _save_result(adapter, original)
         metadata = {

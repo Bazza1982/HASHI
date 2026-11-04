@@ -19,13 +19,47 @@ one-token probe, including a changed closing payload. Characters and tokens
 are independent limits. These fields select an operating envelope; Compute
 remains authoritative for measured identity, shape and resource admission.
 
-Direct Ollama callers now use the existing typed PCM renderer for a
-model-facing discovery index. Only unprotected tool catalogue text is indexed;
-the full catalogue remains in a private hashed reference. Canonical transport,
-authority and protected instructions remain intact. Other adapters do not opt
-into this projection, and an unconfigured model retains its original prompt.
-The final privacy-filtered payload still passes character and native token
-admission; a protected input that cannot fit fails rather than being truncated.
+Direct Ollama callers use the existing typed PCM renderer for a model-facing
+discovery index and a bounded view of completed history. The generic non-HER
+64K bootstrap budget is not a small-model operating budget, and HERV3-managed
+semantic Compact is not enabled by changing a direct Model Provider.
+
+For exact-model native-context opt-ins, measure the complete text request,
+including the system message, native tool schemas and JSON escaping, before
+selecting history references. Aim at three quarters of the qualified encoded
+character limit and two thirds of usable input tokens (estimated, not an
+admission proof). Fold oldest completed exchanges into the existing bounded
+excerpt format first, then source-key indexes if the excerpts themselves
+cannot fit. Preserve exact full bodies in a private hash-verified reference;
+excerpts are continuity cues, not complete semantic summaries. Needed old
+details must be read from that reference. Projection neither deletes canonical
+history nor claims that omitted text was read.
+
+Only unprotected tool catalogue text and typed recent completed exchanges can
+be reduced. The current task, system instructions, Persona, HCC, protected
+memory and active recovery/effects remain intact. Canonical transport and
+authority stay unchanged. Other adapters and models without a per-model
+native-context opt-in keep their previous prompts. A previous turn's tool
+closure must not hide native schemas when measuring the next initial request.
+
+Near-capacity tool closure uses a margin of min(2048, usable_input_tokens / 6)
+for exact-model opt-ins, rather than spending the same fixed 2K margin on every
+small context. Backend-level legacy opt-ins retain the existing margin. This
+does not reduce response headroom or authorize a tool replay. Complete new
+results that fit their estimated token share and the exact encoded request
+remain visible; UTF-8 byte size alone must not turn a usable one-line JSON
+search result into an empty page. Larger results retain the existing private
+paging source. The changed final payload is independently admitted. Character
+and native token checks still govern every physical call after privacy
+filtering. Protected input that cannot fit fails explicitly rather than being
+truncated. A soft projection target that cannot fit is recorded as unmet;
+it never raises the qualified hard limit.
+
+Approval, implementation and actual multi-turn verification are separate.
+Short-answer and single-file-read canaries do not establish sustained history
+capacity or successful reference retrieval. Qualification must include history
+growth and an actual read of omitted earlier evidence, and a source check is
+separate from targeted running Worker adoption.
 
 The stable upstream `resource_profile_unverified` refusal is reported as
 `PROVIDER_RESOURCE_PROFILE_UNVERIFIED` and is not retried against unchanged

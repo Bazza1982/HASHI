@@ -1,6 +1,6 @@
 # HASHI Agent FYI
 
-- Ollama：容量可按精确模型及端点启用，完整输入同时检查字符与tokens；直接路径只索引工具目录并保留完整来源，其他模型保留原行为。资源资格拒绝不重试；采用与实测分开记录。[HERV3](HERV3_OLLAMA_CONTEXT_PILOT.md)。
+- Ollama：精确模型/端点容量同时检查编码字符与native tokens；直接路径按预算折叠已完成历史为摘录/可回读索引，保留权威PCM与完整来源，小上下文工具关闭余量按容量派生；其他模型保持原行为。短对话通过不代表多轮历史及引用回读通过，采用与实测独立记录。[HERV3](HERV3_OLLAMA_CONTEXT_PILOT.md)。
 
 - Speech: manual /voice and /call direction, frozen reading voice and confirmed-failure retry. [PAO](HASHI_SPEECH_PERFORMANCE.md).
 

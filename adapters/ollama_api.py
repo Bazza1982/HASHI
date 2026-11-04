@@ -166,14 +166,12 @@ class OllamaAdapter(OpenRouterAdapter):
         if limit is not None:
             if type(limit) is not int or limit < 1:
                 raise ValueError("Ollama input character limit must be a positive integer")
-            # Match the managed native owner's encoded-object counting contract.
-            encoded = json.dumps({
-                key: value for key, value in payload.items()
-                if key not in {"options", "keep_alive", "stream"}
-            })
-            if len(encoded) > limit:
+            from adapters.ollama_capacity import encoded_input_chars
+
+            size = encoded_input_chars(payload)
+            if size > limit:
                 raise ProviderContextCapacityPreflightError(
-                    f"Ollama input has {len(encoded)} encoded characters; "
+                    f"Ollama input has {size} encoded characters; "
                     f"the configured qualified limit is {limit}."
                 )
 
@@ -249,10 +247,12 @@ class OllamaAdapter(OpenRouterAdapter):
         excluded_tool_names: frozenset[str] = frozenset(),
         audio_output=None,
         allow_tools: bool = True,
+        capacity_preview: bool = False,
     ) -> dict:
         if audio_output is not None:
             raise ValueError("Ollama does not support native audio output")
-        if self._native_context_enabled() and getattr(self, "_ollama_context_closing", False):
+        if (not capacity_preview and self._native_context_enabled()
+                and getattr(self, "_ollama_context_closing", False)):
             from adapters.ollama_capacity import closing_messages
 
             messages = closing_messages(messages)
