@@ -78,9 +78,12 @@ def _remove_matching(api, name: str, marker: str, sid: str) -> None:
 
 def recover_identity(api, manifest: Path) -> None:
     """Remove only a successfully recorded account whose identity still matches."""
+    from orchestrator.config_json import read_config_json, write_config_json
+
     path = Path(manifest)
     try:
-        value = _validate_manifest(json.loads(path.read_text(encoding="utf-8")))
+        document = read_config_json(path)
+        value = _validate_manifest(dict(document))
     except (OSError, ValueError, UnicodeError) as exc:
         raise CleanupUnverified("test identity manifest is unavailable") from exc
     info = api.info(value["name"])
@@ -90,13 +93,15 @@ def recover_identity(api, manifest: Path) -> None:
         return
     if info is None:
         value["state"] = "cleaned"
-        _write_manifest(path, value)
+        document.update(value)
+        write_config_json(path, document)
         return
     if value["state"] != "created" or value["sid"] is None:
         raise CleanupUnverified("test account identity is not proven")
     _remove_matching(api, value["name"], value["marker"], value["sid"])
     value["state"] = "cleaned"
-    _write_manifest(path, value)
+    document.update(value)
+    write_config_json(path, document)
 
 
 def quarantine_identity(api, manifest: Path) -> dict:
@@ -370,3 +375,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# HASHI-Fingerprint: hfp_b10edcfe48ed4893bf9e8db34320fab6

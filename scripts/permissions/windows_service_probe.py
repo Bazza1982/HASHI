@@ -218,6 +218,97 @@ def run_probe(arguments):
         raise RuntimeError("native SCM component qualification did not pass")
 
 
+def recover_probe(output, *, accounts=None, profiles=None, rights=None, services=None):
+    """Finish recorded cleanup only after an operator's Windows maintenance.
+
+    The original qualification receipt remains immutable. This command never
+    reboots, unloads a hive, creates an account or stops an unexpected service.
+    A retained loaded profile remains a failure, not an automatic retry.
+    """
+    from orchestrator.config_json import read_config_json
+    from scripts.permissions.windows_test_identity import _validate_manifest, recover_identity
+    from scripts.permissions.windows_test_profile import recover_profile
+
+    output = Path(output)
+    if (not output.is_absolute() or not output.is_dir()
+            or any(part.is_symlink() or getattr(part, "is_junction", lambda: False)()
+                   for part in (output, *output.parents))):
+        raise CleanupUnverified("an existing ordinary qualification directory is required")
+    original_path = output / "report.json"
+    original = read_config_json(original_path)
+    digest = original.revision
+    if (original.get("version") != 1 or original.get("component_only") is not True
+            or type(original.get("pass")) is not bool or not isinstance(original.get("results"), list)):
+        raise CleanupUnverified("invalid original SCM qualification receipt")
+    accounts = accounts if accounts is not None else WindowsAccounts()
+    profiles = profiles if profiles is not None else WindowsProfiles()
+    rights = rights if rights is not None else NativeServiceLogonRights()
+    services = services if services is not None else NativeTestServices(accounts)
+    owners = {}
+    for role in ("safety", "runner"):
+        value = _validate_manifest(dict(read_config_json(output / (role + "-account.json"))))
+        if value["sid"] is None or value["state"] not in {"created", "cleaned"}:
+            raise CleanupUnverified("recorded test account ownership is incomplete")
+        info = accounts.info(value["name"])
+        if info is not None and (value["state"] != "created" or info.get("sid") != value["sid"]
+                                or info.get("comment") != value["marker"] or not accounts.disabled(value["name"])):
+            raise CleanupUnverified("retained account ownership or disabled state changed")
+        if info is None and value["state"] != "cleaned":
+            raise CleanupUnverified("retained account is missing; reconcile first")
+        if profiles.loaded(value["sid"]):
+            raise CleanupUnverified("the owned profile is still loaded")
+        if rights.list(value["sid"]):
+            raise CleanupUnverified("retained account still has logon rights; reconcile first")
+        owners[role] = value
+    if owners["safety"]["sid"] == owners["runner"]["sid"]:
+        raise CleanupUnverified("independent test account identities are required")
+
+    journals = {}
+    for path in output.glob("*-service.json"):
+        journal = read_config_json(path)
+        if set(journal) != {"version", "id", "name", "binary", "account", "sid", "display", "state"}:
+            raise CleanupUnverified("invalid recorded service ownership")
+        # Reuse the namespace/identity validator; no command is executed.
+        TestServiceSpec(journal["name"], (journal["binary"],), journal["account"], journal["sid"], journal["display"])
+        if journal["name"] in journals:
+            raise CleanupUnverified("duplicate recorded service identity")
+        journals[journal["name"]] = journal
+    if not original["results"]:
+        raise CleanupUnverified("no recorded SCM result can be reconciled")
+    for case in original["results"]:
+        role, name = case.get("role"), case.get("service")
+        journal = journals.get(name)
+        if (role not in owners or journal is None or journal["sid"] != owners[role]["sid"]
+                or journal["account"] != ".\\" + owners[role]["name"]):
+            raise CleanupUnverified("SCM result does not match recorded account ownership")
+        if services.query(name) is not None:
+            raise CleanupUnverified("recorded service is still present; reconcile first")
+    # Unknown journals cannot be silently ignored even when absent from results.
+    if set(journals) != {case["service"] for case in original["results"]}:
+        raise CleanupUnverified("unreconciled SCM registration journal remains")
+
+    receipt_path = output / "recovery.json"
+    if receipt_path.exists():
+        receipt = read_config_json(receipt_path)
+        if receipt.get("original_report_sha256") != digest:
+            raise CleanupUnverified("the original SCM receipt changed")
+    else:
+        receipt = new_config_json(receipt_path, {
+            "version": 1, "component_only": True, "source_commit": original.get("source_commit"),
+            "original_report_sha256": digest, "original_pass": original["pass"],
+            "cleanup_confirmed": False, "roles": [],
+        })
+    for role in ("runner", "safety"):
+        recover_profile(accounts, profiles, output / (role + "-account.json"), output / (role + "-profile.json"))
+        recover_identity(accounts, output / (role + "-account.json"))
+        if role not in receipt["roles"]:
+            receipt["roles"].append(role)
+            write_config_json(receipt_path, receipt)
+    receipt["cleanup_confirmed"] = True
+    write_config_json(receipt_path, receipt)
+    return dict(receipt)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -225,6 +316,8 @@ def main(argv=None):
     probe.add_argument("--capsule-manifest", type=Path, required=True)
     probe.add_argument("--capsule-sha256", required=True)
     probe.add_argument("--output", type=Path, required=True)
+    recover = commands.add_parser("recover", help="finish owned cleanup after Windows has released profiles")
+    recover.add_argument("--output", type=Path, required=True)
     service = commands.add_parser("service")
     service.add_argument("--name", required=True)
     service.add_argument("--sid", required=True)
@@ -233,9 +326,12 @@ def main(argv=None):
     arguments = parser.parse_args(argv)
     if arguments.command == "service":
         service_entry(arguments)
+    elif arguments.command == "recover":
+        print(json.dumps(recover_probe(arguments.output), ensure_ascii=False))
     else:
         run_probe(arguments)
 
 
 if __name__ == "__main__":
     main()
+# HASHI-Fingerprint: hfp_7864e5e5f75344a79a3c47c4c6a401c5

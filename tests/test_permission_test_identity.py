@@ -229,3 +229,26 @@ def test_quarantine_reports_failed_disable_observation(tmp_path):
     with pytest.raises(CleanupUnverified, match="unconfirmed"):
         quarantine_identity(api, path)
     assert api.deleted == []
+
+def test_recovery_record_conflict_after_native_delete_preserves_the_newer_record(tmp_path):
+    from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
+
+    api = FakeAccounts()
+    manifest = tmp_path / "identity.json"
+    identity = DisposableTestIdentity(api, manifest)
+    identity.__enter__()
+    delete = api.delete
+
+    def conflicting_delete(name):
+        delete(name)
+        newer = read_config_json(manifest)
+        newer["state"] = "intent"
+        write_config_json(manifest, newer)
+
+    api.delete = conflicting_delete
+    with pytest.raises(ConfigConflictError):
+        recover_identity(api, manifest)
+    assert api.deleted == [identity.name]
+    assert read_config_json(manifest)["state"] == "intent"
+
+# HASHI-Fingerprint: hfp_338bc52270fc4f3987b2ec9f06ace798
