@@ -180,7 +180,7 @@ See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 Command history redacts args; originals execute. PAO notices keep Session/locale
 without Workers; scope-check and retry delivery only. Remote pages fairly;
 closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
-`/new` preserves history; PAO owns Agent deletion.
+`/new` preserves history; PAO owns Agent deletion. Credential cleanup retains registered Remote access and reports failures as pending; see [PAO](HASHI_PAO_SYSTEM_DESIGN.md#21-agent-and-runtime-control).
 
 `/say`读最新final；`2`–`4`选条数，`1-3`选最近三条并从旧到新。跳过费用/命令/进度。
 Telegram须送达回执，Workbench/TUI本地播；reboot回执不证明播放。

@@ -233,6 +233,16 @@ no separate per-instance opt-in. Frontends derive availability from the
 authenticated capability response and hide the action when the capability is
 absent. Active or running Agents and other reported blockers remain protected.
 
+Deleting an Agent removes only its unshared credentials. Atomic publication of
+the remaining credential document must retain the registered instance Remote
+principal through the existing private-file publisher, as well as the writer
+and system administrators. It must not copy arbitrary inherited access or
+grant broad users access. Unrelated shared/network and loopback credentials
+remain unchanged. Principal resolution or credential publication failure is
+reported as cleanup_pending; secrets_cleaned is recorded only after a
+successful publication. A source fix prevents recurrence after adoption; it
+does not repair an already inaccessible production file or prove live recovery.
+
 Agent creation is also a PAO-owned lifecycle operation. Its explicit Instance
 Configuration template and effective selection/publication contract are defined
 in [Agent creation policy](HASHI_AGENT_CREATION_POLICY.md). Creating an Agent with
