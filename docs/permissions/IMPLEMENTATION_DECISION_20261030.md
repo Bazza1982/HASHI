@@ -87,6 +87,8 @@ Frontend Connector 的 Functions 投影现在在控制器为空时，使用原�
 
 L2 安装权限必须与 PAO 精确 Workzone 分别求交；无有效根不回退到 home/access_root；普通批准不能扩根。根 revision、实际根及合同版本进入策略摘要，停用再启用不能复活旧 epoch。现有 registry/authority/原生 supervisor 复用该单一范围来源，仍由独立受限 host、Runner 及实际对象绑定落实 OS 边界。新 [专门决定](L2_HARD_WORKZONE.md) 定义严格路径、必要运行依赖例外、实体验收门和 Compute 端接口合同；未验收通道不继承 L2。
 
+L2 的边界也覆盖 HERV3 内部模型传输。原工厂允许 provider 原生路径，HERV3 可能在受信服务中初始化未隔离 CLI；现由安装执行器明确要求受代理传输，并在创建 Driver 之前按原 backend registry 的 CLI 分类拒绝。L1 不要求该新增约束，API 模型经原 broker；不复制另一份 Engine/模型名单。真实工厂接线回归 RED 1 failed／6 passed，修复后原 CLI 的 L1 兼容和 L2 API 行为分别验证。
+
 先交付本地实现和离线证据。Compute 仅推理时返回的工具调用仍走本地 broker；若在服务器实际操作资源，必须补服务端权限管制与独立资格，再作端到端验收。本轮不假定远端已具备此能力，不部署服务器服务。Windows 完整安装/回收的旧阻碍不因本地回归通过而消除。
 
 ## NP 实测与收尾边界（2026-11-04）

@@ -31,6 +31,7 @@ L1 已验证的 NP 四按钮、续跑和回收结果不重写为未开发，也�
 - 原 PermissionExecutionGate 和 ManagedToolRegistry 拒绝范围外描述及主动 request_access；不生成可扩围的普通审批。
 - 原 WindowsFileProcessSupervisor 在对象准备、最终 start 和运行检查调用同一当前策略验证；根版本变化后旧绑定失效。原生 helper、LPAC host、离线脚本和 Runner 继续承担实际隔离与清理。
 - HERV3 仍只获得窄 execution 通道。审批、策略管理和 Runner 管理接口不交给模型；未知工具不回退。
+- 保证还包括 HERV3 内部选择的模型传输。L2 在模型 Driver 创建/初始化之前拒绝未隔离的本机 CLI 传输，名单从现有 backend registry 的 CLI 分类派生；不能因顶层选择 HERV3 就把 CLI 当成纯模型 API。L1 保留原兼容行为，API 模型传输继续经原 broker。
 - L1 不采用新的硬根求交或 Workzone revision 栅栏；原安装策略及批准语义保留。该限定以 L1/L2 对照集成回归验证。
 
 以上是本地源码合同。合格的组件不等于完整服务安装或全链路运行已通过。

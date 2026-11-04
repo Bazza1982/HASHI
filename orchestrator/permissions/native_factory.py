@@ -85,7 +85,11 @@ class InstalledExecution:
                     raise PermissionDenied("the selected model owner is unavailable")
                 if self._callbacks is not None:
                     self._callbacks.client.idle_timeout_s = float(config.user_idle_timeout_s)
-                models, public = await self.factory.model_factory.create(self.binding, config, self.channel._guard)
+                model_options = ({"require_brokered_transport": True}
+                                 if self.policy.settings.requested_level is PermissionLevel.L2 else {})
+                models, public = await self.factory.model_factory.create(
+                    self.binding, config, self.channel._guard, **model_options,
+                )
                 try:
                     self.channel._current()
                 except BaseException:
@@ -344,3 +348,4 @@ class InstalledExecutorFactory:
             if journal is not None:
                 journal.retire_parent(parent.name)
         return True
+# HASHI-Fingerprint: hfp_a30d4a864f624c9e8fe6981c17f825a9
