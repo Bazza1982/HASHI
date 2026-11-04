@@ -31,6 +31,9 @@ L1 已验证的 NP 四按钮、续跑和回收结果不重写为未开发，也�
 - 原 PermissionExecutionGate 和 ManagedToolRegistry 拒绝范围外描述及主动 request_access；不生成可扩围的普通审批。
 - 原 WindowsFileProcessSupervisor 在对象准备、最终 start 和运行检查调用同一当前策略验证；根版本变化后旧绑定失效。原生 helper、LPAC host、离线脚本和 Runner 继续承担实际隔离与清理。
 - HERV3 仍只获得窄 execution 通道。审批、策略管理和 Runner 管理接口不交给模型；未知工具不回退。
+- Windows 服务态 LPAC 的最小运行对象也须独立拥有：仅在当前 Session 0 的非交互 service station 上临时授予 READ_CONTROL／ACCESSGLOBALATOMS，每个任务创建单独桌面，仅授予 READOBJECTS／WRITEOBJECTS。拒绝交互 station；不开放用户桌面、剪贴板、创建窗口、hook、切换桌面或改 ACL/owner。并发租约各自回收；Job 确认空且进程 handle 关闭后，才关闭本任务桌面并移除其 station ACE；外部 ACL 变化保留并报告待核对，不盲目恢复旧快照。
+- LPAC 的 LOCAL 管道在服务端按当前 Windows session 与实际 AppContainer SID 建立物理名字；逻辑端点和签名挑战不变。端点 DACL 同时满足普通账户与 lowbox 两次检查，仅该执行端点使用 low integrity；继续核验原生 PID、账户、AppContainer、LPAC 和非管理员身份。身份检查中的保留属性解码使用内置 UTF-16 decoder，不在 identification impersonation 期间临时加载文件。
+- 模型 wire 和无效工具响应的私密诊断经原 Run-bound runtime port 回原 Worker canonical audit owner；不要求 LPAC 修改私密日志 ACL。端口只有两种固定记录类型，不接受目标文件或任意 audit namespace；绑定原 Run/Turn/epoch，缓冲 owner 必须 flush 后回执。失败即停止，不回退到 host 本地写入或重放模型请求；L1 普通 Adapter 沿用原记录路径。
 - 保证还包括 HERV3 内部选择的模型传输。L2 在模型 Driver 创建/初始化之前拒绝未隔离的本机 CLI 传输，名单从现有 backend registry 的 CLI 分类派生；不能因顶层选择 HERV3 就把 CLI 当成纯模型 API。L1 保留原兼容行为，API 模型传输继续经原 broker。
 - Windows 的固定 HERV3 LPAC 入口使用 windows-lpac-offline-v1 异步循环：保留标准 Task、计时器、线程执行器和私有管道，将线程唤醒改为进程内事件。原生无网络 profile 会拒绝 CPython Windows 异步组件初始化时的 Winsock 探测；不为启动宿主增加网络 capability，也不换成普通进程。替代 provider 仅在核实 LPAC token 后、asyncio 导入前装入该一次性进程；不影响服务、L1、Core 或共享 Worker。此 profile 不提供 socket/subprocess transport，模型和工具 I/O 继续通过原 broker。
 - L1 不采用新的硬根求交或 Workzone revision 栅栏；原安装策略及批准语义保留。该限定以 L1/L2 对照集成回归验证。

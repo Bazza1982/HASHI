@@ -1,5 +1,15 @@
 # 权限系统实施与证据状态
 
+## 2026-11-04：Intel 服务态宿主与私密诊断修复（完整包实测待完成）
+
+本轮在既有 HASHI3 main 开发，Intel 使用独立完整 sealed capsule；未推送、合并或生产采用。原始服务组件报告和 profile 回收失败保持原状，延迟回收写独立 recovery receipt，不改写原失败。两份自有测试账户在每轮测试后禁用并撤销服务登录权，不继续创建同类账户。
+
+实体对照发现三处离线替身未揭示的边界：Session 0 LPAC 无法初始化 USER32 依赖，LOCAL 管道名字在容器端发生映射，以及 identification token 下临时加载 UTF-16 codec 被系统拒绝。21 个真实原生进程组合测出 station 0x20020、任务私有 desktop 0x81 足够；对照中的 PID／SID／AppContainer／LPAC 认证已实际通过。对照入口有诊断注入，不能冒称正常完整包通过。
+
+源码补上任务私有桌面与 station ACL 租约、正确的服务端管道命名及双重 DACL／low integrity、无文件加载的原生 token 解码。新增聚焦回收与并发测试覆盖其它任务仍存活、未知 ACL 变化、创建／关闭失败及 Job 未清空时保留资源。受限 Adapter 的 wire／坏工具诊断另经原 canonical owner 记录并等待 flush；新端口不能选择文件或任意记录类型，故障没有本地 fallback。L1 无 sink 的普通 Adapter 沿用原行为。
+
+聚焦 red/green 回执保存在本轮忽略的资格证据中。完整权限／共享合同回归、新提交的完整包资格、正常 HERV3 四路及故障／撤权／全回收仍须逐项实测；当前不能标整体 L2 完成。
+
 更新日期：2026-11-04。功能主责 PAO；执行协作 HERV3，认证及显示协作公共 Frontend Connector。后续 L1 修复在既有 HASHI3 分支进行；原 feature-permission-sys 阶段作为历史保留。Core 不变。用户本轮明确要求补齐 Workbench 自动弹窗、一键审批与时长选择，个人 L1 的按钮点击即视为用户决定；不要求反复身份验证。
 
 本期源码已完成权限服务、真实 HERV3 接入、公共认证/审批、受控工具、媒体/原服务、计费与恢复接线。Windows 实体脚本的启动问题已经解决并通过组件资格。本轮在既有 HASHI3 main 接手；已合并基线为 HASHI PR #127 与 Workbench PR #26。本轮新增源码提交、运行版本、页面证据与生产交付分别核实；旧提交的绿色检查不能代替当前版本。

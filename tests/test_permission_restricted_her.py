@@ -3,6 +3,8 @@ import copy
 from dataclasses import replace
 
 import pytest
+from types import SimpleNamespace
+from tests.permission_forensic_fixture import forensic_port
 
 from adapters.openrouter_api import _APIResult
 from orchestrator.her_v2.config import HERv2Config
@@ -48,8 +50,13 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     )
     turn = coordinator.accept(encoded)
 
+    forensic, forensic_store = forensic_port(tmp_path / "trusted-forensics", SimpleNamespace(
+        request_id="request", context=SimpleNamespace(turn_id="turn", execution_epoch="host-test")))
+
     class Connection:
         def call(self, method, arguments):
+            if method == "runtime_port" and arguments["operation"] == "provider_forensic":
+                return forensic(arguments)
             if method == "runtime_port":
                 assert arguments["operation"] == "manifest"
                 return pack({"operations": [], "allow_immediate_response": False, "workzone_ref": str(tmp_path)})
@@ -84,7 +91,8 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     host_root = tmp_path / "host"
     host_root.mkdir()
     payload = command(registry)
-    first = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit)
+    first = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit,
+                              brokered_forensics=True)
     assert first["state"] == "parked", first
     assert len(model_calls) == 1
     assert not (tmp_path / "report.txt").exists()
@@ -97,7 +105,8 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     authority.bind_execution(successor)
     registry = durable_registry(base, authority, successor, supervisor, tmp_path)
     payload["recovery"] = checkpoints[-1]
-    second = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit)
+    second = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit,
+                               brokered_forensics=True)
     assert second["state"] == "completed", second
     result = unpack(second["result"])
     assert result.terminal_state is TerminalState.COMPLETED, result.error
@@ -124,8 +133,13 @@ async def test_service_loss_before_first_model_answer_retains_the_exact_ready_re
     turn = coordinator.accept(encoded)
     checkpoints, messages = [], []
 
+    forensic, forensic_store = forensic_port(tmp_path / "trusted-forensics", SimpleNamespace(
+        request_id="request", context=SimpleNamespace(turn_id="turn", execution_epoch="host-test")))
+
     class Connection:
         def call(self, method, arguments):
+            if method == "runtime_port" and arguments["operation"] == "provider_forensic":
+                return forensic(arguments)
             if method == "runtime_port":
                 assert arguments["operation"] == "manifest"
                 return pack({"operations": [], "allow_immediate_response": False, "workzone_ref": str(tmp_path)})
@@ -148,12 +162,14 @@ async def test_service_loss_before_first_model_answer_retains_the_exact_ready_re
     root = tmp_path / "host"
     root.mkdir()
     payload = command(registry)
-    first = await run_command(payload, client=Connection(), scratch_root=root, emit=emit)
+    first = await run_command(payload, client=Connection(), scratch_root=root, emit=emit,
+                              brokered_forensics=True)
     assert first["state"] == "parked"
     assert checkpoints[-1]["boundary"] == "ready_provider_request"
     assert supervisor.execute_calls == 0
     payload["recovery"] = checkpoints[-1]
-    second = await run_command(payload, client=Connection(), scratch_root=root, emit=emit)
+    second = await run_command(payload, client=Connection(), scratch_root=root, emit=emit,
+                               brokered_forensics=True)
     assert second["state"] == "completed"
     assert unpack(second["result"]).text == "Continued safely."
     assert messages[0] == messages[1]

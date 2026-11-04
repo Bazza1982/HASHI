@@ -16,7 +16,13 @@ from orchestrator.permissions.wire import PermissionRemoteError
 class BrokeredProviderFactory:
     """Create existing adapters for exact qualified profiles, without real keys."""
 
-    def __init__(self, client, *, profile_config, scratch_root, privacy_level, global_config=None):
+    def __init__(self, client, *, profile_config, scratch_root, privacy_level, global_config=None,
+                 brokered_forensics=False):
+        if type(brokered_forensics) is not bool:
+            raise ValueError("a fixed forensic execution mode is required")
+        if brokered_forensics and not callable(getattr(client, "call", None)):
+            raise ValueError("the isolated host requires its synchronous private evidence port")
+        self._brokered_forensics = brokered_forensics
         self._client = client
         self._profiles = {}
         self.privacy_level = privacy_level
@@ -59,6 +65,10 @@ class BrokeredProviderFactory:
             from orchestrator.permissions.media_output import HostAudioStore
             backend._audio_asset_store = HostAudioStore(self._artifact_ports, engine, model)
         client = self._client
+        from orchestrator.permissions.provider_forensics import BrokeredProviderForensics
+
+        if self._brokered_forensics:
+            backend._provider_protocol_forensic_sink = BrokeredProviderForensics(client)
 
         async def invoke(adapter, payload, headers, callback, *, use_stream):
             del headers
@@ -93,3 +103,4 @@ class BrokeredProviderFactory:
         backend._call_api_once = MethodType(once, backend)
         backend._stream_api_once = MethodType(stream, backend)
         return backend
+# HASHI-Fingerprint: hfp_7335603007cf4c0eb8463cf431c3f791

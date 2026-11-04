@@ -2003,6 +2003,20 @@ class OpenRouterAdapter(BaseBackend):
 
         return self._chat_completions_url()
 
+    def _persist_provider_forensic_sink(self, kind: str, record: Mapping[str, Any]) -> str | None:
+        sink = getattr(self, "_provider_protocol_forensic_sink", None)
+        if sink is None:
+            return None
+        try:
+            reference = sink(kind, dict(record))
+            if not isinstance(reference, str) or not reference or len(reference) > 1024:
+                raise OSError("private Provider evidence acknowledgement is unavailable")
+            return reference
+        except Exception as exc:
+            raise ProviderProtocolForensicError(
+                "brokered private Provider evidence could not be persisted"
+            ) from exc
+
     def _record_provider_wire_evidence(
         self,
         event: str,
@@ -2045,6 +2059,9 @@ class OpenRouterAdapter(BaseBackend):
             **dict(getattr(self, "_provider_invocation_context", {}) or {}),
             "payload": dict(payload),
         }
+        reference = self._persist_provider_forensic_sink("wire", record)
+        if reference is not None:
+            return reference
         runtime = getattr(self.config, "_hashi_runtime", None)
         canonical = getattr(runtime, "canonical_audit", None)
         if canonical is not None and callable(getattr(canonical, "record", None)):
@@ -2234,7 +2251,7 @@ class OpenRouterAdapter(BaseBackend):
     def _write_invalid_tool_call_forensic(
         self,
         *,
-        path: Path | None,
+        path: Path | str | None,
         request_id: str,
         call_serial: int,
         payload: Mapping[str, Any],
@@ -2243,7 +2260,7 @@ class OpenRouterAdapter(BaseBackend):
         repair_response_number: int,
         next_repair_number: int | None,
         incident_number: int,
-    ) -> tuple[Path, list[dict[str, Any]]]:
+    ) -> tuple[Path | str, list[dict[str, Any]]]:
         """Durably append one complete bad-tool response to a private log."""
 
         workspace = Path(self.config.workspace_dir).expanduser().resolve()
@@ -2345,6 +2362,9 @@ class OpenRouterAdapter(BaseBackend):
                 "transport_state": str(result.transport_state or ""),
             },
         }
+        reference = self._persist_provider_forensic_sink("invalid_tool", record)
+        if reference is not None:
+            return reference, tool_details
         encoded = json.dumps(
             record,
             ensure_ascii=False,

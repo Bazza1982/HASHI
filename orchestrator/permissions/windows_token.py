@@ -7,6 +7,7 @@ stand in for an observed token.
 from __future__ import annotations
 
 import ctypes
+from codecs import utf_16_le_decode
 from ctypes import wintypes
 
 
@@ -47,7 +48,9 @@ def _reserved_lpac_attribute(buffer):
         if item.name.length % 2 or item.name.length > item.name.maximum:
             raise OSError("invalid native token attribute name")
         bounded(item.name.buffer, item.name.length)
-        name = ctypes.string_at(item.name.buffer, item.name.length).decode("utf-16-le")
+        # Identification impersonation cannot perform filesystem imports.
+        # Decode directly without the lazy codec registry.
+        name = utf_16_le_decode(ctypes.string_at(item.name.buffer, item.name.length), "strict", True)[0]
         if name.casefold() != "WIN://NOALLAPPPKG".casefold():
             continue
         if (found is not None or item.type not in {2, 6} or item.reserved or item.count != 1
@@ -79,3 +82,4 @@ def token_is_lpac(token, security):
     if not security.GetTokenInformation(token, 39, buffer, size.value, ctypes.byref(size)):
         raise ctypes.WinError(ctypes.get_last_error())
     return _reserved_lpac_attribute(buffer)
+# HASHI-Fingerprint: hfp_de7e38676eac43449084660717126666

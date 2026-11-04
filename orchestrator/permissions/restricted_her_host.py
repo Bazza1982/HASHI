@@ -44,7 +44,7 @@ class _BrokerAuditWriter:
         return self._client.call("audit_record", {"record": dict(record)})
 
 
-async def run_command(command, *, client, scratch_root, emit):
+async def run_command(command, *, client, scratch_root, emit, brokered_forensics=False):
     """Run the real engine and adapters; neither RPC errors nor parks retry tools."""
     if not isinstance(command, dict) or set(command) != _FIELDS:
         raise ValueError("invalid qualified HER command")
@@ -60,7 +60,7 @@ async def run_command(command, *, client, scratch_root, emit):
             raise ValueError("a fixed HER request binding is required")
     factory = BrokeredProviderFactory(
         client, profile_config=command["profiles"], scratch_root=root,
-        privacy_level=command["privacy_level"],
+        privacy_level=command["privacy_level"], brokered_forensics=brokered_forensics,
     )
     registry = BrokeredToolRegistry(client, definitions=command["tool_definitions"], scratch_root=root)
     from orchestrator.permissions.runtime_ports import HostRuntimePorts
@@ -170,7 +170,8 @@ def main():
             await asyncio.to_thread(pipe.send, {"type": "event", "event": encode(event)})
 
         response = asyncio.run(run_command(initial["command"], client=client,
-                                            scratch_root=Path(sys.argv[2]), emit=emit))
+                                            scratch_root=Path(sys.argv[2]), emit=emit,
+                                            brokered_forensics=True))
         pipe.send({"type": "result", "result": response})
     except BaseException as error:
         # Trusted supervisor retains diagnostics; the agent cannot obtain
