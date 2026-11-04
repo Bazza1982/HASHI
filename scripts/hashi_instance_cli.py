@@ -19,8 +19,8 @@ CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from scripts.terminal_support import record_effect, record_instance
-from tools.terminal_environment import has_interactive_input
+from scripts.terminal_support import record_effect, record_instance  # noqa: E402
+from tools.terminal_environment import has_interactive_input  # noqa: E402
 
 from tools.instance_registry import (  # noqa: E402
     InstanceRegistry,
@@ -580,6 +580,7 @@ def _launch_environment(record: dict[str, Any], code_root: Path) -> dict[str, st
     environment.pop("PYTHONHOME", None)
     environment.update(
         {
+            "HASHI_INSTANCE_ID": str(record["instance_id"]),
             "BRIDGE_HOME": str(Path(record["bridge_home"]).resolve()),
             "BRIDGE_CODE_ROOT": str(code_root.resolve()),
             "PYTHONUNBUFFERED": "1",
@@ -602,6 +603,11 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     ).returncode
 
 
+def _selected_identity_matches(record: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    expected = str(record["instance_id"]).strip().casefold()
+    return str(snapshot.get("instance_id") or "").strip().casefold() == expected
+
+
 def start_instance(
     registry: InstanceRegistry,
     record: dict[str, Any],
@@ -611,6 +617,9 @@ def start_instance(
 ) -> int:
     code_root = registry.resolved_code_root(record)
     snapshot = inspect_instance(record, code_root)
+    if not _selected_identity_matches(record, snapshot):
+        print("INSTANCE_IDENTITY_MISMATCH: Configured instance differs from the selected target; start was not sent.", file=sys.stderr)
+        return EXIT_BUSY
     if snapshot["running"]:
         if not quiet:
             print(f"HASHI instance {record['name']} is already running (PID {snapshot['pid']}).")
@@ -677,6 +686,9 @@ def start_instance(
     deadline = time.monotonic() + max(1.0, timeout)
     while time.monotonic() < deadline:
         snapshot = inspect_instance(record, code_root)
+        if not _selected_identity_matches(record, snapshot):
+            print("START_IDENTITY_MISMATCH: Readiness belongs to another instance; process was not killed.", file=sys.stderr)
+            return EXIT_BUSY
         if snapshot["running"] and (
             snapshot["ready"] or snapshot.get("services_ready") is True
         ):
@@ -702,10 +714,68 @@ def start_instance(
     return EXIT_BUSY
 
 
+def _stop_processes(snapshot: dict[str, Any]) -> list[Any]:
+    """Capture process identities before shutdown, including descendants that may be orphaned."""
+    import psutil
+
+    pids = {snapshot.get("pid"), *(agent.get("worker_pid") for agent in snapshot.get("agents", []))}
+    pids = {pid for pid in pids if type(pid) is int and pid > 0}
+    if snapshot.get("running") and (type(snapshot.get("pid")) is not int or snapshot["pid"] <= 0):
+        raise RuntimeError("instance process identity is unavailable")
+    captured = {}
+    for pid in pids:
+        try:
+            process = psutil.Process(pid)
+            for item in [process, *process.children(recursive=True)]:
+                item.create_time()  # psutil's identity includes creation time, fencing PID reuse.
+                captured[item.pid] = item
+        except psutil.NoSuchProcess:
+            continue
+    return list(captured.values())
+
+
+def _stop_remaining(record: dict[str, Any], snapshot: dict[str, Any], processes: list[Any]) -> list[str]:
+    import psutil
+
+    remaining = []
+    if _lock_is_held(_instance_paths(record)[1]):
+        remaining.append("instance lock")
+    for process in processes:
+        try:
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                remaining.append(f"process {process.pid}")
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            remaining.append(f"unverified process {process.pid}")
+    # A supervisor may have started a new generation while the original exited.
+    pid = _read_pid(_instance_paths(record)[2])
+    if pid and pid not in {item.pid for item in processes} and psutil.pid_exists(pid):
+        remaining.append(f"replacement process {pid}")
+    ports = {snapshot.get(key, record.get(key)): key for key in ("api_port", "gateway_port")}
+    # An unresponsive/full listener must not look released merely because connect() times out.
+    # Inspect LISTEN sockets without taking ownership of or signalling any process.
+    listening = {item.laddr.port for item in psutil.net_connections(kind="tcp")
+                 if item.status == psutil.CONN_LISTEN and item.laddr}
+    remaining.extend(key for port, key in ports.items()
+                     if type(port) is int and port in listening)
+    return remaining
+
+
 def stop_instance(registry: InstanceRegistry, record: dict[str, Any], *, timeout: float = 30.0) -> int:
     code_root = registry.resolved_code_root(record)
     snapshot = inspect_instance(record, code_root)
+    if not _selected_identity_matches(record, snapshot):
+        print("INSTANCE_IDENTITY_MISMATCH: Stop target is unverified; no shutdown was sent.", file=sys.stderr)
+        return EXIT_BUSY
     if not snapshot["lock_held"] and not snapshot["healthy"]:
+        try:
+            remaining = _stop_remaining(record, snapshot, _stop_processes(snapshot))
+        except Exception:
+            remaining = ["unverified process state"]
+        if remaining:
+            print("STOP_INCOMPLETE: Instance resources remain: " + ", ".join(remaining), file=sys.stderr)
+            return EXIT_BUSY
         print(f"HASHI instance {record['name']} is already stopped.")
         return 0
     if not snapshot["running"]:
@@ -737,6 +807,11 @@ def stop_instance(registry: InstanceRegistry, record: dict[str, Any], *, timeout
             file=sys.stderr,
         )
         return EXIT_BUSY
+    try:
+        processes = _stop_processes(snapshot)
+    except Exception as exc:
+        print(f"Refusing to stop: process ownership cannot be verified ({type(exc).__name__}).", file=sys.stderr)
+        return EXIT_BUSY
     token = _admin_token(record, code_root)
     record_effect("stop_requested")
     try:
@@ -758,15 +833,21 @@ def stop_instance(registry: InstanceRegistry, record: dict[str, Any], *, timeout
             file=sys.stderr,
         )
         return EXIT_BUSY
-    lock_path = Path(_instance_paths(record)[1])
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _lock_is_held(lock_path):
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            remaining = _stop_remaining(record, snapshot, processes)
+        except Exception:
+            remaining = ["unverified process state"]
+        if not remaining:
             print(f"Stopped HASHI instance {record['name']} gracefully.")
             return 0
-        time.sleep(0.25)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(.25, max(0.0, deadline - time.monotonic())))
     print(
-        "Shutdown was accepted but the instance is still running; no force kill was attempted.",
+        "STOP_INCOMPLETE: Shutdown was accepted but resources remain: "
+        + ", ".join(remaining) + "; no force kill was attempted.",
         file=sys.stderr,
     )
     return EXIT_BUSY
@@ -1164,3 +1245,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_8736b9e12fd34b738438f5b705e71671
