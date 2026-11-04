@@ -218,6 +218,10 @@ async def test_agents_can_include_inactive_for_authenticated_workbench_gateway(t
     complete = await server.handle_agents(_Request(query={"include_inactive": "1"}))
 
     assert json.loads(normal.text)["agents"] == []
+    assert "agent_departures" not in json.loads(normal.text)
+    departure_projection = json.loads(complete.text)["agent_departures"]
+    assert departure_projection["schema_version"] == 1
+    assert departure_projection["events"] == []
     agents = json.loads(complete.text)["agents"]
     assert len(agents) == 1
     assert agents[0]["id"] == "lily"

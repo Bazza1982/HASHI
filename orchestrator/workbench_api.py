@@ -5849,7 +5849,17 @@ class WorkbenchApiServer:
             )
             for agent_row in agent_rows
         ])
-        return web.json_response({"ok": True, "agents": agents})
+        result = {"ok": True, "agents": agents}
+        if include_inactive:
+            from orchestrator.agent_move.service import completed_agent_departures
+            try:
+                result["agent_departures"] = await asyncio.to_thread(
+                    completed_agent_departures, self.config_path.parent
+                )
+            except (OSError, ValueError):
+                # A failed retirement read must never be replaced by inferred absence.
+                result["agent_departures"] = None
+        return web.json_response(result)
 
     async def handle_agent_metadata(self, request):
         if not self._check_admin_auth(request):
