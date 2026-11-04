@@ -66,7 +66,9 @@ L1 已验证的 NP 四按钮、续跑和回收结果不重写为未开发，也�
 
 本地聚焦用例覆盖宽基础/申请范围、L1 对照、根缺失/不可用、附加根、独立多根和窄动作、越界脚本输入、无约束进程、路径重定向，以及 admission/queued/prepared 后停用再启用根。测试通过现有安装策略、factory、registry、真实权威账本和临时文件效果；原生 launcher/IPC 为注入边界，不能据此宣称完整 OS 隔离。
 
-发布前仍须执行 [ACCEPTANCE](ACCEPTANCE.md) 的实体 CASE-L2/WAC，包括整个受限 HERV3 host、Runner、服务身份、网络、撤权、故障和全回收。共享主机上既有两份测试 profile 回收未过的阻碍保留，不继续制造账户或强行重启系统服务。Compute 若有实际远端执行，还须独立完成上节服务和端到端验收。
+发布前仍须完成 [ACCEPTANCE](ACCEPTANCE.md) 的完整实体 CASE-L2/WAC。2026-11-05 同版的受限 HERV3、真实普通 Worker、公开批准续跑、OS拒绝、网络、到期、Workzone变更、故障和任务资源回收已通过[本轮关键链原生验收](L2_INTEL_LOCAL_QUALIFICATION_20261105.md)，不以部分覆盖代替完整表项。Compute 若有实际远端执行，还须独立完成上节服务和端到端验收。
+
+独立 Intel 的两份安装身份 profile 经正常 Windows 维护后完整回收，原即时清理失败不改写。共享 A9_MAX 上的旧 profile 仍是另一个环境的事项；不能用 Intel 结果宣称已清理，也不在共享主机制造新账户或强行操作系统服务。
 
 源码实现、离线验证、Windows 组件资格、完整本地安装验收、Compute 端到端验收、运行采用、GitHub/生产发布分别记录；任何一项的完成不能替代其余项。当前证据见 [实施状态](IMPLEMENTATION_STATUS.md)。
 
