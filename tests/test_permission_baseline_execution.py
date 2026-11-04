@@ -23,6 +23,11 @@ from tests.test_permission_pao_fence import setup_run
 from tools.registry import ToolResult
 
 
+# A deadlock watchdog, not a preparation SLA. The stage events establish the
+# security ordering; Windows durable I/O can legitimately queue for over 1s.
+_STAGE_WATCHDOG_SECONDS = 10
+
+
 class Installation(dict):
     @property
     def revision(self):
@@ -257,12 +262,15 @@ async def test_policy_change_before_execution_cannot_use_frozen_eligibility(inst
             task = asyncio.create_task(execute(
                 env, "file_write", {"path": "changed.txt", "content": "must not write"}, "changed-policy"))
             try:
-                await asyncio.wait_for((env.supervisor.queued if stage == "queued" else env.supervisor.prepared).wait(), 1)
+                await asyncio.wait_for(
+                    (env.supervisor.queued if stage == "queued" else env.supervisor.prepared).wait(),
+                    _STAGE_WATCHDOG_SECONDS,
+                )
             finally:
                 env.installation["agents"]["agent"][source + "_scopes"] = []
                 env.supervisor.queue_release.set()
                 env.supervisor.start_release.set()
-            result = await asyncio.wait_for(task, 1)
+            result = await asyncio.wait_for(task, _STAGE_WATCHDOG_SECONDS)
         else:
             env.installation["agents"]["agent"][source + "_scopes"] = []
             result = await execute(env, "file_write", {"path": "changed.txt", "content": "must not write"}, "changed-policy")
@@ -287,11 +295,11 @@ async def test_revocation_at_final_start_cannot_be_masked_by_partial_baseline(in
         env.supervisor.start_release.clear()
         task = asyncio.create_task(execute(env, "file_write", args, "revoke-at-start"))
         try:
-            await asyncio.wait_for(env.supervisor.prepared.wait(), 1)
+            await asyncio.wait_for(env.supervisor.prepared.wait(), _STAGE_WATCHDOG_SECONDS)
             env.authority.revoke(env.context, lease.lease_id)
         finally:
             env.supervisor.start_release.set()
-        result = await asyncio.wait_for(task, 1)
+        result = await asyncio.wait_for(task, _STAGE_WATCHDOG_SECONDS)
         assert isinstance(result, GateResult) and result.state in {"permission_changed", "unknown"}
         assert not env.supervisor.writes and not (env.root / "revoked.txt").exists()
         assert env.authority.get_lease_for_task(env.context, lease.lease_id).status == "revoked"

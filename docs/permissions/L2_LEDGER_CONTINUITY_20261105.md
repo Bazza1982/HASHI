@@ -61,3 +61,18 @@ schema 9 还使旧 schema 8 程序拒绝该账本，避免回退程序写入不�
 - 完整最终版本的检查及仍缺实机步骤记录在 [WAC 补验责任表](L2_WAC_CLOSEOUT_20261105.md)。
 
 上面是实现及软件边界证据，不是新版本已安装、已部署或完整 L2 已通过。
+
+## Windows CI 等待复核
+
+首次推送有一项 Windows CI 在 prepared 事件的一秒等待上超时（910 passed、
+1 failed、3 skipped）；原完整日志保留。该用例用真实 SQLite、实际 registry 和
+authority，但 launcher 由可观测文件夹具替代，不是在测一秒的产品性能承诺。
+
+在同一个原用例的异步入口注入 1.1 秒合法调度等待，实际复现相同 TimeoutError；
+单纯阻塞 event loop 的 sleep 没有复现，记录不充当 RED。仅将该模块准备／收尾的
+死锁 watchdog 设为 10 秒，仍等待原 queued/prepared 事件，保持政策变更顺序、
+最终 start 复核、实际文件不存在和写入数断言。产品 TTL、heartbeat、清理期限、
+用户批准与所有 Fingerprint watchdog 均不修改。
+
+相同异步等待重放 GREEN；整个 owning 模块18通过。最终推送版本的 Windows CI
+仍须独立通过，不能用本地通过覆盖原远端失败。
