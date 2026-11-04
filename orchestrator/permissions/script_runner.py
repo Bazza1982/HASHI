@@ -211,7 +211,7 @@ class RestrictedScriptRuns:
             while not record["process"].poll():
                 now = asyncio.get_running_loop().time()
                 if now - activity_at >= 1:
-                    await emit_private_event(StreamEvent(kind="tool_activity", metadata={
+                    await emit_private_event(StreamEvent(kind="tool_activity", summary="", metadata={
                         "state": "running", "liveness": True, "progress": False, "counters": {},
                     }))
                     activity_at = now
