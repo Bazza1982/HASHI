@@ -9,7 +9,7 @@
 - Fingerprint默认OFF、按Run冻结；开启Shell须持久审计；marker用护栏原子替换/Manifest，绝对路径限可信Workzone，不重放写入。[PAO](HASHI_FINGERPRINT.md)。
 
 - PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，显式授权原生音频不等转写；原因跨入口/Worker保留；缺FFmpeg明确报错，不重试合成；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
-- L1保留；L2限已验HERV3，LPAC须私有桌面/容器管道/原生身份；审计按Runner原epoch回owner，失败不落本地spool；脚本心跳非进展；CLI/Compute另验。SCM核对SID/双hive后回收，不强卸载。[权限](permissions/L2_HARD_WORKZONE.md)。
+- L1保留；L2限已验HERV3，LPAC用私有桌面/容器管道/原生身份；审计随Runner epoch回owner，失败无本地spool；心跳非进展；CLI/Compute另验。SCM核对SID/双hive，不强卸载。[权限](permissions/L2_HARD_WORKZONE.md)。
 - 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
 
 - `/forget` removes traceable period data; untraceable summaries may remain.
@@ -84,8 +84,8 @@ Keep experiments, secrets, media and remote paths out of PCM/logs/chat/Git.
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
 
-JSON写入在锁和版本检查下验证私有候选，再原子替换；展示默认值只读。
-冲突须重读并重新选择，不自动重放，不用旧快照覆盖已发布结果。[配置持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
+JSON用私有候选、锁与读版本原子发布；默认值只读，冲突/已提交错误不重放。
+PAO根配置为已安装Safety SID保留只读权，不共享secrets、不复制旧ACL。[持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
 
 Endpoint publication retries only bounded Windows rename blocking on the same
 fsynced candidate; permanent failure preserves state and never replays.
@@ -218,7 +218,3 @@ Edge/SAPI/Piper, omits Kokoro/Torch. See
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
-
-## 2026-11-05：L2 服务身份的根配置只读发布
-
-PAO/Functions 的 Agent 根配置写入统一复用 `orchestrator.agent_config_json`，在共享 `config_json` 的空候选阶段为已安装 `permission_service.service_sid` 显式设置只读权限。不是继承已有宽 ACL，也不向该身份共享实例 secrets。普通 Worker 实测已复现旧启动写入移除读取权而使 Safety 准入失败，新增 Windows DACL red/green 与直接配置消费者回归保留；完整新包/普通 Worker 实测仍单独核实。Core、L1 审批规则和生产运行代次不变。
