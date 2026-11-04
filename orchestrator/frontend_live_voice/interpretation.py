@@ -8,8 +8,9 @@ from orchestrator.phone_catalog import PHONE_PROVIDERS
 
 def resolve_interpretation(state, *, interface_language=None):
     model = state["model"]
-    target = "zh-CN" if model == "hy-simulmt-en-zh" else "en"
+    target = PHONE_PROVIDERS[state["provider"]]["models"][model]["target_language"]
     selection = copy.deepcopy(state)
+    selection["language"] = target
     selection["interface_language"] = interface_language
     instructions = ("Translate the incoming English speech into Chinese." if target == "zh-CN"
                     else "Translate the incoming Chinese speech into English.")

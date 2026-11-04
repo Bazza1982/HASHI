@@ -1,5 +1,80 @@
 # HERV3 Ollama context pilot
 
+## Exact-model input qualification — 2026-11-04
+
+The context opt-in can be declared on an exact `model_capabilities` row.
+That model's boolean overrides the backend-level compatibility opt-in. Existing
+unconfigured models keep their previous request parameters. Resolve again after
+a model switch; never cache one model's capacity as the backend's default.
+A row may bind `ollama_url` to the qualified endpoint; the native and
+OpenAI-compatible chat routes on the same endpoint are equivalent bindings.
+A different endpoint fails before inference.
+
+Use the existing capacity resolver for `context_window_tokens` and
+`response_headroom_tokens`. An optional positive `ollama_max_input_chars`
+also bounds the complete encoded inference object: count Python's default
+JSON representation excluding only options, keep_alive and stream, matching
+the managed native owner's admission contract. Check it before every physical
+one-token probe, including a changed closing payload. Characters and tokens
+are independent limits. These fields select an operating envelope; Compute
+remains authoritative for measured identity, shape and resource admission.
+
+Direct Ollama callers use the existing typed PCM renderer for a model-facing
+discovery index and a bounded view of completed history. The generic non-HER
+64K bootstrap budget is not a small-model operating budget, and HERV3-managed
+semantic Compact is not enabled by changing a direct Model Provider.
+
+For exact-model native-context opt-ins, measure the complete text request,
+including the system message, native tool schemas and JSON escaping, before
+selecting history references. Aim at three quarters of the qualified encoded
+character limit and two thirds of usable input tokens (estimated, not an
+admission proof). Fold oldest completed exchanges into the existing bounded
+excerpt format first, then source-key indexes if the excerpts themselves
+cannot fit. Preserve exact full bodies in a private hash-verified reference;
+excerpts are continuity cues, not complete semantic summaries. Needed old
+details must be read from that reference. Projection neither deletes canonical
+history nor claims that omitted text was read.
+
+Only unprotected tool catalogue text and typed recent completed exchanges can
+be reduced. The current task, system instructions, Persona, HCC, protected
+memory and active recovery/effects remain intact. Canonical transport and
+authority stay unchanged. Other adapters and models without a per-model
+native-context opt-in keep their previous prompts. A previous turn's tool
+closure must not hide native schemas when measuring the next initial request.
+
+Near-capacity tool closure uses a margin of min(2048, usable_input_tokens / 6)
+for exact-model opt-ins, rather than spending the same fixed 2K margin on every
+small context. Backend-level legacy opt-ins retain the existing margin. This
+does not reduce response headroom or authorize a tool replay. Complete new
+results that fit their estimated token share and the exact encoded request
+remain visible; UTF-8 byte size alone must not turn a usable one-line JSON
+search result into an empty page. An allowance below 1,024 alone does not close
+tools: fitting results retain successive reads while native admission allows.
+Only genuinely small pages close future reads to avoid footer-only recursion;
+larger results retain the existing private paging source.
+The changed final payload is independently admitted. Character
+and native token checks still govern every physical call after privacy
+filtering. Protected input that cannot fit fails explicitly rather than being
+truncated. A soft projection target that cannot fit is recorded as unmet;
+it never raises the qualified hard limit.
+
+Approval, implementation and actual multi-turn verification are separate.
+Short-answer and single-file-read canaries do not establish sustained history
+capacity or successful reference retrieval. Qualification must include history
+growth and an actual read of omitted earlier evidence, and a source check is
+separate from targeted running Worker adoption.
+
+The stable upstream `resource_profile_unverified` refusal is reported as
+`PROVIDER_RESOURCE_PROFILE_UNVERIFIED` and is not retried against unchanged
+parameters. Generic transient 503 recovery retains its existing behavior.
+
+Approval, implementation and live acceptance are separate facts. The scoped
+repair is approved and its behavioral red/green evidence is recorded with the
+change. Instance overrides and live qualification/adoption receipts remain in
+the instance's ignored review records; publication alone does not prove a
+running Worker or real-model call has adopted this behavior.
+
+
 ## Current status and integration scope — 2026-10-18
 
 Publication of `feature-ollama` to GitHub `main` through a pull request is now

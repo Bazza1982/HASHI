@@ -84,7 +84,8 @@ class PhoneManager:
         models = cls.PROVIDERS[provider]["models"]
         model = cls._validate_choice(state.get("model"), models, "model")
         voice = cls._validate_choice(state.get("voice"), models[model]["voices"], "voice")
-        language = cls._validate_choice(state.get("language"), cls.LANGUAGES, "language")
+        language = (models[model]["target_language"] if provider == "hy-simulmt"
+                    else cls._validate_choice(state.get("language"), cls.LANGUAGES, "language"))
         style = cls._validate_choice(state.get("style"), cls.STYLES, "style")
         custom = state.get("style_instructions", "")
         if not isinstance(custom, str):
@@ -175,7 +176,7 @@ class PhoneManager:
             if state.get("model") not in models:
                 state["model"] = next(iter(models))
             if provider == "hy-simulmt":
-                state["language"] = "zh-CN" if state["model"] == "hy-simulmt-en-zh" else "en"
+                state["language"] = models[state["model"]]["target_language"]
                 state["style"] = "natural"
                 state["style_instructions"] = ""
             voices = models[state["model"]]["voices"]
@@ -190,7 +191,7 @@ class PhoneManager:
         def mutate(state: dict[str, Any]) -> None:
             state["model"] = model
             if state["provider"] == "hy-simulmt":
-                state["language"] = "zh-CN" if model == "hy-simulmt-en-zh" else "en"
+                state["language"] = self.PROVIDERS[state["provider"]]["models"][model]["target_language"]
             voices = self.PROVIDERS[state["provider"]]["models"][model]["voices"]
             if state.get("voice") not in voices:
                 state["voice"] = voices[0]
@@ -207,7 +208,9 @@ class PhoneManager:
         if self.get_state()["provider"] == "hy-simulmt":
             if language not in {"zh-CN", "en"}:
                 raise PhoneConfigError("phone_language_unsupported", "Interpretation supports English and Simplified Chinese.")
-            return self.set_model("hy-simulmt-en-zh" if language == "zh-CN" else "hy-simulmt-zh-en")
+            model = next(key for key, option in self.PROVIDERS["hy-simulmt"]["models"].items()
+                         if option["target_language"] == language)
+            return self.set_model(model)
         return self._update(lambda state: state.__setitem__("language", language))
 
     def set_style(self, value: str) -> dict[str, Any]:

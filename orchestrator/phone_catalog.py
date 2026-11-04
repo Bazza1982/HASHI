@@ -42,8 +42,8 @@ PHONE_PROVIDERS = {
     "hy-simulmt": {
         "label": "HY-SimulMT · Simultaneous interpretation",
         "models": {
-            "hy-simulmt-en-zh": {"label": "English → 中文", "voices": ("default",)},
-            "hy-simulmt-zh-en": {"label": "中文 → English", "voices": ("default",)},
+            "hy-simulmt-en-zh": {"label": "English → 中文", "voices": ("default",), "target_language": "zh-CN"},
+            "hy-simulmt-zh-en": {"label": "中文 → English", "voices": ("default",), "target_language": "en"},
         },
     },
     "local-cascade": {

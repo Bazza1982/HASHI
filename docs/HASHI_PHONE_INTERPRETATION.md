@@ -16,6 +16,9 @@ The existing Phone provider/model menus expose HY-SimulMT and two directions:
 `hy-simulmt-en-zh` and `hy-simulmt-zh-en`. Selecting the language also changes
 the direction; unsupported languages and conversational speaking styles are
 rejected. The first implementation has one fixed CPU voice per target language.
+The selected model owns the target language in saved-state reads and frozen call
+snapshots. A stale language field cannot reverse the displayed or effective
+direction; read-time projection does not rewrite the configuration file.
 
 Interpretation sends no Agent Persona, conversation history, task results or tool
 delegations to the speech model. Source speech is interpreted continuously.

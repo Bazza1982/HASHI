@@ -1,6 +1,8 @@
 # HASHI Agent FYI
 
-- Phone：新增实验性 HY-SimulMT 中英同传 provider，复用 WebRTC codec；无寒暄、Agent 上下文或工具委托。Compute 精确选择与已提交 Functions 采用必需；隔离实测不代表在线采用。[同传](HASHI_PHONE_INTERPRETATION.md)。
+- Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。
+
+- Ollama：精确模型/端点容量同时检查编码字符与native tokens；直接路径按预算折叠已完成历史为摘录/可回读索引，保留权威PCM与完整来源，小上下文关闭余量按容量派生，完整结果可容纳且native准入时保留后续工具；其他模型不变。短对话通过不代表多轮历史及引用回读通过，采用与实测独立记录。[HERV3](HERV3_OLLAMA_CONTEXT_PILOT.md)。
 
 - [实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)保身份/验退出；[迁出](HASHI_AGENT_MOVE_V1.md)凭证收尾。
 
@@ -57,11 +59,9 @@ HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
 
 权限页面保留安全阶段/原因/编号；私密拒绝不泄漏对象，提交不明不谎称未授权，不重放；原认证和审批检查不变。
 
-Prove source, Worker adoption and delivery separately. Tools cannot alter
-Core/Python, read secrets or grant authority. `/reboot min|same`: one Worker;
-`max`: shared Functions/Workers, never Core/Remote. Code needs reboot; docs do not.
-Preserve `AGENT_BUSY`; retry only before durable receipt; `target_busy` stays
-pending. `max` rejects shared API/background work around fencing.
+源码、Worker采用、交付分别验证。工具不能改Core/Python、读秘密或授予权限。
+代码采用需reboot，文档无需；`min|same`限单Worker，`max`含共享Functions/Workers，不动Core/Remote。
+保留`AGENT_BUSY`，只在持久回执前重试；`target_busy`保持pending，`max`在fencing期间拒绝共享API/后台工作。
 [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
 [fail-fast](HASHI_REBOOT_RECEIPTS.md).
 
@@ -72,21 +72,17 @@ pending. `max` rejects shared API/background work around fencing.
 Prove isolated speech locks/runtimes/releases separately:
 [dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).
 
-Config owns identity/ports/Workzones/endpoints/models; omit secrets/paths.
-Instance opt-ins use `allowed_backends`/runtime effort; shared compatibility
-uses the qualified registry. Unknown capability/price is neither unsupported
-nor zero. Persist choices; HERV3 inherits [Provider policy](HASHI_MODEL_AVAILABILITY.md), not Engine grants.
+配置管身份/端口/Workzone/端点/模型，勿外泄秘密/路径。实例opt-in用`allowed_backends`/runtime effort，共享兼容用合格registry。
+能力/价格未知不等于不支持/免费；选择须持久化。HERV3继承[Provider策略](HASHI_MODEL_AVAILABILITY.md)，不继承Engine授权。
 
 Agent name/Emoji use revisioned config; refresh cannot undo a durable save.
 
 Verified capabilities survive lookup failure until identity/source changes;
 pricing freshness stays separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
-Portable has no credentials; PAO starts Workers. Wildcards grant permission,
-not capability; paths grant nothing. Frontend Workzone edits are Agent-scoped
-and revisioned; Runs freeze snapshots and saved state stays visible. Windows
-rejects POSIX Workzones; browser disconnects keep the shared named-pipe listener.
-Keep experiments, secrets, media and remote paths out of PCM/logs/chat/Git.
+Portable无凭据，PAO启动Workers。通配符只授权限不授能力，路径不增权。
+前端Workzone按Agent/版本修改；Run冻结快照，已存状态仍可见。Windows拒绝POSIX Workzone，浏览器断连保留共享命名管道监听。
+实验、秘密、媒体及远端路径不进PCM/日志/聊天/Git。
 
 Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
 Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
@@ -152,11 +148,8 @@ Privacy Level 2 is HERV3/DeepSeek-only, risk-accepted and fail-closed on
 detector errors. Isolated dependencies or synthetic readiness prove neither
 activation nor Worker adoption.
 
-Chat-only has no tools. `/fallback` defaults `OFF`: `RETRY` waits 60/180/300
-or longer `Retry-After`, `ASK` fails closed, `AUTO` uses exact routes. A pauses
-after effects; B resumes the original Engine Session, never replay/retarget.
-PAO—not HERV3—switches to Codex and accumulates counts/costs. Phone/call/voice
-never long-retry or fallback. [policy](HASHI_MODEL_FALLBACK_POLICY.md).
+Chat-only无工具。`/fallback`默认`OFF`；`RETRY`等60/180/300秒或更长`Retry-After`，`ASK`失败关闭，`AUTO`限精确路由。
+A在effects后暂停，B续原Engine Session，不重放/改目标；PAO负责切Codex及累计次数/费用。Phone/call/voice不长重试或fallback。[策略](HASHI_MODEL_FALLBACK_POLICY.md)。
 
 ## UI, media, and Phone
 
@@ -167,10 +160,8 @@ Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
 defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
 settings/PCM do not prove provider readiness.
 
-Renderers/catalogs own UI text. `/language` is shared, `/tui language` local;
-neither translates replies/IDs. TUI switches freeze runtime identity/state.
-Remote authenticates. Mirror opt-outs preserve origin replies; `/think` and
-`/commentary` are independent.
+Renderer/catalog管UI文案。`/language`共享、`/tui language`本地，均不翻译回复/ID；TUI切换冻结运行身份/状态。
+Remote须认证；关闭镜像保原入口回复，`/think`与`/commentary`独立。
 
 `/stop` fences every Agent Session, cancels owned work, rejects stale callbacks,
 retains periodic definitions, and durably records `stopped` before cleanup.
@@ -180,15 +171,11 @@ Never retry uncertain saves; HERV3 releases its Turn first. See
 媒体绑定草稿/实例/代理/Run，Remote不增权；SafeVoice同Run幂等确认/丢弃，各Engine正常终止且不调模型。
 Workbench保留`voice_message`来源并去重界面，普通音频保持可见；Telegram用自身renderer。
 
-Phone binds the owner's foreground Conversation. Dialogue-round HCC uses bound
-PCM/Conversation/job evidence, never raw metadata/scheduled prompts; lookups
-create no Run. Reconnect keeps snapshots/constraints/epoch authority; handoffs
-freeze ID/order only; hang-up restores history. Cleanup matches event IDs;
-exhaustion preserves context and permits the Turn. PCM bounds
-arrivals; HERV3 time-orders and skips unused history. Functions own settings.
-Failed PCM refresh allows stop/inspect only; fence/hang-up win. Keep causes;
-resume at most five times, never retry uncertain writes. Prove acceptance,
-execution, playback, listening, source, adoption and device separately.
+Phone绑定owner前台Conversation。轮次HCC取绑定PCM/Conversation/job证据，不用原始metadata/计划提示；查询不建Run。
+重连保快照/约束/epoch权限，handoff仅冻结ID/顺序；挂断恢复历史，清理匹配event ID，耗尽保上下文且允许Turn。
+PCM限制到达，HERV3按时间排序并跳过未用历史；Functions管设置。
+PCM刷新失败只准stop/inspect，fence/挂断优先；保留原因，最多恢复5次，不重试不明写入。
+受理、执行、播放、监听、源码、采用、设备分别验收。
 See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
 [cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
@@ -197,9 +184,8 @@ without Workers; scope-check and retry delivery only. Remote pages fairly;
 closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 `/new` preserves history; PAO owns Agent deletion.
 
-`/say` reads the latest final; `2`–`4` choose a count and `1-3` the latest
-three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
-Workbench/TUI play locally; reboot receipts never prove playback.
+`/say`读最新final；`2`–`4`选条数，`1-3`选最近三条并从旧到新。跳过费用/命令/进度。
+Telegram须送达回执，Workbench/TUI本地播；reboot回执不证明播放。
 
 `/voice`、`/call` 发布/缓存前按隐私路由。AP 优先 VideoTTS（`video_tts_supported: false` 转音频）。
 分组有界有序；音频失败暂停视频，降级仅本组；旧尾取消，迟到任务仅提示恢复，音频串行。See [language voices](HASHIKO_LANGUAGE_VOICES.md),
@@ -208,11 +194,8 @@ Workbench/TUI play locally; reboot receipts never prove playback.
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-AgentPresence is owner-scoped/default-off; HASHI authenticates and freezes
-Agent/Conversation. Only PAO-admitted human/client input triggers owner-route
-feedback; AP-local input never echoes. `/phone` sends scoped leave/return; AP
-owns presentation, HASHI services/voices. Ingress fails closed; surfaces remain
-independent. See [input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md).
+AgentPresence限owner且默认关闭；HASHI认证并冻结Agent/Conversation。仅PAO受理的人类/客户端输入触发owner路由反馈，AP本地输入不回声。
+`/phone`按范围发离开/返回；AP管呈现，HASHI管服务/音色；入口失败关闭，各界面独立。[反馈](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md)。
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

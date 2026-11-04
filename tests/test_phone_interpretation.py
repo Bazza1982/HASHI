@@ -56,3 +56,22 @@ def test_translation_sideband_accepts_subtitles_and_rejects_delegation():
             "delegation": {"id": "task-1", "target": "client"}}))
     with pytest.raises(LiveVoiceError):
         adapter.opening("say hello", "event-1")
+
+
+@pytest.mark.parametrize("model,saved_language,target", [
+    ("hy-simulmt-en-zh", "en", "zh-CN"),
+    ("hy-simulmt-zh-en", "zh-CN", "en"),
+    ("hy-simulmt-en-zh", "auto", "zh-CN"),
+    ("hy-simulmt-zh-en", "ja", "en"),
+])
+def test_interpreter_model_owns_direction_in_saved_and_frozen_selection(tmp_path, model, saved_language, target):
+    manager = PhoneManager(tmp_path)
+    state = dict(manager.DEFAULT_STATE, provider="hy-simulmt", model=model,
+                 voice="default", language=saved_language)
+    original = json.dumps(state)
+    manager.state_path.write_text(original, encoding="utf-8")
+    assert manager.get_state()["language"] == target
+    result = manager.resolve_live_session(display_name="Interpreter", frozen_selection=state)
+    assert result["model"] == model
+    assert result["selection"]["language"] == result["public"]["language"] == target
+    assert manager.state_path.read_text(encoding="utf-8") == original
