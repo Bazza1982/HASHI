@@ -11,6 +11,7 @@
 - 实例身份/端口/秘密保存在私有配置；路径与通配符不增权。allowed_backends/runtime effort 管实例选择，共享能力由原 registry 派生；能力未知不等于不支持，价格未知不等于免费。[实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)、[能力](HASHI_MODEL_CAPABILITY_DISCOVERY.md)。
 
 ## 权限、配置与迁移
+- 权限账本 schema 9 用独立见证拒绝旧备份复活撤销；见证不随普通备份回滚，缺失／不匹配不得重置绕过。恢复／回退仍须对账，[决定与未完成项](permissions/L2_LEDGER_CONTINUITY_20261105.md)、[补验责任](permissions/L2_WAC_CLOSEOUT_20261105.md)。
 
 - L0 保留原执行行为。L1 保留现有批准/续跑；Workzone 不自动成为 OS 硬围栏。L2 硬 Workzone 只保证已验收的 HERV3 受控链：精确根、缺根拒绝、普通审批不扩根，换工具/脚本不能逃逸；独立 backend 和 Compute 执行须另验。[硬边界](permissions/L2_HARD_WORKZONE.md)。
 - L2 host 恢复与审计回原 owner；审计按 epoch 去重，失败不退本地 spool。心跳不是进展；私有桌面/管道/身份不扩权。SCM/profile 回收须核对 SID 与双 hive；维护后的延迟回收不冒充即时卸载。[原生证据与未完成范围](permissions/L2_INTEL_LOCAL_QUALIFICATION_20261105.md)、[WAC](permissions/L2_WINDOWS.md)、[状态](permissions/IMPLEMENTATION_STATUS.md)。
