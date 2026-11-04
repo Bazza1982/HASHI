@@ -1,0 +1,4 @@
+/config.json
+/*.private.json
+/.env
+/output/
