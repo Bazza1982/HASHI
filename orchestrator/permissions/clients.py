@@ -182,7 +182,7 @@ class RemoteRunExecutor:
             if self._level == "L2":
                 # Only the host owns main-loop continuation. Presentation and
                 # companion calls must not overwrite its ready/pending batch.
-                self._stage_provider.bind_provider_context(observer=None)
+                self._stage_provider.bind_provider_context(observer=None, recovery=None)
             self._stage_provider.backend_manager = BrokeredProviderFactory(
                 client, profile_config=public["profiles"],
                 scratch_root=self._owner.workspace_dir, privacy_level=public["privacy_level"],
@@ -318,3 +318,4 @@ def settings_revision(settings):
     raw = asdict(settings)
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).digest()
     return int.from_bytes(digest[:7], "big") + 1
+# HASHI-Fingerprint: hfp_f79ac9a1e4844f57a6c3f6d7b28132f8

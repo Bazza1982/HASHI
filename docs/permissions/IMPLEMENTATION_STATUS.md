@@ -9,6 +9,8 @@
 可信 Worker 的 bytecode 缓存曾使 sealed capsule 完整性检查拒绝启动；153 个新增缓存已逐项保全，9141 原文件摘要均未变化，并重新通过原 qualifier。测试操作者启动环境禁止缓存写入，没有削弱 qualifier。原两份服务账户 profile 仍待受支持回收，全部适用 WAC、生产采用、独立 backend、Compute 服务器端与用户实际前端均不得据此冒称完成。
 
 
+完整 bb8b4f80 包随后在 Intel 的独立普通 Core/shared/Worker 通过公开 Session API 到达实际 L2 模型接线，配置读取缺口消失；但原 Worker 清理模型私有上下文时遗漏必填 recovery 参数，Run 明确 failed。原生失败保留。现按原 StageProvider 合同同时清空 observer/recovery，真正恢复数据仍单独交给受限 host；L1 不走该清空分支。实际 StageProvider 两项 RED、L1对照原先通过，修复后接线/采用/真实服务回环/恢复组合22通过。另有期限测试误把系统时钟与 authority 的防回拨时钟混比，改用已有 observed_time 严格界定120秒；授权实现未改，相关55通过。完整新包及普通 Worker 后续仍须实际核实。
+
 ## 2026-11-04：Intel 服务态宿主与私密诊断修复（完整包实测待完成）
 
 本轮在既有 HASHI3 main 开发，Intel 使用独立完整 sealed capsule；未推送、合并或生产采用。原始服务组件报告和 profile 回收失败保持原状，延迟回收写独立 recovery receipt，不改写原失败。两份自有测试账户在每轮测试后禁用并撤销服务登录权，不继续创建同类账户。

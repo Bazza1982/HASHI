@@ -69,3 +69,12 @@ L1 已验证的 NP 四按钮、续跑和回收结果不重写为未开发，也�
 发布前仍须执行 [ACCEPTANCE](ACCEPTANCE.md) 的实体 CASE-L2/WAC，包括整个受限 HERV3 host、Runner、服务身份、网络、撤权、故障和全回收。共享主机上既有两份测试 profile 回收未过的阻碍保留，不继续制造账户或强行重启系统服务。Compute 若有实际远端执行，还须独立完成上节服务和端到端验收。
 
 源码实现、离线验证、Windows 组件资格、完整本地安装验收、Compute 端到端验收、运行采用、GitHub/生产发布分别记录；任何一项的完成不能替代其余项。当前证据见 [实施状态](IMPLEMENTATION_STATUS.md)。
+
+## 2026-11-05：普通 Worker 的恢复上下文归属
+
+L2 主循环的私有 checkpoint 只归受限 host。普通 Worker 的呈现及伴随模型
+适配器按其原合同同时清空 observer 和 recovery；经过 PAO 采用的原任务恢复
+快照仍单独交给 host，不被清空或改成新任务。L1 继续保留自己的恢复绑定。
+真实普通 Worker 入口发现旧调用缺少必填 recovery 参数，任务明确失败；
+真实 StageProvider 的新任务、续跑两红及 L1 对照保留，修复后相关22项通过。
+新完整版本的原生普通 Worker、完整 WAC 和实例采用仍分别核实。
