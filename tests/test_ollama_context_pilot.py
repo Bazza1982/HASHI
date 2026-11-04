@@ -129,6 +129,110 @@ def test_native_context_unknown_capacity_fails_closed(tmp_path):
         adapter._build_payload([{"role": "user", "content": "task"}])
 
 
+def _small_model_options(adapter):
+    options = adapter.config.extra["model_capabilities"]["local-qwen"]
+    options.update({
+        "ollama_native_context": True,
+        "ollama_url": "http://localhost:11434/v1/chat/completions",
+        "context_window_tokens": 8192,
+        "response_headroom_tokens": 2048,
+        "ollama_max_input_chars": 25000,
+    })
+    return options
+
+
+def test_exact_model_context_survives_switch_without_changing_other_models(tmp_path):
+    adapter = _adapter(tmp_path, enabled=False)
+    _small_model_options(adapter)
+    adapter.config.extra["provider_reasoning"] = "off"
+    messages = [{"role": "user", "content": "task"}]
+
+    small = adapter._build_payload(messages)
+    assert small["options"] == {"num_ctx": 8192, "num_predict": 2048}
+    assert small["truncate"] is False
+    adapter.config.model = "other-model"
+    other = adapter._build_payload(messages)
+    assert other["options"] == {"num_ctx": 32768, "num_predict": 4096}
+    assert "truncate" in other
+    adapter.config.model = "local-qwen"
+    assert adapter._build_payload(messages) == small
+
+
+def test_exact_model_context_is_bound_to_configured_endpoint(tmp_path):
+    adapter = _adapter(tmp_path, enabled=False)
+    _small_model_options(adapter)
+    adapter.ollama_url = "http://different.invalid/v1/chat/completions"
+
+    with pytest.raises(ProviderContextCapacityPreflightError):
+        adapter._build_payload([{"role": "user", "content": "task"}])
+
+
+@pytest.mark.asyncio
+async def test_encoded_input_limit_blocks_before_any_physical_probe(tmp_path):
+    adapter = _adapter(tmp_path, enabled=False)
+    _small_model_options(adapter)["ollama_max_input_chars"] = 1000
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "message": {"content": "answer"}, "done": True,
+            "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 1,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("汉" * 200, "encoded-budget")
+
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_exact_model_token_reserve_blocks_full_generation(tmp_path):
+    adapter = _adapter(tmp_path, enabled=False)
+    _small_model_options(adapter)
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "message": {"content": "a"}, "done": True,
+            "done_reason": "length", "prompt_eval_count": 7000, "eval_count": 1,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("task", "token-budget")
+
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert len(requests) == 1
+    assert requests[0]["options"] == {"num_ctx": 8192, "num_predict": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_error,expected_code,attempts", [
+    ("resource_profile_unverified", "PROVIDER_RESOURCE_PROFILE_UNVERIFIED", 1),
+    ("temporary backend unavailable", "PROVIDER_SERVER_ERROR", 4),
+])
+async def test_qualification_rejection_stops_only_its_own_transport_recovery(
+    tmp_path, upstream_error, expected_code, attempts
+):
+    adapter = _adapter(tmp_path, enabled=False)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 0
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(503, json={"error": upstream_error})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("task", "qualified-recovery")
+
+    assert response.error_code == expected_code
+    assert len(requests) == attempts
 def test_native_context_memory_controls_are_exact_model_scoped(tmp_path):
     adapter = _adapter(tmp_path)
     adapter.config.extra["model_capabilities"]["local-qwen"].update({

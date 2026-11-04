@@ -46,6 +46,8 @@ def close_tool_loop(adapter, payload):
 async def check_native_capacity(
     adapter, payload, *, request_id, provider_calls, allow_close=True,
 ):
+    # Recheck the changed closing payload before any physical one-token probe.
+    adapter._preflight_payload_capacity(payload)
     # Ollama 0.35 has no public tokenizer/count API. num_predict=0 selects its
     # default generation budget; it is NOT a count-only request. Use exactly
     # one token with the same messages/tools/template/context and no callbacks.

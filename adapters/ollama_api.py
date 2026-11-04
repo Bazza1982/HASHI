@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -75,7 +76,40 @@ class OllamaAdapter(OpenRouterAdapter):
         return self._chat_completions_url()
 
     def _native_context_enabled(self) -> bool:
-        return (getattr(self.config, "extra", None) or {}).get("ollama_native_context") is True
+        extra = getattr(self.config, "extra", None) or {}
+        options = self._model_context_options()
+        enabled = options.get("ollama_native_context", extra.get("ollama_native_context", False))
+        if "ollama_native_context" in options and type(enabled) is not bool:
+            raise ValueError("Ollama model context opt-in must be boolean")
+        if enabled is not True:
+            return False
+        endpoint = options.get("ollama_url")
+        if endpoint is not None:
+            def endpoint_key(value):
+                parts = urlsplit(str(value))
+                path = parts.path.rstrip("/")
+                for suffix in ("/v1/chat/completions", "/api/chat"):
+                    if path.endswith(suffix):
+                        path = path[:-len(suffix)]
+                        break
+                return parts.scheme.lower(), parts.netloc.lower(), path, parts.query
+
+            if endpoint_key(endpoint) != endpoint_key(self.ollama_url):
+                raise ProviderContextCapacityPreflightError(
+                    "The selected model capacity is qualified for a different Ollama endpoint."
+                )
+        return True
+
+    def _model_context_options(self) -> Mapping:
+        extra = getattr(self.config, "extra", None) or {}
+        rows = extra.get("model_capabilities", {})
+        row = rows.get(self.config.model, {}) if isinstance(rows, Mapping) else {}
+        return row if isinstance(row, Mapping) else {}
+
+    def project_pcm_payload(self, payload, *, render_prompt):
+        from adapters.ollama_context import project_pcm_payload
+
+        return project_pcm_payload(self, payload, render_prompt=render_prompt)
 
     def project_main_references(self, refs):
         from adapters.ollama_context import project_references
@@ -128,6 +162,20 @@ class OllamaAdapter(OpenRouterAdapter):
         # compressible text. Admission uses the exact final payload in the
         # asynchronous native check, after outbound privacy filtering.
         self._native_capacity()
+        limit = self._model_context_options().get("ollama_max_input_chars")
+        if limit is not None:
+            if type(limit) is not int or limit < 1:
+                raise ValueError("Ollama input character limit must be a positive integer")
+            # Match the managed native owner's encoded-object counting contract.
+            encoded = json.dumps({
+                key: value for key, value in payload.items()
+                if key not in {"options", "keep_alive", "stream"}
+            })
+            if len(encoded) > limit:
+                raise ProviderContextCapacityPreflightError(
+                    f"Ollama input has {len(encoded)} encoded characters; "
+                    f"the configured qualified limit is {limit}."
+                )
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(

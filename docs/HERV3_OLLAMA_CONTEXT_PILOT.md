@@ -1,5 +1,43 @@
 # HERV3 Ollama context pilot
 
+## Exact-model input qualification — 2026-11-04
+
+The context opt-in can be declared on an exact `model_capabilities` row.
+That model's boolean overrides the backend-level compatibility opt-in. Existing
+unconfigured models keep their previous request parameters. Resolve again after
+a model switch; never cache one model's capacity as the backend's default.
+A row may bind `ollama_url` to the qualified endpoint; the native and
+OpenAI-compatible chat routes on the same endpoint are equivalent bindings.
+A different endpoint fails before inference.
+
+Use the existing capacity resolver for `context_window_tokens` and
+`response_headroom_tokens`. An optional positive `ollama_max_input_chars`
+also bounds the complete encoded inference object: count Python's default
+JSON representation excluding only options, keep_alive and stream, matching
+the managed native owner's admission contract. Check it before every physical
+one-token probe, including a changed closing payload. Characters and tokens
+are independent limits. These fields select an operating envelope; Compute
+remains authoritative for measured identity, shape and resource admission.
+
+Direct Ollama callers now use the existing typed PCM renderer for a
+model-facing discovery index. Only unprotected tool catalogue text is indexed;
+the full catalogue remains in a private hashed reference. Canonical transport,
+authority and protected instructions remain intact. Other adapters do not opt
+into this projection, and an unconfigured model retains its original prompt.
+The final privacy-filtered payload still passes character and native token
+admission; a protected input that cannot fit fails rather than being truncated.
+
+The stable upstream `resource_profile_unverified` refusal is reported as
+`PROVIDER_RESOURCE_PROFILE_UNVERIFIED` and is not retried against unchanged
+parameters. Generic transient 503 recovery retains its existing behavior.
+
+Approval, implementation and live acceptance are separate facts. The scoped
+repair is approved and its behavioral red/green evidence is recorded with the
+change. Instance overrides and live qualification/adoption receipts remain in
+the instance's ignored review records; publication alone does not prove a
+running Worker or real-model call has adopted this behavior.
+
+
 ## Current status and integration scope — 2026-10-18
 
 Publication of `feature-ollama` to GitHub `main` through a pull request is now

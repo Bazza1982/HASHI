@@ -62,6 +62,45 @@ def _historical_recovery_index(text):
     )
 
 
+def project_pcm_payload(adapter, payload, *, render_prompt):
+    """Project typed discovery text; canonical PCM and its authority stay intact."""
+    if (adapter._model_context_options().get("ollama_native_context") is not True
+            or not adapter._native_context_enabled()):
+        return payload
+    sections = deepcopy(payload.get("transport_snapshot", {}).get("sections", []))
+    originals = []
+    for row in sections:
+        if row.get("key") != "tools_catalogue" or row.get("protected"):
+            continue
+        original = str(row.get("text") or "")
+        indexed = _tool_index(original)
+        if indexed == original:
+            continue
+        originals.append({"key": row["key"], "text": original})
+        row["text"] = indexed
+    if not originals:
+        return payload
+    if not callable(render_prompt):
+        raise ValueError("Typed PCM discovery projection requires its owning renderer")
+    path, digest = _save_result(
+        adapter, json.dumps(originals, ensure_ascii=False, indent=2),
+        directory="ollama_context_refs",
+    )
+    for row in sections:
+        if any(source["key"] == row.get("key") for source in originals):
+            row["text"] += f"\nfull_reference: {path}\nsha256: {digest}"
+    projected = deepcopy(payload)
+    projected["final_prompt"] = render_prompt(sections)
+    projected.setdefault("audit", {})["model_reference_projection"] = {
+        "original_chars": len(payload["final_prompt"]),
+        "projected_chars": len(projected["final_prompt"]),
+        "saved_reference": str(path), "sha256": digest,
+        "projected_keys": [row["key"] for row in originals],
+        "canonical_transport_preserved": True,
+    }
+    return projected
+
+
 def project_references(adapter, refs):
     if not adapter._native_context_enabled():
         return refs

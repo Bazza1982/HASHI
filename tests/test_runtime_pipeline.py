@@ -1117,6 +1117,56 @@ async def test_build_turn_prompt_passes_backend_pcm_token_budget():
 
 
 @pytest.mark.asyncio
+async def test_direct_small_ollama_projects_discovery_without_losing_pcm(tmp_path):
+    from adapters.ollama_api import OllamaAdapter
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.pcm import render_pcm_document
+
+    runtime = _runtime()
+    runtime.config.active_backend = "ollama-api"
+    pcm = tmp_path / "agent.md"
+    pcm.write_text(render_pcm_document(
+        persona="KEEP_PERSONA", system="KEEP_SYSTEM", memory="",
+    ), encoding="utf-8")
+    backend = OllamaAdapter(SimpleNamespace(
+        name="small", engine="ollama-api", model="small-qwen",
+        workspace_dir=tmp_path, system_md=pcm,
+        extra={"model_capabilities": {"small-qwen": {
+            "ollama_native_context": True, "context_window_tokens": 8192,
+            "response_headroom_tokens": 2048, "ollama_max_input_chars": 25000,
+        }}},
+    ), SimpleNamespace())
+    runtime.backend_manager.current_backend = backend
+    discovery = "- file_read: " + ("extended discovery details " * 1200).rstrip()
+    runtime.context_assembler = BridgeContextAssembler(
+        BridgeMemoryStore(tmp_path), pcm,
+        tool_catalog_provider=lambda: [("file_read", discovery.partition(": ")[2])],
+    )
+    item = _item(source="text", prompt="KEEP_CURRENT_TASK")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+
+    assert "KEEP_CURRENT_TASK" in prompt.final_prompt
+    assert "KEEP_SYSTEM" in prompt.final_prompt
+    assert "KEEP_PERSONA" in prompt.final_prompt
+    assert discovery not in prompt.final_prompt
+    assert "file_read" in prompt.final_prompt
+    projection = runtime._last_prompt_audit["model_reference_projection"]
+    original = Path(projection["saved_reference"]).read_text(encoding="utf-8")
+    assert discovery in original
+    assert projection["projected_chars"] < projection["original_chars"]
+    backend.config.model = "other-model"
+    runtime_pipeline.begin_queue_item(runtime, item)
+    other = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    assert discovery in other.final_prompt
+    backend.config.extra["ollama_native_context"] = True
+    runtime_pipeline.begin_queue_item(runtime, item)
+    legacy = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    assert discovery in legacy.final_prompt
+
+
+@pytest.mark.asyncio
 async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
     monkeypatch,
 ):
