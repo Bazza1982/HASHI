@@ -59,9 +59,14 @@ async def deliver_run_caption(runtime: Any, run: Mapping[str, Any], owner: str) 
     from orchestrator.agent_presence_notify import AgentPresenceConnectorAdapter
     from orchestrator.frontend_dispatch import FrontendDispatcher
     store = runtime.session_store
+    route = run.get("delivery_route") or {}
+    destination = next((item for item in [route.get("primary"), *route.get("mirrors", [])]
+                        if item and item.get("surface") == "agentpresence"), None)
+    if destination is None:
+        return None
     claim = await asyncio.to_thread(
         store.claim_run_delivery_outbox, request_id=str(run["request_id"]), owner_id=owner,
-        surface="agentpresence", channel_key=owner,
+        surface="agentpresence", channel_key=str(destination["channel_key"]),
         worker_id="fc-agentpresence-caption-" + str(run["request_id"])[:48])
     if not claim or claim.get("state") != "claimed":
         return claim
