@@ -1996,11 +1996,6 @@ def finish_request_from_listener(
             request_id,
             type(exc).__name__,
         )
-    try:
-        from orchestrator.agent_presence_captions import schedule_run_caption
-        schedule_run_caption(runtime, completed_run, scoped_owner)
-    except Exception as exc:
-        side_errors.append(_terminal_side_error("optional_caption_projection", exc))
     return TerminalResolution(
         payload=canonical_payload,
         run=dict(completed_run),
