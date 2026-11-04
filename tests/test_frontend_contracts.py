@@ -136,7 +136,7 @@ def test_registry_maps_legacy_names_to_connector_neutral_ids():
         "media",
     ]
     assert agentpresence["owner_mirror"] is True
-    assert agentpresence["delivery_content_modes"] == ["media"]
+    assert agentpresence["delivery_content_modes"] == ["text", "media"]
     adapter_ids = {
         item["id"] for item in registry["compatibility_adapters"]
     }

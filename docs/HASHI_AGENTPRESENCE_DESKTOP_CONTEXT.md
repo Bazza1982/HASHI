@@ -41,3 +41,10 @@ FYI: implementation and offline qualification do not prove a running instance
 has adopted these Functions, an actual microphone call passed, or production
 was deployed. Adoption, actual Phone/Call operation and cold/warm/busy latency
 are recorded separately in the integration task.
+
+Public caption delivery uses the existing authenticated Frontend Event outbox.
+The Presence connector supports text and media; text remains a disposable native
+projection, not another conversation store. Clients bind sequence deduplication
+to the complete current desktop target and retain rejection of stale events.
+Portable voice previews are qualified against the current source manifest and
+every declared asset's format, length and digest, not a fixed catalogue size.

@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- Presence公开字幕沿用认证FC发件箱，支持text/media；主会话/代次和route仍由既有owner核验。Portable语音样例按当前manifest及资源摘要验收，不固定数量。[FC](HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md)。
+
 - Ollama：精确模型/端点容量同时检查编码字符与native tokens；直接路径按预算折叠已完成历史为摘录/可回读索引，保留权威PCM与完整来源，小上下文关闭余量按容量派生，完整结果可容纳且native准入时保留后续工具；其他模型不变。短对话通过不代表多轮历史及引用回读通过，采用与实测独立记录。[HERV3](HERV3_OLLAMA_CONTEXT_PILOT.md)。
 
 - [实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)保身份/验退出；[迁出](HASHI_AGENT_MOVE_V1.md)凭证收尾。
