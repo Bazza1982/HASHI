@@ -148,7 +148,9 @@ class RestrictedHerRunner:
                 # the fixed reader before writing a potentially large bootstrap;
                 # a suspended reader would fill the OS pipe buffer and deadlock.
                 record["process"].start()
-            await asyncio.to_thread(record["pipe"].send, bootstrap)
+            # The caller cannot choose audit identity; this is the owned Run.
+            await asyncio.to_thread(record["pipe"].send, {
+                **bootstrap, "execution_epoch": binding.context.execution_epoch})
             while True:
                 try:
                     frame = await asyncio.to_thread(record["pipe"].receive, timeout_s=.25)
@@ -359,3 +361,4 @@ class RunnerClient:
             raise PermissionDenied("host cleanup remains unverified")
         self._prepared.pop(binding.context.execution_epoch, None)
         return True
+# HASHI-Fingerprint: hfp_2bbd9d6e7aaf4951bf0585b980fd3ba6

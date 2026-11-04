@@ -35,7 +35,8 @@ def command(registry):
 
 
 @pytest.mark.asyncio
-async def test_full_her_host_preserves_pending_batch_without_replanning(environment, tmp_path):
+@pytest.mark.parametrize("context_refresh", [False, True])
+async def test_full_her_host_preserves_pending_batch_without_replanning(environment, tmp_path, context_refresh):
     authority, issuer, context, _, base = environment
     supervisor = RecoverableFileSupervisor(authority, tmp_path)
     registry = durable_registry(base, authority, context, supervisor, tmp_path)
@@ -65,6 +66,7 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
                 checkpoints.append(coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id))
                 return metadata
             assert method == "audit_record"
+            coordinator.record_runtime_event(turn, arguments["record"])
             audits.append(copy.deepcopy(arguments["record"]))
             return str(len(audits))
 
@@ -91,8 +93,9 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     host_root = tmp_path / "host"
     host_root.mkdir()
     payload = command(registry)
+    payload["turn_id"] = turn.turn_id
     first = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit,
-                              brokered_forensics=True)
+                              brokered_forensics=True, execution_epoch=context.execution_epoch)
     assert first["state"] == "parked", first
     assert len(model_calls) == 1
     assert not (tmp_path / "report.txt").exists()
@@ -105,8 +108,13 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     authority.bind_execution(successor)
     registry = durable_registry(base, authority, successor, supervisor, tmp_path)
     payload["recovery"] = checkpoints[-1]
+    if context_refresh:
+        payload["prompt"] = "Fresh PCM context after approval. " + payload["prompt"]
     second = await run_command(payload, client=Connection(), scratch_root=host_root, emit=emit,
-                               brokered_forensics=True)
+                               brokered_forensics=True, execution_epoch=successor.execution_epoch)
+    assert {record["payload"].get("execution_epoch") for record in audits} >= {
+        context.execution_epoch, successor.execution_epoch,
+    }
     assert second["state"] == "completed", second
     result = unpack(second["result"])
     assert result.terminal_state is TerminalState.COMPLETED, result.error
@@ -116,6 +124,12 @@ async def test_full_her_host_preserves_pending_batch_without_replanning(environm
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "report-write"
     assert audits and events
 
+    from orchestrator.her_v2.session_store import HerSessionStoreError
+    existing = next(row for row in audits if row["event"] == "request_received")
+    with pytest.raises(HerSessionStoreError, match="different immutable facts"):
+        coordinator.record_runtime_event(turn, {
+            **existing, "payload": {**existing["payload"], "request": "changed in the same epoch"},
+        })
 
 
 @pytest.mark.asyncio

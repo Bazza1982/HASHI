@@ -44,7 +44,14 @@ class _BrokerAuditWriter:
         return self._client.call("audit_record", {"record": dict(record)})
 
 
-async def run_command(command, *, client, scratch_root, emit, brokered_forensics=False):
+class _NoHostAuditSpool:
+    def append(self, record):
+        # The disposable sandbox cannot replace the original recovery owner.
+        raise OSError("required runtime audit must reach its original owner")
+
+
+async def run_command(command, *, client, scratch_root, emit, brokered_forensics=False,
+                      execution_epoch=None):
     """Run the real engine and adapters; neither RPC errors nor parks retry tools."""
     if not isinstance(command, dict) or set(command) != _FIELDS:
         raise ValueError("invalid qualified HER command")
@@ -68,8 +75,12 @@ async def run_command(command, *, client, scratch_root, emit, brokered_forensics
     ports = HostRuntimePorts(client)
     factory._artifact_ports = ports if ports.manifest["media_ports"] else None
     services = ports.services()
-    audit = DurableAuditLog(primary_writer=_BrokerAuditWriter(client),
-                            fallback_path=root / "audit-fallback.jsonl")
+    audit = DurableAuditLog(
+        primary_writer=_BrokerAuditWriter(client),
+        **({"fallback_writer": _NoHostAuditSpool()} if brokered_forensics
+           else {"fallback_path": root / "audit-fallback.jsonl"}))
+    if execution_epoch is not None:
+        audit = audit.for_execution_epoch(execution_epoch)
     usage = []
 
     async def stream(event):
@@ -158,7 +169,8 @@ def main():
     pipe = JsonPipe(PipeConnection(int(sys.argv[1])))
     try:
         initial = pipe.receive(timeout_s=10)
-        if not isinstance(initial, dict) or set(initial) != {"endpoint", "public_key", "command"}:
+        if (not isinstance(initial, dict) or set(initial) != {"endpoint", "public_key", "command", "execution_epoch"}
+                or initial["execution_epoch"] is None):
             raise ValueError("invalid HER host bootstrap")
         client = PermissionPipeClient(
             initial["endpoint"],
@@ -171,7 +183,7 @@ def main():
 
         response = asyncio.run(run_command(initial["command"], client=client,
                                             scratch_root=Path(sys.argv[2]), emit=emit,
-                                            brokered_forensics=True))
+                                            brokered_forensics=True, execution_epoch=initial["execution_epoch"]))
         pipe.send({"type": "result", "result": response})
     except BaseException as error:
         # Trusted supervisor retains diagnostics; the agent cannot obtain
