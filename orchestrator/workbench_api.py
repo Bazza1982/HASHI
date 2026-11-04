@@ -5849,7 +5849,17 @@ class WorkbenchApiServer:
             )
             for agent_row in agent_rows
         ])
-        return web.json_response({"ok": True, "agents": agents})
+        result = {"ok": True, "agents": agents}
+        if include_inactive:
+            from orchestrator.agent_move.service import completed_agent_departures
+            try:
+                result["agent_departures"] = await asyncio.to_thread(
+                    completed_agent_departures, self.config_path.parent
+                )
+            except (OSError, ValueError):
+                # A failed retirement read must never be replaced by inferred absence.
+                result["agent_departures"] = None
+        return web.json_response(result)
 
     async def handle_agent_metadata(self, request):
         if not self._check_admin_auth(request):
@@ -10928,6 +10938,7 @@ class WorkbenchApiServer:
 
     async def handle_tui_speech(self, request):
         """Generate Workbench audio plus any enabled owner-mirror presentation."""
+        from orchestrator.speech_tasks import SpeechTaskError
 
         try:
             payload = await request.json()
@@ -10945,9 +10956,17 @@ class WorkbenchApiServer:
         text = str(payload.get("text") or "").strip()
         request_id = str(payload.get("request_id") or "").strip()
         source_language = str(payload.get("source_language") or "").strip()
+        operation = payload.get("operation", "generate")
+        performance_context = payload.get("performance_context")
+        retry_of = payload.get("retry_of")
+        if retry_of is not None and (not isinstance(retry_of, str) or not retry_of or len(retry_of) > 160):
+            return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
+        if (operation not in {"generate", "prepare", "start_generate", "start_prepare", "status", "cancel"}
+                or (performance_context is not None and not isinstance(performance_context, dict))):
+            return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
         if (
-            not text
-            or len(text) > 20_000
+            (not text and operation not in {"status", "cancel"})
+            or (operation not in {"prepare", "start_prepare"} and len(text) > 20_000)
             or not request_id
             or len(request_id) > 160
             or (
@@ -10966,9 +10985,23 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            result = method(text, request_id, source_language or None)
+            kwargs = {}
+            if operation != "generate":
+                kwargs["operation"] = operation
+            if performance_context is not None:
+                kwargs["performance_context"] = performance_context
+            if retry_of is not None:
+                kwargs["retry_of"] = retry_of
+            result = method(text, request_id, source_language or None, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
+        except SpeechTaskError as exc:
+            return web.json_response({"ok": False, "code": exc.code, "error": str(exc)},
+                                     status=404 if exc.code == "speech_task_not_found" else 409)
+        except ValueError as exc:
+            if str(exc) == "speech_split_required":
+                return web.json_response({"ok": False, "code": "speech_split_required"}, status=422)
+            return web.json_response({"ok": False, "code": "invalid_speech_request"}, status=400)
         except VoiceSynthesisError as exc:
             logging.getLogger("BridgeU.Workbench").warning(
                 "TUI speech generation failed: agent=%s code=%s reason=%s",
@@ -11000,6 +11033,12 @@ class WorkbenchApiServer:
                 status=503,
             )
         response = dict(result or {})
+        if response.get("task_error"):
+            code = response["task_error"]
+            return web.json_response({"ok": False, "code": code, "error": code,
+                                      "accepted": response.get("accepted"),
+                                      "retryable": response.get("retryable", False)},
+                                     status=404 if code == "speech_task_not_found" else 422 if code == "speech_split_required" else 429 if code == "speech_queue_full" else 409)
         if len(str(response.get("content_b64") or "")) > 4_200_000:
             return web.json_response(
                 {"ok": False, "code": "speech_asset_too_large", "error": "generated speech is too large"},

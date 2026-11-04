@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from typing import BinaryIO
+import tempfile
+import wave
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -77,11 +80,48 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
             )
         return value
 
-    async def _request(self, body: dict) -> tuple[bytes, str]:
+    async def prepare_performance(self, text: str) -> dict:
+        """Separate planning deadline; never archive the text or returned direction."""
+        if (self.service.get("automatic_performance") is False
+                or self.service.get("location") not in {"local", "lan"}):
+            raise ValueError("Automatic performance is unavailable for this service")
         key = self._credential()
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        maximum = int(self.service["max_response_bytes"])
-        timeout = aiohttp.ClientTimeout(total=float(self.service["timeout_seconds"]))
+        from orchestrator.speech_budget import remaining_speech_budget
+        planning_budget = remaining_speech_budget()
+        planning_timeout = min(100., planning_budget) if planning_budget is not None else 100.
+        if planning_budget is not None:
+            headers["X-Hashi-Speech-Budget-Ms"] = str(max(1, int(planning_timeout*1000)))
+        timeout = aiohttp.ClientTimeout(total=planning_timeout, sock_connect=10, sock_read=planning_timeout)
+        async with self.session_factory(timeout=timeout, trust_env=False) as session:
+            async with session.post(
+                str(self.service["base_url"]).rstrip("/") + "/speech/performance",
+                json={"model": self.service["model"], "input": text},
+                headers=headers, allow_redirects=False,
+            ) as response:
+                raw = await response.content.read(16385)
+                if response.status != 200 or len(raw) > 16384:
+                    raise ValueError("Automatic performance planning failed")
+                from orchestrator.speech_performance import checked_plan
+                value = json.loads(raw)
+                return checked_plan(value.get("plan"), self.service["model"])
+
+    async def _request(self, body: dict, *, sink: BinaryIO | None = None) -> tuple[bytes, str]:
+        key = self._credential()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        maximum = self.service["max_response_bytes"]
+        total_timeout = self.service["timeout_seconds"]
+        from orchestrator.speech_budget import remaining_speech_budget
+        task_budget = remaining_speech_budget()
+        if task_budget is not None:
+            total_timeout = min(float(total_timeout or 120), task_budget)
+            if self.service.get("location") in {"local", "lan"}:
+                headers["X-Hashi-Speech-Budget-Ms"] = str(max(1, int(total_timeout * 1000)))
+        timeout = aiohttp.ClientTimeout(
+            total=total_timeout, sock_connect=10, sock_read=total_timeout or 120,
+        )
+        if maximum is None and sink is None:
+            raise ValueError("Unbounded speech responses require a file sink")
         try:
             async with self.session_factory(timeout=timeout, trust_env=False) as session:
                 async with session.post(
@@ -120,18 +160,23 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
                             retryable=retryable,
                         )
                     chunks: list[bytes] = []
+                    prefix = bytearray()
                     total = 0
                     async for chunk in response.content.iter_chunked(16384):
                         total += len(chunk)
-                        if total > maximum:
+                        if maximum is not None and total > maximum:
                             raise OpenAICompatibleTTSError(
                                 "tts_response_limit",
                                 f"{self.service_id} TTS response exceeded the configured limit.",
                                 retryable=False,
                             )
-                        chunks.append(chunk)
+                        if sink is None:
+                            chunks.append(chunk)
+                        else:
+                            sink.write(chunk)
+                            prefix.extend(chunk[:max(0, 65536-len(prefix))])
                     media_type = response.headers.get("Content-Type", "")
-                    return b"".join(chunks), media_type
+                    return bytes(prefix) if sink is not None else b"".join(chunks), media_type
         except OpenAICompatibleTTSError:
             raise
         except TimeoutError as exc:
@@ -147,6 +192,40 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
                 retryable=True,
             ) from exc
 
+    async def _stream_asset(self, body, output_dir, stem, text, spoken_text):
+        """Spool one response with bounded memory; publish only after normal EOF."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        selected_format = body["response_format"]
+        ogg_path = output_dir / f"{stem}.ogg"
+        converter = (
+            configured_media_executable("ffmpeg", bridge_home=self.bridge_home)
+            or self.ffmpeg_cmd
+        )
+        with tempfile.TemporaryDirectory(prefix=".speech-", dir=output_dir) as temporary:
+            source = Path(temporary) / f"source.{selected_format}"
+            with source.open("wb") as sink:
+                prefix, media_type = await self._request(body, sink=sink)
+            validate_speech_audio(
+                prefix, media_type, selected_format,
+                pcm_sample_rate_hz=int(self.service["pcm_sample_rate_hz"]),
+            )
+            if selected_format == "pcm":
+                if source.stat().st_size % 2:
+                    raise SpeechProtocolError("tts_audio_format_invalid", "Invalid PCM audio.")
+                wrapped = Path(temporary) / "source.wav"
+                with wave.open(str(wrapped), "wb") as audio, source.open("rb") as raw:
+                    audio.setparams((1, 2, int(self.service["pcm_sample_rate_hz"]), 0, "NONE", ""))
+                    for chunk in iter(lambda: raw.read(65536), b""):
+                        audio.writeframesraw(chunk)
+                source = wrapped
+            converted = Path(temporary) / "complete.ogg"
+            await convert_audio_to_ogg(converter, source, converted)
+            converted.replace(ogg_path)
+        return VoiceAsset(
+            provider=self.service_id, text=text, spoken_text=spoken_text,
+            wav_path=None, ogg_path=ogg_path,
+        )
+
     async def synthesize(
         self,
         text: str,
@@ -157,7 +236,8 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
         max_chars: int = 1200,
         provider_options: dict | None = None,
     ) -> VoiceAsset:
-        maximum = min(int(max_chars), int(self.service.get("max_input_chars", max_chars)))
+        advertised = self.service.get("max_input_chars")
+        maximum = min(int(max_chars), int(advertised)) if advertised is not None else int(max_chars)
         spoken_text = self.prepare_spoken_text(text, max_chars=maximum)
         if not spoken_text:
             raise OpenAICompatibleTTSError(
@@ -183,6 +263,8 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
                 response_format=response_format,
                 options=options,
             )
+            if self.service["max_response_bytes"] is None:
+                return await self._stream_asset(body, output_dir, stem, text, spoken_text)
             payload, media_type = await self._request(body)
             audio = validate_speech_audio(
                 payload,

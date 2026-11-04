@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-from pathlib import Path
 import subprocess
 
 import pytest
@@ -33,7 +32,9 @@ def _installed(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows DACL publication")
-@pytest.mark.parametrize("publisher", ["incarnation", "admin", "migration", "group"])
+@pytest.mark.parametrize("publisher", [
+    "incarnation", "admin", "migration", "group", "move", "move_recovery",
+])
 def test_normal_pao_publication_keeps_only_installed_authority_read_access(tmp_path, publisher):
     path = _installed(tmp_path)
     if publisher == "incarnation":
@@ -49,6 +50,17 @@ def test_normal_pao_publication_keeps_only_installed_authority_read_access(tmp_p
         directory = AgentDirectory(path, tmp_path / "capabilities.json", [])
         ok, message = directory.create_group("qualification")
         assert ok, message
+    elif publisher in {"move", "move_recovery"}:
+        from orchestrator.agent_move import service
+        document = read_config_json(path)
+        document["agents"][0]["is_active"] = False
+        if publisher == "move":
+            service._atomic_json(path, document)
+        else:
+            service._restore_json_snapshot(
+                path, json.dumps(document).encode("utf-8"),
+                published_revision=document.revision,
+            )
     else:
         admin = ConfigAdmin(build_bridge_paths(tmp_path, bridge_home=tmp_path))
         document = admin.load_raw_config()
@@ -77,17 +89,34 @@ def test_invalid_or_broad_service_reader_cannot_publish(tmp_path, sid):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows DACL publication")
-def test_cross_account_publication_keeps_revision_conflicts_and_private_secrets(tmp_path):
+@pytest.mark.parametrize("publisher", ["agent", "move", "move_recovery"])
+def test_cross_account_publication_keeps_revision_conflicts_and_private_secrets(
+    tmp_path, publisher,
+):
     from orchestrator.agent_config_json import write_agent_config_json
     from orchestrator.config_json import ConfigConflictError
     path = _installed(tmp_path)
+    if publisher == "move":
+        from orchestrator.agent_move.service import _atomic_json
+        publish = _atomic_json
+    elif publisher == "move_recovery":
+        from orchestrator.agent_move.service import _restore_json_snapshot
+
+        def publish(destination, document):
+            return _restore_json_snapshot(
+                destination, json.dumps(document).encode("utf-8"),
+                published_revision=document.revision,
+            )
+    else:
+        publish = write_agent_config_json
+
     first, stale = read_config_json(path), read_config_json(path)
     first["unowned"]["newer"] = True
-    write_agent_config_json(path, first)
+    publish(path, first)
     before = path.read_bytes()
     stale["unowned"]["lost"] = True
     with pytest.raises(ConfigConflictError):
-        write_agent_config_json(path, stale)
+        publish(path, stale)
     assert path.read_bytes() == before
     private = tmp_path / "secrets.json"
     write_config_json(private, {"workbench_admin_token": "synthetic-only"})

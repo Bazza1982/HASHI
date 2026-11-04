@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -1420,6 +1421,7 @@ def cleanup_source_agent(
                 package_id=package_id,
                 target_instance=target_instance,
                 target_agent_id=target_agent_id,
+                agent_lifecycle_id=source_lifecycle_id,
             )
             if valid_agent_lifecycle_id(source_lifecycle_id):
                 retire_agent_state(
@@ -1451,6 +1453,103 @@ def cleanup_source_agent(
             state.pop(key, None)
         _atomic_json(state_path, state, mode=0o600)
         return state
+
+
+def completed_agent_departures(hashi_root: Path | str) -> dict[str, Any]:
+    """Project positive, source-bound retirement facts, never absence from a roster."""
+    root = _root(hashi_root)
+    source = _configured_instance_id(root)
+    audit = _load_json_or_default(root / "state" / "agent_moves" / "moved_agents.json", {})
+    events = []
+    records = audit.get("agents", {}) if isinstance(audit, dict) else {}
+    history = audit.get("departures", {}) if isinstance(audit, dict) else {}
+    candidates = [
+        *(records.values() if isinstance(records, dict) else []),
+        *(history.values() if isinstance(history, dict) else []),
+    ]
+    seen = set()
+    for record in candidates:
+        if not isinstance(record, dict) or record.get("source_instance_id") != source:
+            continue
+        lifecycle = str(record.get("agent_lifecycle_id") or "").strip().casefold()
+        package_id = str(record.get("package_id") or "")
+        agent_id = str(record.get("agent_id") or "")
+        if (package_id in seen or not valid_agent_lifecycle_id(lifecycle) or not agent_id or not package_id
+                or len(package_id) > 128
+                or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+                       for char in package_id)):
+            continue
+        try:
+            state = _load_json(root / "state" / "agent_moves" / "source" / f"{package_id}.json")
+        except (AgentMoveError, OSError):
+            continue
+        if (not isinstance(state, dict) or state.get("status") != "source_cleaned"
+                or state.get("package_id") != package_id
+                or state.get("agent_id") != agent_id
+                or state.get("source_agent_lifecycle_id") != lifecycle
+                or state.get("target_instance") != record.get("target_instance")
+                or not state.get("cleaned_at")):
+            continue
+        seen.add(package_id)
+        events.append({
+            "package_id": package_id,
+            "agent_id": agent_id,
+            "agent_lifecycle_id": lifecycle,
+            "state": "source_cleaned",
+            "completed_at": state["cleaned_at"],
+        })
+    projection = {"schema_version": 1, "source_instance_id": source, "events": events}
+    returns = _completed_agent_returns(root, source, events)
+    if returns:
+        projection["returns"] = returns
+    return projection
+
+
+def _completed_agent_returns(root: Path, source: str, departures: list[dict]) -> list[dict]:
+    """A completed incoming Move can permit a new assignment, never revive an old one."""
+    latest = {}
+    for event in departures:
+        try:
+            completed = datetime.fromisoformat(event["completed_at"])
+            if completed.tzinfo is None:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        lifecycle = event["agent_lifecycle_id"]
+        latest[lifecycle] = max(latest.get(lifecycle, completed), completed)
+    if not latest:
+        return []
+    current = {
+        (str(row.get("name") or row.get("id") or ""), row.get(AGENT_LIFECYCLE_FIELD))
+        for row in _agent_rows(_load_json(root / "agents.json"))
+        if valid_agent_lifecycle_id(row.get(AGENT_LIFECYCLE_FIELD))
+        and row[AGENT_LIFECYCLE_FIELD] in latest
+    }
+    result = []
+    for path in (root / "state" / "agent_moves" / "incoming").glob("*/state.json"):
+        try:
+            receipt = _load_json(path)
+            if not isinstance(receipt, dict) or not isinstance(receipt.get("target_verification"), dict):
+                continue
+            lifecycle = receipt.get("imported_agent_lifecycle_id")
+            agent_id = receipt.get("target_agent_id") or receipt.get("agent_id")
+            if (receipt.get("status") != "completed" or receipt.get("target_verified") is not True
+                    or receipt.get("target_verification", {}).get("runtime_online") is not True
+                    or receipt.get("target_instance") != source
+                    or receipt.get("package_id") != path.parent.name
+                    or (agent_id, lifecycle) not in current
+                    or datetime.fromisoformat(receipt["completed_at"]) <= latest[lifecycle]):
+                continue
+        except (AgentMoveError, OSError, KeyError, TypeError, ValueError):
+            continue
+        result.append({
+            "package_id": receipt["package_id"],
+            "agent_id": agent_id,
+            "agent_lifecycle_id": lifecycle,
+            "state": "target_completed",
+            "completed_at": receipt["completed_at"],
+        })
+    return result
 
 
 def moved_agent_destination(
@@ -2378,6 +2477,7 @@ def _record_moved_agent(
     package_id: str,
     target_instance: str,
     target_agent_id: str,
+    agent_lifecycle_id: str,
 ) -> None:
     path = _move_root(root) / "moved_agents.json"
     data = _load_json_or_default(path, {"schema_version": 1, "agents": {}})
@@ -2388,12 +2488,18 @@ def _record_moved_agent(
         agents = {}
         data["agents"] = agents
     agents[agent_id.casefold()] = {
+        "source_instance_id": _configured_instance_id(root),
+        "agent_lifecycle_id": agent_lifecycle_id,
         "agent_id": agent_id,
         "package_id": package_id,
         "target_agent_id": target_agent_id,
         "target_instance": _normalize_instance(target_instance),
         "moved_at": utc_now_iso(),
     }
+    departures = data.setdefault("departures", {})
+    if not isinstance(departures, dict):
+        raise AgentMoveError("source departure history is invalid")
+    departures[package_id] = dict(agents[agent_id.casefold()])
     _atomic_json(path, data, mode=0o600)
 
 
@@ -2780,4 +2886,4 @@ def _mutation_lock(root: Path) -> Iterator[None]:
         except TimeoutError as exc:
             raise AgentMoveError("target transfer journal is busy; retry the saved transfer") from exc
         yield
-# HASHI-Fingerprint: hfp_771e20bcb7d6435282e3c3c66c4565c4
+# HASHI-Fingerprint: hfp_e0f657401a3249898852ec4351f13388

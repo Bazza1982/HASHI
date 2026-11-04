@@ -1339,6 +1339,12 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             runtime.config.active_backend,
             **current_kwargs,
         )
+        projector = getattr(backend, "project_pcm_payload", None)
+        if callable(projector):
+            payload = projector(
+                payload,
+                render_prompt=getattr(runtime.context_assembler, "_render_pcm_prompt", None),
+            )
         phone_removals = list(phone_audit.get("removed_section_keys") or [])
         if phone_removals:
             transport = payload.setdefault("transport_snapshot", {})

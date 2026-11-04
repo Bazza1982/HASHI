@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,7 +82,7 @@ def test_stop_busy_instance_does_not_send_shutdown(tmp_path, monkeypatch, capsys
         lambda _record, _root: {
             "lock_held": True,
             "healthy": True,
-            "running": True,
+            "instance_id": "ALPHA", "running": True,
             "activity_verified": True,
             "busy": True,
             "busy_agents": ["worker-a"],
@@ -117,7 +119,7 @@ def test_stop_with_active_background_job_does_not_send_shutdown(
         lambda _record, _root: {
             "lock_held": True,
             "healthy": True,
-            "running": True,
+            "instance_id": "ALPHA", "running": True,
             "activity_verified": True,
             "busy": True,
             "busy_agents": [],
@@ -153,7 +155,7 @@ def test_stop_unverified_lock_never_force_kills(tmp_path, monkeypatch, capsys):
         lambda _record, _root: {
             "lock_held": True,
             "healthy": False,
-            "running": False,
+            "instance_id": "ALPHA", "running": False,
             "activity_verified": False,
             "busy": False,
             "busy_agents": [],
@@ -183,7 +185,7 @@ def test_stop_fails_closed_when_live_activity_endpoint_is_unavailable(
         lambda _record, _root: {
             "lock_held": True,
             "healthy": True,
-            "running": True,
+            "instance_id": "ALPHA", "running": True,
             "activity_verified": False,
             "busy": False,
             "busy_agents": [],
@@ -208,49 +210,36 @@ def test_graceful_stop_uses_exact_local_api_and_waits_for_unlock(
 ):
     record = _record(tmp_path)
     registry = instance_registry.InstanceRegistry(
-        program_root=tmp_path / "program",
-        program_version="test",
-        registry_root=tmp_path / "registry",
-        data_root=tmp_path / "data",
-        environment_id="test-os",
+        program_root=tmp_path / "program", program_version="test",
+        registry_root=tmp_path / "registry", data_root=tmp_path / "data", environment_id="test-os",
     )
-    monkeypatch.setattr(
-        hashi_instance_cli,
-        "inspect_instance",
-        lambda _record, _root: {
-            "lock_held": True,
-            "healthy": True,
-            "running": True,
-            "activity_verified": True,
-            "busy": False,
-            "busy_agents": [],
-            "api_port": 18800,
-        },
-    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    monkeypatch.setattr(hashi_instance_cli, "inspect_instance", lambda *_: {
+        "lock_held": True, "healthy": True, "instance_id": "ALPHA", "running": True, "activity_verified": True,
+        "busy": False, "busy_agents": [], "api_port": 18800, "pid": child.pid,
+    })
     calls = []
 
     def request(*args, **kwargs):
         calls.append((args, kwargs))
+        child.terminate()
+        child.wait(timeout=5)
         return 200, {"ok": True}
 
     monkeypatch.setattr(hashi_instance_cli, "_http_json", request)
-    monkeypatch.setattr(hashi_instance_cli, "_admin_token", lambda *_args: "secret")
-    monkeypatch.setattr(hashi_instance_cli, "_lock_is_held", lambda _path: False)
-
-    result = hashi_instance_cli.stop_instance(registry, record)
-
-    assert result == 0
-    assert calls == [
-        (
-            ("POST", 18800, "/api/admin/shutdown"),
-            {
-                "token": "secret",
-                "body": {"reason": "hashi-cli"},
-                "timeout": 5.0,
-            },
-        )
-    ]
-    assert "gracefully" in capsys.readouterr().out
+    monkeypatch.setattr(hashi_instance_cli, "_admin_token", lambda *_: "secret")
+    monkeypatch.setattr(hashi_instance_cli, "_lock_is_held", lambda _: False)
+    try:
+        assert hashi_instance_cli.stop_instance(registry, record) == 0
+        assert calls == [(("POST", 18800, "/api/admin/shutdown"), {
+            "token": "secret", "body": {"reason": "hashi-cli"}, "timeout": 5.0,
+        })]
+        assert child.poll() is not None
+        assert "gracefully" in capsys.readouterr().out
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
 
 
 def test_status_with_no_registry_is_read_only_and_successful(
@@ -556,7 +545,7 @@ def test_repeat_start_is_idempotent(tmp_path, monkeypatch, capsys):
         hashi_instance_cli,
         "inspect_instance",
         lambda _record, _root: {
-            "running": True,
+            "instance_id": "ALPHA", "running": True,
             "pid": 456,
             "ready": True,
         },
@@ -582,13 +571,13 @@ def test_start_accepts_telegram_only_degraded_local_services(
     snapshots = iter(
         [
             {
-                "running": False,
+                "instance_id": "ALPHA", "running": False,
                 "lock_held": False,
                 "healthy": False,
                 "foreign_endpoint": False,
             },
             {
-                "running": True,
+                "instance_id": "ALPHA", "running": True,
                 "ready": False,
                 "services_ready": True,
                 "pid": 456,
@@ -677,7 +666,7 @@ def test_start_refuses_matching_api_without_instance_lock(
         hashi_instance_cli,
         "inspect_instance",
         lambda _record, _root: {
-            "running": False,
+            "instance_id": "ALPHA", "running": False,
             "lock_held": False,
             "healthy": True,
             "foreign_endpoint": False,
@@ -716,7 +705,7 @@ def test_stopped_managed_instance_cannot_implicitly_adopt_update(
         hashi_instance_cli,
         "inspect_instance",
         lambda _record, _root: {
-            "running": False,
+            "instance_id": "ALPHA", "running": False,
             "lock_held": False,
             "foreign_endpoint": False,
         },
@@ -740,11 +729,13 @@ def test_start_timeout_preserves_actual_child_and_reports_unknown_readiness(tmp_
     monkeypatch.setattr(hashi_instance_cli,'_is_provisioned',lambda *_:True)
     monkeypatch.setattr(hashi_instance_cli,'_select_runtime',lambda *a,**k:[sys.executable])
     monkeypatch.setattr(hashi_instance_cli,'inspect_instance',lambda *_:{
-        'running':False,'lock_held':False,'healthy':False,'foreign_endpoint':False})
+        "instance_id": "ALPHA", 'running':False,'lock_held':False,'healthy':False,'foreign_endpoint':False})
     children=[]
     original=subprocess.Popen
     def launch(*a,**kw):
-        child=original(*a,**kw);children.append(child);return child
+        child=original(*a,**kw)
+        children.append(child)
+        return child
     monkeypatch.setattr(subprocess,'Popen',launch)
     try:
         assert hashi_instance_cli.start_instance(registry,record,timeout=.01)==75
@@ -752,7 +743,8 @@ def test_start_timeout_preserves_actual_child_and_reports_unknown_readiness(tmp_
         assert 'START_TIMEOUT' in capsys.readouterr().err
     finally:
         for child in children:
-            child.terminate();child.wait(timeout=10)
+            child.terminate()
+            child.wait(timeout=10)
 
 
 def test_terminal_global_options_json_errors_and_attach_only_are_read_only(tmp_path, monkeypatch, capsys):
@@ -772,8 +764,10 @@ def test_terminal_global_options_json_errors_and_attach_only_are_read_only(tmp_p
 
 
 def test_terminal_purge_error_codes_preserve_external_data(tmp_path, monkeypatch, capsys):
-    program=tmp_path/'program';program.mkdir()
-    external=tmp_path/'external';external.mkdir()
+    program=tmp_path/'program'
+    program.mkdir()
+    external=tmp_path/'external'
+    external.mkdir()
     config=external/'agents.json'
     config.write_text('{"global":{"instance_id":"EXTERNAL","workbench_port":19991},"agents":[]}')
     before=config.read_bytes()
@@ -841,3 +835,4 @@ def test_terminal_follow_tracks_replaced_and_temporarily_missing_log(tmp_path):
         process.terminate()
         process.communicate(timeout=5)
         reader.join(timeout=2)
+# HASHI-Fingerprint: hfp_35f8964940da46e49b6dbadb84cd3299

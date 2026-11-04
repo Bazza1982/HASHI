@@ -2305,6 +2305,7 @@ def _forward_workbench_gateway_request(
         headers["X-Workbench-Token"] = admin_token
 
     desktop_request = upstream_path.split("?", 1)[0].startswith("/api/v1/desktop/")
+    speech_request = route_path == "/api/tui/speech" and normalized_method == "POST"
     hosts = (
         (_desktop_workbench_host(str(_instance_info.get("instance_id") or ""), _workbench_port),)
         if desktop_request
@@ -2434,7 +2435,7 @@ def _forward_workbench_gateway_request(
             )
             # Mutating requests may fail over only after a proved pre-connect
             # refusal/name-resolution failure. Missing acknowledgements are not replay permission.
-            if desktop_request or (normalized_method not in {"GET", "HEAD"} and last_error.accepted is None):
+            if desktop_request or speech_request or (normalized_method not in {"GET", "HEAD"} and last_error.accepted is None):
                 break
             continue
     _workbench_gateway_log(

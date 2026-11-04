@@ -1672,6 +1672,7 @@ class FunctionWorkerHost:
                     str(params.get("text") or ""),
                     str(params.get("request_id") or ""),
                     str(params.get("source_language") or "") or None,
+                    **{key: params[key] for key in ("operation", "performance_context", "retry_of") if key in params},
                 )
             except VoiceSynthesisError as error:
                 return error.as_wire_result()

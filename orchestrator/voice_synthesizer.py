@@ -28,6 +28,7 @@ class VoiceAsset:
     style_applied: bool | None = None
     style_reason: str | None = None
     notice: str | None = None
+    performance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,17 @@ async def convert_audio_to_ogg(ffmpeg_cmd: str, input_path: Path, ogg_path: Path
             "tts_audio_conversion_failed",
             f"FFmpeg audio conversion could not start: {safe_voice_error_detail(exc)}",
         ) from exc
-    _, stderr = await proc.communicate()
+    try:
+        _, stderr = await proc.communicate()
+    except BaseException:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.communicate()
+        ogg_path.unlink(missing_ok=True)
+        raise
     if proc.returncode != 0 or not ogg_path.exists():
         err = stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"ffmpeg voice conversion failed: {err or f'exit_code={proc.returncode}'}")

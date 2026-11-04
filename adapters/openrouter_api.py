@@ -436,6 +436,8 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
     candidates: list[Any] = []
     if isinstance(payload, Mapping):
         error = payload.get("error")
+        if error == "resource_profile_unverified":
+            return "PROVIDER_RESOURCE_PROFILE_UNVERIFIED"
         if isinstance(error, Mapping):
             candidates.extend((error.get("code"), error.get("type")))
             metadata = error.get("metadata")
@@ -444,6 +446,8 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
         candidates.extend((payload.get("code"), payload.get("type")))
     for candidate in candidates:
         normalized = str(candidate or "").strip().lower()
+        if normalized == "resource_profile_unverified":
+            return "PROVIDER_RESOURCE_PROFILE_UNVERIFIED"
         if normalized in _STABLE_CONTEXT_CAPACITY_CODES:
             return "CONTEXT_CAPACITY_REJECTED"
         if normalized in _STABLE_MODALITY_UNSUPPORTED_CODES:
@@ -1573,6 +1577,12 @@ def _backend_failure_response(
         elif stable_code == "PROVIDER_MODALITY_UNSUPPORTED":
             code = stable_code
             description = "The provider explicitly rejected the requested input modality."
+        elif stable_code == "PROVIDER_RESOURCE_PROFILE_UNVERIFIED":
+            code = stable_code
+            description = (
+                "The model or complete request has no matching qualified resource profile. "
+                "Check its endpoint, context and input limits before retrying."
+            )
         elif stable_code == "PROVIDER_CAPACITY_UNAVAILABLE" or (
             status == 529 or (status == 503 and _provider_capacity_message(response))
         ):
@@ -1640,7 +1650,9 @@ def _backend_failure_response(
     return BackendResponse(
         text="",
         duration_ms=duration_ms,
-        error=str(error).strip() or f"{type(error).__name__}: {description}",
+        error=(description + " (resource_profile_unverified)"
+               if code == "PROVIDER_RESOURCE_PROFILE_UNVERIFIED"
+               else str(error).strip() or f"{type(error).__name__}: {description}"),
         is_success=False,
         tool_call_count=int(tool_call_count),
         tool_loop_count=int(tool_loop_count),
@@ -1674,6 +1686,8 @@ def _transient_provider_call_error(error: Exception) -> bool:
     if bool(getattr(error, "hashi_disable_inplace_retry", False)):
         return False
     response = getattr(error, "response", None)
+    if _stable_provider_error_code(response) == "PROVIDER_RESOURCE_PROFILE_UNVERIFIED":
+        return False
     status = (
         int(response.status_code)
         if isinstance(response, httpx.Response)

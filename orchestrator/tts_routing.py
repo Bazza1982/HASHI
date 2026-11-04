@@ -423,10 +423,14 @@ def resolve_tts_route(
     unsupported = False
     route_source = selected_capability.source
 
-    # Explicit character choices take precedence over generic English compatibility
-    # and catalogue iteration order. The catalogue validates these alias references.
+    # Keep an explicit native voice. Language defaults still precede generic
+    # English compatibility when adapting a character to another language.
+    # The catalogue validates these alias references.
     alias = fixed.get(target_language)
-    if alias:
+    selected_is_native = bool(
+        selected_voice and target_language in selected_capability.native_languages
+    )
+    if alias and not selected_is_native:
         preset = presets[alias]
         candidate_voice = str(preset.get("voice_name") or "").strip() or None
         if candidate_voice != selected_voice:

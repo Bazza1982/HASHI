@@ -1,5 +1,12 @@
 # HASHI configuration persistence
 
+PR #133 integration preserves permission-aware Agent Move publication and
+snapshot recovery together with the current receipt and revision contracts.
+Only the installed Safety SID retains read access to `agents.json`; secrets
+remain private. Regression scope and remaining acceptance are recorded in the
+[integration decision](permissions/PR133_INTEGRATION_REVIEW_20261105.md).
+
+
 Scope: HN-20260911-002 / W1, Functions-layer declarative configuration and preference persistence.
 Parent: [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 Operational journals, evidence, caches and user content are classified below;

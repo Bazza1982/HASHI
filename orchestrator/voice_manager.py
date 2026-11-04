@@ -83,8 +83,7 @@ def _provider_failure(
     status = getattr(exc, "status", None)
 
     if (
-        declared_code == "tts_protocol_rejected"
-        or status == 403
+        status == 403
         or ("wsserverhandshakeerror" in lowered and re.search(r"\b403\b", lowered))
     ):
         return VoiceProviderFailure(
@@ -228,6 +227,7 @@ class VoiceManager:
         # voice. Providers that support style may apply it; others ignore it
         # safely. None means the user has not chosen a style.
         "voice_profile": None,
+        "performance": False,
         # Voice is available, but automatic speech requires explicit opt-in.
         # A user's saved off/native/tts choice remains exact.
         "native": {
@@ -439,8 +439,8 @@ class VoiceManager:
         )
 
     def _remember_provider_failure(self, failure: VoiceProviderFailure) -> None:
-        # An absent voice does not establish that the entire service is down.
-        if failure.code == "tts_voice_unavailable":
+        # A request/voice-specific refusal does not establish a service outage.
+        if failure.code in {"tts_voice_unavailable", "tts_response_limit", "tts_text_invalid"}:
             return
         self._provider_cooldowns[failure.provider] = (
             time.monotonic() + self.PROVIDER_FAILURE_COOLDOWN_SECONDS,
@@ -899,6 +899,58 @@ class VoiceManager:
             action=ui_language.tr("voice.tts.action"),
         )
 
+    def get_performance(self) -> bool:
+        return self._load().get("performance") is True
+
+    def set_performance(self, enabled: bool) -> str:
+        if type(enabled) is not bool:
+            raise ValueError("performance must be boolean")
+        self._update(lambda state: state.update(performance=enabled))
+        return ui_language.tr("voice.performance.updated")
+
+    def get_manual_direction(self) -> dict:
+        return dict(self._load().get("manual_direction") or {"enabled": False, "instructions": ""})
+
+    def set_manual_direction(self, enabled: bool, instructions=None) -> str:
+        from orchestrator.manual_speech_direction import validate
+        value=self.get_manual_direction()
+        value["enabled"]=enabled
+        if instructions is not None:
+            value["instructions"]=instructions
+        value=validate(value)
+        self._update(lambda state: state.update(manual_direction=value))
+        return ui_language.tr("voice.performance.updated")
+
+    async def prepare_performance(self, text: str) -> dict:
+        from orchestrator.speech_performance import prepare
+        return await prepare(self, text, build_provider)
+
+    async def prepare_reading(self, text: str, *, source_language=None) -> dict:
+        from copy import deepcopy
+        from uuid import uuid4
+        from orchestrator.speech_performance import prepare
+        state = deepcopy(self._load())
+        self._require_voice_catalog()
+        catalog = deepcopy(self.voice_catalog)
+        route = resolve_tts_route(
+            provider=state["provider"], voice_name=state.get("voice_name"),
+            provider_options=state.get("provider_options") or {},
+            requested_style=self._voice_profile_from_state(state), text=text,
+            source_language=source_language, presets=catalog.presets,
+            profiles=self.VOICE_PROFILES, provider_profiles=catalog.routing_profiles())
+        context = await prepare(self, text, build_provider, state=state)
+        ident = uuid4().hex
+        context = {**context, "selection_id": ident}
+        readings = getattr(self, "_reading_selections", None)
+        if readings is None:
+            readings = self._reading_selections = {}
+        # Bounded per-Agent control state; no text or credentials leave this process.
+        if len(readings) >= 64:
+            readings.pop(next(iter(readings)))
+        state["_frozen_route"] = route
+        readings[ident] = (state, catalog, deepcopy(context))
+        return context
+
     def voice_menu_text(self) -> str:
         state = self._load()
         native = self._native_policy_from_state(state)
@@ -925,7 +977,13 @@ class VoiceManager:
             "Voice",
             current=current,
             facts=[
+                f"<b>{html.escape(ui_language.tr('voice.manual.label'))}</b> · "
+                + ("ON" if self.get_manual_direction()["enabled"] else "OFF"),
+                html.escape(self.get_manual_direction()["instructions"]),
+                f"<code>/voice manual &lt;on|off|TEXT&gt;</code>",
                 f"<b>{html.escape(ui_language.tr('voice.field.mode'))}</b>",
+                ui_language.tr("voice.performance.state",
+                    state="ON" if self.get_performance() else "OFF"),
                 (
                     f"• <b>{html.escape(native_label)}</b> · "
                     f"{html.escape(ui_language.tr('voice.mode.native.description'))}"
@@ -1070,6 +1128,7 @@ class VoiceManager:
             for key in ("provider", "voice_name", "provider_options"):
                 merged[key] = copy.deepcopy(preset[key])
         merged.update(data)
+        merged["performance"] = merged.get("performance") is True
         if not isinstance(merged.get("provider_options"), dict):
             merged["provider_options"] = {}
         voice_profile = str(merged.get("voice_profile") or "").strip().casefold()
@@ -1593,10 +1652,28 @@ class VoiceManager:
         max_chars_override: int | None = None,
         source_language: str | None = None,
         source_surface: str = "unknown",
+        performance_context: dict | None = None,
     ) -> VoiceAsset | None:
-        state = self._load()
+        from copy import deepcopy
+        selection_id = (performance_context or {}).get("selection_id")
+        frozen = getattr(self, "_reading_selections", {}).get(selection_id) if selection_id else None
+        if selection_id and frozen is None:
+            raise VoiceSynthesisError("speech_voice_changed", "The reading selection expired; start a new reading.")
+        state = deepcopy(frozen[0]) if frozen else self._load()
         if not force and not state.get("enabled"):
             return None
+        from orchestrator.speech_performance import checked_context, metadata, notice
+        context = deepcopy(frozen[2]) if frozen else (
+            checked_context(performance_context) if performance_context is not None
+            else await self.prepare_performance(text)
+        ) if state.get("performance") is True or (state.get("manual_direction") or {}).get("enabled") else {"enabled": False}
+        if context.get("source") == "manual":
+            manual=state.get("manual_direction") or {}
+            if not manual.get("enabled") or manual.get("instructions") != (context.get("plan") or {}).get("instructions"):
+                raise VoiceSynthesisError("tts_performance_context_changed", "The manual direction changed; start a new reading.")
+        if context.get("enabled") and context.get("provider") != state["provider"]:
+            raise VoiceSynthesisError("tts_performance_context_changed", "The voice selection changed; start a new reading.")
+        state["_performance_context"] = context
         result = await self._synthesize_configured_state(
             agent_name=agent_name,
             request_id=request_id,
@@ -1606,8 +1683,13 @@ class VoiceManager:
             max_chars_override=max_chars_override,
             source_language=source_language,
             source_surface=source_surface,
+            catalog=frozen[1] if frozen else None,
         )
-        return result.asset
+        if result.effective_provider_options.get("instructions") and context.get("source") != "manual":
+            context = {**context, "plan": None, "reason": "manual_instructions"}
+        performance = metadata(context, result.asset.provider)
+        return replace(result.asset, performance=performance,
+                       notice=notice(performance, result.asset.notice, locale=source_language))
 
     async def synthesize_configured(
         self,
@@ -1627,6 +1709,7 @@ class VoiceManager:
         catalog: VoiceCatalog | None = None,
         provider_allowed: Callable[[str, dict[str, object]], bool] | None = None,
         output_dir: Path | None = None,
+        performance_context: dict | None = None,
     ) -> ConfiguredTTSResult:
         """Synthesize one explicit selection through the shared TTS platform.
 
@@ -1642,6 +1725,7 @@ class VoiceManager:
             "voice_profile": requested_style,
             "rate": int(rate),
             "max_chars": max(1, int(max_chars)),
+            "_performance_context": performance_context,
         }
         return await self._synthesize_configured_state(
             agent_name=agent_name,
@@ -1673,6 +1757,7 @@ class VoiceManager:
         output_dir: Path | None = None,
     ) -> ConfiguredTTSResult:
         import asyncio
+        from orchestrator.speech_performance import options_for
 
         logger = logging.getLogger(f"Runtime.{agent_name}.voice")
         if catalog is None:
@@ -1704,7 +1789,7 @@ class VoiceManager:
             if max_chars_override is not None
             else int(state.get("max_chars", 1200))
         )
-        primary_route = resolve_tts_route(
+        primary_route = state.get("_frozen_route") or resolve_tts_route(
             provider=primary_name,
             voice_name=state.get("voice_name"),
             provider_options=state.get("provider_options") or {},
@@ -1724,6 +1809,12 @@ class VoiceManager:
         fallback_chain = tuple(
             candidate for candidate in declared_fallback_chain if allowed(candidate)
         )
+        from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
+        if ACTIVE_SPEECH_BUDGET.get() is not None or state.get("_frozen_route"):
+            # One task owner controls attempts; never move an unknown native
+            # execution into a second provider or nested fallback retry.
+            fallback_chain = ()
+
         attempts: list[dict[str, object]] = []
         audit: dict[str, object] = {
             "event": "tts_synthesis",
@@ -1807,10 +1898,15 @@ class VoiceManager:
                 f"_{route.provider}_{attempt}"
             )
             try:
+                provider_config = service(route.provider)
+                complete_input = (
+                    "max_input_chars" in provider_config
+                    and provider_config["max_input_chars"] is None
+                )
                 provider = build_provider(
                     route.provider,
                     ffmpeg_cmd=self.ffmpeg_cmd,
-                    provider_config=service(route.provider),
+                    provider_config=provider_config,
                     secrets=self._secrets,
                     bridge_home=self.project_root,
                 )
@@ -1820,10 +1916,20 @@ class VoiceManager:
                     stem=stem,
                     voice_name=route.voice_name,
                     rate=int(state.get("rate", 0)),
-                    max_chars=max_chars,
-                    provider_options=route.provider_options,
+                    max_chars=len(text) if complete_input and max_chars_override is None else max_chars,
+                    provider_options=options_for(
+                        state.get("_performance_context"), route.provider, route.provider_options),
                 )
             except Exception as exc:
+                from orchestrator.speech_budget import ACTIVE_SPEECH_BUDGET
+                if ACTIVE_SPEECH_BUDGET.get() is not None or state.get("_frozen_route"):
+                    from orchestrator.speech_tasks import SpeechTaskError
+                    code = str(getattr(exc, "code", "tts_generation_failed"))
+                    status = getattr(exc, "status", None)
+                    # Only explicit pre-execution rejection is safe to retry.
+                    accepted = False if status in {400, 401, 403, 404, 422, 429} else None
+                    raise SpeechTaskError(code, retryable=status == 429,
+                                          accepted=accepted) from None
                 failure = _provider_failure(
                     route.provider,
                     exc,
