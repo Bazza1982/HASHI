@@ -11,6 +11,8 @@
 
 完整 bb8b4f80 包随后在 Intel 的独立普通 Core/shared/Worker 通过公开 Session API 到达实际 L2 模型接线，配置读取缺口消失；但原 Worker 清理模型私有上下文时遗漏必填 recovery 参数，Run 明确 failed。原生失败保留。现按原 StageProvider 合同同时清空 observer/recovery，真正恢复数据仍单独交给受限 host；L1 不走该清空分支。实际 StageProvider 两项 RED、L1对照原先通过，修复后接线/采用/真实服务回环/恢复组合22通过。另有期限测试误把系统时钟与 authority 的防回拨时钟混比，改用已有 observed_time 严格界定120秒；授权实现未改，相关55通过。完整新包及普通 Worker 后续仍须实际核实。
 
+d46afa5d 的完整权限/直接消费者723通过，curated关键运行881通过、1项POSIX平台跳过。Intel普通Worker继续暴露审计回调把整条mapping传给具名字段接口的TypeError，固定host正确以AUDIT_PERSISTENCE_FAILURE停止，原失败保留。现只在Worker回调适配原DurableAuditLog接口，保留其canonical先写、脱敏、去重与失败传播，不碰共享审计实现或允许host本地替代。真实原owner及canonical store的两项RED、修复及host恢复/故障/实际Provider合同13通过；新完整版本普通Worker仍待实体复验。
+
 ## 2026-11-04：Intel 服务态宿主与私密诊断修复（完整包实测待完成）
 
 本轮在既有 HASHI3 main 开发，Intel 使用独立完整 sealed capsule；未推送、合并或生产采用。原始服务组件报告和 profile 回收失败保持原状，延迟回收写独立 recovery receipt，不改写原失败。两份自有测试账户在每轮测试后禁用并撤销服务登录权，不继续创建同类账户。

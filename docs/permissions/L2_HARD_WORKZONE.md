@@ -78,3 +78,9 @@ L2 主循环的私有 checkpoint 只归受限 host。普通 Worker 的呈现及�
 真实普通 Worker 入口发现旧调用缺少必填 recovery 参数，任务明确失败；
 真实 StageProvider 的新任务、续跑两红及 L1 对照保留，修复后相关22项通过。
 新完整版本的原生普通 Worker、完整 WAC 和实例采用仍分别核实。
+
+原 Worker 的审计回调复用真正 DurableAuditLog 的具名字段接口，原 owner
+重新生成接收信封，保留 host 的 epoch、事件身份及事实。不能把 AuditWriter
+的整条 mapping 接口混用为 DurableAuditLog 接口；格式未知、别的 Turn/请求、
+事实冲突或原 canonical owner 失败均拒绝，不能改用 host 本地 spool。
+真实原 owner 与 canonical store 的失败到通过证据保留，原生复验另记。
