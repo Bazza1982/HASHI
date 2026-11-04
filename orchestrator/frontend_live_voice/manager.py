@@ -425,7 +425,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             for key in (
                 "revision", "provider", "provider_label", "model", "model_label",
                 "voice", "voice_label", "voice_presentation", "language", "language_label", "style",
-                "style_label", "custom_style", "persona_projected", "adapter_version", "interface_language",
+                "style_label", "custom_style", "persona_projected", "adapter_version", "interface_language", "mode",
             )
             if key in public
         }
@@ -462,7 +462,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return dict(public) if isinstance(public, Mapping) else None
 
     def _schedule_opening(self, binding: CallBinding) -> None:
-        if self._closing:
+        if self._closing or not self._provider_for(binding).capabilities.proactive_opening:
             return
         ws = self._active_sockets.get(binding.call_id)
         if ws is None or getattr(ws, "closed", True):
@@ -2444,6 +2444,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )
             return False
         adapter = self._provider_for(binding)
+        if not adapter.capabilities.context_updates:
+            return False
         cascade_speech = kind == "commentary" and adapter.provider_id == "local-cascade"
         generation = (expected_generation if expected_generation is not None else
                       self._cascade_generations.get(

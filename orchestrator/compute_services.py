@@ -1560,6 +1560,10 @@ class ComputeServiceClient:
         self.session_factory = session_factory
         self.secret_resolver = secret_resolver
 
+    def request_headers(self, node: ComputeNode) -> dict[str, str]:
+        """Resolve configured credentials for an admitted streaming consumer."""
+        return self._headers(node)
+
     def _headers(self, node: ComputeNode) -> dict[str, str]:
         if not node.credential_ref:
             return {"Accept": "application/json"}
