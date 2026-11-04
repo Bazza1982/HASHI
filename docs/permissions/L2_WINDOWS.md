@@ -2,16 +2,18 @@
 
 | 项目 | 内容 |
 |---|---|
-| 文档版本 | v1.1 |
-| 日期 | 2026-10-23 |
-| 状态 | **设计未实施；本文所有 Windows 平台验收均待执行** |
+| 文档版本 | v1.2 |
+| 日期 | 2026-11-04 |
+| 状态 | **本地组件已有实现及部分资格证据；完整安装/组合 WAC 未通过，见当前实施状态** |
 | 源码基线 | `d6b6513973bfc8f9f22c40ddd8f72802f907baa0` |
 | 功能主责 | PAO：权限权威、任务生命周期与执行准入 |
 | 协作主责 | HERV3：受限执行接入；公共 FC Functions：身份验证与标准交互投影 |
 | 工程层 | Functions、独立 Windows sidecar、平台与实例配置 |
 | 本期范围 | HASHI 仓库内实现；不修改 protected Core、外部客户端或 Telegram 专用 connector；不改变普通 `ask_user` 语义 |
 
-本文规定 Windows L2 的主实现路径、施工分包、边界和验收。它没有声称现有代码已经具备 AppContainer 隔离、可信批准回执、独立安全服务或自动回收能力。新增模块、接口、服务名和安装参数均是施工契约，不是当前可运行命令。
+本文规定 Windows L2 的主实现路径、施工分包、边界和验收；表内源码基线是最初施工参考，不是当前运行版本。现有 AppContainer/Runner/权限服务组件与原生 SCM 试验分别见 [实施状态](IMPLEMENTATION_STATUS.md)；完整安装和组合 WAC 尚未通过，设计参数不能直接当作已安装命令。
+
+2026-11-04 用户批准的 [硬 Workzone 与 Compute 决定](L2_HARD_WORKZONE.md) 补充本方案：L1 保持现状；L2 受控 HERV3 的业务文件以精确 Workzone 为上限，普通批准不能扩根；远端实际执行须在相应服务器落实独立管制并验收。未验收的独立 backend 不继承保证。
 
 领域命名统一使用 `AccessRequest`（权限申请）、`ApprovalDecision`（批准／拒绝的决定依据）、`PermissionLease`（有效授权记录）与 `DecisionReceipt`（可信人类动作回执）。本文的 grant／lease 是 `PermissionLease` 的说明性同义词，不表示额外实体或另一套账本。
 

@@ -30,7 +30,9 @@ from orchestrator.permissions.models import PermissionLevel, normalize_scope, un
 from orchestrator.permissions.native_factory import InstalledExecutorFactory, InstalledFileHelper
 from orchestrator.permissions.receipt_issuer import SupervisorReceiptIssuer
 from orchestrator.permissions.result_store import EncryptedResultStore
-from orchestrator.permissions.resource_policy import ProtectedResourcePolicy
+from orchestrator.permissions.resource_policy import (
+    ProtectedResourcePolicy, WORKZONE_BOUNDARY_VERSION, constrain_to_workzones,
+)
 from orchestrator.permissions.run_service import ManagedRunPolicy
 from orchestrator.permissions.service import PermissionServiceApplication
 from orchestrator.permissions.signed_receipts import SignedReceiptVerifier
@@ -80,7 +82,35 @@ class InstancePolicies:
             ),
         )
 
-    def preview(self, agent_id, owner_id):
+    def _workzones(self, agent, owner_id, level):
+        raw = self.store.get_agent_workzone_set(owner_id=owner_id, agent_id=agent.name)
+        state = workzone.normalize_workzone_state(raw)
+        if level is PermissionLevel.L2:
+            active = workzone.active_workzone_slots(state)
+            if not active or any(not item["available"] or not item["host_compatible"] for item in active):
+                raise PermissionDenied("L2 requires explicit, available Workzones")
+            # The selected path cannot be redirected by a mutable junction/link.
+            # Native file binding independently rejects reparse/object races.
+            raw_paths = {item["slot_id"]: Path(item["path"]).expanduser()
+                         for item in raw["slots"]}
+            if any(not raw_paths[item["slot_id"]].is_absolute()
+                   or raw_paths[item["slot_id"]].absolute() != Path(item["path"]) for item in active):
+                raise PermissionDenied("an L2 Workzone path was redirected")
+            roots = tuple(dict.fromkeys(Path(item["path"]) for item in active))
+            cwd = workzone.primary_workzone_path(state) or roots[0]
+        else:
+            cwd = workzone.primary_workzone_path(state) or agent.workspace_dir
+            roots = workzone.access_roots_for_workzones(
+                agent.resolve_access_root(), state, workspace_dir=agent.workspace_dir,
+            )
+        return state, Path(cwd), roots
+
+    @staticmethod
+    def _boundary(state, roots):
+        return {"version": WORKZONE_BOUNDARY_VERSION, "revision": state["revision"],
+                "roots": [str(root) for root in roots]}
+
+    def preview(self, agent_id, owner_id, *, requested_level=None):
         global_config, agents, _ = self.manager.load()
         declared = self.installation["agents"].get(agent_id)
         matches = [agent for agent in agents if agent.name == agent_id]
@@ -88,10 +118,22 @@ class InstancePolicies:
             raise PermissionDenied("no installed policy exists for this Agent owner")
         agent = matches[0]
         cwd = agent.workspace_dir
+        boundary = None
+        level = self.settings(agent_id).requested_level if requested_level is None else requested_level
+        if not isinstance(level, PermissionLevel):
+            raise ValueError("a valid target permission level is required")
+        if level is PermissionLevel.L2:
+            state, cwd, roots = self._workzones(agent, owner_id, level)
+            boundary = self._boundary(state, roots)
         baseline = _scopes(declared["baseline_scopes"], cwd)
+        requestable = _scopes(declared["requestable_scopes"], cwd)
+        if boundary is not None:
+            baseline = constrain_to_workzones(baseline, roots)
+            requestable = constrain_to_workzones(requestable, roots)
         return {
             "baseline_scopes": [asdict(scope) for scope in baseline],
-            "requestable_scopes": [asdict(scope) for scope in _scopes(declared["requestable_scopes"], cwd)],
+            "requestable_scopes": [asdict(scope) for scope in requestable],
+            **({"workzone_boundary": boundary} if boundary is not None else {}),
             "installation_revision": self.installation.revision,
             "protected_roots": [str(path) for path in self.protected_policy(global_config).policy.protected_write_paths],
             "native_tools": list(InstalledExecutorFactory.native_tool_names(self.runner)),
@@ -113,12 +155,7 @@ class InstancePolicies:
             raise PermissionDenied("this Agent has left managed execution")
         # Agent workzone truth belongs to PAO's owner-scoped profile. Config
         # extras are only a backend projection and may be stale after a change.
-        state = workzone.normalize_workzone_state(self.store.get_agent_workzone_set(
-            owner_id=owner_id, agent_id=agent_id,
-        ))
-        cwd = workzone.primary_workzone_path(state) or agent.workspace_dir
-        roots = workzone.access_roots_for_workzones(agent.resolve_access_root(), state,
-                                                   workspace_dir=agent.workspace_dir)
+        state, cwd, roots = self._workzones(agent, owner_id, snapshot.settings.requested_level)
         from orchestrator.flexible_backend_manager import FlexibleBackendManager
 
         backend_owner = FlexibleBackendManager(agent, global_config, secrets)
@@ -131,12 +168,18 @@ class InstancePolicies:
             raise PermissionDenied("installed tool policy is invalid")
         baseline = _scopes(declared["baseline_scopes"], Path(cwd))
         requestable = _scopes(declared["requestable_scopes"], Path(cwd))
+        boundary = None
+        if snapshot.settings.requested_level is PermissionLevel.L2:
+            boundary = self._boundary(state, roots)
+            baseline = constrain_to_workzones(baseline, roots)
+            requestable = constrain_to_workzones(requestable, roots)
         protected = self.protected_policy(global_config)
         from orchestrator.permissions.network_worker import build_options
 
         network = build_options(declared.get("network", {}), secrets)
         digest = sha256(json.dumps({
             "config_revision": snapshot.revision, "base_revision": self.installation.revision,
+            **({"workzone_boundary": boundary} if boundary is not None else {}),
             "cwd": str(cwd), "roots": [str(root) for root in roots],
             "settings": asdict(snapshot.settings), "tools": allowed, "tool_options": tools,
             "baseline_scopes": [asdict(scope) for scope in baseline],

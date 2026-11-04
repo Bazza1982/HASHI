@@ -10,6 +10,16 @@
 
 L1 后续真实审批测试证实：应用令牌不能代替人类会话，测试人类账户能批准并撤销指定 lease；但续跑时重新装配的上下文触发旧事件编号冲突。运行日志现按真实 ExecutionEpoch 区分新事件，原 Run/Turn/operation 与物理用量身份保留，同 epoch 的不可变事实检查继续拒绝冲突。接入 canonical observer 的两项私有 IPC 组合回归从 2 failed 变为 2 passed；完整权限/直接合同组合 616 passed，HERV3/最小 Core/Function 合同 24 passed；此为历史组合回归；本轮实体续跑与实际页面结果见下节。
 
+## 2026-11-04：稳定 L1、补 L2 硬 Workzone
+
+用户本轮批准保留 L1 行为并写清保证边界；L2 先完成本地部分，主要保证已验收的 HERV3 受控执行链。L1 的实际权限仍由基础策略和租约决定，Workzone 不自动成为硬围栏；Codex 等独立 Engine Provider 及未验收的远端执行不继承完整 L2 保证。
+
+本地源码现按 PAO 原 Workzone writer 的精确根，分别收窄 L2 基础范围及申请上限；无有效根不回退到 home/access_root，附加根不扩成共同父目录，普通批准不能扩根。根 revision、精确根和边界协议版本进入 L2 policy digest；停用再启用不能复活旧 epoch。路径被重定向拒绝，脚本输入与文件工具共用同一范围；原生绑定/受限 host/Runner 仍承担实际隔离。L1 不采用这次硬上限或根 revision 栅栏。
+
+聚焦集成回归通过真实安装策略、factory、registry、权威账本及临时文件效果，原生 launcher/IPC 注入。改动前两份确定源码的同组回放为 11 failed／24 passed，修复后 35 passed；覆盖 L1 对照、宽权限越界、主动请求、缺根/不可用根、附加根、多根/窄动作、脚本输入、无约束执行、实际目录重定向及 admission/queued/prepared 后根版本变化。切级检查还发现 review 使用切换前等级的范围，现改为按目标等级预览；缺根在操作前拒绝，根版本变化使审阅 revision 失效。同组该缺口 RED 3 failed，修复后切级及原聚焦组合 40 passed。最终完整权限/FYI 回归为 70 文件、647 passed（无过滤、无 skip）。关键运行加载检查要求完整已提交源码；最终提交后的回执另存当轮证据，不将提交前正确拒绝未提交源码的两项检查当成产品回归。不能把这些组合当成完整平台资格。
+
+Compute 仅推理时，返回的工具调用继续走本地 broker；若在服务器实际执行资源操作，必须补服务器权限服务、根映射、受限执行、撤权/期限/幂等回执与独立资格，才纳入端到端 L2。本轮只写清对接合同，不部署或假定远端能力。完整 Windows 服务/WAC 仍受 profile 回收失败阻碍；不继续新增同类账户或强改系统服务。本轮运行 L1 保留既有已验收代次，生产未采用。详见 [专门决定](L2_HARD_WORKZONE.md)。
+
 ## 2026-11-04：发现状态修复与 NP 页面验收
 
 真实 H3 测试已生成有效待批申请（期限未到、0 claim、无文件），但未加载临时安装描述的共享 API 返回正常空列表。现修复为：已配置但 frontend controller 未加载，或配置不可读时，返回明确不可用；未安装的实例保留原空视图。复用原配置读取者，身份／Session／generation 先核验，正常已绑定查询和审批权威不改变。有效用例 RED 3 failed／6 passed → 发现及精确点击 GREEN 14 passed。
@@ -82,12 +92,12 @@ L2 原安装入口只有前台信号循环，本轮新增 Windows SCM host，复
 
 | 交付事实 | 核对位置 / 状态 |
 | --- | --- |
-| 本地源码与测试 | HASHI3 既有 main 的三项功能提交已完整提交；本轮验收记录另有文档收尾提交，见 Git 日志 |
+| 本地源码与测试 | HASHI3 既有 main；SCM/L1 收尾与本轮 L2 硬 Workzone、目标等级审阅、回归和说明按完整提交交付，见 Git 日志及当轮回执 |
 | GitHub 收到与 PR 可审阅 | 已合并基线 HASHI #127／Workbench #26；本轮新增提交未推送，无新增 PR |
 | Windows 脚本入口/launcher 组件 | 已通过；证据保留实际 SID、OS、Python 版本、逐文件摘要和清理结果 |
 | 完整独立安装/WAC | SCM 原生四场景行为按预期，但 profile 回收未过；完整 L2 仍保持发布门 |
 | 生产源码同步 | 未进行 |
-| 运行服务/Worker/页面采用 | HASHI3 Functions 已采用并验证 cd0f9cad；NP 页面四按钮实测通过；临时服务／配置／ACL 已恢复。文档收尾不代表新功能代次 |
+| 运行服务/Worker/页面采用 | HASHI3 Functions 保留已验证 cd0f9cad；NP 四按钮实测及恢复证据保留。本轮 L2 硬根源码尚未被运行服务采用，不能以本地提交或离线检查冒充部署 |
 | 用户手工前端验收 | 未进行；本轮实际浏览器操作由 Agent 完成 |
 
 本轮只在指定 HASHI3 范围实际采用 Functions，没有冷重启 Core、安装生产持久服务或修改生产源码。一次性资格进程和测试 IPC 不等于完整 L2 安装合格。详细取舍见 [当前实施决定](IMPLEMENTATION_DECISION_20261030.md)，源码关系见 [CODE_MAP](CODE_MAP.md#map-11--当前实现与边界2026-10-30)。

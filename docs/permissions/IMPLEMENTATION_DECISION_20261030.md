@@ -81,6 +81,14 @@ Frontend Connector 的 Functions 投影现在在控制器为空时，使用原�
 
 同组实际 API／配置／权威回归：旧代码 3 failed／6 passed，修复后发现与精确点击相关 14 passed。无 controller 的失败状态保留有效 pending 和 0 decision，不创建假空权威。H3 首次正常 /reboot max 被忙碌保护拒绝，未强制切换；随后空闲窗口实际采用与页面结果另见本轮状态记录。
 
+## L2 硬 Workzone 与 Compute（2026-11-04 用户批准）
+
+本轮用户批准稳定 L1、说明实际保障边界，再继续 L2 本地实现；L2 主要保证已验收的 HERV3 受控执行链，不把 Codex 等独立 Engine Provider 当作已受完全控制。L1 的 Workzone/安装权限/临时租约语义保留。
+
+L2 安装权限必须与 PAO 精确 Workzone 分别求交；无有效根不回退到 home/access_root；普通批准不能扩根。根 revision、实际根及合同版本进入策略摘要，停用再启用不能复活旧 epoch。现有 registry/authority/原生 supervisor 复用该单一范围来源，仍由独立受限 host、Runner 及实际对象绑定落实 OS 边界。新 [专门决定](L2_HARD_WORKZONE.md) 定义严格路径、必要运行依赖例外、实体验收门和 Compute 端接口合同；未验收通道不继承 L2。
+
+先交付本地实现和离线证据。Compute 仅推理时返回的工具调用仍走本地 broker；若在服务器实际操作资源，必须补服务端权限管制与独立资格，再作端到端验收。本轮不假定远端已具备此能力，不部署服务器服务。Windows 完整安装/回收的旧阻碍不因本地回归通过而消除。
+
 ## NP 实测与收尾边界（2026-11-04）
 
 个人 L1 的决定仍走已登记前端按钮与原权威。当前 HASHI3 的真实 NP 页面验证批准一次、本任务、10 分钟及拒绝四条路径，核对同一 operation 的真实文件效果、成功 claim 与 Task 终态撤权；页面刷新后重开原 Session 仍发现 pending。10 分钟从批准提交精确计时 600 秒，本轮只验证任务提前结束的回收，不把它写成自然到期实体测试。原 Run 续跑成功，没有为测试改写运行、授权或物理用量状态。

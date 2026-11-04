@@ -33,6 +33,7 @@ class FileEffects:
     """In-process physical effect; uses the real prepare/start authority fence."""
 
     credential_names = ()
+    TOOL_NAMES = frozenset({"file_write"})
 
     def __init__(self, authority, *, cwd, validate_resource, **kwargs):
         self.authority, self.cwd, self.validate_resource = authority, cwd, validate_resource
@@ -74,16 +75,24 @@ class FileEffects:
 
 @pytest.fixture
 def installed(tmp_path, monkeypatch):
-    async def build(baseline, requestable):
+    async def build(baseline, requestable, *, level="L1", workzone=False, broad=False):
         store, _, accepted, fence, original = setup_run(tmp_path)
         business = tmp_path / "business"
         business.mkdir()
+        if workzone:
+            zone = business if workzone is True else tmp_path / str(workzone)
+            if workzone == "attached":
+                zone.mkdir()
+            store.set_agent_workzone_slot(
+                owner_id="owner", agent_id="agent", slot_id="1" if workzone == "attached" else "main",
+                path=str(zone), expected_revision=0,
+            )
         config_path = tmp_path / "agents.json"
         config_path.write_text(json.dumps({"agents": [
-            {"name": "agent", "permission_settings": {"requested_level": "L1"}},
+            {"name": "agent", "permission_settings": {"requested_level": level}},
         ]}), encoding="utf-8")
         def declared(actions):
-            return ([{"kind": "file", "resource": str(business), "actions": list(actions)}]
+            return ([{"kind": "file", "resource": str(tmp_path if broad else business), "actions": list(actions)}]
                     if actions else [])
         installation = Installation({
             "agents": {"agent": {"owner_id": "owner", "baseline_scopes": declared(baseline),
@@ -133,18 +142,30 @@ def installed(tmp_path, monkeypatch):
                                  entry=tmp_path / "runtime/file_worker.py", executable_digest="a" * 64,
                                  entry_digest="b" * 64, private_root=tmp_path / "private",
                                  environment={})
+        class Runner:
+            def qualified_for(self, *args):
+                return True
+            def scripts_qualified(self):
+                return False
+            async def prepare(self, binding):
+                return None
+            async def stop(self, binding):
+                return True
         factory = InstalledExecutorFactory(
             authority, store, helper=helper, results=None,
             stop_issuer=SimpleNamespace(key_id=context.executor_id, issue_stop=lambda *a: "unused"),
             signing_key=Ed25519PrivateKey.generate(), worker_sid="S-1-5-21-2",
             validate_resource=policies.validate, checkpoint_writer=lambda *a: None,
             audit_writer=lambda *a: None, policy_observer=policies.freeze,
+            runner=Runner() if level == "L2" else None,
+            parent_job=object() if level == "L2" else None,
         )
         executor = await factory.create(binding, policy)
         registry = executor.channel.registry
         return SimpleNamespace(authority=authority, issuer=issuer, context=context, registry=registry,
                                supervisor=registry._permission_gate._supervisor, policy=policy,
-                               policies=policies, installation=installation, root=business, executor=executor)
+                               policies=policies, installation=installation, root=business, executor=executor,
+                               store=store, config_path=config_path)
     return build
 
 
@@ -298,3 +319,4 @@ async def test_declared_baseline_is_not_a_grant_or_an_expanded_approval_ceiling(
         assert env.authority.list_requests(env.context) == ()
     finally:
         await env.executor.close()
+# HASHI-Fingerprint: hfp_1d3492d4ac4a4f22a659bb966d7e898c
