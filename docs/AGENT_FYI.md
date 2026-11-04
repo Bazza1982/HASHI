@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- Phone：新增实验性 HY-SimulMT 中英同传 provider，复用 WebRTC codec；无寒暄、Agent 上下文或工具委托。Compute 精确选择与已提交 Functions 采用必需；隔离实测不代表在线采用。[同传](HASHI_PHONE_INTERPRETATION.md)。
+
 - [实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)保身份/验退出；[迁出](HASHI_AGENT_MOVE_V1.md)凭证收尾。
 
 - Speech: manual /voice and /call direction, frozen reading voice and confirmed-failure retry. [PAO](HASHI_SPEECH_PERFORMANCE.md).

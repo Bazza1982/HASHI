@@ -159,13 +159,13 @@ class PhoneManager:
     def voice_presentation(cls, voice: str) -> str | None:
         return cls.VOICE_PRESENTATIONS.get(str(voice))
 
-    @classmethod
-    def language_options(cls) -> tuple[tuple[str, str], ...]:
-        return tuple((key, str(value["label"])) for key, value in cls.LANGUAGES.items())
+    def language_options(self) -> tuple[tuple[str, str], ...]:
+        keys = ("zh-CN", "en") if self.get_state()["provider"] == "hy-simulmt" else self.LANGUAGES
+        return tuple((key, str(self.LANGUAGES[key]["label"])) for key in keys)
 
-    @classmethod
-    def style_options(cls) -> tuple[tuple[str, str], ...]:
-        return tuple((key, str(value["label"])) for key, value in cls.STYLES.items())
+    def style_options(self) -> tuple[tuple[str, str], ...]:
+        keys = ("natural",) if self.get_state()["provider"] == "hy-simulmt" else self.STYLES
+        return tuple((key, str(self.STYLES[key]["label"])) for key in keys)
 
     def set_provider(self, value: str) -> dict[str, Any]:
         provider = self._validate_choice(value, self.PROVIDERS, "provider")
@@ -174,6 +174,10 @@ class PhoneManager:
             models = self.PROVIDERS[provider]["models"]
             if state.get("model") not in models:
                 state["model"] = next(iter(models))
+            if provider == "hy-simulmt":
+                state["language"] = "zh-CN" if state["model"] == "hy-simulmt-en-zh" else "en"
+                state["style"] = "natural"
+                state["style_instructions"] = ""
             voices = models[state["model"]]["voices"]
             if state.get("voice") not in voices:
                 state["voice"] = voices[0]
@@ -185,6 +189,8 @@ class PhoneManager:
         model = self._validate_choice(value, models, "model")
         def mutate(state: dict[str, Any]) -> None:
             state["model"] = model
+            if state["provider"] == "hy-simulmt":
+                state["language"] = "zh-CN" if model == "hy-simulmt-en-zh" else "en"
             voices = self.PROVIDERS[state["provider"]]["models"][model]["voices"]
             if state.get("voice") not in voices:
                 state["voice"] = voices[0]
@@ -198,14 +204,22 @@ class PhoneManager:
 
     def set_language(self, value: str) -> dict[str, Any]:
         language = self._validate_choice(value, self.LANGUAGES, "language")
+        if self.get_state()["provider"] == "hy-simulmt":
+            if language not in {"zh-CN", "en"}:
+                raise PhoneConfigError("phone_language_unsupported", "Interpretation supports English and Simplified Chinese.")
+            return self.set_model("hy-simulmt-en-zh" if language == "zh-CN" else "hy-simulmt-zh-en")
         return self._update(lambda state: state.__setitem__("language", language))
 
     def set_style(self, value: str) -> dict[str, Any]:
         style = self._validate_choice(value, self.STYLES, "style")
+        if self.get_state()["provider"] == "hy-simulmt" and style != "natural":
+            raise PhoneConfigError("phone_style_unsupported", "Interpretation uses a fixed speaking style.")
         return self._update(lambda state: state.__setitem__("style", style))
 
     def set_style_instructions(self, value: str | None) -> dict[str, Any]:
         custom = str(value or "").strip()
+        if custom and self.get_state()["provider"] == "hy-simulmt":
+            raise PhoneConfigError("phone_style_instructions_unsupported", "Interpretation uses fixed translation instructions.")
         if len(custom) > self.MAX_CUSTOM_INSTRUCTIONS_CHARS:
             raise PhoneConfigError(
                 "phone_style_instructions_too_long",
@@ -238,6 +252,9 @@ class PhoneManager:
             # Re-read current persona/authority below, but retain phone choices.
             state = self._normalise_state(dict(frozen_selection))
             interface_language = frozen_selection.get("interface_language", interface_language)
+        if state["provider"] == "hy-simulmt":
+            from .frontend_live_voice.interpretation import resolve_interpretation
+            return resolve_interpretation(state, interface_language=interface_language)
         persona = load_phone_persona(self.workspace_dir)
         effective_pcm = (
             dict(pcm_payload)
