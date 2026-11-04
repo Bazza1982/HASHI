@@ -6,7 +6,6 @@ execution channel. It has no Functions/Core RPC client or approval endpoint.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict
 from pathlib import Path
 import sys
@@ -14,6 +13,10 @@ import sys
 # The qualified isolated interpreter does not search the working directory.
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from orchestrator.permissions.offline_asyncio import install
+    install()
+
+import asyncio
 
 from adapters.her_v2_provider import HashiStageProvider, _AdapterDelivery
 from adapters.stream_events import StreamEvent
