@@ -218,3 +218,7 @@ Edge/SAPI/Piper, omits Kokoro/Torch. See
 
 Lily Wiki needs new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
+
+## 2026-11-05：L2 服务身份的根配置只读发布
+
+PAO/Functions 的 Agent 根配置写入统一复用 `orchestrator.agent_config_json`，在共享 `config_json` 的空候选阶段为已安装 `permission_service.service_sid` 显式设置只读权限。不是继承已有宽 ACL，也不向该身份共享实例 secrets。普通 Worker 实测已复现旧启动写入移除读取权而使 Safety 准入失败，新增 Windows DACL red/green 与直接配置消费者回归保留；完整新包/普通 Worker 实测仍单独核实。Core、L1 审批规则和生产运行代次不变。

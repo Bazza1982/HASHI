@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     file_write_lock,
     new_config_json,
@@ -212,7 +213,7 @@ def ensure_memory_plus_observer(workspace_dir: Path) -> bool:
         changed = True
     config["observers"] = normalized
     if changed or not path.exists():
-        write_config_json(path, config)
+        write_agent_config_json(path, config)
     return changed
 
 
@@ -1209,3 +1210,4 @@ def _read_bool(mapping: Mapping[str, Any], key: str, default: bool) -> bool:
         if normalized in {"true", "yes", "1", "on"}:
             return True
     return bool(value)
+# HASHI-Fingerprint: hfp_e38c26d502b246179e0a601c5b0fb21f

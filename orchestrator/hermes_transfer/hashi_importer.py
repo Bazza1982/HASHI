@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import new_config_json, read_managed_json, write_config_json
 from orchestrator.pcm import atomic_write_pcm, convert_legacy_pcm_text
 
@@ -221,7 +222,7 @@ def _upsert_agent(agents_file: Path, agent_config: dict[str, Any]) -> None:
             break
     else:
         agents.append(agent_config)
-    write_config_json(agents_file, data)
+    write_agent_config_json(agents_file, data)
 
 
 def _import_schedules(plan: HashiImportPlan) -> None:

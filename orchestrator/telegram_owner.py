@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.telegram_access import GLOBAL_USERS_KEY
 from orchestrator.telegram_identity import (
@@ -210,7 +211,7 @@ def stage_telegram_owner_replacement(
     if GLOBAL_USERS_KEY in global_config:
         global_config[GLOBAL_USERS_KEY] = []
 
-    revision = write_config_json(config_path, config)
+    revision = write_agent_config_json(config_path, config)
     return {
         "staged": True,
         "new_owner_id": candidate,
@@ -292,3 +293,4 @@ __all__ = [
     "finalize_telegram_owner_secret",
     "stage_telegram_owner_replacement",
 ]
+# HASHI-Fingerprint: hfp_684b8d98a5394e5da7ecfe2ab3df6e0d

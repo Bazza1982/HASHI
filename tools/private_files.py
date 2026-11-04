@@ -24,17 +24,19 @@ def protect_private_file(
     path: Path,
     *,
     additional_full_control_sids: Iterable[str] = (),
+    additional_read_sids: Iterable[str] = (),
 ) -> None:
     """Replace broad access with the writer and explicit runtime principals.
 
     A deployment may create an instance as an elevated service account while
     its long-running process uses a Limited user token.  Such setup code must
     pass that runtime user's SID explicitly; otherwise the writer remains the
-    sole non-system principal, as before.
+    sole non-system principal, as before. Explicit additional readers receive
+    file read access only; existing broad or inherited grants are not copied.
     """
 
     if os.name != 'nt':
-        if tuple(additional_full_control_sids):
+        if tuple(additional_full_control_sids) or tuple(additional_read_sids):
             raise ValueError("Additional Windows principals require Windows")
         path.chmod(0o700 if path.is_dir() else 0o600)
         return
@@ -55,9 +57,15 @@ def protect_private_file(
         normalized = _normalize_windows_sid(candidate)
         if normalized not in permitted_sids:
             permitted_sids.append(normalized)
+    readers = []
+    for candidate in additional_read_sids:
+        normalized = _normalize_windows_sid(candidate)
+        if normalized not in permitted_sids and normalized not in readers:
+            readers.append(normalized)
     inheritance = 'OICI' if path.is_dir() else ''
     sddl = 'D:P' + ''.join(f'(A;{inheritance};FA;;;{account})'
                           for account in (*permitted_sids, 'SY', 'BA'))
+    sddl += ''.join(f'(A;{inheritance};FR;;;{account})' for account in readers)
     security = ctypes.WinDLL('advapi32', use_last_error=True)
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     pointer = ctypes.c_void_p
@@ -108,3 +116,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_a3270f39d68a4eb2a26c2a9d5b332a57

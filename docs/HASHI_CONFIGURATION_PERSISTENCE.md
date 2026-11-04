@@ -266,3 +266,23 @@ actual backend-timeout preference consumer. The unchanged architecture workflow
 already selects this module. The batch-05 receipt and completed PR CI comment
 separate local closure tests, approved-interpreter CI, broader runtime gates and
 native/live adoption. None is a substitute for the others.
+
+## Installed Windows permission-service configuration reader
+
+PAO root Agent declaration writers use `agent_config_json.write_agent_config_json`
+for the existing JSON publication. On Windows, an explicitly installed
+`global.permission_service.service_sid` receives file read access on the empty
+candidate before payload publication. The declaration remains the sole source;
+there is no copied ACL, cached identity, extra model catalogue or secrets-file
+sharing. Only private account/service SIDs are accepted; broad principals are
+rejected before publication. Uninstalled and non-Windows configurations retain
+the existing private-file behavior.
+
+The shared JSON/private-file primitives accept explicit read-only principals as
+well as their existing explicit full-control principals. They do not interpret
+Agent schemas, discover services or broaden existing DACLs. PAO startup
+migration, incarnation, management, group, transfer, provisioning and root
+configuration edits reuse the same owner policy. Revision conflicts and
+committed durability errors still propagate without retry. This fixes a native
+ordinary-Worker failure where an atomic startup rewrite removed the installed
+Safety account's read access, leaving admission unable to read current policy.

@@ -174,15 +174,17 @@ def _protect_candidate(
     path: Path,
     *,
     private_full_control_sids: tuple[str, ...] = (),
+    private_read_sids: tuple[str, ...] = (),
 ) -> None:
     if os.name == "nt":
         from tools.private_files import protect_private_file
         protect_private_file(
             path,
             additional_full_control_sids=private_full_control_sids,
+            additional_read_sids=private_read_sids,
         )
     else:
-        if private_full_control_sids:
+        if private_full_control_sids or private_read_sids:
             raise ValueError("Additional Windows principals require Windows")
         path.chmod(0o600)
 
@@ -205,6 +207,7 @@ def write_config_json(
     expected_revision: str | None | object = _UNSPECIFIED,
     lock_timeout: float = 5.0,
     private_full_control_sids: Iterable[str] = (),
+    private_read_sids: Iterable[str] = (),
 ) -> str:
     """Publish validated UTF-8/LF bytes, with no BOM or partial destination.
 
@@ -214,7 +217,9 @@ def write_config_json(
     optimistic concurrency, or None to require an absent destination. All
     participating writers use the same lock. Unmigrated/external writers do not.
     Windows setup running under a different account may explicitly bind the
-    intended runtime principals through ``private_full_control_sids``.
+    intended runtime principals through ``private_full_control_sids`` and
+    explicit readers through ``private_read_sids``. Readers receive only file
+    read access; this primitive does not derive principals from the payload.
     Errors before os.replace preserve the destination. ConfigDurabilityError is
     deliberately different: committed=True means do not blindly retry/rollback.
     """
@@ -223,6 +228,9 @@ def write_config_json(
     if isinstance(private_full_control_sids, (str, bytes)):
         raise TypeError("private_full_control_sids must be an iterable of SIDs")
     private_sids = tuple(private_full_control_sids)
+    if isinstance(private_read_sids, (str, bytes)):
+        raise TypeError("private_read_sids must be an iterable of SIDs")
+    reader_sids = tuple(private_read_sids)
     target = Path(path).expanduser().resolve()
     if isinstance(payload, (ConfigDocument, ConfigList)):
         if payload.source != target:
@@ -249,10 +257,11 @@ def write_config_json(
         candidate = Path(name)
         try:
             # In particular, apply the Windows DACL while the file is empty.
-            if private_sids:
+            if private_sids or reader_sids:
                 _protect_candidate(
                     candidate,
                     private_full_control_sids=private_sids,
+                    private_read_sids=reader_sids,
                 )
             else:
                 _protect_candidate(candidate)

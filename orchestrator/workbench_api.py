@@ -7951,7 +7951,9 @@ class WorkbenchApiServer:
                     {"ok": False, "error_code": "permissions_runtime_apply_failed"}, status=503
                 )
             try:
-                write_config_json(self.config_path, document)
+                from orchestrator.agent_config_json import write_agent_config_json
+
+                write_agent_config_json(self.config_path, document)
             except ConfigDurabilityError:
                 return web.json_response(
                     {"ok": False, "error_code": "settings_persistence_uncertain"}, status=503

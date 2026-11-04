@@ -1,5 +1,14 @@
 # 权限系统实施与证据状态
 
+## 2026-11-05：普通 Worker 配置发布缺口与原生推进
+
+本轮在既有 HASHI3 main 修复，生产与原正常 Worker 代次未采用。完整 c7b8200b 包在 Intel 的真实服务、LPAC、IPC 与 HERV3 固定入口完成区内文件、区外拒绝、shell 拒绝和离线脚本；脚本输入/输出摘要相符，额外子进程和直连网络拒绝。随后真实原任务/Turn/operation 的一次批准续跑完成并回收；原测试报告的证据写入参数错误另以只读对账绑定，不重放业务。36 项实际 OS 越权拒绝、目录别名/硬链接、CLI 传输阻断及声明网络 origin 的正向与拒绝对照通过。真实授权到期、工作区版本变更、Safety/Runner 故障与恢复后的新任务有独立进程及权威记录证据；不以模型结语判断通过。
+
+补验普通 Core/shared/Worker 的公开 Session API 时，启动配置原子发布丢失独立 Safety 身份的读取权，原生准入失败，任务未完成；该失败保留。现由 PAO 根配置 publication owner 按已安装 descriptor 显式加入只读 SID，各根配置写入者共用，候选空文件即设权限。原文件 ACL 不作盲目继承，实例 secrets 不因此共享；读取 revision、冲突与 committed durability 语义不变。真实 Windows 配置身份/管理两项 RED，修复及配置/迁移/分组/转移等直接消费者144通过、3项平台/条件跳过；新完整提交及普通 Worker 原生复验仍待执行。
+
+可信 Worker 的 bytecode 缓存曾使 sealed capsule 完整性检查拒绝启动；153 个新增缓存已逐项保全，9141 原文件摘要均未变化，并重新通过原 qualifier。测试操作者启动环境禁止缓存写入，没有削弱 qualifier。原两份服务账户 profile 仍待受支持回收，全部适用 WAC、生产采用、独立 backend、Compute 服务器端与用户实际前端均不得据此冒称完成。
+
+
 ## 2026-11-04：Intel 服务态宿主与私密诊断修复（完整包实测待完成）
 
 本轮在既有 HASHI3 main 开发，Intel 使用独立完整 sealed capsule；未推送、合并或生产采用。原始服务组件报告和 profile 回收失败保持原状，延迟回收写独立 recovery receipt，不改写原失败。两份自有测试账户在每轮测试后禁用并撤销服务登录权，不继续创建同类账户。
