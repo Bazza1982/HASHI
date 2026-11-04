@@ -103,6 +103,9 @@ async def test_supervised_write_uses_permission_result_without_reopening_target(
     request = await find_pending(authority, context)
     operation = authority.operation_status_for_task(context, request.operation_id)
     issuer.approve(authority, context, request, operation.arguments_digest)
+    # The real approval path signals its waiter; this test checks receipt-only
+    # evidence, rather than relying on a polling tick inside its watchdog.
+    registry._permission_waiter.notify()
     result = await asyncio.wait_for(task, 2)
     assert not result.is_error and (tmp_path / "result.txt").read_text() == "approved"
     assert reads == []

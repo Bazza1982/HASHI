@@ -44,6 +44,32 @@ was lost (**2 failed**). The unmutated integrated working tree passed the comple
 publication module (**13 passed**). No source mutation was persisted. These
 pre-commit checks are failure proof, not the final committed-HEAD result.
 
+## Initial failure reconciliation
+
+The first integrated commit, `af57f664e3d255b7bc75f0a73270cbbde9e9689f`,
+exposed one Agent Move and two Telegram configuration tests still injecting
+faults into the generic publisher. Their real write path now uses the
+permission-aware publisher. Retarget the injections, retaining conflict,
+unknown-commit, exactly-one-write and preserved-data assertions. Move also
+asserts that the competing writer actually ran. A process-local mutation that
+drops read revisions makes the two conflict regressions fail; the repaired
+Move/Telegram/Fingerprint focused group passes all five cases.
+
+The initial Windows Fingerprint CI failed its two supervised-write cases while
+waiting for the approval polling tick. Signal the same waiter used by the real
+approval path; retain the existing two-second watchdog and all receipt-only
+evidence assertions. No product timeout, lease expiry or approval check changes.
+
+The first local permission run placed its fixture data below the real checkout.
+The immutable-code floor correctly refused those writes, producing 16 failures.
+Two identical scenarios pass with fixture data outside that protected root.
+Use a separate ignored temporary-data root for final regressions, preserving
+the product protection. The first 300-second tool transport wait timed out;
+the completed JUnit/child receipt independently records its actual failed run.
+Original failed logs and results remain evidence, not passes.
+
+## Final committed-HEAD validation
+
 After the integration commit, rerun these separately recorded scopes on its exact
 HEAD, recording the full argv, committed tree, working-tree state, JUnit outcomes
 and logs. The PR review report carries the final SHA and results, avoiding a
