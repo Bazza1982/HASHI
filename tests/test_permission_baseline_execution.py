@@ -18,14 +18,14 @@ from orchestrator.permissions.execution_gate import GateResult, SupervisedResult
 from orchestrator.permissions.installation import InstancePolicies
 from orchestrator.permissions.models import RuntimeExecutionBinding
 from orchestrator.permissions.native_factory import InstalledExecutorFactory
-from tests.test_permission_execution_gate import Issuer
+from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer
 from tests.test_permission_pao_fence import setup_run
 from tools.registry import ToolResult
 
 
 # A deadlock watchdog, not a preparation SLA. The stage events establish the
 # security ordering; Windows durable I/O can legitimately queue for over 1s.
-_STAGE_WATCHDOG_SECONDS = 10
+_STAGE_WATCHDOG_SECONDS = CONTRACT_WATCHDOG_SECONDS
 
 
 class Installation(dict):

@@ -76,3 +76,17 @@ authority，但 launcher 由可观测文件夹具替代，不是在测一秒的�
 
 相同异步等待重放 GREEN；整个 owning 模块18通过。最终推送版本的 Windows CI
 仍须独立通过，不能用本地通过覆盖原远端失败。
+
+后续同一 `dcbdc975` 的 push/PR Windows 运行出现一绿一红；失败运行
+901 passed、10 failed、3 skipped，均为一秒等待。共享 `find_pending` 的发现
+watchdog 导致多个 Gate、governed Session 和原生文件绑定用例未等到已有 pending，
+另有相同组件的收尾等待；不能用另一条绿色运行覆盖这些失败。
+
+现将共用发现及这些直接消费者的准备／收尾 watchdog 统一从同一个测试 owner
+派生，保持 10 秒有界。baseline 复用同一值，不再复制超时数值。没有改产品等待、
+授予范围或重放／未知结果规则，也没有增加 skip。
+
+向原 Gate 用例注入 1.1 秒异步准入延迟：旧共享发现函数实际 RED，统一后 GREEN。
+Gate、baseline、Windows file binding 和 enterprise 四个直接模块共77通过。
+另外，进程内禁用最终 start 栅栏会使原用例在实际文件副作用断言上失败；
+未变异最终版本通过，证明延长测试watchdog没有放过权限越界。
