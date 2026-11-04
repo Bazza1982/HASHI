@@ -1996,6 +1996,11 @@ def finish_request_from_listener(
             request_id,
             type(exc).__name__,
         )
+    try:
+        from orchestrator.agent_presence_captions import schedule_run_caption
+        schedule_run_caption(runtime, completed_run, scoped_owner)
+    except Exception as exc:
+        side_errors.append(_terminal_side_error("optional_caption_projection", exc))
     return TerminalResolution(
         payload=canonical_payload,
         run=dict(completed_run),
@@ -2846,3 +2851,4 @@ __all__ = [
     "telegram_delivery_state_for_update",
     "telegram_delivery_texts_for_update",
 ]
+# HASHI-Fingerprint: hfp_037578eb59c34de8a24d7a212caf3bc4
