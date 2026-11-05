@@ -13,15 +13,12 @@ Orchestrates the safe, destructive removal of an Agent and its managed workspace
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
-import os
 import shutil
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -33,9 +30,7 @@ from orchestrator.agent_incarnation import (
 )
 from orchestrator.telegram_delivery_state import retire_agent_state
 from orchestrator.config_json import (
-    ConfigConflictError,
     ConfigDocument,
-    ConfigDurabilityError,
     read_config_json,
     write_config_json,
 )
@@ -763,9 +758,18 @@ class AgentDeletionService:
                         removed_any = True
 
             if removed_any:
-                write_config_json(self.paths.secrets_path, secrets_doc)
+                from orchestrator.workbench_auth import _windows_remote_runtime_sids
+
+                write_config_json(
+                    self.paths.secrets_path,
+                    secrets_doc,
+                    private_full_control_sids=_windows_remote_runtime_sids(
+                        self.paths.secrets_path.parent
+                    ),
+                )
         except Exception as exc:
             logger.warning("Secrets cleanup warning for agent=%s: %s", agent_id, exc)
+            raise
 
     def _archive_conversations(self, agent_id: str) -> None:
         if self.session_store is None:
@@ -783,3 +787,4 @@ class AgentDeletionService:
         target = self.quarantine_root / f"{agent_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         shutil.move(str(ws_path), str(target))
         return target
+# HASHI-Fingerprint: hfp_aba00c7a0edf4d3d9309e9a5d7741f9a
