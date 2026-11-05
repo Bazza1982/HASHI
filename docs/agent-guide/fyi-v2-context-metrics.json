@@ -1,0 +1,100 @@
+{
+  "token_accounting": "Estimate only: ceil(Unicode characters / 4). No backend tokenizer was installed; no model calls.",
+  "baseline_commit": "ea37129b8edad3c0420541133b41fd96dcacc6c9",
+  "before": {
+    "fyi": {
+      "characters": 10592,
+      "estimated_tokens": 2648
+    },
+    "engineering_guidance": {
+      "characters": 3834,
+      "estimated_tokens": 959
+    },
+    "assembled_primer": {
+      "characters": 14561,
+      "estimated_tokens": 3641
+    }
+  },
+  "after": {
+    "fyi": {
+      "characters": 3635,
+      "estimated_tokens": 909
+    },
+    "engineering_guidance": {
+      "characters": 4278,
+      "estimated_tokens": 1070
+    },
+    "assembled_primer": {
+      "characters": 8164,
+      "estimated_tokens": 2041
+    }
+  },
+  "bootstrap_char_budget": 16000,
+  "additional_reader_tool_schema": {
+    "characters": 1007,
+    "estimated_tokens": 252
+  },
+  "normal_bootstrap_occurrences": {
+    "catalogue": 1,
+    "engineering_guidance": 1
+  },
+  "duplicate_bootstrap_characters": 0,
+  "on_demand_examples": {
+    "voice guide": {
+      "characters": 2271,
+      "estimated_tokens": 568,
+      "pages": 1,
+      "source": {
+        "path": "docs/agent-guide/voice.md",
+        "sha256": "baa52d098bf051b5439df08eeca9222c46ccfcd2d0a7c5414b6112e06659d17e",
+        "section": null,
+        "line": 1
+      }
+    },
+    "Phone context": {
+      "characters": 1156,
+      "estimated_tokens": 289,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PHONE_CONTEXT_HANDOFF.md",
+        "sha256": "3d34cd7e695816682a247baafe4f593ec2521b26d5eb10d83d0f83d3b72f6dbe",
+        "section": "Freeze before action admission",
+        "line": 15
+      }
+    },
+    "Compute truthfulness": {
+      "characters": 1681,
+      "estimated_tokens": 421,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_COMPUTE_SERVICE_DIRECTORY.md",
+        "sha256": "af599f2b4fb701a81349e11a6440942422e2fc3e7f7073dda9ec6948705244ee",
+        "section": "Compatibility and truthfulness",
+        "line": 117
+      }
+    },
+    "Move": {
+      "characters": 5099,
+      "estimated_tokens": 1275,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_AGENT_MOVE_V1.md",
+        "sha256": "5aa645bdefd9cc56d3a33972f2f712feba7ecb402bceee562a42276bd2052a11",
+        "section": "Transaction",
+        "line": 393
+      }
+    },
+    "PCM authority": {
+      "characters": 2701,
+      "estimated_tokens": 676,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PCM_SYSTEM_DESIGN.md",
+        "sha256": "db1183c530a2b7c6e3c9912ce11ac764f1bd844ab74b31a9a1dba677c95cb480",
+        "section": "7. PCM Authority and Conflict Resolution",
+        "line": 410
+      }
+    }
+  },
+  "scope": "Reference primer only; excludes user request, Session history and backend tool schemas. Explicit /fyi plus an armed Session primer is deduplicated by runtime tests."
+}

@@ -87,3 +87,12 @@ Core and the ordinary core gate remain required before adoption. Native OCR and 
 timed speech, Functions/Agent Worker adoption, Workbench source/build/service identity,
 and physical-device acceptance are separate evidence; a direct working-tree probe is
 not proof that a running API adopted it.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 006 File library cursors and extraction
+
+- 文件库：PAO附件目录按owner/Agent签名游标补历史，不依赖页面；来源定位不换主Session。OCR/转写只读且显式启用，真实分段不造时间；OCR锁随源码发布；独立模型不进Core。[契约](HASHI_FILE_LIBRARY_CONTENT.md)。

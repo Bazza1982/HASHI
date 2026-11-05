@@ -2465,6 +2465,30 @@ TOOL_SCHEMAS.extend(
         {
             "type": "function",
             "function": {
+                "name": "documentation_read",
+                "description": (
+                    "Read HASHI documentation through scoped Markdown links, sections and "
+                    "revision-bound continuation. Use outline for section discovery. "
+                    "Only approved documentation roots are readable; no writes or secret access."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["read", "outline"], "default": "read"},
+                        "path": {"type": "string", "description": "Repository-relative document or link from from_path.", "default": "docs/AGENT_FYI.md"},
+                        "from_path": {"type": "string", "description": "Source document advertising a relative link.", "default": "docs/AGENT_FYI.md"},
+                        "section": {"type": "string", "description": "Heading or anchor; omit for the complete document."},
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "max_chars": {"type": "integer", "minimum": 256, "maximum": 8000, "default": 4000},
+                        "revision": {"type": "string", "description": "Source SHA-256 from continuation; required after offset zero."},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "wiki_search",
                 "description": (
                     "Search or read the instance-configured curated Wiki. This capability is "

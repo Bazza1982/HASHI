@@ -234,3 +234,17 @@ The current campaign has not tested `/phone`.
 Source commit, Function-generation qualification, live hot adoption and
 physical-user acceptance remain separate facts. Neither component checks nor
 the successful PAO opening establish a passing end-to-end `/call`.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 053 Speech privacy, ordered groups and video fallback
+
+`/voice`、`/call` 发布/缓存前按隐私路由。AP 优先 VideoTTS（`video_tts_supported: false` 转音频）。
+分组有界有序；音频失败暂停视频，降级仅本组；旧尾取消，迟到任务仅提示恢复，音频串行。See [language voices](HASHIKO_LANGUAGE_VOICES.md),
+[Call/Phone policy](HASHI_CALL_AGENTPRESENCE_VIDEO.md#command-policy-2026-10-23),
+[catalogue](HASHI_VOICE_TTS_CATALOG.md),
+[routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
+[fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).

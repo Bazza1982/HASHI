@@ -190,3 +190,12 @@ Implementation authorization, source commit/PR, offline tests, runtime
 adoption and user acceptance are separate evidence. The current delivery does
 not change or restart production. Operational adoption must follow the
 instance-specific authorization and Functions replacement scope.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 007 Run-frozen Fingerprint and audit
+
+- Fingerprint默认OFF、按Run冻结；开启Shell须持久审计；marker用护栏原子替换/Manifest，绝对路径限可信Workzone，不重放写入。[PAO](HASHI_FINGERPRINT.md)。

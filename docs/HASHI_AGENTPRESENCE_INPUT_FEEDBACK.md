@@ -42,3 +42,13 @@ deduplication, scoped rejection, ambient preemption and speech ownership.
 
 See [runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) and
 [Frontend Connector architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 054 Owner-bound Agent Presence feedback
+
+AgentPresence限owner且默认关闭；HASHI认证并冻结Agent/Conversation。仅PAO受理的人类/客户端输入触发owner路由反馈，AP本地输入不回声。
+`/phone`按范围发离开/返回；AP管呈现，HASHI管服务/音色；入口失败关闭，各界面独立。[反馈](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md)。

@@ -28,7 +28,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list"],
+    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
@@ -105,6 +105,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "process_list",
         "request_diagnostics",
         "wiki_search",
+        "documentation_read",
         "web_fetch",
         "web_search",
         "windows_info",
@@ -2016,6 +2017,18 @@ class ToolRegistry:
             except (ValueError, MemorySearchAuthorizationError) as exc:
                 return f"Error: {exc}"
 
+        if tool_name == "documentation_read":
+            from tools.documentation_read import execute_documentation_read
+
+            output = await execute_documentation_read(
+                arguments,
+                global_config=self._effective_audit_context().get("global_config"),
+            )
+            result = json.loads(output)
+            if not result["ok"]:
+                return f"Error: {result['error']}: {result['message']}"
+            return output
+
         if tool_name == "wiki_search":
             from tools.wiki_search import execute_wiki_search
 
@@ -2218,3 +2231,4 @@ class ToolRegistry:
             return await self._obsidian.dispatch(tool_name, arguments)
 
         return f"Error: no executor for tool '{tool_name}'"
+# HASHI-Fingerprint: hfp_dc7e0236d6584d39abab159f44531a64

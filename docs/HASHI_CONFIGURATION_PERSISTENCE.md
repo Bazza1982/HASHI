@@ -266,3 +266,18 @@ actual backend-timeout preference consumer. The unchanged architecture workflow
 already selects this module. The batch-05 receipt and completed PR CI comment
 separate local closure tests, approved-interpreter CI, broader runtime gates and
 native/live adoption. None is a substitute for the others.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 031 Revision-checked private configuration publication
+
+JSON写入在锁和版本检查下验证私有候选，再原子替换；展示默认值只读。
+冲突须重读并重新选择，不自动重放，不用旧快照覆盖已发布结果。[配置持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
+
+### FYI v1 032 Bounded endpoint rename retries
+
+Endpoint publication retries only bounded Windows rename blocking on the same
+fsynced candidate; permanent failure preserves state and never replays.

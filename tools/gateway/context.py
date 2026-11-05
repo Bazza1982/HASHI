@@ -15,6 +15,7 @@ from tools.workbench_client import (
     live_workbench_api_base_url as _live_workbench_api_base_url,
 )
 from orchestrator.file_permissions import tighten_fd_permissions
+from orchestrator.agent_documentation import documentation_root
 
 CONTEXT_SCHEMA_VERSION = 6
 _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, 5, CONTEXT_SCHEMA_VERSION})
@@ -192,6 +193,11 @@ class GatewayContext:
                     **{key: str(getattr(global_config, key)) for key in
                        ("project_root", "bridge_home", "secrets_path")
                        if getattr(global_config, key, None) is not None},
+                    # Derived source identity for this read-only capability;
+                    # not an instance setting or a model-selectable root.
+                    **({"documentation_root": str(documentation_root(global_config.project_root))}
+                       if "documentation_read" in allowed_tools and getattr(global_config, "project_root", None)
+                       else {}),
                     "central_memory": _json_safe(
                         getattr(global_config, "central_memory", None) or {}
                     ),
