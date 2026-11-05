@@ -48,6 +48,12 @@ Validation uses a separate CPython 3.12.13 environment. No installer targets a
 running Core interpreter. The downloaded Windows wheels were checked against
 their official full-file PyPI SHA256 values.
 
+The initial-preparation counts below describe commit
+`db4fde7ebdf69434b4622a861dee354d80a58bd7` against baseline
+`25f88330cd91dd6d1541fcc05d155aeedd1c9a29`. They are historical evidence,
+including the wheel/sdist build, rather than a full-suite or artifact claim for
+the later integrated source. Integrated validation is recorded separately.
+
 Two bounded regression checks use synthetic values and no network:
 a Secure shared cookie must be excluded from HTTP while remaining available
 over HTTPS, and multidict reflected-union/subtraction must release operand
@@ -105,6 +111,54 @@ failures stay in the original 34-failure receipt; a focused green rerun does not
 rewrite that historical result. The whole offline product gate is therefore
 not reported as a clean pass or as production acceptance.
 
+## Integrated source closeout
+
+The branch integrates main through
+`6f78ac7f45b25111e68a737a5e6588152341b6a2`, including lifecycle changes and
+the FYI v2 catalogue. Upstream program files and the canonical nine protected
+Core files are unchanged from that main; Core 5 guidance is linked from the
+engineering domain guide. The complete five-package migration and derived
+portable hash lock are retained.
+
+On the integrated source, runtime enforcement and dependency consistency pass
+with CPython 3.12.13. Python/npm/Helm application versions agree, and the separate
+Helm chart version is preserved. Rechecking official wheel hashes, the complete
+55-package portable hash closure and public advisory audits of the 50 standard
+and 55 portable packages passes. The two bounded security probes again fail on
+the old components and pass on the candidate.
+
+The guard regression suite passes 41 checks. The actual Architecture workflow
+script rejects the simulated missing-label branch and accepts the authorized
+branch only with the existing major reset and matching independent runtime
+seals. These are local workflow simulations; they do not apply a GitHub label.
+The new FYI navigation/migration validator also passes. Local selections are
+derived from the actual integrated Architecture workflow:
+
+| Workflow selection | Passed | Skipped |
+| --- | ---: | ---: |
+| Architecture contracts | 905 | 1 |
+| Frontend Session and native file content | 755 | 3 |
+| Telegram activation and readiness | 189 | 0 |
+| Shared voice and personal authorization | 395 | 1 |
+
+The frontend selection runs in two bounded batches whose concatenated selectors
+exactly match its workflow list. The selections overlap and are not a unique-test
+total. All 38 portable packaging tests also pass on the integrated source. Final
+npm/build checks and GitHub job conclusions are recorded separately in the PR
+validation report; an absent maintainer label must block Architecture approval.
+
+The exact 32 historical failure nodes were rerun against this main with its
+unchanged old lock and against the integrated candidate. Main fails all 32;
+the candidate initially fails 31 and passes the gateway variant of
+`test_stop_cannot_report_success_with_an_owned_process_or_port_left` once.
+Three isolated repetitions then fail in each environment for that same gateway
+variant. All 32 baseline issues therefore remain unclosed, including that
+inconsistent outcome; its cause is unadjudicated. Test modules are unchanged,
+and no unrelated baseline repair is
+included. The original approximately nine-thousand-test selection has not been
+rerun for this integration. These focused checks do not establish a clean whole
+product gate or production acceptance.
+
 ## Release and adoption boundaries
 
 The standard lock is part of the immutable runtime identity. A Function
@@ -114,9 +168,14 @@ from the running Core; it cannot adopt this dependency generation.
 Before merge, retain the major-version increment, `core-change-approved` label
 and a new independent record under `docs/core-reviews/`. The implementer and
 reviewer must differ. The record seals the standard lock and project metadata
-as well as the protected-source digest. A plain protected-source guard reports
-no source change here; that result alone does not validate dependency-migration
-release approval.
+as well as the protected-source digest. The Architecture CI guard now enforces
+this policy for changes to the product major version, the standard lock or its
+declared owner, even when protected source is unchanged. The standard-lock owner
+is derived from `[tool.hashi.runtime]`; staged metadata and the baseline owner
+cannot be hidden by restoring or redirecting a working file. Missing approval,
+missing major reset or stale metadata/lock review seals fail closed. The trusted
+`core-change-approved` PR label remains a maintainer action before merge;
+local authorization flags do not grant or replace that approval.
 
 Deployment needs a separate, explicitly approved maintenance plan: prepare a
 complete new runtime, preserve instance configuration and the old release,

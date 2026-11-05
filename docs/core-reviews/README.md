@@ -34,10 +34,27 @@ Create a uniquely named JSON file, for example
   "verdict": "approved",
   "product_version": "5.0.0a1",
   "core_digest": "sha256:replace-with-command-output",
+  "reviewed_files_sha256": {
+    "pyproject.toml": "sha256:replace-with-reviewed-metadata-digest",
+    "constraints/standard-py312.lock": "sha256:replace-with-reviewed-lock-digest"
+  },
   "summary": "What was reviewed, risks found, and why approval was given."
 }
 ```
 
-The branch gate accepts only a newly added record whose product version and
-digest match the candidate. A copied historical record, self-review, missing
-timezone, non-approved verdict, or stale digest fails closed.
+The branch gate also runs for a product major-version change, an edit to the
+standard lock, or a change to its declared owner, even when no protected source
+changes. Resolve that owner from `[tool.hashi.runtime]` in `pyproject.toml`; the
+example path above is not a second declaration of ownership.
+
+The branch gate accepts only a newly added record whose product version,
+protected-source digest, and `reviewed_files_sha256` entries for project metadata
+and the active standard lock match the candidate. Hash the UTF-8 LF source view
+(the index when using `--cached`), and prefix each SHA256 with `sha256:`. Reviewers
+may seal additional reviewed files. A copied historical record, self-review,
+missing timezone, non-approved verdict, or stale digest fails closed.
+
+Local authorization flags acknowledge an existing user authorization. The
+required Architecture CI job receives authorization from the trusted PR label;
+flags and a matching independent record cannot replace `core-change-approved`.
+An authorized maintainer must apply that label before merge.

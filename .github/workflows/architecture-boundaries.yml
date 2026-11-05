@@ -24,7 +24,7 @@ jobs:
         run: python scripts/check_protected_core_changes.py --validate-manifest
       - name: Validate FYI navigation and retained knowledge
         run: python scripts/validate_agent_fyi.py
-      - name: Enforce protected-core approval on pull requests
+      - name: Enforce Core source and runtime-generation approval on pull requests
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -66,7 +66,7 @@ jobs:
             } else {
               core.info("No associated merged PR; treating this update as a direct push.");
             }
-      - name: Flag protected-core edits pushed directly to main
+      - name: Flag unapproved Core source or runtime generations pushed to main
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:
           BASE_SHA: ${{ github.event.before }}

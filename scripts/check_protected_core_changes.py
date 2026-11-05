@@ -11,8 +11,9 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = "orchestrator/runtime_contract.py"
@@ -103,7 +104,7 @@ def _protected_paths(root: Path, args: argparse.Namespace) -> set[str]:
     for ref in dict.fromkeys(refs):
         result = subprocess.run(
             ["git", "show", f"{ref}:{MANIFEST_PATH}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         if result.returncode == 0:
             protected.update(_parse_manifest(result.stdout))
@@ -123,6 +124,7 @@ def _git_text(spec: str) -> str:
         ["git", "show", spec],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or "path is unavailable"
@@ -137,6 +139,64 @@ def _candidate_text(root: Path, path: str, args: argparse.Namespace) -> str:
         return (root / path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"cannot read candidate {path}: {exc}") from exc
+
+
+def _standard_lock_path(source: str) -> str | None:
+    runtime = tomllib.loads(source).get("tool", {}).get("hashi", {}).get("runtime")
+    if runtime is None:
+        return None
+    value = runtime.get("standard-lock")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("[tool.hashi.runtime] standard-lock must be a relative path")
+    value = value.strip()
+    path = Path(value.replace("\\", "/"))
+    if path.anchor or PureWindowsPath(value).anchor or ".." in path.parts:
+        raise ValueError("standard-lock must remain inside the repository")
+    return value.strip()
+
+
+def _runtime_generation_changes(
+    root: Path, args: argparse.Namespace, changed: set[str],
+) -> set[str]:
+    if not changed:
+        return set()
+    baseline = _git_text(f"{args.base or 'HEAD'}:{PROJECT_METADATA_PATH}")
+    sources = [baseline, _git_text(f"HEAD:{PROJECT_METADATA_PATH}"),
+               _candidate_text(root, PROJECT_METADATA_PATH, args)]
+    if not args.cached and not args.base:
+        # Default preflight covers the index even when the working file hides it.
+        sources.append(_git_text(f":{PROJECT_METADATA_PATH}"))
+    baseline_major = _project_release(baseline)[1][0]
+    # The raw owner string participates in the runtime fingerprint, even when
+    # multiple spellings resolve to the same physical lock on this platform.
+    owners = {_standard_lock_path(source) for source in sources}
+    lock_paths = {
+        Path(owner.replace("\\", "/")).as_posix()
+        for owner in owners if owner is not None
+    }
+    changes = changed & lock_paths
+    if len(owners) > 1 or any(
+        _project_release(source)[1][0] != baseline_major for source in sources
+    ):
+        changes.add(PROJECT_METADATA_PATH)
+    return changes
+
+
+def _runtime_review_file_digests(
+    root: Path, args: argparse.Namespace,
+) -> dict[str, str]:
+    metadata = _candidate_text(root, PROJECT_METADATA_PATH, args)
+    paths = {PROJECT_METADATA_PATH}
+    lock = _standard_lock_path(metadata)
+    if lock is not None:
+        paths.add(Path(lock.replace("\\", "/")).as_posix())
+    # Match the canonical UTF-8 LF source view, including --cached's index.
+    return {
+        path: "sha256:" + hashlib.sha256(
+            _candidate_text(root, path, args).encode("utf-8")
+        ).hexdigest()
+        for path in sorted(paths)
+    }
 
 
 def _project_release(source: str) -> tuple[str, tuple[int, int, int]]:
@@ -193,6 +253,7 @@ def _review_record_errors(
     *,
     product_version: str,
     core_digest: str,
+    required_file_digests: dict[str, str] | None = None,
 ) -> list[str]:
     try:
         record = json.loads(source)
@@ -236,6 +297,10 @@ def _review_record_errors(
         else:
             if parsed.tzinfo is None:
                 errors.append("reviewed_at must include a timezone")
+    reviewed_files = record.get("reviewed_files_sha256")
+    for path, expected in (required_file_digests or {}).items():
+        if not isinstance(reviewed_files, dict) or reviewed_files.get(path) != expected:
+            errors.append(f"reviewed_files_sha256 does not match {path}")
     return errors
 
 
@@ -270,6 +335,10 @@ def _major_version_policy_errors(
 
     core_digest = _core_review_digest(root, protected_paths, args)
     try:
+        required_file_digests = _runtime_review_file_digests(root, args)
+    except (ValueError, OSError) as exc:
+        return errors + [f"cannot seal the candidate runtime generation: {exc}"]
+    try:
         review_paths = _added_review_paths(args)
     except subprocess.CalledProcessError as exc:
         errors.append(f"cannot inspect Core review records: {exc}")
@@ -287,6 +356,7 @@ def _major_version_policy_errors(
                 _candidate_text(root, path, args),
                 product_version=product_version,
                 core_digest=core_digest,
+                required_file_digests=required_file_digests,
             )
         except ValueError as exc:
             record_errors = [str(exc)]
@@ -348,14 +418,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"protected core manifest: invalid: {exc}", file=sys.stderr)
         return 3
 
+    runtime_changes: set[str] = set()
     if not protected:
+        try:
+            runtime_changes = _runtime_generation_changes(root, args, changed)
+        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+            print(f"Core runtime generation is unavailable: {exc}", file=sys.stderr)
+            return 3
+    approval_scope = sorted(set(protected) | runtime_changes)
+    if not approval_scope:
         print("protected core check: ok")
         return 0
 
     if not _is_authorized(args):
         print("protected core check: blocked", file=sys.stderr)
-        print("Protected HASHI Core files changed without explicit authorization:", file=sys.stderr)
-        for path in protected:
+        print(
+            "Core source or runtime generation changed without explicit authorization; "
+            "CI requires the core-change-approved label:",
+            file=sys.stderr,
+        )
+        for path in approval_scope:
             print(f"- {path}", file=sys.stderr)
         print(
             "\nOnly a user-authorized Core major-version migration may proceed. "
@@ -386,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         return 4
 
     print("protected core check: authorized major-version change")
-    for path in protected:
+    for path in approval_scope:
         print(f"- {path}")
     return 0
 
