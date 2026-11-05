@@ -18,7 +18,14 @@ This boundary is deliberately exact:
 - protected Core source paths come only from
   `orchestrator.runtime_contract.CORE_SOURCE_PATHS` beneath the configured
   `project_root`;
-- the live interpreter root is the Function Worker's actual `sys.prefix`;
+- the live interpreter roots include the Function Worker's actual sys.prefix,
+  its admitted sealed base, and the independently admitted Core and selected
+  Functions environments/bases. Targets derive from private process receipts
+  and the fixed installer selector; Agent arguments/configuration cannot choose
+  an interpreter or remove this protection;
+- external qualification manifests and the fixed installer selector are
+  protected write targets. During a handoff both the bound old FR and the
+  selected new FR remain protected;
 - the configured instance secrets file is unreadable through Agent file and
   shell tools;
 - the current Core PID cannot be terminated with the generic process tool;
@@ -76,6 +83,13 @@ Schema 1 accepts only absolute paths:
   "service_targets": []
 }
 ```
+
+Runtime target derivation checks qualified manifests against the observed Core
+receipt. Selector replacement invalidates the Tool Registry cache. Missing,
+ambiguous or mismatched required installation records deny execution before
+the executor; they never fall back to an unprotected interpretation. Read-only
+inspection remains available when the installation itself is valid. This is
+Functions tool admission, not a new Core executable-selection channel.
 
 The file can only extend the derived baseline; it cannot disable Core,
 interpreter, secret, or PID protection. Unknown fields, relative paths, or a

@@ -150,3 +150,44 @@ it does not modify sealed runtime files. Linux CI, the complete original-version
 parity scope and final exact-tree human review are still pending at publication.
 No PR137 version, production process, active Python environment or service has
 been changed.
+
+## Completed original-version parity and runtime protection
+
+At exact source 030689c4e48de6eeebf718a1ccd50e1a747a760a, the complete
+offline original-version suite passed locally in the separate test-tool FR:
+9,021 passed, 33 skipped, 246 excluded by unchanged scope markers and 18 subtests
+passed (2,494.89 pytest seconds; 2,501.50 command seconds). Source tree
+219f4c20664a2e0109bf551c079906609b99c8a0e34187e3b0e1cd2816a8ab75
+stayed identical. Windows push CI 42058021617 independently passed the same
+9,021 + 18 subtest scope, 33 skips, in 1,386.99 seconds; its 80 role checks,
+134 startup contracts and 68 patch/approval checks passed. Linux passed 75
+role checks (5 Windows-only skips) and 955 curated Core checks (7 platform skips).
+Marker exclusions, skip reasons and original failure reports remain retained.
+
+A new full actual-product cold preparation on native Windows used zero-app
+Core and the original 50-app FR: qualification 83.782 seconds, prepare 29.281
+seconds, 666 modules and 728 resources. No external routes were activated and
+both owned processes retired normally. Their CR/FR byte seals remain valid.
+
+A follow-up Tool Registry red test showed that deriving protection only from
+current FR sys.prefix omitted the separate Core. Functions now derive exact
+Core/FR/base and qualification-file targets from admitted fingerprints and the
+fixed installer selector. Both bound old and selected new FR stay protected.
+Invalid selection denies execution; independent workspaces/development Python
+and valid read-only inspection stay allowed. Core code bytes do not change.
+The added actual-role/handoff, old permission, supervisor and version scope
+passes 68 cases, with 3 POSIX-only skips on Windows, in 352.96 seconds. The
+earlier red is preserved. First target derivation measured 3.847 seconds;
+subsequent independent writes/core denials took about 5 ms.
+
+Post-suite seal checking correctly rejected bytecode caches generated in the
+test-tool driver. That driver is retained as test evidence and is not an
+adoptable product runtime. Both real product-role environments/base trees
+still match their exact seals; no cache exception or hash assertion was added.
+The test driver includes six separately declared test-only distributions and
+is distinct from the actual 0/50 role qualification.
+
+No PR137 package version is adopted yet. Its exact cookie/reference-lifetime
+probes reproduce two expected failures against old packages. Only reviewed
+public wheel inputs were cached. Native account/WAC, independent human Core
+review, formal release packaging and operator adoption remain separate gates.

@@ -874,14 +874,26 @@ class ToolRegistry:
             policy_cache_key,
         )
 
+        from orchestrator.runtime_contract import RuntimeContractError
         runtime_prefix = context.get("live_runtime_prefix")
-        cache_key = policy_cache_key(global_config, runtime_prefix)
-        if cache_key != self._live_runtime_policy_cache_key:
-            self._live_runtime_policy_cache = load_live_runtime_policy(
-                global_config,
-                runtime_prefix=runtime_prefix,
+        owner = getattr(context.get("_runtime"), "orchestrator", None)
+        try:
+            core_runtime = getattr(owner, "core_runtime_fingerprint", None)
+            cache_key = policy_cache_key(global_config, runtime_prefix, core_runtime=core_runtime)
+            if cache_key != self._live_runtime_policy_cache_key:
+                self._live_runtime_policy_cache = load_live_runtime_policy(
+                    global_config, runtime_prefix=runtime_prefix, core_runtime=core_runtime,
+                )
+                self._live_runtime_policy_cache_key = cache_key
+        except (OSError, ValueError, RuntimeContractError):
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output="Error: installed runtime protection could not be verified; use controlled recovery.",
+                is_error=True,
+                details={"control_disposition": "denied", "reason": "live_runtime_protection",
+                         "operation": "runtime_qualification_unavailable", "retryable": False,
+                         "tool_executed": False},
             )
-            self._live_runtime_policy_cache_key = cache_key
         if tool_name == "file_search":
             for root in arguments.get("roots") or []:
                 denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)

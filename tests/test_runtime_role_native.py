@@ -246,3 +246,90 @@ def test_builder_refuses_to_touch_any_existing_environment(native_roles):
         build_reference_roles(ROOT, native_roles["reference_path"],
                               expected_digest=native_roles["reference_digest"],
                               destination=native_roles["destination"])
+
+
+def _role_registry(native_roles, tmp_path):
+    from types import SimpleNamespace
+    from tools.registry import ToolRegistry
+    home = tmp_path / "policy-instance"
+    workspace = home / "workspaces/agent"
+    workspace.mkdir(parents=True)
+    config = SimpleNamespace(project_root=ROOT, bridge_home=home,
+                             secrets_path=home/"secrets.json", instance_id="isolated-role-policy")
+    owner = SimpleNamespace(core_runtime_fingerprint=RuntimeFingerprint.from_mapping(native_roles["core"]))
+    registry = ToolRegistry(
+        allowed_tools=["file_read", "file_write", "apply_patch", "shell", "verification_run"],
+        access_root=tmp_path, access_roots=[tmp_path], workspace_dir=workspace, secrets={},
+        audit_context={"global_config":config, "live_runtime_prefix":native_roles["functions"]["environment_prefix"],
+                       "_runtime":SimpleNamespace(orchestrator=owner)})
+    return registry, workspace
+
+
+def _admit_role_write(registry, path):
+    return registry._check_live_runtime_gate("file_write", {"path":str(path), "content":"never executed"},
+                                            tool_call_id="isolated-role-policy")
+
+
+def test_split_role_tool_denial_includes_core_bases_manifests_and_selector(native_roles, tmp_path):
+    registry, workspace = _role_registry(native_roles, tmp_path)
+    release = Path(native_roles["destination"])
+    selector = Path(native_roles["selection"])
+    record = json.loads(selector.read_bytes())
+    targets = [
+        Path(native_roles["core"]["environment_prefix"])/"pyvenv.cfg",
+        Path(native_roles["functions"]["environment_prefix"])/"pyvenv.cfg",
+        release/"base/BUILD", Path(record["core"]["path"]),
+        Path(record["functions"]["path"]), selector,
+    ]
+    for path in targets:
+        denied = _admit_role_write(registry, path)
+        assert denied is not None and denied.is_error, path
+        assert denied.details["reason"] == "live_runtime_protection", path
+    assert _admit_role_write(registry, workspace/"ordinary.txt") is None
+    independent = tmp_path/"independent-development/Scripts/python.exe"
+    assert registry._check_live_runtime_gate(
+        "shell", {"command":f'uv pip install --python "{independent}" sample'},
+        tool_call_id="independent") is None
+    assert registry._check_live_runtime_gate(
+        "shell", {"command":f'uv pip install --python "{native_roles["core"]["executable"]}" sample'},
+        tool_call_id="live-core") is not None
+    assert registry._check_live_runtime_gate(
+        "file_read", {"path":str(targets[0])}, tool_call_id="read-only") is None
+
+
+def test_selector_change_protects_new_and_bound_old_fr_and_corruption_denies(native_roles, tmp_path, monkeypatch):
+    from orchestrator.runtime_contract import qualified_runtime_from_reference
+    import orchestrator.runtime_protection_targets as targets
+    registry, workspace = _role_registry(native_roles, tmp_path)
+    selector = Path(native_roles["selection"])
+    previous = selector.read_bytes()
+    record = json.loads(previous)
+    bound = qualified_runtime_from_reference(record["functions"],code_root=ROOT)
+    monkeypatch.setattr(targets,"current_process_runtime",lambda:bound)
+    candidate = tmp_path/"new-functions"
+    shutil.copytree(bound.fingerprint.environment_prefix,candidate)
+    metadata = _site_packages(candidate)/"hashi_role_policy_fixture-2.dist-info"
+    metadata.mkdir()
+    (metadata/"METADATA").write_text("Name: hashi-role-policy-fixture\nVersion: 2\n",encoding="utf-8")
+    newer = qualify_environment(ROOT,candidate,Path(native_roles["destination"])/"base",
+                                tmp_path/"new-functions.json",FUNCTIONS_ROLE)
+    assert newer.runtime_id != bound.runtime_id
+    assert _admit_role_write(registry,workspace/"ordinary-before.txt") is None
+    try:
+        record["functions"] = runtime_installation_reference(newer)
+        selector.write_text(json.dumps(record),encoding="utf-8")
+        for target in (candidate/"pyvenv.cfg",newer.manifest_path,
+                       Path(bound.fingerprint.environment_prefix)/"pyvenv.cfg",bound.manifest_path):
+            result = _admit_role_write(registry,target)
+            assert result is not None and result.is_error,target
+            assert result.details["reason"] == "live_runtime_protection"
+        assert _admit_role_write(registry,workspace/"ordinary-after.txt") is None
+        selector.write_text('{"schema_version":1,"schema_version":1}',encoding="utf-8")
+        denial = _admit_role_write(registry,workspace/"must-not-execute.txt")
+        assert denial is not None and denial.is_error
+        assert denial.details["operation"] == "runtime_qualification_unavailable"
+        assert denial.details["tool_executed"] is False
+        assert not (workspace/"must-not-execute.txt").exists()
+    finally:
+        selector.write_bytes(previous)
+    assert selector.read_bytes() == previous
