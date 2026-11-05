@@ -26,7 +26,7 @@ jobs:
           ruff check orchestrator/frontend_call tests/frontend_call
           ruff format --check orchestrator/frontend_call tests/frontend_call
       - name: Focused connector and phone regression
-        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_architecture_boundaries.py
+        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_phone_interpretation.py tests/test_agent_fyi.py tests/test_architecture_boundaries.py
       - name: Protected Core and source invariants
         run: |
           python scripts/check_protected_core_changes.py --base 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
