@@ -77,8 +77,12 @@ async def dispatch_permission_operation(api, request, runtime, operation, metada
             token, temporary = login["session_token"], True
         except (OSError, ValueError, TypeError, KeyError):
             pass
+    from orchestrator.permissions.human_approval import human_approval
+
+    approval = human_approval(api)
     ingress = PermissionIngress(
         subject, api.permission_control, token, metadata["connection_binding"],
+        approval_link=approval.invite if approval is not None else None,
     )
     try:
         with bind_permission_ingress(ingress):
@@ -145,3 +149,4 @@ async def try_permission_command(api, request, runtime, text, *, owner_id):
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {"ok": False, "error_code": "permission_command_unavailable",
                 "request_outcome": "unknown"}
+# HASHI-Fingerprint: hfp_1a9d9f09098d42dbb6365dff87a33c90

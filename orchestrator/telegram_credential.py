@@ -25,6 +25,7 @@ from orchestrator.agent_delivery_policy import (
     update_agent_telegram_mirror_policy,
 )
 from orchestrator.connector_delivery_preferences import get_connector_preference
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDocument,
@@ -404,7 +405,7 @@ class TelegramCredentialService:
                 normalized_policy,
             )
             try:
-                write_config_json(self.config_path, config)
+                write_agent_config_json(self.config_path, config)
             except ConfigDurabilityError:
                 durability_warning = "mirror_policy_saved_durability_unconfirmed"
         except ConfigConflictError:
@@ -570,3 +571,4 @@ class TelegramCredentialService:
         if durability_warning:
             result["warning_code"] = durability_warning
         return result
+# HASHI-Fingerprint: hfp_beaf162634a04faea4a8bc16635b9a1a

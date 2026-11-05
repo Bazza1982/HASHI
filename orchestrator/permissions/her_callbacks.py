@@ -81,7 +81,13 @@ class WorkerHerCallbacks:
         if (not isinstance(record, dict) or record.get("turn_id") != binding.context.turn_id
                 or record.get("request_ref") != "hashi-request:" + binding.request_id):
             raise PermissionDenied("audit entry is outside this Turn")
-        result = await asyncio.to_thread(turn.adapter._audit_log.append, record)
+        if record.get("format") != "her-v2-audit-v1":
+            raise PermissionDenied("unsupported bound runtime audit format")
+        # The original owner supplies its envelope. Its keyword append keeps
+        # canonical-before-projection persistence, redaction and deduplication.
+        facts = {key: value for key, value in record.items()
+                 if key not in {"format", "recorded_at"}}
+        result = await asyncio.to_thread(turn.adapter._audit_log.append, **facts)
         with guard(binding.context):
             pass
         return result

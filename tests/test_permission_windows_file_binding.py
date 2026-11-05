@@ -150,7 +150,7 @@ async def test_authorized_operation_reads_the_bound_windows_file(tmp_path):
     from orchestrator.permissions.execution_gate import PermissionExecutionGate, SupervisedResult
     from orchestrator.permissions.models import ExecutionContext
     from orchestrator.permissions.waiting import PermissionWaiter
-    from tests.test_permission_execution_gate import Issuer, find_pending
+    from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer, find_pending
 
     context = ExecutionContext(
         instance_id="instance", owner_id="owner", agent_id="agent", task_id="task",
@@ -196,7 +196,7 @@ async def test_authorized_operation_reads_the_bound_windows_file(tmp_path):
     facts = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, facts.arguments_digest)
     waiter.notify()
-    result = await asyncio.wait_for(operation, 1)
+    result = await asyncio.wait_for(operation, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "succeeded"
     assert result.payload == "approved file"
     assert authority.operation_state("operation") == "succeeded"
@@ -344,7 +344,7 @@ async def test_authorized_operation_creates_the_bound_windows_file(tmp_path):
     from orchestrator.permissions.execution_gate import PermissionExecutionGate, SupervisedResult
     from orchestrator.permissions.models import ExecutionContext
     from orchestrator.permissions.waiting import PermissionWaiter
-    from tests.test_permission_execution_gate import Issuer, find_pending
+    from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer, find_pending
 
     context = ExecutionContext(
         instance_id="instance", owner_id="owner", agent_id="agent", task_id="task",
@@ -392,7 +392,7 @@ async def test_authorized_operation_creates_the_bound_windows_file(tmp_path):
     facts = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, facts.arguments_digest)
     waiter.notify()
-    result = await asyncio.wait_for(operation, 1)
+    result = await asyncio.wait_for(operation, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "succeeded"
     assert target.read_text(encoding="utf-8") == "approved"
     assert authority.operation_state("operation") == "succeeded"
@@ -419,7 +419,7 @@ async def test_revoked_queued_windows_create_cannot_write_the_bound_file(tmp_pat
     from orchestrator.permissions.execution_gate import PermissionExecutionGate
     from orchestrator.permissions.models import ExecutionContext
     from orchestrator.permissions.waiting import PermissionWaiter
-    from tests.test_permission_execution_gate import Issuer, find_pending
+    from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer, find_pending
 
     context = ExecutionContext(
         instance_id="instance", owner_id="owner", agent_id="agent", task_id="task",
@@ -465,11 +465,12 @@ async def test_revoked_queued_windows_create_cannot_write_the_bound_file(tmp_pat
     facts = authority.operation_status_for_task(context, "operation")
     lease = issuer.approve(authority, context, request, facts.arguments_digest)
     waiter.notify()
-    await asyncio.wait_for(queued.wait(), 1)
+    await asyncio.wait_for(queued.wait(), CONTRACT_WATCHDOG_SECONDS)
     authority.revoke(context, lease.lease_id)
     release.set()
-    result = await asyncio.wait_for(operation, 1)
+    result = await asyncio.wait_for(operation, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert authority.resource_state(claims[0]) == "stopping"
     assert authority.get_lease(lease.lease_id).status == "revoked"
     assert not target.exists()
+# HASHI-Fingerprint: hfp_f1fb68f2613c448292d31fb145924899

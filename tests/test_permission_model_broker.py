@@ -38,13 +38,21 @@ async def test_actual_api_adapter_uses_broker_and_never_receives_service_key(env
     broker = SelectedModelBroker(authority, binding, run_guard=guard,
                                  drivers={("deepseek-api", "deepseek-v4-pro"): Driver()})
 
+    from tests.permission_forensic_fixture import forensic_port
+    forensic, forensic_store = forensic_port(tmp_path / "trusted-forensics", binding)
+
     class Connection:
+        def call(self, method, arguments):
+            assert method == "runtime_port"
+            return forensic(arguments)
+
         async def call_async(self, method, arguments, *, on_event=None):
             assert method == "provider_call"
             return await broker.provider_call(**arguments)
 
     factory = BrokeredProviderFactory(Connection(), profile_config=[
-        {"engine": "deepseek-api", "model": "deepseek-v4-pro"}], scratch_root=tmp_path, privacy_level=1)
+        {"engine": "deepseek-api", "model": "deepseek-v4-pro"}], scratch_root=tmp_path, privacy_level=1,
+        brokered_forensics=True)
     adapter = factory.create_ephemeral_backend("deepseek-api", "deepseek-v4-pro")
     try:
         assert await adapter.initialize()
@@ -83,3 +91,4 @@ async def test_model_broker_rejects_other_destinations_remote_tools_and_inactive
         await broker.provider_call(**base)
     with pytest.raises(ValueError):
         RuntimeExecutionBinding(replace(context, owner_id=""), "request", 1, "worker")
+# HASHI-Fingerprint: hfp_2b91619dee344993bef9ce6558613462

@@ -552,6 +552,8 @@ class WorkbenchApiServer:
         register_call_api(self)
         from orchestrator.standby.routes import register_standby_api
         register_standby_api(self)
+        from orchestrator.permissions.human_approval import register_human_approval
+        register_human_approval(self)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
@@ -7961,7 +7963,9 @@ class WorkbenchApiServer:
                     {"ok": False, "error_code": "permissions_runtime_apply_failed"}, status=503
                 )
             try:
-                write_config_json(self.config_path, document)
+                from orchestrator.agent_config_json import write_agent_config_json
+
+                write_agent_config_json(self.config_path, document)
             except ConfigDurabilityError:
                 return web.json_response(
                     {"ok": False, "error_code": "settings_persistence_uncertain"}, status=503

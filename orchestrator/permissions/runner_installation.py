@@ -89,26 +89,38 @@ def build_runner(path):
         raise
 
 
-async def serve(path):
+async def serve(path, *, stopped=None, on_ready=None):
+    """Serve under foreground signals or an explicit SCM-owned stop event."""
     runner, endpoint, lock = build_runner(path)
-    loop, stopped = asyncio.get_running_loop(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    external_stop = stopped is not None
+    stopped = stopped if external_stop else asyncio.Event()
     previous = {}
-    for kind in (signal.SIGINT, signal.SIGTERM):
-        previous[kind] = signal.getsignal(kind)
-        signal.signal(kind, lambda *args: loop.call_soon_threadsafe(stopped.set))
     try:
+        if not external_stop:
+            for kind in (signal.SIGINT, signal.SIGTERM):
+                previous[kind] = signal.getsignal(kind)
+                signal.signal(kind, lambda *args: loop.call_soon_threadsafe(stopped.set))
+        if stopped.is_set():
+            return
         await asyncio.to_thread(runner.records.recover_all)
+        if stopped.is_set():
+            return
         await endpoint.start()
+        if not stopped.is_set() and on_ready is not None:
+            on_ready()
         await stopped.wait()
     finally:
-        # Do not release the installation lock if a child Job still has an
-        # unknown outcome; a second Runner must not adopt it as clean.
-        errors = await asyncio.gather(endpoint.close(), runner.close(), return_exceptions=True)
-        if any(isinstance(error, BaseException) for error in errors):
-            raise OSError("Runner shutdown remains unverified")
-        lock.close()
-        for kind, handler in previous.items():
-            signal.signal(kind, handler)
+        try:
+            # Unknown child outcomes retain installation ownership. SCM must
+            # report failed shutdown rather than claiming successful cleanup.
+            errors = await asyncio.gather(endpoint.close(), runner.close(), return_exceptions=True)
+            if any(isinstance(error, BaseException) for error in errors):
+                raise OSError("Runner shutdown remains unverified")
+            lock.close()
+        finally:
+            for kind, handler in previous.items():
+                signal.signal(kind, handler)
 
 
 def main(argv=None):

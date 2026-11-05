@@ -37,8 +37,12 @@ def service_clients(global_config):
     raw = getattr(global_config, "permission_service", None)
     required = {"version", "instance_id", "pao_endpoint", "control_endpoint", "public_key"}
     if (not isinstance(raw, dict) or not required.issubset(raw)
-            or set(raw) - required - {"service_sid"} or raw["version"] != 1):
+            or set(raw) - required - {"service_sid", "approval_origin"} or raw["version"] != 1):
         raise PermissionDenied("a qualified permission service installation is required")
+    if "approval_origin" in raw:
+        from orchestrator.permissions.human_approval import approval_origin
+
+        approval_origin(raw["approval_origin"])
     if str(raw["instance_id"]).upper() != str(global_config.instance_id).upper():
         raise PermissionDenied("permission service belongs to another instance")
     from orchestrator.permissions.windows_ipc import _PIPE
@@ -182,7 +186,7 @@ class RemoteRunExecutor:
             if self._level == "L2":
                 # Only the host owns main-loop continuation. Presentation and
                 # companion calls must not overwrite its ready/pending batch.
-                self._stage_provider.bind_provider_context(observer=None)
+                self._stage_provider.bind_provider_context(observer=None, recovery=None)
             self._stage_provider.backend_manager = BrokeredProviderFactory(
                 client, profile_config=public["profiles"],
                 scratch_root=self._owner.workspace_dir, privacy_level=public["privacy_level"],
@@ -318,3 +322,4 @@ def settings_revision(settings):
     raw = asdict(settings)
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).digest()
     return int.from_bytes(digest[:7], "big") + 1
+# HASHI-Fingerprint: hfp_f79ac9a1e4844f57a6c3f6d7b28132f8

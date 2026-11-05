@@ -84,6 +84,16 @@ async def invoke(turn, operation, arguments):
         if arguments != {"args": [], "kwargs": {}}:
             raise PermissionDenied("runtime manifest takes no arguments")
         return pack(manifest(runtime))
+    if operation == "provider_forensic":
+        if (not isinstance(arguments, dict) or set(arguments) != {"args", "kwargs"}
+                or arguments["args"] != [] or not isinstance(arguments["kwargs"], dict)
+                or set(arguments["kwargs"]) != {"kind", "record"}):
+            raise PermissionDenied("a fixed private provider evidence record is required")
+        from orchestrator.permissions.provider_forensics import persist_provider_forensic
+
+        return pack(await persist_provider_forensic(turn, **{
+            key: unpack(value) for key, value in arguments["kwargs"].items()
+        }))
     if (operation not in (_OPERATIONS.keys() | {"provider_features", "execution_start", "media_manifest", "media_chunk",
                                                 "voice_state", "voice_transcript", "text_audio", "media_cleanup",
                                                 "audio_begin", "audio_chunk", "audio_complete"}) or not isinstance(arguments, dict)

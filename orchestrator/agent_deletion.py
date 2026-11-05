@@ -29,6 +29,7 @@ from orchestrator.agent_incarnation import (
     valid_agent_lifecycle_id,
 )
 from orchestrator.telegram_delivery_state import retire_agent_state
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigDocument,
     read_config_json,
@@ -553,7 +554,7 @@ class AgentDeletionService:
                     if not (isinstance(r, dict) and str(r.get("name") or r.get("id") or "") == agent_name)
                 ]
             AgentDirectory.remove_local_memberships(config_doc, agent_name)
-            write_config_json(self.paths.config_path, config_doc)
+            write_agent_config_json(self.paths.config_path, config_doc)
             journal["steps_completed"].append("config_removed")
             journal["status"] = "config_removed"
             self._write_journal(operation_id, journal)

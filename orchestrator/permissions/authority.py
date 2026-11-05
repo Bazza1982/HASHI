@@ -215,7 +215,7 @@ class PermissionEvent:
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _MAX_LIVE_DECISION_ACTIONS = 1024
 _REQUIRED_COLUMNS = {
     "authority_metadata": {"key", "value"},
@@ -503,6 +503,7 @@ class PermissionAuthority:
                 raise ValueError(f"{name} must be a positive integer")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.continuity_path = self.path.with_name(self.path.name + ".continuity")
         if baseline_resolver is not None and (not callable(baseline_resolver) or inspect.iscoroutinefunction(baseline_resolver)):
             raise ValueError("a synchronous trusted baseline policy resolver is required")
         self._baseline_resolver = baseline_resolver
@@ -517,6 +518,9 @@ class PermissionAuthority:
         self._wall_anchor = float(clock())
         self._monotonic_anchor = float(monotonic())
         self._clock_lock = threading.Lock()
+        from orchestrator.permissions.transaction_queue import LedgerTransactionQueue
+
+        self._transaction_lock = LedgerTransactionQueue()
         self._clock_observations: dict[int, tuple[float, float]] = {}
         self._service_generation: str | None = None
         if not math.isfinite(self._wall_anchor) or not math.isfinite(self._monotonic_anchor):
@@ -525,17 +529,206 @@ class PermissionAuthority:
         self._begin_service()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        return self._open_ledger(self.path)
+
+    @staticmethod
+    def _open_ledger(path: Path, *, read_only=False) -> sqlite3.Connection:
+        path = Path(path)
+        witness = path.with_name(path.name + ".continuity")
+        if read_only and (not path.is_file() or not witness.is_file()):
+            raise PermissionDenied("permission ledger continuity is missing")
+        target = path.absolute().as_uri() + "?mode=ro" if read_only else str(path)
+        witness_target = witness.absolute().as_uri() + "?mode=ro" if read_only else str(witness)
+        connection = sqlite3.connect(target, timeout=10, isolation_level=None, uri=read_only)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("ATTACH DATABASE ? AS continuity", (witness_target,))
+            # SQLite's super-journal commits both files atomically. WAL, MEMORY
+            # and OFF cannot provide that cross-database durability contract.
+            for schema in ("main", "continuity"):
+                mode = connection.execute(f"PRAGMA {schema}.journal_mode").fetchone()[0]
+                if mode not in {"delete", "truncate", "persist"}:
+                    raise PermissionDenied("permission continuity requires durable rollback journals")
+                connection.execute(f"PRAGMA {schema}.synchronous=FULL")
+            return connection
+        except BaseException:
+            connection.close()
+            raise
+
+    @staticmethod
+    def _check_continuity(connection: sqlite3.Connection) -> None:
+        metadata = connection.execute(
+            "SELECT name FROM main.sqlite_master WHERE type='table' AND name='authority_metadata'"
+        ).fetchone()
+        ledger = None if metadata is None else connection.execute(
+            "SELECT value FROM authority_metadata WHERE key='continuity_token'"
+        ).fetchone()
+        witness_table = connection.execute(
+            "SELECT name FROM continuity.sqlite_master WHERE type='table' AND name='ledger_head'"
+        ).fetchone()
+        witness = None if witness_table is None else connection.execute(
+            "SELECT token FROM continuity.ledger_head WHERE singleton=1"
+        ).fetchone()
+        if ledger is None and witness is None:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version >= 9 or witness_table is not None:
+                raise PermissionDenied("permission ledger continuity is missing")
+            # First creation or the one-time upgrade of an intact legacy
+            # installation. Later restoration cannot take this path while
+            # the independently protected witness is retained.
+            connection.execute(
+                "CREATE TABLE continuity.ledger_head ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+                "token TEXT NOT NULL CHECK(length(token)=32))"
+            )
+            return
+        if (ledger is None or witness is None
+                or not isinstance(ledger["value"], str)
+                or re.fullmatch(r"[0-9a-f]{32}", ledger["value"]) is None
+                or ledger["value"] != witness["token"]):
+            raise PermissionDenied("permission ledger continuity does not match; restoration requires reconciliation")
+
+    @staticmethod
+    def _advance_continuity(connection: sqlite3.Connection) -> None:
+        token = uuid4().hex
+        connection.execute(
+            "INSERT INTO authority_metadata(key,value) VALUES('continuity_token',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (token,),
+        )
+        connection.execute(
+            "INSERT INTO continuity.ledger_head(singleton,token) VALUES(1,?) "
+            "ON CONFLICT(singleton) DO UPDATE SET token=excluded.token", (token,),
+        )
+
+    @classmethod
+    def _maintenance_observation(cls, connection):
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version != _SCHEMA_VERSION:
+            raise PermissionDenied("maintenance requires the current permission ledger schema")
+        cls._validate_schema(connection, version)
+        ledger = connection.execute(
+            "SELECT value FROM authority_metadata WHERE key='continuity_token'"
+        ).fetchone()
+        witness = connection.execute("SELECT token FROM continuity.ledger_head WHERE singleton=1").fetchone()
+        if any(row is None or not isinstance(row[0], str)
+               or re.fullmatch(r"[0-9a-f]{32}", row[0]) is None for row in (ledger, witness)):
+            raise PermissionDenied("permission ledger continuity is missing")
+        heads = (version, ledger[0], witness[0])
+        return {
+            "revision": hashlib.sha256(_json(heads).encode()).hexdigest(),
+            "schema": version, "continuity_matches": ledger[0] == witness[0],
+            "instance_ids": [row[0] for row in connection.execute(
+                "SELECT DISTINCT instance_id FROM permission_tasks ORDER BY instance_id")],
+        }
+
+    @classmethod
+    def inspect_ledger(cls, path):
+        """Observe without startup, migration, generation fencing or file creation."""
+        connection = cls._open_ledger(path, read_only=True)
+        try:
+            connection.execute("BEGIN")
+            return cls._maintenance_observation(connection)
+        finally:
+            connection.rollback()
+            connection.close()
+
+    @classmethod
+    def reconcile_ledger(cls, path, *, expected_revision, recovery_id, reason,
+                         observed_at, instance_id):
+        """Trusted offline owner only; public callers must use the Windows operator.
+
+        Never enables a grant, resumes a task or claims OS resource cleanup.
+        The operator holds the same installation lock as service startup.
+        """
+        if (not isinstance(expected_revision, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
+                or not isinstance(recovery_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", recovery_id) is None
+                or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500
+                or not isinstance(instance_id, str) or not instance_id
+                or type(observed_at) not in (int, float) or not math.isfinite(observed_at)):
+            raise ValueError("explicit recovery identity, revision, reason and trusted time required")
+        path = Path(path)
+        # Refuse absent components before the writable connection can create any.
+        cls.inspect_ledger(path)
+        connection = cls._open_ledger(path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            observation = cls._maintenance_observation(connection)
+            if any(value != instance_id for value in observation["instance_ids"]):
+                raise PermissionDenied("ledger belongs to another installation")
+            key = "maintenance_recovery:" + recovery_id
+            prior = connection.execute(
+                "SELECT value FROM authority_metadata WHERE key=?", (key,)
+            ).fetchone()
+            if prior is not None:
+                if not observation["continuity_matches"]:
+                    raise PermissionDenied("recovery receipt has lost ledger continuity")
+                result = json.loads(prior[0])
+                if result["source_revision"] != expected_revision or result["reason"] != reason:
+                    raise RevisionConflict("recovery identity was already used with another input")
+                return result
+            if observation["revision"] != expected_revision:
+                raise RevisionConflict("ledger changed after maintenance inspection")
+            for floor in ("wall_high_water", "effective_high_water"):
+                previous = cls._time_floor(connection, floor)
+                if previous is not None and observed_at < previous:
+                    raise PermissionDenied("clock rollback requires corrected trusted time")
+            tasks = connection.execute("SELECT task_id FROM permission_tasks").fetchall()
+            result = {
+                "recovery_id": recovery_id, "source_revision": expected_revision,
+                "reason": reason, "observed_at": observed_at,
+                "revoked_leases": connection.execute(
+                    "UPDATE permission_leases SET status='revoked',reserved_claim=NULL "
+                    "WHERE status IN ('active','reserved')").rowcount,
+                "paused_tasks": connection.execute(
+                    "UPDATE permission_tasks SET state='paused',revision=revision+1 "
+                    "WHERE state='active'").rowcount,
+            }
+            for row in connection.execute("SELECT execution_epoch FROM execution_bindings").fetchall():
+                cls._stop_epoch_resources(connection, row[0])
+            connection.execute("UPDATE execution_bindings SET state='fenced' WHERE state='active'")
+            connection.execute("UPDATE pending_operations SET state='unknown' WHERE state='started'")
+            connection.execute("UPDATE execution_claims SET state='unknown' WHERE state='started'")
+            connection.execute(
+                "UPDATE pending_operations SET state='cancelled' WHERE state IN ('waiting','prepared')")
+            connection.execute("UPDATE access_requests SET state='withdrawn',revision=revision+1 WHERE state='pending'")
+            connection.execute("UPDATE decision_actions SET expires_at=MIN(expires_at,?)", (observed_at,))
+            for floor in ("wall_high_water", "effective_high_water"):
+                cls._store_time_floor(connection, floor, observed_at)
+            connection.execute(
+                "INSERT INTO authority_metadata(key,value) VALUES('service_generation',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (uuid4().hex,))
+            for row in tasks:
+                cls._event(connection, row[0], "ledger_reconciled", recovery_id, observed_at)
+            connection.execute("INSERT INTO authority_metadata(key,value) VALUES(?,?)", (key, _json(result)))
+            cls._advance_continuity(connection)
+            connection.commit()
+            return result
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            # A replay performs no commit, even after later valid approvals.
+            connection.rollback()
+            connection.close()
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, *, force_commit=False):
+        # Queue this service's writers before opening their SQLite connections.
+        # Otherwise local callers consume SQLite's external-writer busy budget
+        # while another local commit is still flushing both durable databases.
+        # Independent owners still meet BEGIN IMMEDIATE and generation fencing.
+        with self._transaction_lock, self._ledger_transaction(force_commit=force_commit) as connection:
+            yield connection
+
+    @contextmanager
+    def _ledger_transaction(self, *, force_commit=False):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._check_continuity(connection)
             if self._service_generation is not None:
                 active = connection.execute(
                     "SELECT value FROM authority_metadata WHERE key='service_generation'"
@@ -543,7 +736,13 @@ class PermissionAuthority:
                 if active is None or active["value"] != self._service_generation:
                     raise PermissionDenied("permission service generation is fenced")
             yield connection
-            connection.commit()
+            if force_commit or connection.total_changes:
+                self._advance_continuity(connection)
+                connection.commit()
+            else:
+                # All reads and fences still ran under the same transaction.
+                # No state or time changed, so no new durable head is needed.
+                connection.rollback()
         except BaseException:
             # Roll back business state, but do not forget a later clock observed
             # by the rejected transaction: a restart must not revive a lease.
@@ -552,10 +751,16 @@ class PermissionAuthority:
             connection.rollback()
             if observation is not None:
                 try:
+                    previous_changes = connection.total_changes
                     connection.execute("BEGIN IMMEDIATE")
+                    self._check_continuity(connection)
                     self._store_time_floor(connection, "wall_high_water", observation[0])
                     self._store_time_floor(connection, "effective_high_water", observation[1])
-                    connection.commit()
+                    if connection.total_changes != previous_changes:
+                        self._advance_continuity(connection)
+                        connection.commit()
+                    else:
+                        connection.rollback()
                 except BaseException as exc:
                     connection.rollback()
                     raise PermissionDenied("trusted time could not be persisted") from exc
@@ -720,9 +925,10 @@ class PermissionAuthority:
             raise ValueError("permission ledger pending uniqueness is incomplete")
 
     def _initialize(self) -> None:
-        with self._transaction() as connection:
+        # DDL/PRAGMA schema changes are not counted by SQLite total_changes.
+        with self._transaction(force_commit=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version in {1, 2, 3, 4, 5, 6, 7, _SCHEMA_VERSION}:
+            if version in {1, 2, 3, 4, 5, 6, 7, 8, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
             if version == _SCHEMA_VERSION:
                 return
@@ -790,6 +996,10 @@ class PermissionAuthority:
             if version == 7:
                 connection.execute(_PRESTART_FAILURES_SCHEMA)
                 version = 8
+            if version == 8:
+                # Older binaries must reject this ledger rather than write
+                # history without advancing its independent witness.
+                version = 9
             if version != _SCHEMA_VERSION:
                 raise ValueError("unsupported permission ledger schema")
             self._validate_schema(connection, _SCHEMA_VERSION)
@@ -817,6 +1027,8 @@ class PermissionAuthority:
         old = cls._time_floor(connection, key)
         if old is not None:
             value = max(value, old)
+            if value == old:
+                return
         connection.execute(
             "INSERT INTO authority_metadata(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

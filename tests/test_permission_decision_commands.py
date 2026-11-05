@@ -1,7 +1,6 @@
 """Formal frontend intentions bind a current human session and canonical Run."""
 from dataclasses import replace
 import sqlite3
-import time
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -61,10 +60,10 @@ def submit(control, command, *, invocation="invocation", token=None, subject=Non
 def test_exact_partial_approval_and_retry_do_not_expand_or_duplicate(control):
     _, _, authority, context, scope, request, _, _, _, _ = control
     command = f"approve {request.request_id} once --revision 1 --for 2m --actions read"
-    started = time.time()
+    started = authority.observed_time()
     outcome = submit(control, command)
     assert outcome.lease.lifetime == "once" and outcome.lease.scopes[0].actions == ("read",)
-    assert started + 120 <= outcome.lease.expires_at <= time.time() + 120
+    assert started + 120 <= outcome.lease.expires_at <= authority.observed_time() + 120
     read = replace(scope, actions=("read",))
     assert authority.evaluate(context, [read], operation_id="op")
     assert not authority.evaluate(context, [scope], operation_id="op")

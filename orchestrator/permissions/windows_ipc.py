@@ -180,6 +180,45 @@ class JsonPipe:
         self._connection.close()
 
 
+def _pipe_server_name(name, policy, session_id):
+    """Resolve only the kernel's LOCAL alias; signatures keep the logical name."""
+    if (not isinstance(name, str) or _PIPE.fullmatch(name) is None
+            or not isinstance(policy, PipePeerPolicy)):
+        raise ValueError("a fixed local permission endpoint and peer policy are required")
+    if policy.appcontainer_sid is None:
+        return name
+    if type(session_id) is not int or not 0 <= session_id <= 0xFFFFFFFF:
+        raise ValueError("an observed Windows session is required")
+    import ntpath
+
+    return ntpath.join(r"\\.\pipe", "Sessions", str(session_id),
+                       "AppContainerNamedObjects", policy.appcontainer_sid,
+                       name.rsplit("\\", 1)[-1])
+
+
+def _pipe_security_descriptor(service_sid, policy):
+    if (not isinstance(service_sid, str) or _SID.fullmatch(service_sid) is None
+            or not isinstance(policy, PipePeerPolicy)):
+        raise ValueError("fixed service and client identities are required")
+    # Both the ordinary-user and lowbox access checks must pass. Kernel peer
+    # verification still rejects an ordinary process of the same base user.
+    sddl = f"D:P(A;;GA;;;{service_sid})(A;;GRGW;;;{policy.user_sid})"
+    if policy.appcontainer_sid is not None:
+        sddl += f"(A;;GRGW;;;{policy.appcontainer_sid})S:(ML;;NW;;;LW)"
+    return sddl
+
+
+def _current_session_id():
+    ctypes, wintypes, kernel, _ = _windows()
+    query = kernel.ProcessIdToSessionId
+    query.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    query.restype = wintypes.BOOL
+    session = wintypes.DWORD()
+    if not query(os.getpid(), ctypes.byref(session)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(session.value)
+
+
 class WindowsPipeListener:
     def __init__(self, name, *, service_sid, peer_policy: PipePeerPolicy):
         if not isinstance(name, str) or _PIPE.fullmatch(name) is None:
@@ -189,6 +228,8 @@ class WindowsPipeListener:
         if not isinstance(peer_policy, PipePeerPolicy):
             raise ValueError("a fixed OS peer policy is required")
         self.name, self.service_sid, self.policy = name, service_sid, peer_policy
+        self._server_name = _pipe_server_name(name, peer_policy,
+                                              _current_session_id() if peer_policy.appcontainer_sid else 0)
         self._closed = threading.Event()
         self._pending = None
         self._lock = threading.Lock()
@@ -211,10 +252,7 @@ class WindowsPipeListener:
             wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.ULONG),
         ], wintypes.BOOL
         descriptor = wintypes.LPVOID()
-        # The restricted SID must itself pass AccessCheck; granting Everyone
-        # or the ordinary Users group would not represent an execution role.
-        client_sid = self.policy.appcontainer_sid or self.policy.user_sid
-        sddl = f"D:P(A;;GA;;;{self.service_sid})(A;;GRGW;;;{client_sid})"
+        sddl = _pipe_security_descriptor(self.service_sid, self.policy)
         if not convert(sddl, 1, ctypes.byref(descriptor), None):
             raise ctypes.WinError(ctypes.get_last_error())
 
@@ -234,7 +272,7 @@ class WindowsPipeListener:
             # Duplex + overlapped + first-instance protection. Reject remote
             # clients at the kernel boundary, before parsing any application data.
             access = 0x00000003 | 0x40000000 | (0x00080000 if self._first else 0)
-            handle = create(self.name, access, 0x00000004 | 0x00000002 | 0x00000008,
+            handle = create(self._server_name, access, 0x00000004 | 0x00000002 | 0x00000008,
                             8, 65536, 65536, 1000, ctypes.byref(attributes))
             if handle == ctypes.c_void_p(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())

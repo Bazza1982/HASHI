@@ -10,6 +10,8 @@
 
 本文中的 **FC 指 Frontend Connector**。模型工具的 function-calling JSON schema 与 FC 是两类接口，不混用术语。本文以固定 SHA 源码为事实依据；“必须”“应”描述待实现契约，“基线已有”描述当前代码。已有架构将权限、Session、Run、Workzone 的权威状态交给 PAO，外部客户端只负责呈现；历史名 `workbench_api.py` 实际是 HASHI Backend API。[架构与所有权][S-ARCH] [兼容命名][S-NAMES]
 
+**2026-11-05 源码增量：** [正式人类批准入口](GOVERNED_HUMAN_APPROVAL.md) 增加可选 HASHI 自有登录/审阅页，通过既有通用 URL 按钮从 Workbench 打开。页面验证真实人类密码登录、原请求/会话及动作，个人 L1 和实例凭据不能冒充 L2。外部 Workbench 源码、公开 FC schema 与 Core 均不因此改变；自动化联调、真人验收、独立 OS L2 隔离仍分别记证，生产启用继续待正式验收。
+
 **统一类型名：** `AccessRequest` 对应旧稿的 `PermissionRequest`，`PermissionLease` 对应旧稿的 `Grant / Lease`；服务端私有类型统一为 `VerifiedPrincipal` 与 `DecisionReceipt`（旧稿分别简称 Principal、称 PermissionDecisionReceipt / Receipt）。这些是同义名称，不是不同对象，不得据此另建一套表、服务或状态机。
 
 ## 1. 范围与不可突破的约束

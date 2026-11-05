@@ -1474,7 +1474,7 @@ def test_source_deactivation_does_not_overwrite_an_intervening_config_writer(
 ):
     source, _, _ = _roots(tmp_path)
     agents_path = (source / "agents.json").resolve()
-    actual_write = write_config_json
+    actual_write = service.write_agent_config_json
     injected = False
 
     def interleaved(path, payload, **kwargs):
@@ -1486,7 +1486,7 @@ def test_source_deactivation_does_not_overwrite_an_intervening_config_writer(
             actual_write(path, winner)
         return actual_write(path, payload, **kwargs)
 
-    monkeypatch.setattr(service, "write_config_json", interleaved)
+    monkeypatch.setattr(service, "write_agent_config_json", interleaved)
 
     with pytest.raises(ConfigConflictError):
         deactivate_source_agent(
@@ -1496,6 +1496,7 @@ def test_source_deactivation_does_not_overwrite_an_intervening_config_writer(
             target_instance="HASHI2",
         )
 
+    assert injected
     current = read_config_json(agents_path)
     assert current["global"]["concurrent_extension"] == "kept"
     zelda = next(row for row in current["agents"] if row["name"] == "zelda")

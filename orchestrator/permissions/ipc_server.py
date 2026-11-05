@@ -10,10 +10,14 @@ from orchestrator.permissions.windows_ipc import WindowsPipeListener
 from orchestrator.permissions.wire import PermissionServiceRouter
 
 
+MAX_ENDPOINT_CONNECTIONS = 8
+
+
 class PermissionEndpoint:
-    def __init__(self, listener, router, *, signing_key, service_generation, max_connections=8):
+    def __init__(self, listener, router, *, signing_key, service_generation,
+                 max_connections=MAX_ENDPOINT_CONNECTIONS):
         if (not isinstance(listener, WindowsPipeListener) or not isinstance(router, PermissionServiceRouter)
-                or type(max_connections) is not int or not 1 <= max_connections <= 8):
+                or type(max_connections) is not int or not 1 <= max_connections <= MAX_ENDPOINT_CONNECTIONS):
             raise ValueError("a fixed native permission endpoint is required")
         self._listener, self._router = listener, router
         self._key, self.generation = signing_key, service_generation
@@ -115,3 +119,4 @@ class PermissionEndpoint:
             if pending:
                 raise OSError("permission endpoint cleanup is unverified")
         self._tasks.clear()
+# HASHI-Fingerprint: hfp_cf7c235e7fc74b089f6f2edb0820ce0c

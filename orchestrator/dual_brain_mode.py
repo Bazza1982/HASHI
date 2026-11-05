@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.post_turn_observer import (
     PostTurnObserver,
@@ -705,7 +706,7 @@ def ensure_dual_brain_observer(workspace_dir: Path) -> bool:
         changed = True
     config["observers"] = normalized
     if changed or not path.exists():
-        write_config_json(path, config)
+        write_agent_config_json(path, config)
     return changed
 
 
@@ -864,3 +865,4 @@ def _extract_json_object(text: str) -> dict[str, Any]:
                     break
         start = text.find("{", start + 1)
     raise RuntimeError("no JSON object found in backend output")
+# HASHI-Fingerprint: hfp_06bda6090cc24f2495e2de10a28c8605

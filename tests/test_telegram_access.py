@@ -163,7 +163,7 @@ def test_concurrent_update_during_save_is_never_overwritten(tmp_path, monkeypatc
 
     service, config_path, _ = _instance(tmp_path)
     state = service.status("lily")
-    original = access.write_config_json
+    original = access.write_agent_config_json
 
     def conflict(path, document):
         concurrent = read_config_json(path)
@@ -171,7 +171,7 @@ def test_concurrent_update_during_save_is_never_overwritten(tmp_path, monkeypatc
         original(path, concurrent)
         return original(path, document)
 
-    monkeypatch.setattr(access, "write_config_json", conflict)
+    monkeypatch.setattr(access, "write_agent_config_json", conflict)
     with pytest.raises(TelegramAccessError) as caught:
         service.change("lily", expected_revision=state["revision"],
                        scope="agent", action="add", user_id="300")
@@ -186,7 +186,7 @@ def test_uncertain_commit_is_reported_without_repeating_write(tmp_path, monkeypa
 
     service, _config_path, _ = _instance(tmp_path)
     state = service.status("lily")
-    original = access.write_config_json
+    original = access.write_agent_config_json
     calls = []
 
     def uncertain(path, document):
@@ -194,7 +194,7 @@ def test_uncertain_commit_is_reported_without_repeating_write(tmp_path, monkeypa
         original(path, document)
         raise ConfigDurabilityError("published but durability is uncertain")
 
-    monkeypatch.setattr(access, "write_config_json", uncertain)
+    monkeypatch.setattr(access, "write_agent_config_json", uncertain)
     with pytest.raises(TelegramAccessError) as caught:
         service.change("lily", expected_revision=state["revision"],
                        scope="agent", action="add", user_id="300")
