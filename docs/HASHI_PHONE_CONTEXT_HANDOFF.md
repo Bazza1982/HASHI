@@ -1,16 +1,16 @@
 # Phone Session context and action handoff
 
-Phone speech is ordinary Session conversation history. PCM owns its projection,
+Conversational Phone speech is ordinary Session history. PCM owns its projection,
 budgeting and compaction exactly as it owns typed chat history. PAO owns Session
 attribution, action authorization cutoffs, admission and durable
-handoff/consumption facts. This shared Functions behavior applies to every Phone
-provider and text Engine; the front-end intent judge is not a substitute for the
+handoff/consumption facts. This shared Functions behavior applies to Phone
+providers that support Agent conversation/delegation and every text Engine; the front-end intent judge is not a substitute for the
 acting Agent's context. It supplements `HASHI_PCM_SYSTEM_DESIGN.md` and
 `HASHI_PAO_SYSTEM_DESIGN.md`.
 
 ## Translation discovery
 
-For a translation task, follow the [Phone translation capability boundary](HASHI_PHONE_TRANSLATION_BOUNDARY.md) to the current Compute service contract. Conversation handoff, speech language selection and translation services have distinct responsibilities. A missing translation contract must be reported explicitly.
+For a translation task, read [Phone simultaneous interpretation](HASHI_PHONE_INTERPRETATION.md), then its Compute transport contract. Interpretation sends no Agent Persona, conversation history or task delegation to its speech model. Conversational handoff below and interpretation have distinct responsibilities; an isolated canary does not prove live adoption.
 
 ## Freeze before action admission
 

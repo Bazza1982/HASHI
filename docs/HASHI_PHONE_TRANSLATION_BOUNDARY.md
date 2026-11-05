@@ -1,15 +1,9 @@
-# Phone translation discovery boundary
+# Historical Phone translation discovery snapshot
 
-Status: current capability boundary; no translation protocol is defined here.
+Status: historical. This records the pre-41a91616 catalogue audit, not the current capability contract.
 
-## What this source generation implements
+At baseline `ea37129b`, the checkout had Phone context handoff and Compute speech selection but no separate Phone translation provider contract. That absence was explicitly reported during the FYI migration instead of inventing an endpoint.
 
-At the catalogue migration baseline (`ea37129b`), HASHI has a [Phone Session/context handoff contract](HASHI_PHONE_CONTEXT_HANDOFF.md) and a [Compute service directory](HASHI_COMPUTE_SERVICE_DIRECTORY.md). The latter defines transcription, TTS and vision service selection. This checkout does not advertise a separate Phone-to-Compute translation service kind, request schema or consumer.
+Main subsequently added HY-SimulMT through PR #132. The current authority is [Phone simultaneous interpretation](HASHI_PHONE_INTERPRETATION.md), with [Compute directory compatibility](HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness). Its experimental source qualification does not prove adoption by a running instance.
 
-Selecting an output language, voice or transcription language is not evidence of a translation capability. Do not invent an endpoint, infer an API from a guide label, or treat a proposed service as deployed.
-
-## When modifying Phone translation
-
-Read the Phone context handoff contract first to preserve conversation, privacy and authorization boundaries. Then read [Compute compatibility and truthfulness](HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness) and the actual selected service manifest. If a later qualified generation supplies an authoritative translation contract, use that source/version and update the domain guide. Until then, report the missing contract or capability explicitly before implementing a translation integration.
-
-The FYI refactor supplies reliable discovery and this explicit absence result. It does not implement translation, modify Hashi Compute, or claim that every backend or installed generation has adopted the new documentation reader.
+Interpretation, conversational Phone context/delegation, voice selection and transcription language have distinct responsibilities. Consult the current contract and actual deployed generation; this historical audit cannot override them.

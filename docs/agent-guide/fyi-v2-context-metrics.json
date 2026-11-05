@@ -1,18 +1,18 @@
 {
   "token_accounting": "Estimate only: ceil(Unicode characters / 4). No backend tokenizer was installed; no model calls.",
-  "baseline_commit": "ea37129b8edad3c0420541133b41fd96dcacc6c9",
+  "baseline_commit": "41a91616055ab7d03536165e1e1b709d2783c97b",
   "before": {
     "fyi": {
-      "characters": 10592,
-      "estimated_tokens": 2648
+      "characters": 10668,
+      "estimated_tokens": 2667
     },
     "engineering_guidance": {
       "characters": 3834,
       "estimated_tokens": 959
     },
     "assembled_primer": {
-      "characters": 14561,
-      "estimated_tokens": 3641
+      "characters": 14637,
+      "estimated_tokens": 3660
     }
   },
   "after": {
@@ -41,15 +41,27 @@
   "duplicate_bootstrap_characters": 0,
   "on_demand_examples": {
     "voice guide": {
-      "characters": 2271,
-      "estimated_tokens": 568,
-      "serialized_response_characters": 2691,
+      "characters": 2523,
+      "estimated_tokens": 631,
+      "serialized_response_characters": 2942,
       "pages": 1,
       "source": {
         "path": "docs/agent-guide/voice.md",
-        "sha256": "baa52d098bf051b5439df08eeca9222c46ccfcd2d0a7c5414b6112e06659d17e",
+        "sha256": "0fd9527144660654eabd6055d286750d0ee10bbb6efd0d462e59a6c3bda31641",
         "section": null,
         "line": 1
+      }
+    },
+    "Phone interpretation": {
+      "characters": 1187,
+      "estimated_tokens": 297,
+      "serialized_response_characters": 1642,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PHONE_INTERPRETATION.md",
+        "sha256": "e64671cbc1d4d17e01362fadde36c7ed3cac4e1b55ea296e078be45f634c80ec",
+        "section": "Transport",
+        "line": 32
       }
     },
     "Phone context": {
@@ -59,7 +71,7 @@
       "pages": 1,
       "source": {
         "path": "docs/HASHI_PHONE_CONTEXT_HANDOFF.md",
-        "sha256": "3d34cd7e695816682a247baafe4f593ec2521b26d5eb10d83d0f83d3b72f6dbe",
+        "sha256": "251e4dca00bace54e9fbfe7549dae1fcf1636e1642bdc0c60a21a9c9560d2ec0",
         "section": "Freeze before action admission",
         "line": 15
       }

@@ -490,7 +490,7 @@ def test_deployed_artifact_contains_readable_docs_and_excludes_untracked_files(r
 
 
 @pytest.mark.parametrize("domain,destination,section", [
-    ("voice", "HASHI_PHONE_CONTEXT_HANDOFF.md", "Freeze before action admission"),
+    ("voice", "HASHI_PHONE_INTERPRETATION.md", "Transport"),
     ("lifecycle", "HASHI_AGENT_MOVE_V1.md", "Transaction"),
     ("pcm", "HASHI_PCM_SYSTEM_DESIGN.md", "7. PCM Authority and Conflict Resolution"),
 ])
@@ -513,9 +513,9 @@ def test_phone_translation_navigation_exposes_the_actual_compute_contract_bounda
     }, code_root=ROOT)
     assert phone["ok"] and phone["complete"]
     links = re.findall(r"\]\(([^)]+)\)", phone["text"])
-    assert "HASHI_PHONE_TRANSLATION_BOUNDARY.md" in links
+    assert "HASHI_PHONE_INTERPRETATION.md" in links
     boundary = read_documentation({
-        "path": links[0], "from_path": phone["source"]["path"],
+        "path": "HASHI_PHONE_INTERPRETATION.md", "from_path": phone["source"]["path"], "max_chars": 8000,
     }, code_root=ROOT)
     assert boundary["ok"] and boundary["complete"]
     compute_link = "HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness"

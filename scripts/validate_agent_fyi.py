@@ -44,6 +44,7 @@ def context_metrics(root: Path) -> dict:
     examples = {}
     for name, path, section in [
         ("voice guide", "docs/agent-guide/voice.md", ""),
+        ("Phone interpretation", "docs/HASHI_PHONE_INTERPRETATION.md", "Transport"),
         ("Phone context", "docs/HASHI_PHONE_CONTEXT_HANDOFF.md", "Freeze before action admission"),
         ("Compute truthfulness", "docs/HASHI_COMPUTE_SERVICE_DIRECTORY.md", "Compatibility and truthfulness"),
         ("Move", "docs/HASHI_AGENT_MOVE_V1.md", "Transaction"),

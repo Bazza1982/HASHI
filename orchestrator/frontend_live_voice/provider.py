@@ -28,6 +28,7 @@ class ProviderCapabilities:
     recovery: bool = True
     playback_control: str = "client"
     output_completion: str = "unavailable"
+    mode: str = "conversation"
 
 
 class VoiceProvider(Protocol):
@@ -79,6 +80,9 @@ def default_registry(include_experimental: bool = False) -> dict[str, VoiceProvi
     openai_adapter = OpenAILiveProvider()
     registry = {openai_adapter.provider_id: openai_adapter}
     if include_experimental:
+        from .simulmt_provider import SimulMTProvider
+        translation_adapter = SimulMTProvider()
+        registry[translation_adapter.provider_id] = translation_adapter
         from .cascade_provider import CascadeProvider
 
         cascade_adapter = CascadeProvider()
@@ -93,6 +97,10 @@ def select_provider(
     if adapter is None or adapter.provider_id != provider_id:
         raise LiveVoiceError("live_provider_unqualified", 503)
     capabilities = adapter.capabilities
+    if capabilities.mode == "interpretation":
+        if not all((capabilities.duplex_audio, capabilities.transcript, capabilities.recovery)):
+            raise LiveVoiceError("live_provider_capability_unqualified", 503)
+        return adapter
     if not all(
         (
             capabilities.duplex_audio,

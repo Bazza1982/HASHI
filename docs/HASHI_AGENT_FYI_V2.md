@@ -40,6 +40,6 @@ Run `python scripts/validate_agent_fyi.py` and `tests/test_agent_fyi.py`. The va
 
 [Context measurements](agent-guide/fyi-v2-context-metrics.json) reproduce the original wrapper and measure the new assembled reference and representative section reads. Counts are characters and explicitly estimated tokens when no tokenizer is installed. There are no model-dependent CI gates or combined-knowledge-base size assertions.
 
-Phone translation discovery leads through the [Phone context contract](HASHI_PHONE_CONTEXT_HANDOFF.md) to the [explicit capability boundary](HASHI_PHONE_TRANSLATION_BOUNDARY.md) and Compute directory. This baseline has no separate translation service contract; navigation must expose that absence. Move and PCM tasks lead to their existing contracts and actual code/tests.
+Phone translation discovery leads through the Voice guide to the [Phone interpretation contract](HASHI_PHONE_INTERPRETATION.md) and its Compute service selection/transport. Interpretation sends no Agent context or delegation to its speech model; conversational Phone handoff remains separate. The earlier absence snapshot is historical, not current authority. Move and PCM tasks lead to their existing contracts and actual code/tests.
 
 Source validation, packaged resources, runtime adoption and physical-client acceptance remain separate. This source refactor does not deploy, restart services or claim live adoption.
