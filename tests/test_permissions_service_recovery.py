@@ -226,7 +226,7 @@ def test_v3_outcome_migration_is_atomic_and_preserves_decisions(service, conflic
         assert reopened.decide(reference, approved_scopes=[scope]) == lease
         assert reopened.decision_count(request.request_id) == 1
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 8)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (3 if conflicting_table else 9)
         if conflicting_table:
             assert connection.execute("SELECT keep FROM operation_outcome_receipts").fetchone() == ("preserve",)
 
@@ -245,3 +245,130 @@ def test_restart_does_not_accept_stop_receipt_from_another_executor(service):
     with pytest.raises(PermissionDenied):
         new.confirm_resource_stopped(context, claim.claim_id, receipt_reference=issuer.publish_stop(wrong))
     assert new.resource_state(claim.claim_id) == "stopping"
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_restored_ledger_cannot_revive_a_revoked_lease(service, reopen):
+    from contextlib import closing
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    _, _, lease = approve(authority, issuer, clock, context, [scope])
+    backup = path.with_name("old-backup.sqlite")
+    with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(backup)) as target:
+        source.backup(target)
+
+    authority.revoke(context, lease.lease_id)
+    assert not authority.evaluate(context, [scope])
+    with closing(sqlite3.connect(backup)) as source, closing(sqlite3.connect(path)) as target:
+        source.backup(target)
+
+    # A new service generation alone cannot prove that revocations survived.
+    # Both the live owner and normal startup must refuse the restored history.
+    with pytest.raises(PermissionDenied, match="continuity"):
+        if reopen:
+            restarted = _reopen(path, issuer, clock)
+            later = _new_execution(context)
+            restarted.bind_execution(later)
+            restarted.evaluate(later, [scope])
+        else:
+            authority.evaluate(context, [scope])
+
+@pytest.mark.parametrize("missing", ["deleted", "empty", "other-ledger"])
+def test_missing_or_unrelated_continuity_never_resets_authority(service, missing):
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    approve(authority, issuer, clock, context, [scope])
+    witness = authority.continuity_path
+    witness.unlink()
+    if missing == "empty":
+        witness.touch()
+    elif missing == "other-ledger":
+        other = PermissionAuthority(path.with_name("other.sqlite"), verifier=issuer,
+                                    clock=clock, monotonic=clock)
+        witness.write_bytes(other.continuity_path.read_bytes())
+    before = path.read_bytes()
+    with pytest.raises(PermissionDenied, match="continuity"):
+        _reopen(path, issuer, clock)
+    assert path.read_bytes() == before
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT status FROM permission_leases").fetchone() == ("active",)
+
+
+def test_continuity_write_failure_rolls_back_request_publication(service):
+    from contextlib import closing
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    witness = authority.continuity_path
+    with closing(sqlite3.connect(witness)) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_update BEFORE UPDATE ON ledger_head "
+            "BEGIN SELECT RAISE(ABORT,'injected witness failure'); END"
+        )
+    with pytest.raises((PermissionDenied, sqlite3.DatabaseError)):
+        approve(authority, issuer, clock, context, [scope])
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT count(*) FROM permission_leases").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM access_requests").fetchone() == (0,)
+    with closing(sqlite3.connect(witness)) as connection:
+        connection.execute("DROP TRIGGER refuse_update")
+    assert not authority.evaluate(context, [scope])
+
+
+def test_wal_ledger_is_rejected_without_migrating_or_fencing_the_live_owner(service):
+    from contextlib import closing
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    approve(authority, issuer, clock, context, [scope])
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    with pytest.raises(PermissionDenied, match="rollback journals"):
+        _reopen(path, issuer, clock)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+    assert authority.evaluate(context, [scope])
+def test_unchanged_status_read_does_not_rewrite_durable_witness(service):
+    from contextlib import closing
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    request, _, lease = approve(authority, issuer, clock, context, [scope])
+    witness = authority.continuity_path
+    with closing(sqlite3.connect(witness)) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_update BEFORE UPDATE ON ledger_head "
+            "BEGIN SELECT RAISE(ABORT,'injected witness failure'); END"
+        )
+    # No new time or authority state: a read must not require another flush.
+    assert authority.evaluate(context, [scope])
+    assert authority.get_request(context, request.request_id).request_id == request.request_id
+    # A real authority change must still fail closed if its witness cannot commit.
+    with pytest.raises((PermissionDenied, sqlite3.DatabaseError)):
+        authority.revoke(context, lease.lease_id)
+    assert authority.evaluate(context, [scope])
+    clock.value += 1
+    with pytest.raises((PermissionDenied, sqlite3.DatabaseError)):
+        authority.evaluate(context, [scope])
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_new_time_from_status_read_is_durable_before_restart(service, rejected):
+    path, authority, issuer, clock, context, scope = service
+    approve(authority, issuer, clock, context, [scope])
+    before = authority.continuity_path.read_bytes()
+    clock.value += 1
+    if rejected:
+        with pytest.raises(PermissionDenied):
+            authority.get_request(context, "absent")
+    else:
+        assert authority.evaluate(context, [scope])
+    assert authority.continuity_path.read_bytes() != before
+    clock.value -= 1
+    with pytest.raises(PermissionDenied, match="clock rollback"):
+        _reopen(path, issuer, clock)
+
+
+# HASHI-Fingerprint: hfp_8c38980848b44ab383f3cf782dbcd5b3

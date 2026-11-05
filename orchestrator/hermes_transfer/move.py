@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import read_managed_json, write_config_json
 
 
@@ -62,7 +63,7 @@ def finalize_hashi_to_hermes_move_source(
             break
     if not changed:
         raise TransferMoveError(f"HASHI agent not found: {name}")
-    write_config_json(agents_file, data)
+    write_agent_config_json(agents_file, data)
 
     changed_paths = [agents_file]
     tasks_file = root / "tasks.json"
@@ -202,3 +203,4 @@ def _read_yaml_file(path: Path) -> dict[str, Any]:
 def _write_yaml_file(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(value, allow_unicode=True, sort_keys=True), encoding="utf-8")
+# HASHI-Fingerprint: hfp_6d4b641244ae4c4c957f96edf47dcf82

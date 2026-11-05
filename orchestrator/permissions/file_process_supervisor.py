@@ -244,7 +244,7 @@ class WindowsFileProcessSupervisor:
                             from orchestrator.permissions.ipc_rpc import emit_private_event
 
                             metadata = json.loads(encoded_progress)
-                            await emit_private_event(StreamEvent(kind="tool_activity", metadata={
+                            await emit_private_event(StreamEvent(kind="tool_activity", summary="", metadata={
                                 **metadata, "tool_call_id": resource["tool_call_id"], "operation_type": "run_script",
                             }))
                             resource["progress_digest"] = progress_digest
@@ -383,3 +383,4 @@ class WindowsFileProcessSupervisor:
             if pending or errors or self._active:
                 raise OSError("file supervisor settlement remains unverified")
         return not self._active
+# HASHI-Fingerprint: hfp_129f57e0631e4b88bc10004c421fcb98

@@ -8,7 +8,7 @@ from orchestrator.her_v2.config import HERv2Config
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.configured_models import ConfiguredModelFactory
 from orchestrator.permissions.pao_run_fence import PaoRunFence
-from orchestrator.permissions.models import RuntimeExecutionBinding
+from orchestrator.permissions.models import PermissionLevel, PermissionSettings, RuntimeExecutionBinding
 from tests.test_permission_pao_fence import setup_run
 
 
@@ -136,3 +136,64 @@ async def test_installed_factory_uses_real_adapter_timeout_and_lifecycle(tmp_pat
             await factory.create(binding, config, guard)
         assert len(created) == 1 and created[0].IDLE_TIMEOUT_SEC == 127
         assert created[0].client is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level,engine", [("L1", "codex-cli"), ("L2", "codex-cli"),
+                                          ("L2", "deepseek-api")])
+async def test_l2_inference_rejects_native_cli_before_it_can_initialize(tmp_path, monkeypatch, level, engine):
+    from orchestrator.permissions.native_factory import InstalledExecution
+
+    store, _, accepted, fence, context = setup_run(tmp_path)
+    binding = RuntimeExecutionBinding(context, accepted.request_id, fence, "INSTANCE:agent")
+    guard = PaoRunFence(store, context=context, request_id=accepted.request_id,
+                        fencing_token=fence, worker_id="INSTANCE:agent")
+    config = HERv2Config.from_mapping({"profiles": {
+        name: {"engine": engine, "model": "test-model"}
+        for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
+    }})
+    created, initialized, closed = [], [], []
+
+    class Driver:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+        async def initialize(self):
+            initialized.append(engine)
+            return True
+        async def shutdown(self):
+            closed.append(engine)
+
+    class Manager:
+        privacy_level = 1
+        def __init__(self, *args):
+            pass
+        def create_herv3_provider_backend(self, requested_engine, model):
+            assert requested_engine == engine
+            created.append(engine)
+            return Driver()
+
+    monkeypatch.setattr("orchestrator.permissions.configured_models.FlexibleBackendManager", Manager)
+    source = SimpleNamespace(load=lambda: (
+        SimpleNamespace(), [SimpleNamespace(name=context.agent_id)], {},
+    ))
+    factory = ConfiguredModelFactory(source, object(), private_workspace=tmp_path)
+    channel = SimpleNamespace(_current=lambda: None, _guard=guard, registry=None)
+    execution = InstalledExecution(
+        SimpleNamespace(model_factory=factory), binding,
+        SimpleNamespace(settings=PermissionSettings(requested_level=PermissionLevel(level))),
+        channel, None, "unused-private-endpoint",
+    )
+    if level == "L2" and engine == "codex-cli":
+        with pytest.raises(PermissionDenied):
+            await execution.configure_inference(config)
+        assert not created and not initialized and not closed
+        assert execution._inference_digest is None
+    else:
+        public = await execution.configure_inference(config)
+        assert created == initialized == [engine] and not closed
+        assert public["profiles"][0]["engine"] == engine
+        assert await execution.configure_inference(config) == public
+        assert created == [engine]
+        await channel._models.close()
+        assert closed == [engine]
+# HASHI-Fingerprint: hfp_531ee9fd1fac40c6a647a2788311076f

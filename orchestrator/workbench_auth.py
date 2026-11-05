@@ -90,6 +90,16 @@ try {
     return (sid.upper(),)
 
 
+def resolve_remote_runtime_sids(root: Path) -> tuple[str, ...]:
+    """Return the registered Remote consumers for private config publication.
+
+    Credential writers must carry these principals onto atomic candidates;
+    otherwise a writer running under a different account can strand Remote.
+    Resolution failures deliberately propagate before publication.
+    """
+    return _windows_remote_runtime_sids(root)
+
+
 def ensure_local_api_credential(
     document: ConfigDocument,
     *,
@@ -116,7 +126,7 @@ def ensure_local_api_credential(
     runtime_sids = (
         tuple(remote_runtime_sids)
         if remote_runtime_sids is not None
-        else _windows_remote_runtime_sids(document.source.parent)
+        else resolve_remote_runtime_sids(document.source.parent)
     )
     if isinstance(current, str) and current.strip():
         if runtime_sids:

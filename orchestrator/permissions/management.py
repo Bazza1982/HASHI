@@ -5,6 +5,7 @@ from dataclasses import replace
 import re
 
 from orchestrator.permissions.authority import PermissionDenied
+from orchestrator.permissions.async_work import settled_thread
 from orchestrator.permissions.decision_commands import parse_decision_intent, _selected_scopes
 from orchestrator.permissions.models import PermissionLevel, PermissionSubject
 
@@ -25,12 +26,14 @@ class PermissionManagement:
                 or self.runs.store.instance_id != subject.instance_id):
             raise PermissionDenied("the management Session changed")
 
-    async def manage(self, subject, arguments, *, session_token, invocation_id):
+    def _prepare(self, subject, arguments, session_token, invocation_id):
         if (not isinstance(arguments, (list, tuple)) or not arguments or len(arguments) > 64
                 or any(not isinstance(item, str) or not 1 <= len(item) <= 4096 for item in arguments)
                 or not isinstance(invocation_id, str) or not 1 <= len(invocation_id) <= 256):
             raise ValueError("an exact formal management command is required")
         verb = arguments[0]
+        # Keep this complete guard/transaction section in one service thread.
+        # No await may release the identity guard before its mutation settles.
         with self.identity.hold_active_session(session_token) as authenticated:
             self._authenticated(subject, authenticated)
             if verb == "narrow":
@@ -43,12 +46,13 @@ class PermissionManagement:
                 result = self.authority.narrow_request(
                     binding.context, request.request_id, intent.revision, narrowed,
                 )
-                return {"kind": "narrowed", "request": self.authority.get_session_request(subject, result.request_id)}
+                return "complete", {"kind": "narrowed", "request": self.authority.get_session_request(subject, result.request_id)}
             if verb in {"revoke", "revoke-task"} and len(arguments) == 2:
                 result = self.authority.revoke_session_access(
                     subject, arguments[1], whole_task=verb == "revoke-task",
                 )
-            elif verb == "set-level" and len(arguments) in {2, 4}:
+                return "revoke", result
+            if verb == "set-level" and len(arguments) in {2, 4}:
                 try:
                     level = PermissionLevel(arguments[1])
                 except ValueError as error:
@@ -59,14 +63,18 @@ class PermissionManagement:
                 new_settings = replace(snapshot.settings, requested_level=level)
                 review = self.transition.review(subject, snapshot, new_settings)
                 if len(arguments) == 2:
-                    return review
+                    return "complete", review
                 if (arguments[2] != "--revision" or re.fullmatch(r"[0-9a-f]{64}", arguments[3]) is None
                         or arguments[3] != review["revision"]):
                     raise PermissionDenied("the reviewed policy or configuration changed")
-                result = None
-            else:
-                raise ValueError("unknown or incomplete permission management command")
-        if verb in {"revoke", "revoke-task"}:
+                return "transition", (snapshot, new_settings)
+            raise ValueError("unknown or incomplete permission management command")
+
+    async def manage(self, subject, arguments, *, session_token, invocation_id):
+        kind, result = await settled_thread(self._prepare, subject, arguments, session_token, invocation_id)
+        if kind == "complete":
+            return result
+        if kind == "revoke":
             # The ledger was fenced under the session guard. Cleanup is an
             # independent observation and cannot be fabricated by that commit.
             for binding in tuple(self.runs._active.values()):
@@ -75,10 +83,11 @@ class PermissionManagement:
                     stopper = getattr(executor, "stop_revoked_resources", None)
                     if callable(stopper):
                         await stopper()
-            current = self.authority.session_summary(subject)
+            current = await settled_thread(self.authority.session_summary, subject)
             task = next(row for row in current["tasks"] if row["task_id"] == result["task_id"])
             result.update({"kind": "revoked", "task": task})
             return result
+        snapshot, new_settings = result
         # The operational transition owns routing fences and verified resource
         # retirement. It receives a short authenticated CAS writer, never an
         # impersonation credential, and must not restart Core.

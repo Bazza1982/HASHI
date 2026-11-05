@@ -11,6 +11,7 @@ from adapters.base import TokenUsage
 from tools.registry import ToolResult
 
 from orchestrator.permissions import authority, models
+from orchestrator.permissions.async_work import _CURRENT_EXECUTOR, settled_thread
 from orchestrator.permissions.enterprise_decisions import SessionDecisionOutcome
 from orchestrator.permissions.execution_gate import GateResult, SupervisedResult
 
@@ -99,11 +100,12 @@ def request_frame(method, arguments, *, request_id):
 class PermissionServiceRouter:
     """One OS-authenticated role and fixed receiver, never a caller-owned role."""
 
-    def __init__(self, receiver, *, methods):
+    def __init__(self, receiver, *, methods, executor=None):
         allowed = frozenset(methods)
         if not allowed or not all(isinstance(name, str) and callable(getattr(receiver, name, None)) for name in allowed):
             raise ValueError("a closed trusted method surface is required")
         self._receiver, self._methods = receiver, allowed
+        self._executor = executor
 
     def _invocation(self, frame):
         if (not isinstance(frame, dict) or set(frame) != {"type", "id", "method", "arguments"}
@@ -131,9 +133,16 @@ class PermissionServiceRouter:
 
     async def dispatch_async(self, frame):
         method, arguments = self._invocation(frame)
-        result = method(**arguments)
-        if inspect.isawaitable(result):
-            result = await result
+        token = _CURRENT_EXECUTOR.set(self._executor)
+        try:
+            if inspect.iscoroutinefunction(method):
+                result = method(**arguments)
+            else:
+                result = await settled_thread(method, **arguments)
+            if inspect.isawaitable(result):
+                result = await result
+        finally:
+            _CURRENT_EXECUTOR.reset(token)
         return {"type": "hashi.permission-result.v1", "id": frame["id"], "result": encode(result)}
 
 

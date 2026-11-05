@@ -1,5 +1,12 @@
 # HASHI configuration persistence
 
+PR #133 integration preserves permission-aware Agent Move publication and
+snapshot recovery together with the current receipt and revision contracts.
+Only the installed Safety SID retains read access to `agents.json`; secrets
+remain private. Regression scope and remaining acceptance are recorded in the
+[integration decision](permissions/PR133_INTEGRATION_REVIEW_20261105.md).
+
+
 Scope: HN-20260911-002 / W1, Functions-layer declarative configuration and preference persistence.
 Parent: [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 Operational journals, evidence, caches and user content are classified below;
@@ -53,6 +60,13 @@ Failures before atomic replacement preserve the previous destination.
 directory synchronization failed: do not restore an old snapshot or replay the
 operation automatically. Re-read and reconcile the current state. Candidates
 use the primitive's private-file policy; this batch does not change that policy.
+
+The default Windows policy retains the writer plus explicit runtime principals.
+An operator publishing a service-private artifact can explicitly use
+private_include_writer=False together with private_full_control_sids. This
+omits the operator's extra user ACE; System and Administrators retain access.
+The private DACL is applied to the empty candidate before bytes are written.
+The ordinary configuration and agents.json publication defaults are unchanged.
 
 ## Language preference behavior
 
@@ -208,6 +222,20 @@ through a configuration writer merely to make a static search empty.
 
 ## Operator and Agent FYI
 
+Agent deletion's unshared-credential cleanup publishes private candidates with
+the registered Remote runtime principals resolved by
+`workbench_auth.resolve_remote_runtime_sids`; it does not infer the account from
+the current writer or a machine path. Deletion resolves that registration from
+the canonical `BridgePaths.bridge_home`, even when `secrets_path` uses a legacy
+file outside that home. Identity-resolution or credential publication failures
+propagate into the deletion journal's `cleanup_pending`
+receipt, without recording `secrets_cleaned`. This prevents a different-account
+writer from dropping Remote's grant on replacement. It does not repair already
+published production ACLs, change Tool admission, or adopt code into live
+Functions. Agent Move and legacy import writers require their own migration and
+validation under their existing contracts; this repair changes only deletion's
+lookup of the registered instance Remote consumers.
+
 UTF-8 editor output with or without BOM is supported at these migrated read
 boundaries. A conflict asks for a fresh read, not permission to overwrite.
 Unreadable or incompatible saved preferences require diagnosis; do not delete
@@ -267,6 +295,25 @@ already selects this module. The batch-05 receipt and completed PR CI comment
 separate local closure tests, approved-interpreter CI, broader runtime gates and
 native/live adoption. None is a substitute for the others.
 
+## Installed Windows permission-service configuration reader
+
+PAO root Agent declaration writers use `agent_config_json.write_agent_config_json`
+for the existing JSON publication. On Windows, an explicitly installed
+`global.permission_service.service_sid` receives file read access on the empty
+candidate before payload publication. The declaration remains the sole source;
+there is no copied ACL, cached identity, extra model catalogue or secrets-file
+sharing. Only private account/service SIDs are accepted; broad principals are
+rejected before publication. Uninstalled and non-Windows configurations retain
+the existing private-file behavior.
+
+The shared JSON/private-file primitives accept explicit read-only principals as
+well as their existing explicit full-control principals. They do not interpret
+Agent schemas, discover services or broaden existing DACLs. PAO startup
+migration, incarnation, management, group, transfer, provisioning and root
+configuration edits reuse the same owner policy. Revision conflicts and
+committed durability errors still propagate without retry. This fixes a native
+ordinary-Worker failure where an atomic startup rewrite removed the installed
+Safety account's read access, leaving admission unable to read current policy.
 
 ## FYI v1 migration clarifications
 

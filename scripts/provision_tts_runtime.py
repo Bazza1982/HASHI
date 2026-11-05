@@ -20,11 +20,8 @@ from orchestrator.voice_synthesis_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TTS_RESULT_PREFIX,
 )
-from orchestrator.config_json import (  # noqa: E402
-    new_config_json,
-    read_config_json,
-    write_config_json,
-)
+from orchestrator.agent_config_json import write_agent_config_json  # noqa: E402
+from orchestrator.config_json import new_config_json, read_config_json  # noqa: E402
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -244,7 +241,7 @@ def _write_platform_config(
     except FileNotFoundError:
         document = new_config_json(config_path)
     document.update(payload)
-    write_config_json(config_path, document)
+    write_agent_config_json(config_path, document)
     return config_path
 
 
@@ -369,4 +366,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-# HASHI-Fingerprint: hfp_acd3b65bb0ec4d25b32899a841bb89c9
+# HASHI-Fingerprint: hfp_4bafb84c2d0d4f5d97fe3ba03eb22fc1

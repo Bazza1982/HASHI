@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigDocument,
     new_config_json,
@@ -158,7 +159,7 @@ def ensure_agents_json(bridge_home: Path, engine: str):
 
     cfg.setdefault("global", copy.deepcopy(sample.get("global", {"authorized_id": 0})))
     cfg["agents"] = agents
-    write_config_json(agents_path, cfg)
+    write_agent_config_json(agents_path, cfg)
 
 
 def write_completion_marker(bridge_home: Path, lang_code: str):
@@ -347,3 +348,4 @@ class LightOnboardingPhase:
     def get_wakeup_prompt(self) -> str:
         lang_name = (self.selected_lang or {}).get("displayName", "English")
         return build_wakeup_prompt(self.l_code, lang_name)
+# HASHI-Fingerprint: hfp_69bb70d1826f414bba61f215cd530f4f

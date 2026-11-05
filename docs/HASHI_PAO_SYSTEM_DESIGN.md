@@ -236,8 +236,10 @@ absent. Active or running Agents and other reported blockers remain protected.
 Deleting an Agent removes only its unshared credentials. Atomic publication of
 the remaining credential document must retain the registered instance Remote
 principal through the existing private-file publisher, as well as the writer
-and system administrators. It must not copy arbitrary inherited access or
-grant broad users access. Unrelated shared/network and loopback credentials
+and system administrators. Deletion resolves the registered principal using
+the canonical instance home, including when the credential document falls back
+to a legacy location outside that home. It must not copy arbitrary inherited
+access or grant broad users access. Unrelated shared/network and loopback credentials
 remain unchanged. Principal resolution or credential publication failure is
 reported as cleanup_pending; secrets_cleaned is recorded only after a
 successful publication. A source fix prevents recurrence after adoption; it

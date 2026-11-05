@@ -61,6 +61,7 @@ from orchestrator.agent_move.manager import (
     record_agent_move_admin_outcome,
 )
 from orchestrator.agent_move.package import AgentMoveError
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 
 
@@ -614,7 +615,7 @@ def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
         agents.append(new_config)
 
     data["agents"] = agents
-    write_config_json(agents_file, data)
+    write_agent_config_json(agents_file, data)
     print("  agents.json updated on target")
 
 
@@ -648,7 +649,7 @@ def _deactivate_agent(agent_id: str, root: Path):
             ag["is_active"] = False
             break
     data["agents"] = agents
-    write_config_json(agents_file, data)
+    write_agent_config_json(agents_file, data)
 
 
 def _try_vector_backfill(root: Path, agent_id: str):

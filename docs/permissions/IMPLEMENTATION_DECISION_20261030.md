@@ -10,6 +10,8 @@ Windows Python profile 只包含固定的 `registryRead` capability，满足 SxS
 
 run_script 的正式接口是源码、明确输入及临时输出名称。实际输入文件不在脚本进程内开放；输出回传后保存正式成果仍走文件代理。当前 profile 不支持任意 shell、进程树、隐含联网、原始凭证或安装依赖。目录大小监测是软限制，不称硬配额。
 
+2026-11-05 实机并发补验发现：省略可选 inputs/outputs 时，helper 补入空列表，导致 Runner 重算的摘要与原审批不符，合法脚本被拒绝。固定 helper 现保留原审核 JSON 跨边界传递，Runner 先按原表示验证摘要，再使用缺省值执行；不更换现有摘要算法或重写存量批准。源码、输入、输出与其余执行事实变化仍被拒绝。跨真实 helper/Runner 的协议回归原先三失败、一通过，修复后相关二十二项通过；原生并发须在完整新版本重跑，不能把模型答复完成当作脚本执行成功。
+
 已确认尚未执行的文件绑定失败，必须在所有初始资源关闭后记录 authority-owned prestart failure；不创建假 claim，不消费 once。其摘要与加密结果可核对恢复。已经创建 claim、可能 ResumeThread、部分写入或无法确认清理的错误仍保持 unknown/待对账。权限数据库版本 8 的迁移是一个事务，原有决定和 lease 不改写。
 
 HTTP 的域名、方法、DNS 固定与连接验证不构成禁止外传证明；调用者可在 URL 路径携带信息，因此 GET/HEAD 也需要 send。具名凭证由安装配置限制精确 HTTPS origin、方法和允许响应字段；秘密不进模型、日志或返回体。
@@ -61,3 +63,44 @@ L1 续跑保留原 Run、Turn、工具调用及 operation 身份，但新的 Exe
 ## 验证与采用
 
 以单一完整提交交付代码、测试、文档和资格配方。源代码、原生实体资格、服务采用和用户前端验证分别报告。Windows 原生脚本资格已在独立普通测试账户通过：原文件读取/写入、子进程和 TCP/UDP IPv4/IPv6 均被阻止；输入快照、临时输出、低完整性目录、原子 Job 与回收通过。此为实际脚本入口/launcher 的组件资格，不能代替完整安装的 WAC 或用户前端验收。完整 WAC 和发布门未通过前，不宣称整体 L2 已验证或运行中采用。当前事实及历史失败见 [状态](IMPLEMENTATION_STATUS.md)。
+
+## Windows SCM 生命周期（2026-11-03）
+
+用户已明确批准在既有 HASHI3 接手 L1 收尾和 L2 继续开发，配套 NP Workbench 连接 HASHI3。归属 PAO Functions／Windows sidecar；Core、生产及原权限权威不变。原 Safety／Runner 安装读取器继续是身份、封闭 runtime 和私有数据的唯一装配入口，新 SCM host 只管理其真实就绪与停止，不复制策略、端点或权限状态。
+
+前台信号与 SCM 生命周期分开：SCM 回调线程使用明确停止事件；只有实际端点就绪后报告 RUNNING。checkpoint 不依赖应用事件循环；停止或状态报告失败不能被迟到就绪覆盖。未确认关闭资源时保留失败语义，SCM 非零退出，不能声称已干净回收。安装和运行失败必须分别取证。
+
+新测试注册辅助器只操作 manifest-owned 独立服务和新普通账户，不接管既有注册；身份变化、配置冲突和已提交耐久性错误先保全对账。配方、注入边界及完整 L2 尚需条件见 [SCM 组件资格](WINDOWS_SERVICE_QUALIFICATION.md)。组件与完整安装／用户前端验收分别记录。
+
+实体 SCM 探针确认四场景预期及服务自管拒绝，但主机 User Profile Service 仍持有两个新账户 hive，正常配置回收未成功；整轮组件资格不通过。新失败策略仅禁用 manifest／SID／marker 仍匹配的测试账户并核实结果，保留 profile、所有权和失败，不对替换账户操作，不将禁用冒充卸载成功。原生服务、进程和新增 service-logon right 已清理。不得为重跑而继续在同一共享主机制造此类 profile；完整安装 WAC 推荐独立可维护 Windows 测试环境，不擅自重启或改动共享系统服务。详见组件资格的实体结果。
+
+
+## 发现接口的未采用状态（2026-11-04）
+
+实际 HASHI3 复验中，权限服务已保存有效待批申请，期限未到、0 claim、无文件效果；共享 API 在未配置服务时启动，permission_control 尚未绑定，因此此前返回了正常空列表。安装描述保存与 shared owner 的实际采用必须分别处理；不在只读发现请求中启动服务或替换 shared。
+
+Frontend Connector 的 Functions 投影现在在控制器为空时，使用原配置读取者检查当前持久配置。已保存 permission_service 但尚未加载，或配置无法可靠读取时，返回原有 503／permission_requests_unavailable；未安装的实例保持原只读空视图。身份与 Session／generation 检查仍在配置读取之前，已绑定控制器仍走原权威。不改变批准、范围、期限、重放或 Run 续跑规则，也不把普通问题答案当授权。
+
+同组实际 API／配置／权威回归：旧代码 3 failed／6 passed，修复后发现与精确点击相关 14 passed。无 controller 的失败状态保留有效 pending 和 0 decision，不创建假空权威。H3 首次正常 /reboot max 被忙碌保护拒绝，未强制切换；随后空闲窗口实际采用与页面结果另见本轮状态记录。
+
+## L2 硬 Workzone 与 Compute（2026-11-04 用户批准）
+
+本轮用户批准稳定 L1、说明实际保障边界，再继续 L2 本地实现；L2 主要保证已验收的 HERV3 受控执行链，不把 Codex 等独立 Engine Provider 当作已受完全控制。L1 的 Workzone/安装权限/临时租约语义保留。
+
+L2 安装权限必须与 PAO 精确 Workzone 分别求交；无有效根不回退到 home/access_root；普通批准不能扩根。根 revision、实际根及合同版本进入策略摘要，停用再启用不能复活旧 epoch。现有 registry/authority/原生 supervisor 复用该单一范围来源，仍由独立受限 host、Runner 及实际对象绑定落实 OS 边界。新 [专门决定](L2_HARD_WORKZONE.md) 定义严格路径、必要运行依赖例外、实体验收门和 Compute 端接口合同；未验收通道不继承 L2。
+
+L2 的边界也覆盖 HERV3 内部模型传输。原工厂允许 provider 原生路径，HERV3 可能在受信服务中初始化未隔离 CLI；现由安装执行器明确要求受代理传输，并在创建 Driver 之前按原 backend registry 的 CLI 分类拒绝。L1 不要求该新增约束，API 模型经原 broker；不复制另一份 Engine/模型名单。真实工厂接线回归 RED 1 failed／6 passed，修复后原 CLI 的 L1 兼容和 L2 API 行为分别验证。
+
+先交付本地实现和离线证据。Compute 仅推理时返回的工具调用仍走本地 broker；若在服务器实际操作资源，必须补服务端权限管制与独立资格，再作端到端验收。本轮不假定远端已具备此能力，不部署服务器服务。Windows 完整安装/回收的旧阻碍不因本地回归通过而消除。
+
+## NP 实测与收尾边界（2026-11-04）
+
+个人 L1 的决定仍走已登记前端按钮与原权威。当前 HASHI3 的真实 NP 页面验证批准一次、本任务、10 分钟及拒绝四条路径，核对同一 operation 的真实文件效果、成功 claim 与 Task 终态撤权；页面刷新后重开原 Session 仍发现 pending。10 分钟从批准提交精确计时 600 秒，本轮只验证任务提前结束的回收，不把它写成自然到期实体测试。原 Run 续跑成功，没有为测试改写运行、授权或物理用量状态。
+
+临时服务、测试 Worker、配置和目录 ACL 均单独确认关闭／恢复。shared API 曾保留启动时 controller，因此配置撤回后仍需同一标准 Functions 采用路径刷新；等待空闲，遵守忙碌保护，不以只读发现、任意属性注入或 Core 冷重启代替采用。恢复后未安装状态返回原 200 空视图。
+
+这是指定 HASHI3 与 NP Workbench 的证据，不能传播成生产、其它实例或完整 L2 的授权与验收。SCM 的遗留 Windows profile 继续保持失败与所有权记录，两个账户已禁用、rights 已撤除；完整安装推荐可维护的独立 Windows 测试环境，不能在同一共享主机反复新增账户或强行操作系统服务。
+
+## 账本备份连续性（2026-11-05 补验）
+
+真实 SQLite 旧备份能在原服务和新 epoch 路径复活已撤销 grant，两项复现均失败。PAO Functions 将账本升级为 schema 9，以受保护目录内独立见证和 SQLite 原子双库事务核对连续性；记录缺失／不匹配、见证提交失败或不支持持久原子提交的 journal 模式均拒绝。普通 L0 不构造该边界，正常 L1 决定和租约语义保留；旧 binary 拒绝新 schema，不靠恢复旧授权实现回退。详细范围、初始绑定限制、剩余恢复操作流程与实机门见[连续性决定](L2_LEDGER_CONTINUITY_20261105.md)和[本轮 WAC 责任表](L2_WAC_CLOSEOUT_20261105.md)。本轮不安装、重启或部署服务，不关闭正式 WAC。

@@ -128,6 +128,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
       - name: Prepare Python
         shell: bash
@@ -140,6 +142,10 @@ jobs:
           fi
       - name: Install test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      - name: Validate Protected Core manifest
+        run: python scripts/check_protected_core_changes.py --validate-manifest
+      - name: Verify Protected Core against main
+        run: python scripts/check_protected_core_changes.py --base origin/main
       - name: Check focused code
         run: >-
           python -m ruff check orchestrator/permissions orchestrator/config.py
@@ -158,7 +164,17 @@ jobs:
           tests/test_permission_capabilities.py
           tests/test_permission_agent_tools.py tests/test_permission_wait.py
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
+          tests/test_permission_ledger_maintenance.py
           tests/test_permission_signed_receipts.py tests/test_permission_actions.py
+          tests/test_permission_transaction_contention.py
+          tests/test_permission_service_responsiveness.py tests/test_permission_human_approval.py
+          tests/test_agent_fyi.py tests/test_agent_deletion.py tests/test_private_files.py
+          tests/test_agent_move_service.py tests/test_agent_move_manager.py
+          tests/test_agent_move_coordinator.py tests/test_agent_move_package.py tests/test_remote_agent_move.py
+          tests/test_workzone.py tests/test_runtime_workzone.py tests/test_workzone_pending_projection.py
+          tests/test_workbench_workzone_management.py tests/test_telegram_access_workzone.py
+          tests/test_permission_policy_run_lock.py
+          tests/test_permission_remote_presentation.py
           tests/test_permission_windows_file_binding.py tests/test_permission_windows_supervisor.py
           tests/test_permissions_service_recovery.py
           tests/test_permissions_outcome_recovery.py
@@ -229,7 +245,7 @@ jobs:
         run: python -m ruff check orchestrator/flexible_backend_manager.py --ignore E402
       - name: Test permission and legacy contracts
         run: >-
-          python -m pytest -q
+          python -m pytest -q --durations=20
           tests/test_permission_agent_tools.py
           tests/test_permission_safety_command.py
           tests/test_safety_failure_details.py
@@ -248,12 +264,22 @@ jobs:
           tests/test_permission_probe_process.py
           tests/test_permission_capabilities.py
           tests/test_permission_actions.py
+          tests/test_permission_transaction_contention.py
+          tests/test_permission_service_responsiveness.py tests/test_permission_human_approval.py
+          tests/test_agent_fyi.py tests/test_agent_deletion.py tests/test_private_files.py
+          tests/test_agent_move_service.py tests/test_agent_move_manager.py
+          tests/test_agent_move_coordinator.py tests/test_agent_move_package.py tests/test_remote_agent_move.py
+          tests/test_workzone.py tests/test_runtime_workzone.py tests/test_workzone_pending_projection.py
+          tests/test_workbench_workzone_management.py tests/test_telegram_access_workzone.py
+          tests/test_permission_policy_run_lock.py
+          tests/test_permission_remote_presentation.py
           tests/test_permission_enterprise_decisions.py
           tests/test_enterprise_identity.py
           tests/test_permission_signed_receipts.py
           tests/test_permission_windows_file_binding.py
           tests/test_permission_windows_supervisor.py
           tests/test_permissions_authority.py
+          tests/test_permission_ledger_maintenance.py
           tests/test_permissions_service_recovery.py
           tests/test_permissions_outcome_recovery.py
           tests/test_permissions_guarded_dispatch.py

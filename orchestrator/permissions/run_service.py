@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from orchestrator.permissions.authority import PermissionDenied
+from orchestrator.permissions.async_work import settled_thread
 from orchestrator.permissions.models import ExecutionContext, PermissionLevel, PermissionSettings, RuntimeExecutionBinding, Scope
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.parking import PermissionParkingStore
@@ -58,7 +59,7 @@ class PermissionRunService:
     async def _retire(self, binding):
         # Fence first, then independently stop resources. An old Worker exit
         # cannot revoke a replacement merely because the Agent name matches.
-        self.authority.fence_execution(binding.context)
+        await settled_thread(self.authority.fence_execution, binding.context)
         result = self._executors.retire(binding)
         if inspect.isawaitable(result):
             result = await result
@@ -73,7 +74,7 @@ class PermissionRunService:
                              turn_id, backend_id, callbacks=None):
         lock = self._locks.setdefault(run_id, asyncio.Lock())
         async with lock:
-            run = self.store.get_run(run_id, owner_id=owner_id)
+            run = await settled_thread(self.store.get_run, run_id, owner_id=owner_id)
             if (run["request_id"] != request_id or run["agent_id"] != agent_id
                     or run["session_id"] != session_id or run["context_generation"] != context_generation
                     or run["fencing_token"] != fencing_token or run["worker_id"] != worker_id
@@ -81,7 +82,7 @@ class PermissionRunService:
                     or not isinstance(worker_generation, str) or not worker_generation
                     or not isinstance(turn_id, str) or not turn_id):
                 raise PermissionDenied("canonical PAO Run binding is unavailable")
-            policy = self._policy(agent_id, owner_id, session_id)
+            policy = await settled_thread(self._policy, agent_id, owner_id, session_id)
             if not isinstance(policy, ManagedRunPolicy):
                 raise PermissionDenied("managed execution policy is unavailable")
             current = self._active.get(run_id)
@@ -92,7 +93,7 @@ class PermissionRunService:
                 current.context.policy_revision == policy.revision,
             )):
                 return current
-            recorded = self.parking.route(run_id, owner_id=owner_id)
+            recorded = await settled_thread(self.parking.route, run_id, owner_id=owner_id)
             prior = binding_from_route(recorded) if recorded is not None else None
             if prior is not None:
                 if prior.fencing_token > fencing_token:
@@ -103,10 +104,10 @@ class PermissionRunService:
                 task_id = "task_" + uuid4().hex
                 parent = run.get("parent_run_id")
                 if parent:
-                    route = self.parking.route(parent, owner_id=owner_id)
+                    route = await settled_thread(self.parking.route, parent, owner_id=owner_id)
                     if route is not None:
                         candidate = binding_from_route(route)
-                        status = self.authority.execution_status(candidate.context)
+                        status = await settled_thread(self.authority.execution_status, candidate.context)
                         if status.task_state == "recovering":
                             raise PermissionDenied("parent task has an unresolved operation outcome")
                         if (candidate.context.agent_id == agent_id and candidate.context.session_id == session_id
@@ -123,12 +124,15 @@ class PermissionRunService:
             binding = RuntimeExecutionBinding(context, request_id, fencing_token, worker_id)
             guard = PaoRunFence(self.store, context=context, request_id=request_id,
                                 fencing_token=fencing_token, worker_id=worker_id)
-            self.authority.open_task(context)
-            try:
+            def record_binding():
+                self.authority.open_task(context)
                 self.authority.register_runtime_context(context, run_guard=guard)
                 if prior is not None:
                     self.authority.rebind_parked_requests(context, run_guard=guard)
                 self.parking.record_binding(binding)
+
+            try:
+                await settled_thread(record_binding)
                 executor = self._executors.create(binding, policy)
                 if inspect.isawaitable(executor):
                     executor = await executor
@@ -136,7 +140,7 @@ class PermissionRunService:
                 self._active[run_id] = binding
                 return binding
             except BaseException:
-                self.authority.fence_execution(context)
+                await settled_thread(self.authority.fence_execution, context)
                 raise
 
     def execution_registry(self, binding):
@@ -159,8 +163,8 @@ class PermissionRunService:
     async def settle_run(self, *, binding):
         if not isinstance(binding, RuntimeExecutionBinding):
             raise PermissionDenied("an exact execution binding is required")
-        run = self.store.get_run(binding.context.run_id, owner_id=binding.context.owner_id)
-        route = self.parking.route(binding.context.run_id, owner_id=binding.context.owner_id)
+        run = await settled_thread(self.store.get_run, binding.context.run_id, owner_id=binding.context.owner_id)
+        route = await settled_thread(self.parking.route, binding.context.run_id, owner_id=binding.context.owner_id)
         if route != asdict(binding):
             await self.close_execution(binding=binding)
             return "superseded"
@@ -168,9 +172,10 @@ class PermissionRunService:
             raise PermissionDenied("the PAO Run is not terminal")
         from orchestrator.permissions.pao_run_fence import PaoTerminalRunFence
 
-        self.authority.settle_canonical_run(
+        await settled_thread(
+            self.authority.settle_canonical_run,
             binding.context, terminal_guard=PaoTerminalRunFence(self.store, binding),
         )
-        self.parking.finish(binding)
+        await settled_thread(self.parking.finish, binding)
         await self.close_execution(binding=binding)
         return "settled"

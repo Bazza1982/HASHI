@@ -25,6 +25,7 @@ def _failure(runtime, error, *, phase, mutation_started=False):
     from orchestrator.operation_failures import OperationFailed, operation_failure
     from orchestrator.permissions.authority import PermissionErrorBase, RevisionConflict, OperationConflict
     from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
+    from orchestrator.permissions.wire import PermissionRemoteError
 
     if isinstance(error, OperationFailed):
         return error.failure
@@ -39,6 +40,18 @@ def _failure(runtime, error, *, phase, mutation_started=False):
         reason = "state_changed"
     elif isinstance(error, (PermissionErrorBase, SessionDecisionDenied)):
         reason = "scope_unavailable"
+    elif phase == "presentation" and not mutation_started and isinstance(error, PermissionRemoteError):
+        # A read-only menu can report a typed service refusal. The same remote
+        # error after a mutation must still leave its outcome unconfirmed.
+        # Never render arbitrary remote codes or interpret them as local I/O.
+        reason = {
+            "SessionDecisionDenied": "scope_unavailable",
+            "PermissionDenied": "scope_unavailable",
+            "InvalidDecision": "scope_unavailable",
+            "StaleFencingToken": "scope_unavailable",
+            "RevisionConflict": "state_changed",
+            "OperationConflict": "state_changed",
+        }.get(error.code, "service_unavailable")
     elif phase == "scope" and isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
         reason = "scope_unavailable"
     elif phase == "configuration" and isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
@@ -172,9 +185,22 @@ def _decision_markup(runtime, update, request_id, *, compact=False):
     view = authority.get_session_request(subject, request_id)
     if view.request.state != "pending" or view.task_state not in {"active", "paused"} or view.binding_state != "active":
         return None, ""
-    actions = current_permission_ingress().issue_actions(
-        subject, request_id, view.request.revision, presentation_id=str(update.update_id),
-    )
+    from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
+    from orchestrator.permissions.wire import PermissionRemoteError
+
+    ingress = current_permission_ingress()
+    try:
+        actions = ingress.issue_actions(
+            subject, request_id, view.request.revision, presentation_id=str(update.update_id),
+        )
+    except (SessionDecisionDenied, PermissionRemoteError) as error:
+        if isinstance(error, PermissionRemoteError) and error.code != "SessionDecisionDenied":
+            raise
+        url = ingress.human_approval_link(subject, request_id, view.request.revision,
+                                          locale=ui_language.current_locale())
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            ui_language.tr("safety.human_open"), url=url,
+        )]]), ""
     if compact:
         actions = tuple(sorted(
             (action for action in actions if action.lifetime != "run"),
@@ -346,3 +372,4 @@ async def safety_command(runtime: Any, update: Any, context: Any):
 
 COMMANDS = [RuntimeCommand("safety", "View permission status", native_command(safety_command))]
 CALLBACKS = [RuntimeCallback(r"^safety:d:[a-f0-9]{32}$", native_command(safety_decision_callback))]
+# HASHI-Fingerprint: hfp_084f0dbfcdb3436faa9857c381a2ef7a
