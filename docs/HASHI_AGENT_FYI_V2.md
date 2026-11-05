@@ -42,4 +42,6 @@ Run `python scripts/validate_agent_fyi.py` and `tests/test_agent_fyi.py`. The va
 
 Phone translation discovery leads through the Voice guide to the [Phone interpretation contract](HASHI_PHONE_INTERPRETATION.md) and its Compute service selection/transport. Interpretation sends no Agent context or delegation to its speech model; conversational Phone handoff remains separate. The earlier absence snapshot is historical, not current authority. Move and PCM tasks lead to their existing contracts and actual code/tests.
 
+Presence discovery leads to the complete [desktop context](HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md) and [native caption](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05) contracts. Lifecycle navigation includes the current [PAO credential-cleanup contract](HASHI_PAO_SYSTEM_DESIGN.md#21-agent-and-runtime-control). These remain their existing owners' contracts; the knowledge inventory records the latest main baseline and retained upstream content.
+
 Source validation, packaged resources, runtime adoption and physical-client acceptance remain separate. This source refactor does not deploy, restart services or claim live adoption.

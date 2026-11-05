@@ -1,18 +1,18 @@
 {
   "token_accounting": "Estimate only: ceil(Unicode characters / 4). No backend tokenizer was installed; no model calls.",
-  "baseline_commit": "41a91616055ab7d03536165e1e1b709d2783c97b",
+  "baseline_commit": "87100678cad23da58cd069ef288ba832501a19ae",
   "before": {
     "fyi": {
-      "characters": 10668,
-      "estimated_tokens": 2667
+      "characters": 10813,
+      "estimated_tokens": 2704
     },
     "engineering_guidance": {
       "characters": 3834,
       "estimated_tokens": 959
     },
     "assembled_primer": {
-      "characters": 14637,
-      "estimated_tokens": 3660
+      "characters": 14782,
+      "estimated_tokens": 3696
     }
   },
   "after": {
@@ -41,13 +41,13 @@
   "duplicate_bootstrap_characters": 0,
   "on_demand_examples": {
     "voice guide": {
-      "characters": 2523,
-      "estimated_tokens": 631,
-      "serialized_response_characters": 2942,
+      "characters": 3175,
+      "estimated_tokens": 794,
+      "serialized_response_characters": 3596,
       "pages": 1,
       "source": {
         "path": "docs/agent-guide/voice.md",
-        "sha256": "0fd9527144660654eabd6055d286750d0ee10bbb6efd0d462e59a6c3bda31641",
+        "sha256": "b2247d76ccfd8c36e5ca47bb509903d71a3b9b07707803398ff0e83b0ae5c5c2",
         "section": null,
         "line": 1
       }
@@ -74,6 +74,18 @@
         "sha256": "251e4dca00bace54e9fbfe7549dae1fcf1636e1642bdc0c60a21a9c9560d2ec0",
         "section": "Freeze before action admission",
         "line": 15
+      }
+    },
+    "Presence desktop": {
+      "characters": 3063,
+      "estimated_tokens": 766,
+      "serialized_response_characters": 3603,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md",
+        "sha256": "eaef8944185e56cfefd3bad7b8d52c23f59b7a5cfd8abf6f91210f35243cfb9d",
+        "section": "Presence desktop context",
+        "line": 1
       }
     },
     "Compute truthfulness": {

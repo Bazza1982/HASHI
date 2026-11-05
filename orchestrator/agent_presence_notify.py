@@ -140,7 +140,8 @@ def mirror_enabled(bridge_home: Any, owner_id: Any) -> bool:
         return False
 
 
-def _post(path: str, *, data: bytes | None = None, content_type: str = "") -> bool:
+def _post(path: str, *, data: bytes | None = None, content_type: str = "",
+          caption_id: str = "", caption_producer: str = "") -> bool:
     """POST to the companion; True only on an accepted response.  Never raises."""
     token = _token()
     if not token:
@@ -151,6 +152,9 @@ def _post(path: str, *, data: bytes | None = None, content_type: str = "") -> bo
     }
     if content_type:
         headers["Content-Type"] = content_type
+    if caption_id and caption_producer:
+        headers["X-AP-Caption-Id"] = caption_id
+        headers["X-AP-Caption-Producer"] = caption_producer
     request = urllib.request.Request(
         _base_url() + path, data=data, headers=headers, method="POST"
     )
@@ -235,11 +239,13 @@ class AgentPresenceConnectorAdapter:
             [Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]
         ]
         | None = None,
+        caption_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self.bridge_home = bridge_home
         self.owner_id = str(owner_id or "").strip()
         self.enabled = bool(enabled)
         self.media_resolver = media_resolver
+        self.caption_resolver = caption_resolver
 
     async def dispatch(
         self,
@@ -279,6 +285,20 @@ class AgentPresenceConnectorAdapter:
         if str(event.get("presentation_channel") or "").strip().casefold() == "call":
             return _receipt(event, endpoint_id, "skipped")
 
+        caption_accepted = False
+        caption = None
+        if callable(self.caption_resolver):
+            try:
+                caption = await asyncio.to_thread(self.caption_resolver, event)
+                if caption:
+                    caption_accepted = await asyncio.to_thread(
+                        _post_json, "/v1/captions/project",
+                        {"producer_id": "hashi:" + str(caption["target"]["instance_id"]) + ":" + str(caption["target"]["agent_id"]),
+                         "caption": dict(caption)},
+                    )
+            except Exception:
+                pass  # Optional captions cannot disrupt delivery or expose diagnostic text.
+
         media_refs = [
             block
             for block in event.get("content_blocks") or ()
@@ -287,7 +307,7 @@ class AgentPresenceConnectorAdapter:
             and str(block.get("role") or "").casefold() in {"voice", "voice_message"}
         ]
         if not media_refs or not callable(self.media_resolver):
-            return _receipt(event, endpoint_id, "skipped")
+            return _receipt(event, endpoint_id, "accepted" if caption_accepted else "skipped")
 
         outcomes: list[str] = []
         for media_ref in media_refs:
@@ -318,11 +338,16 @@ class AgentPresenceConnectorAdapter:
             if len(payload) > VOICE_MAX_BYTES:
                 outcomes.append("skipped")
                 continue
+            caption_headers = {}
+            if caption and caption.get("source") == "voice":
+                caption_headers = {"caption_id": caption["caption_id"],
+                                   "caption_producer": "hashi:" + str(caption["target"]["instance_id"]) + ":" + str(caption["target"]["agent_id"])}
             accepted = await asyncio.to_thread(
                 _post,
                 "/v1/voice/speak",
                 data=bytes(payload),
                 content_type=mime_type,
+                **caption_headers,
             )
             outcomes.append("accepted" if accepted else "unknown")
 

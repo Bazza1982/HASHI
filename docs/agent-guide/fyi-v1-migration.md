@@ -1,12 +1,13 @@
 # FYI v1 knowledge migration inventory
 
 Review evidence only. This file and its JSON source are not bootstrap content.
-Baseline: docs/AGENT_FYI.md at 41a91616055ab7d03536165e1e1b709d2783c97b; all 58 substantive statement groups are accounted for.
-Includes the Phone interpretation topic merged into main during implementation; all earlier 57 groups retain their original destinations.
+Baseline: docs/AGENT_FYI.md at 87100678cad23da58cd069ef288ba832501a19ae; all 59 substantive statement groups are accounted for.
+Includes the Phone interpretation and Presence topics from current main; all earlier 58 groups retain their original destinations and stable identifiers.
 Existing detailed contracts remain complete. Dated implementation and instance facts are explicitly historical.
 
 | Original topic | Classification | Authoritative destination | Action | Verification |
 |---|---|---|---|---|
+| 059: HASHI Agent FYI / Presence authenticated captions and portable voice qualification from main | domain navigation | [docs/HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md#presence-desktop-context](../HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md#presence-desktop-context) | linked | Reviewed the complete current contract: PAO primary Session/route/generation, authenticated text/media outbox and manifest/asset-based portable qualification; discoverable from the voice guide. |
 | 058: HASHI Agent FYI / Phone simultaneous interpretation from main | detailed contract | [docs/HASHI_PHONE_INTERPRETATION.md#fyi-catalogue-migration](../HASHI_PHONE_INTERPRETATION.md#fyi-catalogue-migration) | moved | Complete retained text and protocol contract checked in actual destination |
 | 001: HASHI Agent FYI / Ollama capacity and readable history | detailed contract | [docs/HERV3_OLLAMA_CONTEXT_PILOT.md#fyi-v1-001-ollama-capacity-and-readable-history](../HERV3_OLLAMA_CONTEXT_PILOT.md#fyi-v1-001-ollama-capacity-and-readable-history) | moved | Full original statement group retained, with only relative Markdown links relocated. |
 | 002: HASHI Agent FYI / Instance identity and departure evidence | detailed contract | [docs/HASHI_INSTANCE_CLI_LIFECYCLE.md#fyi-v1-002-instance-identity-and-departure-evidence](../HASHI_INSTANCE_CLI_LIFECYCLE.md#fyi-v1-002-instance-identity-and-departure-evidence) | moved | Full original statement group retained, with only relative Markdown links relocated. |
@@ -65,3 +66,9 @@ Existing detailed contracts remain complete. Dated implementation and instance f
 | 055: UI, media, and Phone / Dated portable speech packaging observation | historical reference | [docs/agent-guide/history/fyi-v1-notes.md#fyi-v1-055-dated-portable-speech-packaging-observation](history/fyi-v1-notes.md#fyi-v1-055-dated-portable-speech-packaging-observation) | moved | Full original statement group retained, with only relative Markdown links relocated. |
 | 056: UI, media, and Phone / Historical records are reference only | historical reference | [docs/agent-guide/history/fyi-v1-notes.md#fyi-v1-056-historical-records-are-reference-only](history/fyi-v1-notes.md#fyi-v1-056-historical-records-are-reference-only) | moved | Full original statement group retained, with only relative Markdown links relocated. |
 | 057: UI, media, and Phone / Instance Wiki consolidation evidence at migration | historical reference | [docs/agent-guide/history/fyi-v1-notes.md#fyi-v1-057-instance-wiki-consolidation-evidence-at-migration](history/fyi-v1-notes.md#fyi-v1-057-instance-wiki-consolidation-evidence-at-migration) | moved | Full original statement group retained, with only relative Markdown links relocated. |
+
+## Post-main contract review
+
+- Presence #134: the complete [desktop context and caption contract](../HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md) stays current. The [Native captions section](../HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05) is retained alongside the earlier owner-feedback migration clarification.
+- Credential cleanup #135: the complete [PAO lifecycle contract](../HASHI_PAO_SYSTEM_DESIGN.md#21-agent-and-runtime-control) retains registered Remote access, explicit cleanup_pending versus secrets_cleaned and the distinction between source prevention and live recovery. The JSON evidence records the incoming paragraph verbatim.
+- These contract checks supplement the original FYI topic inventory. They do not create bootstrap content, another authority owner or a claim of runtime adoption.

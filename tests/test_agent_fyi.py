@@ -499,6 +499,7 @@ def test_deployed_artifact_contains_readable_docs_and_excludes_untracked_files(r
 
 @pytest.mark.parametrize("domain,destination,section", [
     ("voice", "HASHI_PHONE_INTERPRETATION.md", "Transport"),
+    ("voice", "HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md", "Presence desktop context"),
     ("lifecycle", "HASHI_AGENT_MOVE_V1.md", "Transaction"),
     ("pcm", "HASHI_PCM_SYSTEM_DESIGN.md", "7. PCM Authority and Conflict Resolution"),
 ])

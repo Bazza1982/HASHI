@@ -1973,6 +1973,11 @@ class FlexibleAgentRuntime:
             request_id,
             payload,
         )
+        try:
+            from orchestrator.agent_presence_captions import schedule_run_caption
+            schedule_run_caption(self, resolution.run, runtime_session.request_owner_id(self, request_id))
+        except Exception as exc:
+            self.logger.warning("Optional caption scheduling failed for %s (%s)", request_id, type(exc).__name__)
         payload = dict(resolution.payload)
         payload["continuity_status"] = resolution.continuity_status
         if resolution.side_errors:

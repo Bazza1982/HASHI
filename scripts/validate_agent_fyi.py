@@ -46,6 +46,7 @@ def context_metrics(root: Path) -> dict:
         ("voice guide", "docs/agent-guide/voice.md", ""),
         ("Phone interpretation", "docs/HASHI_PHONE_INTERPRETATION.md", "Transport"),
         ("Phone context", "docs/HASHI_PHONE_CONTEXT_HANDOFF.md", "Freeze before action admission"),
+        ("Presence desktop", "docs/HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md", "Presence desktop context"),
         ("Compute truthfulness", "docs/HASHI_COMPUTE_SERVICE_DIRECTORY.md", "Compatibility and truthfulness"),
         ("Move", "docs/HASHI_AGENT_MOVE_V1.md", "Transaction"),
         ("PCM authority", "docs/HASHI_PCM_SYSTEM_DESIGN.md", "7. PCM Authority and Conflict Resolution"),
