@@ -147,6 +147,16 @@ total. All 38 portable packaging tests also pass on the integrated source. Final
 npm/build checks and GitHub job conclusions are recorded separately in the PR
 validation report; an absent maintainer label must block Architecture approval.
 
+HCC also consumes the same Core guard. Its PR workflow now maps the trusted
+GitHub approval label to the full major/review checks and reruns on label addition
+or removal. Existing path filters, the feature-branch push policy, whitespace,
+lint and component tests are preserved. Replaying its actual script demonstrates
+that the previous workflow still rejected an approved migration, while the new
+workflow rejects no-label changes and accepts the fully reviewed authorized
+candidate. The HCC component selection passes 506 tests with 11 skips; its
+unchanged lint selection passes against main and the candidate with Ruff 0.17.3.
+These are offline checks; the actual PR jobs remain gated by the maintainer label.
+
 The exact 32 historical failure nodes were rerun against this main with its
 unchanged old lock and against the integrated candidate. Main fails all 32;
 the candidate initially fails 31 and passes the gateway variant of
