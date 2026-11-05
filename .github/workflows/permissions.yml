@@ -144,8 +144,21 @@ jobs:
         run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
       - name: Validate Protected Core manifest
         run: python scripts/check_protected_core_changes.py --validate-manifest
-      - name: Verify Protected Core against main
-        run: python scripts/check_protected_core_changes.py --base origin/main
+      - name: Verify Protected Core against the event baseline
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
+        run: |
+          core_args=()
+          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+            core_args+=(--authorized --major-version-change)
+          fi
+          core_base_ref="${BASE_SHA:-origin/main}"
+          if [ "$core_base_ref" = 0000000000000000000000000000000000000000 ]; then
+            core_base_ref=origin/main
+          fi
+          python scripts/check_protected_core_changes.py --base "$core_base_ref" "${core_args[@]}"
       - name: Check focused code
         run: >-
           python -m ruff check orchestrator/permissions orchestrator/config.py

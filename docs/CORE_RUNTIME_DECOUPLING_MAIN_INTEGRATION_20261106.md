@@ -60,3 +60,21 @@ installation. Independent human Core review, complete real-account/frontend
 and native L2/WAC acceptance, elevated install/reset/rollback and operator
 cutover remain separate gates. Do not represent source or build success as
 runtime adoption.
+
+## Permission CI compatibility
+
+The first merged-head permission workflow still enforced an unconditional
+comparison to main, so it rejected the already-authorized Core major migration
+as an ordinary feature edit before executing permission regressions.
+
+Use the event baseline for push checks and the PR base for full-branch checks.
+Only the existing trusted `core-change-approved` PR label acknowledges the
+major migration; the canonical checker still enforces version and independent
+same-generation review. Missing/zero push baselines fail closed against main.
+No check is skipped and no failure is marked successful.
+
+Executing the actual Bash gate reproduced the original false rejection.
+After repair, the existing-generation push passes, an unapproved Core PR
+still exits 2, and an approved major without human review still exits 4.
+Missing and all-zero baselines also retain rejection. Original CI logs and
+these native red/green receipts remain preserved.
