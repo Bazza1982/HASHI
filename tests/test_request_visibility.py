@@ -22,6 +22,7 @@ from orchestrator.frontend_call.transient_live_media import (
     live_frames_for,
 )
 from orchestrator.session_store import AcceptedRun, SessionStore
+from orchestrator.fingerprint.models import FingerprintPolicy
 
 
 def _runtime_for_admission():
@@ -46,6 +47,7 @@ def _admission_store(tmp_path, **extra):
     return SimpleNamespace(
         session_workspace=lambda *args: tmp_path,
         get_message=lambda *args, **kwargs: {"content": []},
+        get_run=Mock(return_value={"fingerprint_policy": FingerprintPolicy(enabled=True).snapshot()}),
         **extra,
     )
 
@@ -120,6 +122,8 @@ async def test_live_frames_leave_request_metadata_before_session_admission(
     assert TRANSIENT_LIVE_FRAMES_METADATA_KEY not in item.request_metadata
     assert "data:image" not in json.dumps(item.request_metadata)
     assert len(live_frames_for(runtime, result)) == 1
+    runtime.session_store.get_run.assert_called_once_with("run-live", owner_id="user:123")
+    assert item.request_metadata["fingerprint_policy"] == FingerprintPolicy(enabled=True).snapshot()
 
 
 @pytest.mark.asyncio

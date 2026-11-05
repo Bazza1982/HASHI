@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
+from orchestrator import runtime_session
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator.scheduler import TaskScheduler
 
@@ -139,6 +140,10 @@ async def test_queue_lists_and_clears_ready_and_delayed_items(tmp_path):
     runtime = _FakeRuntime()
     runtime.workspace_dir = tmp_path / "workspace"
     runtime.workspace_dir.mkdir()
+    store = runtime_session.ensure_store(runtime)
+    runtime.default_session_id = store.ensure_default_session(
+        owner_id=runtime_session.owner_id(runtime), agent_id=runtime.name,
+    )["session_id"]
 
     scheduler = TaskScheduler(
         tasks_path=tmp_path / "tasks.json",

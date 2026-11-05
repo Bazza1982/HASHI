@@ -2340,7 +2340,7 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
     )
     store = ensure_store(runtime)
     if surface in _SHARED_PRIMARY_SURFACES:
-        store.bind_primary_session(
+        selected = store.bind_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
             session_id=session_id,
@@ -2354,16 +2354,20 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
                 actor_id=getattr(getattr(update, "effective_user", None), "id", None),
             )
     else:
-        store.bind_channel(
+        selected = store.bind_channel(
             owner_id=resolved_owner,
             agent_id=runtime.name,
             surface=surface,
             channel_key=channel_key,
             session_id=session_id,
         )
-    # Telegram Update objects are slotted and cannot carry arbitrary HASHI
-    # attributes. The durable channel binding is canonical; callers already
-    # hold the selected Session for any remaining work in the same command.
+    # Internal frontend projections retain an explicit Session/generation fence.
+    # A successful command-owned switch must move that projection as well, so
+    # its remaining output is not published against the retired Session.
+    # Native Telegram Update objects have no such attributes and stay slotted.
+    if hasattr(update, "_hashi_session_id"):
+        update._hashi_session_id = selected["session_id"]
+        update._hashi_session_context_generation = selected["context_generation"]
 
 
 def _log_session_failure(runtime: Any, error: Exception, *, operation: str, phase: str):

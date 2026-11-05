@@ -84,7 +84,8 @@ HASHI 再次验证当前值、backend 兼容性、Level 2 隔离过滤器就绪�
 - 支持 HASHI 现有的 cron、heartbeat、nudge 作业，动作仍为 `enqueue_prompt`。
 - Cron 的 IANA 时区由 Workbench 明确传入；当前界面默认使用并显示本机时区，由 HASHI 校验后持久化。
 - 创建和更新复用 HASHI 的 Scheduler 校验及 Agent 所有权检查。
-- 删除必须带 `explicit_user_confirmation: true`，再由 HASHI 校验作业归属并执行。
+- 删除必须带 `explicit_user_confirmation: true` 和已展示任务的 `deletion_revision`（作为 `expected_revision` 传回）；HASHI 校验完整定义、作业归属和版本，过时确认返回 `snapshot_changed`，不删除任务。
+- 设置转接保留原请求的认证信息和 Governed 身份；读取、创建、更新及条件删除复用同一所有权校验，不以内部适配请求替换认证。
 - 作业开关只更新该作业的 `enabled` 状态；不改变全局权限或其他作业。
 
 “可用操作”列表说明 FC 可提供哪些调用，不代表已经授予 Agent 任意行动权限。HASHI 对具体操作的 Remote 身份、owner、Scheduler、隐私及确认约束仍然有效。

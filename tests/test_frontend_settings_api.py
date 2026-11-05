@@ -14,6 +14,7 @@ from orchestrator.workbench_api import WorkbenchApiServer
 class Request:
     def __init__(self, *, operation=None, payload=None, target_instance="HASHI3",
                  target_agent="momo", query=None, job_id=None):
+        self.headers = {"Authorization": "Bearer settings-fixture-token"}
         self.match_info = {"name": "momo", "agent_id": "momo"}
         if job_id is not None:
             self.match_info["job_id"] = job_id
@@ -69,7 +70,7 @@ def make_server(tmp_path: Path):
         global_config=global_config,
         orchestrator=orchestrator,
     )
-    server._strict_authenticated_owner = lambda _request: "owner"
+    server.admin_token = "settings-fixture-token"
     return server, runtime
 
 
@@ -155,9 +156,20 @@ async def test_frontend_settings_activity_uses_agent_scheduler_and_requires_dele
     )
     assert denied.status == 403
 
+    # Read the exact definition being confirmed after the enabled state changed.
+    refreshed = await server.handle_v1_agent_settings_activity_get(Request())
+    revision = decode(refreshed)["result"]["jobs"][0]["deletion_revision"]
+    stale = await server.handle_v1_agent_settings_activity_delete(
+        Request(operation="activity.scheduler.delete", job_id="workbench-daily",
+                payload={"kind": "cron", "explicit_user_confirmation": True,
+                         "expected_revision": listed[0]["deletion_revision"]})
+    )
+    assert stale.status == 409
+    assert decode(stale)["error_code"] == "snapshot_changed"
     deleted = await server.handle_v1_agent_settings_activity_delete(
         Request(operation="activity.scheduler.delete", job_id="workbench-daily",
-                payload={"kind": "cron", "explicit_user_confirmation": True})
+                payload={"kind": "cron", "explicit_user_confirmation": True,
+                         "expected_revision": revision})
     )
     assert deleted.status == 200
     assert decode(deleted)["result"]["job_id"] == "workbench-daily"

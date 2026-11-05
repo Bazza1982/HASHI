@@ -465,8 +465,10 @@ public command is discovered from the shared RuntimeCommand registry; it is not
 a Telegram command implementation or a Backend/API special case. All
 command-capable Connectors may invoke it through their existing command adapter.
 
-When enabled, PAO freezes AgentPresence as an optional media destination at Run
-admission. Canonical reply voice then receives its own outbox task and receipt;
+When enabled, PAO freezes AgentPresence as an optional public text/media
+destination at Run admission. Native captions follow the authenticated
+current-Conversation contract in [Presence input feedback](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05).
+Canonical reply voice then receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The
