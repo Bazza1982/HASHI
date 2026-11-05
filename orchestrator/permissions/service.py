@@ -33,9 +33,9 @@ class PermissionServiceApplication:
             raise ValueError("qualified installed service levels are required")
         self.authority, self.store = authority, run_store
         self.identity, self.owners = identity_service, dict(owner_bindings)
-        # Only an actual governed login through this service generation may
-        # approve L2. Cooperative L1/native tokens and surviving old sessions
-        # cannot be promoted merely because their bearer format is identical.
+        # Governed password login and explicitly linked original native-human
+        # authentication retain their existing decision paths. Cooperative L1
+        # tokens and surviving old sessions cannot be promoted by bearer format.
         self._governed_sessions, self._human_sessions_lock = {}, threading.Lock()
 
         self.native_identities = {}
@@ -339,7 +339,15 @@ class PermissionServiceApplication:
                 or str(session["context_generation"]) != subject.context_generation):
             raise PermissionDenied("original command Session changed")
         login = self.identity.create_session(user_id=user.id, ttl_seconds=60)
+        self._remember_governed_session(login)
         return {"session_token": login.token, "expires_at": login.expires_at}
+
+    def _remember_governed_session(self, session):
+        expiry = datetime.fromisoformat(session.expires_at).timestamp()
+        with self._human_sessions_lock:
+            self._governed_sessions = {key: value for key, value in self._governed_sessions.items()
+                                       if value > time.time()}
+            self._governed_sessions[sha256(session.token.encode()).hexdigest()] = expiry
 
     def login(self, *, org_id, email, password):
         # API keys, shared instance bearers and ordinary question answers never
@@ -351,11 +359,7 @@ class PermissionServiceApplication:
         if user is None or user.id not in self.owners:
             raise PermissionDenied("invalid human login")
         session = self.identity.create_session(user_id=user.id)
-        expiry = datetime.fromisoformat(session.expires_at).timestamp()
-        with self._human_sessions_lock:
-            self._governed_sessions = {key: value for key, value in self._governed_sessions.items()
-                                       if value > time.time()}
-            self._governed_sessions[sha256(session.token.encode()).hexdigest()] = expiry
+        self._remember_governed_session(session)
         return {"ok": True, "session": {"token": session.token, "expires_at": session.expires_at},
                 "user": {"id": user.id, "org_id": user.org_id, "email": user.email,
                          "display_name": user.display_name}}

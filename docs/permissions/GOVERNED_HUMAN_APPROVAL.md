@@ -12,9 +12,9 @@ The URL opens the HASHI-owned approval page. Organisation, email and password ar
 
 ## L1 is not governed L2
 
-The service records only hashes of successfully password-authenticated sessions for its current generation. L2 issue/submit/manage calls require this provenance in addition to the existing live identity, exact owner, policy and PAO Run checks. A cooperative personal L1 session, a shared instance credential, an ordinary answer and an unrecognised surviving session cannot satisfy it. A policy switch does not promote an earlier L1 token. A service replacement requires a fresh governed login; no unaudited provenance is reconstructed from a bearer prefix. Logout and underlying identity revocation still apply.
+The service records only hashes of independently authenticated human sessions for its current generation: verified password login or the existing, explicitly configured original-native-human identity link. L2 issue/submit/manage calls require this provenance in addition to the existing live identity, exact owner, policy and PAO Run checks. A cooperative personal L1 session, a shared instance credential, an ordinary answer and an unrecognised surviving session cannot satisfy it. A policy switch does not promote an earlier L1 token. A service replacement requires fresh human authentication; no unaudited provenance is reconstructed from a bearer prefix. Logout and underlying identity revocation still apply.
 
-The configured native-identity attestation path remains usable for personal L1. It is not silently promoted to this password-authenticated L2 path. No new privilege comes from relay authentication.
+The existing native-identity path retains its L1/L2 support only for an explicitly registered human link through the trusted original-command FC. Its original transport/user checks reject synthetic API actors before native login. Backend API/Workbench uses the separate governed password page; relay HMAC and the cooperative personal L1 login never acquire that provenance. A regression verifies native L2 approval, exact once scope and logout alongside synthetic-API and personal-L1 rejection.
 
 ## Exact decision, resume and retirement
 

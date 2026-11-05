@@ -1,5 +1,7 @@
 # L2 permission presentation and current acceptance scope (2026-11-05)
 
+Current governed-human source behavior is described in [the approval contract](GOVERNED_HUMAN_APPROVAL.md). Stock Workbench URL-button/password-form automation now exercises the original operation, once replay, expiry and revocation; explicitly registered original-native-human L1/L2 decisions remain supported. Instance HMAC and cooperative personal L1 tokens are not governed L2 approval. The sections below retain the historical projection-only defect and its original version-scoped evidence. Manual human acceptance and independently isolated current-HEAD native L2 qualification remain separate gates; use the final PR133 review for current receipts.
+
 Owner: Frontend Connector; engineering layer: replaceable Functions.
 PAO owns the permission ledger and decides whether an action is available.
 This correction changes only the safety command's error projection.

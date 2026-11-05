@@ -246,6 +246,25 @@ async def test_lease_expiry_and_revoked_governed_session_are_enforced(browser):
     assert b.authority.decision_count(b.request.request_id) == 1
 
 
+@pytest.mark.asyncio
+async def test_configured_original_native_human_keeps_l2_approval_support(browser):
+    b = browser
+    with pytest.raises(PermissionDenied):
+        b.service.native_login(subject=b.subject, connector_id="backend_api", actor_id="731", invocation_id="synthetic-api")
+    native = b.service.native_login(subject=b.subject, connector_id="telegram", actor_id="731", invocation_id="original-native-update")
+    token = native["session_token"]
+    actions = b.service.issue_session_actions(b.subject, b.request.request_id, b.request.revision,
+                                            session_token=token, presentation_id="original-native-update")
+    once = next(action for action in actions if action.lifetime == "once")
+    outcome = b.service.submit_session_action(b.subject, once.action_id, session_token=token)
+    assert outcome.choice == "approve" and b.authority.decision_count(b.request.request_id) == 1
+    assert b.authority.evaluate(b.binding.context, [b.scope], operation_id="original-op")
+    assert not b.authority.evaluate(b.binding.context, [b.scope], operation_id="different-op")
+    assert b.service.logout(session_token=token)["revoked"]
+    with pytest.raises(SessionDecisionDenied):
+        b.service.submit_session_action(b.subject, once.action_id, session_token=token)
+
+
 @pytest.mark.parametrize("origin", ["http://192.168.0.2:80", "https://good.test/path",
                                    "https://user:pass@good.test", "https://good.test/?secret=x",
                                    "https://good.test/#fragment", "https://good.test\\bad"])
