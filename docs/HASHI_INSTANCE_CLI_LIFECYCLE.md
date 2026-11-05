@@ -22,9 +22,7 @@ identity. Shutdown acceptance is not completion. Success requires all captured
 process identities to have exited, both API/Gateway TCP listeners to have gone,
 and the instance's operating-system lock to have been released. A live replacement
 PID also prevents success. Unknown ownership or inspection failure cannot report
-success. A TCP endpoint with no remote peer and an unclassified NONE status
-also keeps its selected port occupied; Windows inspection must not mistake it
-for a released listener. Timeout reports incomplete stop without forced termination. An already
+success; timeout reports incomplete stop without forced termination. An already
 stopped observation is subject to the same resource check. A persistent lock file
 is permitted when no operating-system lock remains held.
 

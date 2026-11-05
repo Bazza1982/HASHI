@@ -1234,11 +1234,6 @@ def test_remote_config_snapshot_prefers_bridge_home_runtime_state_when_separated
     state_root = tmp_path / "home"
     (code_root / "remote").mkdir(parents=True)
     (state_root / "state").mkdir(parents=True)
-    (state_root / "remote").mkdir()
-    (state_root / "remote" / "config.yaml").write_text(
-        "server:\n  port: 8766\n  use_tls: true\ndiscovery:\n  backend: configured-home\n",
-        encoding="utf-8",
-    )
     (code_root / "remote" / "config.yaml").write_text(
         "server:\n  port: 8767\n  use_tls: false\ndiscovery:\n  backend: lan\n",
         encoding="utf-8",
@@ -1260,11 +1255,8 @@ def test_remote_config_snapshot_prefers_bridge_home_runtime_state_when_separated
 
     cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
 
-    assert cfg["root"] == state_root
+    assert cfg["root"] == code_root
     assert cfg["state_root"] == state_root
-    assert cfg["code_root"] == code_root
-    assert cfg["use_tls"] is True
-    assert cfg["backend"] == "configured-home"
     assert cfg["port"] == 8768
     assert cfg["ports"] == [8768]
 

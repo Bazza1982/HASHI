@@ -755,12 +755,8 @@ def _stop_remaining(record: dict[str, Any], snapshot: dict[str, Any], processes:
     ports = {snapshot.get(key, record.get(key)): key for key in ("api_port", "gateway_port")}
     # An unresponsive/full listener must not look released merely because connect() times out.
     # Inspect LISTEN sockets without taking ownership of or signalling any process.
-    # Windows can expose a bound/listening TCP endpoint as NONE. Without a
-    # remote peer, its selected local port is still occupied, not proved free.
     listening = {item.laddr.port for item in psutil.net_connections(kind="tcp")
-                 if item.laddr and (item.status == psutil.CONN_LISTEN
-                                    or (item.status == psutil.CONN_NONE
-                                        and not item.raddr))}
+                 if item.status == psutil.CONN_LISTEN and item.laddr}
     remaining.extend(key for port, key in ports.items()
                      if type(port) is int and port in listening)
     return remaining

@@ -39,7 +39,7 @@ def test_selected_instance_is_the_identity_received_by_the_actual_child(target, 
     assert json.loads(child.stdout) == [record["instance_id"], str(Path(record["bridge_home"]).resolve())]
 
 
-@pytest.mark.parametrize("remaining", ["process", "api", "gateway", "lock", "released"])
+@pytest.mark.parametrize("remaining", ["process", "api", "gateway", "lock"])
 def test_stop_cannot_report_success_with_an_owned_process_or_port_left(target, monkeypatch, remaining):
     registry, record = target
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -72,11 +72,8 @@ def test_stop_cannot_report_success_with_an_owned_process_or_port_left(target, m
     monkeypatch.setattr(cli, "_lock_is_held", lambda _: remaining == "lock")
     monkeypatch.setattr(cli, "_admin_token", lambda *_: "fixture-token")
     monkeypatch.setattr(cli, "_http_json", shutdown)
-    if remaining == "released":
-        listener.close()
     try:
-        expected = 0 if remaining == "released" else cli.EXIT_BUSY
-        assert cli.stop_instance(registry, record, timeout=.02) == expected
+        assert cli.stop_instance(registry, record, timeout=.02) == cli.EXIT_BUSY
         assert calls == [("POST", snapshot["api_port"], "/api/admin/shutdown")]
         if remaining == "process":
             assert child.poll() is None, "completion verification must not manufacture success by force killing"

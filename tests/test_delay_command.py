@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
-from orchestrator import runtime_session
 from orchestrator.command_registry import runtime_bot_commands
 from orchestrator.commands.delay import parse_delay_request
 from orchestrator.scheduler import MAX_DELAY_MINUTES, TaskScheduler
@@ -19,10 +18,6 @@ class _FakeRuntime:
         self.workspace_dir.mkdir()
         self.global_config = SimpleNamespace(authorized_id=1)
         self.queue = asyncio.Queue()
-        store = runtime_session.ensure_store(self)
-        self.default_session_id = store.ensure_default_session(
-            owner_id=runtime_session.owner_id(self), agent_id=self.name,
-        )["session_id"]
         scheduler = TaskScheduler(
             tasks_path=tmp_path / "tasks.json",
             state_path=tmp_path / "scheduler_state.json",

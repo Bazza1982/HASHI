@@ -821,7 +821,7 @@ async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hchat_draft_unqualified_sender_retains_body_and_unconfirmed_status(tmp_path):
+async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     listener_payloads = []
     runtime.register_request_listener = (
@@ -842,12 +842,14 @@ async def test_hchat_draft_unqualified_sender_retains_body_and_unconfirmed_statu
         completion_path="foreground",
     )
 
-    assert "Please review the plan." in result.visible_text
-    assert "could not be confirmed" in result.visible_text
-    assert "do not resend yet" in result.visible_text
-    assert "hchat_dispatch_response_invalid" in result.visible_text
+    assert result.visible_text == (
+        "❌ Hchat delivery failed for akane.\n\n"
+        "Message:\n"
+        "Please review the plan.\n\n"
+        "Reason: send_hchat returned false"
+    )
     assert listener_payloads[0]["success"] is False
-    assert listener_payloads[0]["hchat_delivery_status"] == "unconfirmed"
+    assert listener_payloads[0]["hchat_delivery_status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -386,16 +386,10 @@ def _saml_assertion_xml_from_payload(payload: dict) -> str:
 class _FrontendSettingsRequest:
     """Narrow adapter for reusing HASHI's existing scheduler owner handlers."""
 
-    def __init__(self, source_request, *, name: str, payload: dict | None = None, job_id: str = ""):
-        self._source_request = source_request
+    def __init__(self, *, name: str, payload: dict | None = None, job_id: str = ""):
         self.match_info = {"name": name, "job_id": job_id}
         self.query = {}
         self._payload = dict(payload or {})
-
-    def __getattr__(self, name):
-        # Reused owner handlers must see the same authenticated request,
-        # including governed identity; the adapter only replaces route/payload.
-        return getattr(self._source_request, name)
 
     async def json(self):
         return dict(self._payload)
@@ -7673,7 +7667,7 @@ class WorkbenchApiServer:
             return error
         request_id = f"read-{uuid4().hex}"
         response = await self.handle_agent_scheduler_jobs(
-            _FrontendSettingsRequest(request, name=runtime.name)
+            _FrontendSettingsRequest(name=runtime.name)
         )
         return self._frontend_settings_scheduler_response(
             response, target=target, request_id=request_id
@@ -7687,7 +7681,7 @@ class WorkbenchApiServer:
             return error
         payload = dict(envelope["payload"])
         response = await self.handle_agent_scheduler_create(
-            _FrontendSettingsRequest(request, name=runtime.name, payload=payload)
+            _FrontendSettingsRequest(name=runtime.name, payload=payload)
         )
         return self._frontend_settings_scheduler_response(
             response, target=target, request_id=envelope["request_id"]
@@ -7707,7 +7701,6 @@ class WorkbenchApiServer:
             )
         response = await self.handle_agent_scheduler_update(
             _FrontendSettingsRequest(
-                request,
                 name=runtime.name,
                 job_id=job_id,
                 payload=dict(envelope["payload"]),
@@ -7738,7 +7731,6 @@ class WorkbenchApiServer:
             )
         response = await self.handle_agent_scheduler_delete(
             _FrontendSettingsRequest(
-                request,
                 name=runtime.name,
                 job_id=job_id,
                 payload=payload,

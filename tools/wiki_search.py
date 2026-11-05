@@ -140,9 +140,7 @@ def _candidate_files(
         for candidate in sorted(zone.rglob("*.md")):
             if len(files) >= max_files:
                 return files
-            # Only entries below the explicitly configured zone are hidden.
-            # A host's hidden ancestor directory is not Wiki content policy.
-            if candidate.is_symlink() or any(part.startswith(".") for part in candidate.relative_to(zone).parts):
+            if candidate.is_symlink() or any(part.startswith(".") for part in candidate.parts):
                 continue
             resolved = candidate.resolve()
             if resolved.is_file() and _inside_zones(resolved, zones):

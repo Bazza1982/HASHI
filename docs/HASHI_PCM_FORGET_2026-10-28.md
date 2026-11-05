@@ -62,10 +62,6 @@ that the Agent has forgotten everything from that period.
 Use isolated disposable data for repeatable tests, including failure and resume,
 old and new messages, unknown-time summaries, and boundary-crossing material.
 Report source, tests, running Worker, production, and user acceptance separately.
-After a successful command-owned Session switch, the internal frontend command
-projection uses the selected Session and its context generation for completion
-output. The original invocation remains audit evidence; a stale explicit
-Session fence must not turn completed forgetting into an HTTP failure.
 The user's accepted limitation must be present in the interface and PR review;
 passing tests never proves complete erasure of untraceable information.
 

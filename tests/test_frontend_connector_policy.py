@@ -391,7 +391,7 @@ def test_legacy_run_route_projects_to_endpoint_level_delivery_intent():
     ] == [("backend_api", "primary"), ("telegram", "mirror")]
 
 
-def test_agentpresence_route_is_frozen_and_receives_public_text_and_media(tmp_path):
+def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
     set_connector_preference(tmp_path, "owner-a", "agentpresence", "mirror", True)
     additional = configured_owner_mirror_destinations(
         request_metadata={"owner_id": "owner-a"},
@@ -416,9 +416,8 @@ def test_agentpresence_route_is_frozen_and_receives_public_text_and_media(tmp_pa
         content_modes=["text"],
     )
     assert [item["connector_id"] for item in text_intent["destinations"]] == [
-        "backend_api", "agentpresence"
+        "backend_api"
     ]
-    assert text_intent["destinations"][1]["content_modes"] == ["text"]
 
     media_intent = delivery_intent_from_run_route(
         route,
@@ -433,11 +432,7 @@ def test_agentpresence_route_is_frozen_and_receives_public_text_and_media(tmp_pa
         if item["connector_id"] == "agentpresence"
     )
     assert agentpresence["role"] == "mirror"
-    assert set(agentpresence["content_modes"]) == {"text", "media"}
-    # Switching off only affects new admissions, not the frozen active Run.
-    assert configured_owner_mirror_destinations(
-        request_metadata={"owner_id": "owner-a"}, state_root=tmp_path,
-    ) == ()
+    assert agentpresence["content_modes"] == ["media"]
 
 
 def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():

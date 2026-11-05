@@ -753,15 +753,10 @@ async def test_tool_registry_request_scope_filters_catalogue_and_admission(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("parent", ["visible", ".hidden-host"])
-async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_path, monkeypatch, parent):
-    # Exercise the supported fallback even when the host has ripgrep installed.
-    monkeypatch.setattr("tools.wiki_search.shutil.which", lambda _name: None)
-    vault = tmp_path / parent / "private-vault"
+async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_path):
+    vault = tmp_path / "private-vault"
     topics = vault / "10_GENERATED_TOPICS"
     topics.mkdir(parents=True)
-    (topics / ".private").mkdir()
-    (topics / ".private" / "Hidden.md").write_text("RCA applications Renee private", encoding="utf-8")
     (topics / "RCA_Applications.md").write_text(
         "# RCA applications\n\nRenee prepared source documents and application templates.",
         encoding="utf-8",
@@ -791,7 +786,6 @@ async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_pat
     )
     assert search.is_error is False
     payload = json.loads(search.output)
-    assert len(payload["results"]) == 1
     assert payload["results"][0]["source"] == "10_GENERATED_TOPICS/RCA_Applications.md"
     assert "Renee prepared" in payload["results"][0]["excerpt"]
     assert str(vault) not in search.output

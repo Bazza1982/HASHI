@@ -284,12 +284,6 @@ suitable retrieval capability is configured, the command must fail clearly
 without guessing a local setup. A private Wiki deployment may plug into this
 interface, but its data and configuration remain outside HASHI.
 
-The read-only Wiki search fallback applies hidden-entry filtering below each
-explicitly configured zone. Hidden directories above the configured vault
-do not suppress its public curated pages. Hidden entries within a zone,
-symlinks and files outside the configured zones retain their existing
-exclusion and scope checks; results expose only vault-relative sources.
-
 ### 5.4 Memory+ Notebook
 
 Memory+ is an optional continuity layer that improves medium- and long-term
