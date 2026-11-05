@@ -19,8 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12.13'
-      - name: Isolated offline test dependencies
-        run: python -m pip install pytest pytest-asyncio anyio aiohttp pillow PyYAML httpx jsonschema python-telegram-bot croniter psutil rich ruff
+      - name: Isolated mandated runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
       - name: New connector lint
         run: |
           ruff check orchestrator/frontend_call tests/frontend_call
