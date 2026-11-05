@@ -98,6 +98,24 @@ def _write_delivery_state(tmp_path: Path, agent: str, record: dict) -> Path:
     return path
 
 
+@pytest.mark.asyncio
+async def test_incomplete_owner_keeps_retry_after_cause_and_never_publishes_state(tmp_path):
+    from orchestrator.telegram_delivery_errors import TelegramRateLimitRecoveryError
+
+    runtime = _runtime(tmp_path, "source")
+    runtime.config.extra.pop("agent_lifecycle_id")
+    original = RetryAfter(5)
+    with pytest.raises(TelegramRateLimitRecoveryError) as caught:
+        await failover.handle_retry_after(
+            runtime, exc=original, chat_id=123,
+            request_id="isolated-missing-owner", purpose="placeholder",
+        )
+    assert caught.value.__cause__ is original
+    assert caught.value.retry_after_s == 5
+    assert caught.value.retryable is False
+    assert failover.load_health_state(runtime)["agents"] == {}
+
+
 def test_only_unexpired_retry_after_window_blocks_delivery(tmp_path):
     source = _runtime(tmp_path, "zelda")
     path = _write_delivery_state(

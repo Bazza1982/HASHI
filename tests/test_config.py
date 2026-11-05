@@ -89,6 +89,62 @@ def _minimal_flex_agent():
     }
 
 
+@pytest.mark.parametrize("layout", ["outer_with_extra", "outer_only", "nested", "matching"])
+def test_load_preserves_lifecycle_identity_and_delivery_owner(tmp_path, layout):
+    from types import SimpleNamespace
+    from orchestrator.agent_incarnation import lifecycle_id_from_config
+    from orchestrator.telegram_delivery_state import owner_for_runtime
+
+    lifecycle = "a" * 32
+    agent = _minimal_flex_agent()
+    if layout != "nested":
+        agent["agent_lifecycle_id"] = lifecycle.upper()
+    if layout != "outer_only":
+        agent["extra"] = {"telegram_stream_enabled": True}
+        if layout in {"nested", "matching"}:
+            agent["extra"]["agent_lifecycle_id"] = lifecycle
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["instance_id"] = "HASHI1"
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+
+    global_config, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    loaded = agents[0]
+    assert lifecycle_id_from_config(loaded) == lifecycle
+    owner = owner_for_runtime(SimpleNamespace(
+        config=loaded, global_config=global_config, token="synthetic-token"
+    ))
+    assert owner["agent_lifecycle_id"] == lifecycle
+    if layout != "outer_only":
+        assert loaded.extra["telegram_stream_enabled"] is True
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))["agents"][0]
+    if layout != "nested":
+        assert persisted["agent_lifecycle_id"] == lifecycle.upper()
+    assert persisted.get("extra", {}).get("agent_lifecycle_id") == (
+        lifecycle if layout in {"nested", "matching"} else None
+    )
+
+
+@pytest.mark.parametrize(
+    ("outer", "nested"),
+    [("a" * 32, "b" * 32), ("invalid", None), ("a" * 32, "invalid"), (None, "invalid")],
+)
+def test_load_rejects_conflicting_or_malformed_lifecycle_identity(tmp_path, outer, nested):
+    agent = _minimal_flex_agent()
+    if outer is not None:
+        agent["agent_lifecycle_id"] = outer
+    agent["extra"] = {"telegram_stream_enabled": True}
+    if nested is not None:
+        agent["extra"]["agent_lifecycle_id"] = nested
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    before = config_path.read_bytes()
+    with pytest.raises(ValueError, match="lifecycle identity"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    assert config_path.read_bytes() == before
+
+
 def test_media_defaults_on_but_explicit_instance_opt_out_is_kept(tmp_path):
     config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
     manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)

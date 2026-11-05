@@ -751,6 +751,26 @@ def format_backend_error_for_user(
     return "\n".join(lines).strip()
 
 
+def runtime_exception_fields(runtime: Any, item: Any, exc: Exception) -> dict[str, Any]:
+    """Project known connector failures without calling them provider failures."""
+    from orchestrator.telegram_delivery_errors import TelegramRateLimitRecoveryError
+
+    context = {
+        "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
+        "error_retryable": False,
+    }
+    if isinstance(exc, TelegramRateLimitRecoveryError):
+        context["retry_after_s"] = exc.retry_after_s
+        context["public_failure"] = build_public_failure(
+            runtime.config.active_backend, str(exc),
+            locale=ui_language.preferred_locale(
+                runtime, actor_id=getattr(item, "owner_id", None) or item.chat_id
+            ),
+            error_context=context,
+        )
+    return context
+
+
 def build_public_failure(engine: str, error_text: str, *, locale: str | None = None,
                          error_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Build the one owner-defined terminal meaning consumed by every frontend."""
@@ -769,7 +789,14 @@ def build_public_failure(engine: str, error_text: str, *, locale: str | None = N
                                         locale=locale, error_context=context)
     if len(body) > 12000:
         body = body[:12000] + '\n' + ui_language.tr('error.truncated', locale=locale)
-    header = '❌ ' + ui_language.tr('error.backend_header', locale=locale, backend=backend)
+    if context.get("error_code") == "TELEGRAM_RATE_LIMIT_RECOVERY_FAILED":
+        header = "⚠️ " + ui_language.tr("error.telegram_delivery_header", locale=locale)
+        body = ui_language.tr(
+            "error.telegram_rate_limit_recovery_failed", locale=locale,
+            seconds=context.get("retry_after_s", 0),
+        ) + "\n" + ui_language.tr("error.code", locale=locale, code=context["error_code"])
+    else:
+        header = '❌ ' + ui_language.tr('error.backend_header', locale=locale, backend=backend)
     return normalize_public_failure({'type':'hashi.public-failure', 'version':1,
         'backend':backend, 'error_code':context.get('error_code'), 'error_retryable':context.get('error_retryable'),
         'side_effects_possible':bool(context.get('side_effects_possible')), 'effects':effects,

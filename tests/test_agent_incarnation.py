@@ -19,6 +19,26 @@ def _config(tmp_path, lifecycle=None):
     return path
 
 
+@pytest.mark.parametrize("outer", [None, "a" * 32, "b" * 32])
+def test_worker_identity_preparation_preserves_nested_identity_or_rejects_conflict(
+    tmp_path, outer
+):
+    path = _config(tmp_path, outer)
+    document = json.loads(path.read_text())
+    document["agents"][0]["extra"] = {"agent_lifecycle_id": "a" * 32, "setting": True}
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = path.read_bytes()
+    if outer == "b" * 32:
+        with pytest.raises(ValueError, match="conflicting lifecycle identity"):
+            agent_incarnation.ensure_agent_lifecycle_id(path, "zelda")
+        assert path.read_bytes() == before
+    else:
+        assert agent_incarnation.ensure_agent_lifecycle_id(path, "zelda") == "a" * 32
+        saved = json.loads(path.read_text())["agents"][0]
+        assert saved["agent_lifecycle_id"] == "a" * 32
+        assert saved["extra"] == document["agents"][0]["extra"]
+
+
 def test_missing_incarnation_is_assigned_once_and_reused(tmp_path):
     path = _config(tmp_path)
 

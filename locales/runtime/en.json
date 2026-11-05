@@ -625,6 +625,8 @@
     "wip.action": "Run /compact to add the recovery summary to this Session and clear the active Journal.",
     "wip.stream_summary": "Unfinished HERV3 work was recovered in bounded form; /compact can preserve it in Session context.",
     "error.backend_header": "Backend error ({backend})",
+    "error.telegram_delivery_header": "Telegram delivery delayed",
+    "error.telegram_rate_limit_recovery_failed": "Telegram requires a wait of {seconds} seconds. Automatic rate-limit recovery is unavailable. Check delivery status before resubmitting; an already executed task must not be repeated.",
     "error.details": "Error details: {error}",
     "error.code": "Error code: {code}",
     "error.http_status": "HTTP status: {status}",
