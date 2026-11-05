@@ -103,6 +103,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # Managed CPython also supplies Windows security-only patch releases
       # that are absent from actions/python-versions.
       - uses: astral-sh/setup-uv@v6

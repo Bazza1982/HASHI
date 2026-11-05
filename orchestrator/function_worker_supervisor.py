@@ -1627,6 +1627,11 @@ class FunctionWorkerSupervisor:
                 if isinstance(handle, AgentRuntimeHandle)
             ],
             "runtime": self.kernel.runtime_fingerprint.to_dict(),
+            "kernel_pid": getattr(self.kernel, "kernel_pid", None),
+            "core_runtime": (
+                self.kernel.core_runtime_fingerprint.to_dict()
+                if getattr(self.kernel, "core_runtime_fingerprint", None) is not None else None
+            ),
             "starting": sorted(getattr(self.kernel, "_startup_tasks", {})),
             "whatsapp_connected": bool(getattr(self.kernel, "whatsapp", None)),
             "scheduler": scheduler_snapshot,

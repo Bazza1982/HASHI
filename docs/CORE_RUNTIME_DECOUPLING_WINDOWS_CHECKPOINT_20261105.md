@@ -90,3 +90,35 @@ same major-version and independent exact-tree review checks. Real execution of
 its three authorization states rejects missing/unrecognized authorization and
 continues to reject the authorized candidate for its missing independent review.
 It does not mark source review, Gate 3 or release accepted.
+
+The completed original-dependency offline run at 424141a7 returned 8,977 passed,
+23 failed and 33 skipped (246 deselected by the unchanged markers, 18 subtests
+passed), in 2,468.38 seconds. Its source bytes stayed identical throughout;
+this is a completed failed scope, not a parity pass. The corresponding PR
+Windows CI returned 8,969 passed, 32 failed and 33 skipped.
+
+Read-only control at the untouched pre-migration 6f78ac7f source reproduced all
+23 local failures. The original source also reproduced seven API availability
+failures when Codex was absent from PATH, explaining seven CI-only cases without
+changing assertions. The real GNU patch LF/CRLF mismatch is toolchain-dependent
+and remains unadjudicated. These baseline results do not waive Gate 3.
+
+The other CI-only failure was the FYI migration guard's unavailable historical
+Git baseline. The workflow now fetches full history. Running the actual unchanged
+validator against a private shallow object database reproduced its rejection;
+fetching full history made it pass. No extra source checkout or product branch
+was created for that proof, and historical-content assertions were retained.
+
+The Functions-side version/topology follow-up projects Core and Functions
+runtime IDs independently from their admitted fingerprints, including after
+private topology serialization. Legacy/missing Core receipts remain unknown.
+Detailed version cards retain HTML escaping and hide interpreter/manifest paths.
+Wrong Core-role observations fail before instance/product work. Existing runtime
+guidance now distinguishes the v5 candidate from its preserved v4 baseline and
+historical restart permissions. The affected version, handoff, supervisor,
+language and FYI modules passed 136 cases; the complete FYI primer stays within
+the existing budget at 8,354 characters.
+
+Original application pins remain unchanged. Source review, failed business
+parity, complete Linux/native qualification, PR #137 security adoption, release
+packaging/authority protection and operator adoption remain explicit HOLDs.

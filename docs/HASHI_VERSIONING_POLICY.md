@@ -182,6 +182,16 @@ runtime-compatibility specification even when the product label is unchanged.
 Sharing `X` or a release string never authorizes hot adoption across a rejected
 fingerprint or substitutes for a configuration/data migration check.
 
+Core v5's structured version payload adds `runtime_roles.core_host` and
+`runtime_roles.functions`. They project the admitted Core receipt and the
+observed current Functions process separately, retaining their actual runtime
+IDs, Core source digest and PID. Agent views receive Core facts through the
+existing private shared-Functions topology and report their own Functions
+runtime. Missing/legacy Core receipts stay unknown; checkout metadata and the
+Functions identity never fill that gap. Public data and the full `/version`
+diagnostic view omit interpreter/prefix/manifest paths. Product and FG facts
+remain separate. This additive display does not admit or activate a candidate.
+
 Reports distinguish checked-out source, built/qualified artifact, running Core,
 shared Functions generation, and per-Agent Worker generation. Different
 instances may adopt the same release at different times. A repository version

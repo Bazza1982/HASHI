@@ -17,6 +17,7 @@ from orchestrator.function_generation import candidate_import_guard
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.function_worker_protocol import JsonConnectionPeer
 from orchestrator.kernel_artifact import verify_artifact
+from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError, RuntimeFingerprint
 from orchestrator import runtime_handoff
 
 
@@ -39,6 +40,13 @@ class RuntimeAppHost:
         self.onboarding_done = False
 
     async def prepare(self):
+        core_receipt = self.bootstrap.get("core_runtime")
+        core_runtime = (
+            RuntimeFingerprint.from_mapping(core_receipt)
+            if core_receipt is not None else None
+        )
+        if core_runtime is not None and core_runtime.role != CORE_HOST_ROLE:
+            raise RuntimeContractError("Admitted Core receipt has the wrong runtime role")
         manifest = self.bootstrap["manifest"]
         with candidate_import_guard():
             for entry in manifest["entries"]:
@@ -88,6 +96,7 @@ class RuntimeAppHost:
             bootstrap_local_api_credential=True,
         )
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
+        self.app.core_runtime_fingerprint = core_runtime
         self.app.shared_generation_id = manifest["generation_id"]
         self.app.function_release_adoption = dict(
             self.bootstrap.get("adoption") or {"status": "unknown", "reason_code": None}
@@ -140,6 +149,8 @@ class RuntimeAppHost:
         return {
             "pid": os.getpid(),
             "generation_id": manifest["generation_id"],
+            "core_runtime_id": core_runtime.runtime_id if core_runtime else None,
+            "functions_runtime_id": self.app.runtime_fingerprint.runtime_id,
             "project_root": str(self.app.global_cfg.project_root),
             "bridge_home": str(paths.bridge_home),
         }
@@ -436,3 +447,4 @@ async def serve(connection, bootstrap):
     finally:
         await host.stop()
         await peer.close()
+# HASHI-Fingerprint: hfp_b54b525a9fcd48a6ac589aace91654ac

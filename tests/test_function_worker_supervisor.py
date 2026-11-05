@@ -251,8 +251,13 @@ def test_topology_publishes_live_source_adoption_commit():
     kernel.runtimes = [handle]
     supervisor = FunctionWorkerSupervisor(kernel)
 
+    kernel.kernel_pid = 202
+    core_receipt = {"role": "core-host", "installation_digest": "sha256:" + "b" * 64}
+    kernel.core_runtime_fingerprint = SimpleNamespace(to_dict=lambda: core_receipt)
     topology = supervisor.topology_snapshot()
 
+    assert topology["kernel_pid"] == 202
+    assert topology["core_runtime"] == core_receipt
     assert topology["shared_functions"]["source_commit"] == target
     assert topology["function_workers"][0]["source_commit"] == target
 
