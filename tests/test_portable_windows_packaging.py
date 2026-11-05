@@ -917,7 +917,8 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "constraints/transcription-py312.lock",
         "constraints/tts-edge-py312.lock",
     )
-    assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
+    assert {"exp/loader.py", "exp/AGENT.md", "exp/schema.md", "exp/training.md"} <= set(builder.ROOT_PACKAGE_FILES)
+    assert "specs" in builder.SOURCE_DIRS
     assert "veritas" in builder.SOURCE_DIRS
     for name in ("codex", "claude", "gemini", "grok"):
         assert f"adapters/{name}_cli.py" in builder.PRUNED_SOURCE_PATHS

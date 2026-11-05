@@ -193,15 +193,18 @@ function Get-ExistingLocalInstallation {
     if ([string]$marker.bundle_id -ne (Get-BundleId -Root $script:InstallRoot)) {
         throw 'The local installation build identity does not match its ownership marker. It was not changed.'
     }
-    foreach ($relative in @(
-        'runtime\python\python.exe',
+    $runtimeRelatives = @('runtime\python\python.exe')
+    if (Test-Path -LiteralPath (Join-Path $script:InstallRoot 'app\hashi\constraints\core-host-py312.lock') -PathType Leaf) {
+        $runtimeRelatives = @('runtime\core\python.exe', 'runtime\functions\python.exe', 'runtime\hashi-runtime-release.json')
+    }
+    foreach ($relative in @($runtimeRelatives + @(
         'app\hashi\main.py',
         'app\hashi\tui.py',
         'data\agents.json',
         'data\secrets.json',
         'Start_HASHI_TUI.bat',
         'Stop_HASHI.bat'
-    )) {
+    ))) {
         if (-not (Test-Path -LiteralPath (Join-Path $script:InstallRoot $relative) -PathType Leaf)) {
             throw "The existing HASHI installation is incomplete: $relative"
         }
@@ -591,6 +594,18 @@ function Remove-NewInstallationSafely {
     }
 }
 
+function Expand-PortableRuntimePayloads {
+    param([string]$Root)
+    $capsule = Read-JsonObject -Path (Join-Path $Root 'runtime\role-capsule.json')
+    if ($null -eq $capsule -or [int]$capsule.schema_version -ne 2) { return }
+    # This runs only after the complete staging copy passed SHA-256 verification.
+    # The already bundled zero-dependency interpreter uses stdlib extraction.
+    $python = Join-Path $Root 'runtime\core\python.exe'
+    $qualifier = Join-Path $Root 'app\hashi\scripts\qualify_portable_runtime.py'
+    & $python -I -B $qualifier expand-bundle --image-root $Root
+    if ($LASTEXITCODE -ne 0) { throw 'The offline runtime payloads failed verification or expansion.' }
+}
+
 function Assert-InstalledRuntimeQualification {
     param([string]$Root, [switch]$Prepare)
     $python = Join-Path $Root 'runtime\functions\python.exe'
@@ -704,7 +719,16 @@ try {
     }
     $driveRoot = [System.IO.Path]::GetPathRoot($script:InstallRoot)
     $drive = [System.IO.DriveInfo]::new($driveRoot)
-    $requiredFree = $totalBytes + 256MB
+    $payloadExpansionBytes = [long]0
+    $sourceCapsule = Read-JsonObject -Path (Join-Path $script:SourceRoot 'runtime\role-capsule.json')
+    if ($null -ne $sourceCapsule -and [int]$sourceCapsule.schema_version -eq 2) {
+        foreach ($property in $sourceCapsule.payloads.PSObject.Properties) {
+            $amount = [long]$property.Value.uncompressed_bytes
+            if ($amount -lt 0 -or $amount -gt 4GB) { throw 'The runtime payload size is invalid.' }
+            $payloadExpansionBytes += $amount
+        }
+    }
+    $requiredFree = $totalBytes + $payloadExpansionBytes + 256MB
     if ($drive.AvailableFreeSpace -lt $requiredFree) {
         throw "Not enough free space on $driveRoot. HASHI needs at least $([Math]::Ceiling($requiredFree / 1MB)) MB free."
     }
@@ -790,6 +814,8 @@ try {
             -English "Verifying files: $verifyIndex of $($records.Count)" `
             -Chinese "正在验证文件：$verifyIndex / $($records.Count)"
     }
+
+    Expand-PortableRuntimePayloads -Root $script:StageRoot
 
     if ($script:WasUpdate) {
         Write-InstallProgress `

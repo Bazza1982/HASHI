@@ -384,7 +384,8 @@ def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_
     from orchestrator.kernel_artifact import manifest_digest
     from orchestrator.runtime_contract import RuntimeContractError, qualified_runtime_from_reference
     from orchestrator.runtime_release_capsule import (
-        create_capsule, qualify_relocated_roles, verify_capsule, verify_installed_roles,
+        create_capsule, materialize_release_payloads, pack_release_payloads,
+        qualify_relocated_roles, verify_capsule, verify_installed_roles,
     )
 
     image = tmp_path / "built-image"
@@ -411,6 +412,11 @@ def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_
             shutil.copytree(_site_packages(native_roles["functions"]["environment_prefix"]), site)
     capsule = create_capsule(image, code, tmp_path / "build-observations",
                              function_manifest=manifest)
+    original_ids = {name: record["runtime_id"] for name, record in capsule["roles"].items()}
+    capsule = pack_release_payloads(image, code, roots=("runtime/functions",))
+    assert (image / "runtime/functions.payload.zip").is_file()
+    assert not (image / "runtime/functions").exists()
+    assert {name: record["runtime_id"] for name, record in capsule["roles"].items()} == original_ids
     serialized = json.dumps(capsule)
     assert str(tmp_path) not in serialized
     assert str(ROOT) not in serialized
@@ -424,6 +430,9 @@ def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_
     code = moved / "app/hashi"
     with pytest.raises(RuntimeContractError):
         qualified_runtime_from_reference(original_reference, code_root=code, role=CORE_HOST_ROLE)
+    with pytest.raises(RuntimeContractError, match="fully expanded"):
+        qualify_relocated_roles(moved, code)
+    materialize_release_payloads(moved, code)
     selection = qualify_relocated_roles(moved, code)
     assert verify_installed_roles(moved, code) == selection
     observed = _run(moved / ("runtime/core/python.exe" if os.name == "nt" else "runtime/core/bin/python3"),

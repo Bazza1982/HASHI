@@ -255,7 +255,11 @@ Follow [Source install](#source-install) or the explicit npm version path.
 For a self-contained Windows handoff, use the allowlisted Portable Windows
 builder described in the [Portable Windows guide](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md).
 The resulting USB is verified installation media; HASHI runs from the local
-copy installed on the recipient PC.
+copy installed on the recipient PC. Core v5 keeps Core and Functions in separate
+qualified runtimes. Lossless transfer payloads preserve all runtime and speech
+files; the installer verifies and expands them before final-path qualification.
+The destination needs space for the expanded copy, staging and complete rollback
+version, beyond the transfer image's capacity. No active interpreter is patched.
 
 The Portable Windows image has a strict 957 MB capacity and does not contain
 the Level 2 detector packages or model. After installation on the PC, run

@@ -48,6 +48,16 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
 
     assert {
         "cli.js",
+        "FUNCTION_SOURCE.json",
+        "scripts/run_qualified_core.py",
+        "specs/compute/v1/manifest.schema.json",
+        "specs/ete/v1/artefact-meta.schema.json",
+        "specs/ete/v1/ete-manifest.schema.json",
+        "specs/ete/v1/project.schema.json",
+        "specs/ete/v1/task.schema.json",
+        "exp/AGENT.md",
+        "exp/schema.md",
+        "exp/training.md",
         "BUILD_INFO.json",
         "main.py",
         "pyproject.toml",

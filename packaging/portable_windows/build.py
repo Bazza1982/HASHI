@@ -10,6 +10,7 @@ import os
 import re
 import secrets as secrets_module
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -152,6 +153,7 @@ SOURCE_DIRS = (
     "remote",
     "scripts",
     "skills",
+    "specs",
     "superloops",
     "tools",
     "transports",
@@ -179,6 +181,9 @@ ROOT_PACKAGE_FILES = (
     "exp/__init__.py",
     "exp/loader.py",
     "exp/asset-packs.json",
+    "exp/AGENT.md",
+    "exp/schema.md",
+    "exp/training.md",
 )
 PRUNED_SOURCE_PATHS = (
     "adapters/claude_cli.py",
@@ -603,23 +608,24 @@ def strip_fresh_bootstrap_packages(runtime_python: Path) -> None:
             shutil.rmtree(directory)
 
 
-def seal_portable_roles(staging: Path, build_temp: Path) -> dict:
+def seal_portable_roles(staging: Path, build_temp: Path, cache: Path | None = None) -> dict:
     from orchestrator.function_generation import (
         FUNCTION_GENERATION_ENTRYPOINTS, build_source_manifest,
     )
     from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
     from orchestrator.function_source_publication import packaged_tree_snapshot
-    from orchestrator.runtime_release_capsule import create_capsule
+    from orchestrator.runtime_release_capsule import create_capsule, pack_release_payloads
 
     app = staging / "app/hashi"
     manifest = build_source_manifest(
         [*FUNCTION_GENERATION_ENTRYPOINTS, *(spec.module for spec in FUNCTION_MANAGER_SPECS)],
         code_root=app)
     source = packaged_tree_snapshot(HASHI_ROOT, app)
-    return create_capsule(
+    create_capsule(
         staging, app, build_temp / "role-qualifications",
         function_manifest=manifest.to_dict(), function_source=source,
         sidecar_roots=("runtime/bin", "runtime/media"))
+    return pack_release_payloads(staging, app, cache_root=cache / "verified-runtime-payloads" if cache else None)
 
 
 def install_python_dependencies(runtime_python: Path) -> None:
@@ -649,6 +655,81 @@ def install_python_dependencies(runtime_python: Path) -> None:
     for compiled in site_packages.rglob("*.py[co]"):
         compiled.unlink()
     remove_path(site_packages / "bin")
+
+
+def materialize_model_cache(staging: Path) -> int:
+    """Flatten only fresh Hugging Face model-file links before sealing an image."""
+    staging = Path(staging).absolute()
+    if staging.resolve() != staging or any((staging / relative).exists() for relative in (
+        "runtime/role-capsule.json", "runtime/hashi-runtime-release.json",
+        "runtime/core/runtime-policy", "runtime/functions/runtime-policy",
+    )):
+        raise RuntimeError("Model materialization requires a fresh unqualified image")
+    cache = staging / "runtime/media/model-cache"
+    if not cache.exists():
+        return 0
+    if cache.resolve() != cache:
+        raise RuntimeError("Model cache root is redirected")
+    links = []
+    pending = [cache]
+    while pending:
+        directory = pending.pop()
+        for entry in os.scandir(directory):
+            metadata = entry.stat(follow_symlinks=False)
+            path = Path(entry.path)
+            redirected = stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400
+            if redirected:
+                target = path.resolve(strict=True)
+                local, resolved = path.relative_to(cache).parts, target.relative_to(cache).parts if target.is_relative_to(cache) else ()
+                if (len(local) < 4 or local[1] != "snapshots" or len(resolved) != 3
+                        or resolved[0] != local[0] or resolved[1] != "blobs"
+                        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", resolved[2]) is None):
+                    raise RuntimeError("Model cache link escapes its declared snapshot/blob pair")
+                source_stat = target.stat(follow_symlinks=False)
+                if (not stat.S_ISREG(source_stat.st_mode)
+                        or getattr(source_stat, "st_file_attributes", 0) & 0x400):
+                    raise RuntimeError("Model cache link does not name a regular blob")
+                links.append((path, target, source_stat))
+            elif stat.S_ISDIR(metadata.st_mode):
+                pending.append(path)
+            elif not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError("Model cache contains a non-regular resource")
+
+    def identity(value):
+        return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+    consumed = {}
+    for path, target, expected in links:
+        temporary = path.with_name("." + path.name + ".materializing-" + secrets_module.token_hex(6))
+        try:
+            digest = hashlib.sha256()
+            with target.open("rb") as source, temporary.open("xb") as output:
+                if identity(os.fstat(source.fileno())) != identity(expected):
+                    raise RuntimeError("Model blob changed before materialization")
+                while block := source.read(1024 * 1024):
+                    output.write(block)
+                    digest.update(block)
+                if identity(os.fstat(source.fileno())) != identity(expected):
+                    raise RuntimeError("Model blob changed during materialization")
+            checksum = digest.hexdigest()
+            with temporary.open("rb") as copied:
+                copied_checksum = hashlib.file_digest(copied, "sha256").hexdigest()
+            if copied_checksum != checksum or (target in consumed and consumed[target][1] != checksum):
+                raise RuntimeError("Model copy bytes changed during materialization")
+            if path.resolve(strict=True) != target:
+                raise RuntimeError("Model snapshot link changed during materialization")
+            os.replace(temporary, path)
+            consumed[target] = (expected, checksum)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    # The ordinary no-symlink HF cache layout stores bytes in snapshots directly.
+    # Drop only the proven blob copies after every reference has become a file.
+    for target, (expected, _checksum) in consumed.items():
+        if identity(target.stat(follow_symlinks=False)) != identity(expected):
+            raise RuntimeError("Model blob changed before retiring its duplicate")
+        target.unlink()
+    return len(links)
 
 
 def install_media_helpers(staging: Path, app_hashi: Path, cache: Path) -> None:
@@ -683,6 +764,7 @@ def install_media_helpers(staging: Path, app_hashi: Path, cache: Path) -> None:
                     os.environ.pop("HF_HUB_CACHE", None)
                 else:
                     os.environ["HF_HUB_CACHE"] = previous
+    materialize_model_cache(staging)
 
 
 def validate_bundled_runtime_contract(runtime_python: Path, app_hashi: Path) -> None:
@@ -1190,6 +1272,14 @@ def validate_image(image_root: Path) -> None:
         raise RuntimeError("portable Remote must use token-required one-click pairing")
     if f"pairing_token_ttl_seconds: {PAIRING_TOKEN_TTL_SECONDS}" not in remote_config:
         raise RuntimeError("portable pairing TTL is not seven days")
+    logical_files = set()
+    from orchestrator.runtime_release_capsule import PAYLOAD_ROOTS, verify_capsule
+    if any((image_root / (relative + ".payload.zip")).is_file() for relative in PAYLOAD_ROOTS):
+        capsule = verify_capsule(image_root, image_root / "app/hashi")
+        for role in capsule["roles"].values():
+            logical_files.update(role["root"] + "/" + name for name in role["files"])
+        for relative, files in capsule["sidecars"].items():
+            logical_files.update(relative + "/" + name for name in files)
     forbidden = (
         "runtime/node",
         "app/workbench",
@@ -1203,7 +1293,8 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/adapters/grok_cli.py",
         "app/hashi/scripts/hashi_remote_watchdog.py",
     )
-    present = [relative for relative in forbidden if (image_root / relative).exists()]
+    present = [relative for relative in forbidden
+               if (image_root / relative).exists() or relative in logical_files]
     if present:
         raise RuntimeError(f"forbidden portable components are present: {present}")
     required = (
@@ -1241,7 +1332,8 @@ def validate_image(image_root: Path) -> None:
         "launcher/Enable-Privacy-Level2.ps1",
     )
     missing = [
-        relative for relative in required if not (image_root / relative).is_file()
+        relative for relative in required
+        if not (image_root / relative).is_file() and relative not in logical_files
     ]
     if missing:
         raise RuntimeError(f"portable image is incomplete: {missing}")
@@ -1323,7 +1415,7 @@ def build(args: argparse.Namespace) -> Path:
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
         configure_data(staging, private_deepseek_key=private_deepseek_key)
         copy_launchers(staging)
-        roles = seal_portable_roles(staging, build_temp)
+        roles = seal_portable_roles(staging, build_temp, args.cache)
         validate_image(staging)
 
         categories = {

@@ -353,7 +353,7 @@ def _select_core_runtime(code_root: Path, *, with_functions=False):
         try:
             _validate_environment_path(Path(runtime[0]))
             result = subprocess.run(
-                [*runtime, "-B", str(checker), "--code-root", str(code_root), "--core-command"],
+                [*runtime, "-I", "-B", str(checker), "--code-root", str(code_root), "--core-command"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=180, check=False)
             if result.returncode:

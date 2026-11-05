@@ -328,3 +328,46 @@ generalized rather than excluded from leak detection; the canonical Functions
 hash lock is explicitly tracked. No assertion, Core startup restriction or
 runtime byte-seal rule was disabled. Actual rebuilt artifact and CI receipts
 are recorded separately from these source fixes in PR140.
+
+## Full transfer payload and remaining launch owners
+
+The real b48d0c58 npm tarball completed a fresh Git-less install and full
+Core-driven product preparation: 668 modules, 717 resources, 395.81 command
+seconds. Its explicit no-privacy/no-transcription/no-TTS options mean this is
+role/product qualification, not complete media installation. Both role seals
+and the original Python base (3546 files) remained unchanged; existing-data
+witnesses survived. Standard and Kubernetes actual image CI 42090332292 passed.
+
+Portable's next real failure exposed four Hugging Face snapshot links. The
+fresh-image builder now materializes only verified same-repository blob links,
+checks every copy and retires duplicate blobs only after all references are
+ordinary matching files. Escape and already-qualified image negatives remain.
+The actual unchanged small model passes offline checking; the complete media
+closure has 11178 files and 975544153 bytes. No model, version or hash assertion
+is removed to meet the existing transfer limit.
+
+The same full media closure measures 562925390 bytes with lossless LZMA ZIP.
+A separate real 159.79-second verification checked the archive and every
+uncompressed file. Portable capsule v2 records fixed payload roots, archive
+checksums, full uncompressed tables and sizes. Expansion occurs in fresh staging
+before touching an older installation. The original strict role/sidecar checks
+run on expanded files, and final-path qualification remains mandatory. Neither
+Core/FR IDs nor their byte-seal policy changes. The 957000000-byte capacity and
+32 KiB allocation check remain intact; destination free-space checks include
+all uncompressed payloads and whole-release rollback space.
+
+Native Windows actual 0/50 roles passed compressed transfer, relocation into a
+space/Chinese path, final qualification, unchanged role IDs and tamper/escape
+rejection: 2 tests, 575.65 command seconds. The focused payload, model,
+Windows/WSL launch and runtime-contract scope passed 107 cases in 55.48 pytest
+seconds on the same frozen source bytes; Ruff passed. Synthetic payload fixtures
+are explicitly unqualified and are not counted as the actual-role evidence.
+
+Native Windows/WSL management and macOS launch scripts use the existing
+installer-qualified Core selection for v5, with legacy v4 rollback retained;
+macOS acceptance and actual WSL service adoption are not implied. npm and
+Portable also include the previously omitted EXP guides and specification
+resources. Complete final rebuilt Portable and npm artifacts and final full
+source CI are still pending at this implementation checkpoint. PR140 remains
+Draft; exact-tree independent human Core review, main integration, account/WAC
+qualification and operator adoption remain separate gates.

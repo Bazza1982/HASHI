@@ -10,13 +10,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from orchestrator.runtime_release_capsule import (  # noqa: E402
-    qualify_relocated_roles, verify_capsule, verify_installed_roles,
+    materialize_release_payloads, qualify_relocated_roles, verify_capsule, verify_installed_roles,
 )
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("verify-bundle", "qualify-installed", "verify-installed"))
+    parser.add_argument("operation", choices=("verify-bundle", "expand-bundle", "qualify-installed", "verify-installed"))
     parser.add_argument("--image-root", type=Path, required=True)
     args = parser.parse_args(argv)
     image = args.image_root.absolute()
@@ -24,6 +24,7 @@ def main(argv=None):
     if code.resolve() != ROOT:
         raise ValueError("Portable qualifier must belong to the exact installed program")
     function = {"verify-bundle": verify_capsule,
+                "expand-bundle": materialize_release_payloads,
                 "qualify-installed": qualify_relocated_roles,
                 "verify-installed": verify_installed_roles}[args.operation]
     result = function(image, code)
