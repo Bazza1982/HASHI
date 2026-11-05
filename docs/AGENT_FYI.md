@@ -30,7 +30,7 @@ These owners differ from deployment layers: Core, replaceable Functions, platfor
 ## Find and read
 Read the relevant guide, then its owning contract. With read-only `documentation_read`, pass the link and `from_path` to resolve it from the source document. Use an outline to select a section. Follow explicit continuation before treating its conditions and exceptions as complete.
 Use authorized repository readers for source/tests or when the scoped reader is unavailable. Report inaccessible references instead of inventing content or authority.
-General chat needs no detailed guides. Do not expand every link or reload the catalogue every turn. Retain path/section/revision references across compaction and backend handoff so relevant material can be reread.
+General chat needs no detailed guides. Do not expand every link or reload the catalogue every turn. Keep returned `hashi-doc:` references in task continuity across compaction or backend handoff; pass `reference` to reread the relevant material.
 
 ## Evidence and authority
 Design, source implementation, packaged bytes, runtime adoption and live acceptance are separate evidence. Catalogue/common-guidance revision does not certify linked documents; retrieved sources have their own revisions.

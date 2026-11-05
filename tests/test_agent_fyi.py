@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -260,6 +261,49 @@ def test_migration_checks_actual_content_and_every_original_topic(tmp_path):
     assert "missing or duplicated" in "; ".join(validate_knowledge_migration(root))
 
 
+def test_document_reference_survives_existing_compaction_evidence_contract(reference_repo):
+    from orchestrator.context_compaction import (
+        CAPSULE_FORMAT, CompactionFailure, _normalise_capsule, _turn_segment,
+    )
+
+    document = read_documentation({"path": "docs/contract.md", "section": "Conditions"}, code_root=reference_repo)
+    reference = document["reference"]
+    segment = _turn_segment({"id": 1, "role": "assistant", "text": json.dumps(document)})
+    assert reference in segment.evidence_refs
+    capsule = {
+        "format": CAPSULE_FORMAT, "source_segment_ids": [segment.segment_id], "source_digest": segment.source_hash,
+        "summary": "Continue source review.", "active_historical_goals": [], "decisions_and_constraints": [],
+        "completed_work_and_verification": [], "unresolved_work_questions_failures": [],
+        "evidence_refs": [], "preferences_and_definitions": [], "omissions_and_uncertainty": [],
+    }
+    validation = dict(source_ids=[segment.segment_id], source_digest=segment.source_hash,
+                      required_evidence=segment.evidence_refs, max_chars=4000)
+    with pytest.raises(CompactionFailure) as failure:
+        _normalise_capsule(capsule, **validation)
+    assert failure.value.code == "COMPACTION_EVIDENCE_MISSING"
+    capsule["evidence_refs"] = [reference]
+    retained = _normalise_capsule(capsule, **validation)
+    reread = read_documentation({"reference": retained["evidence_refs"][0]}, code_root=reference_repo)
+    assert reread["ok"] and reread["complete"]
+    assert reread["source"] == document["source"]
+    assert reread["text"] == document["text"]
+
+
+@pytest.mark.parametrize("fields", [None, {"path": "../secrets.json", "section": "", "revision": "forged"}, {"root": "outside"}])
+def test_saved_document_references_cannot_grant_filesystem_authority(reference_repo, fields):
+    reference = "hashi-doc:!" if fields is None else "hashi-doc:" + base64.urlsafe_b64encode(json.dumps(fields).encode()).decode().rstrip("=")
+    result = read_documentation({"reference": reference}, code_root=reference_repo)
+    assert not result["ok"] and "text" not in result
+    assert "fixture sentinel" not in json.dumps(result)
+
+
+def test_saved_reference_detects_changed_source(reference_repo):
+    first = read_documentation({"path": "docs/contract.md"}, code_root=reference_repo)
+    (reference_repo / "docs/contract.md").write_text("# Different source\n", encoding="utf-8")
+    changed = read_documentation({"reference": first["reference"]}, code_root=reference_repo)
+    assert not changed["ok"] and changed["error"] == "revision_changed"
+
+
 def test_relative_links_sections_and_revision_bound_continuation(reference_repo):
     contract = reference_repo / "docs/contract.md"
     complete = "# Contract\n\n## Conditions\n\n" + "\n\n".join(f"Condition {i}: full rule and exception." for i in range(100)) + "\n\n## Other\n\nUnrelated material.\n"
@@ -281,6 +325,17 @@ def test_relative_links_sections_and_revision_bound_continuation(reference_repo)
     contract.write_text(complete + "\nUpdated source.", encoding="utf-8")
     changed = read_documentation(first["continuation"], code_root=reference_repo)
     assert not changed["ok"] and changed["error"] == "revision_changed"
+
+
+@pytest.mark.parametrize("reference", ["AGENTS.md", "docs/contract.md"])
+def test_explicit_link_source_is_respected_for_root_looking_relative_names(reference_repo, reference):
+    local = reference_repo / "docs/agent-guide" / reference
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text("# Linked local document\n", encoding="utf-8")
+    result = read_documentation({
+        "path": reference, "from_path": "docs/agent-guide/voice.md",
+    }, code_root=reference_repo)
+    assert result["ok"] and result["source"]["path"] == local.relative_to(reference_repo).as_posix()
 
 
 @pytest.mark.parametrize("path", ["../secrets.json", "../../secrets.md", "/etc/passwd", "C:/secrets.md", "https://example.invalid/guide.md"])
@@ -343,6 +398,11 @@ async def test_shared_registry_and_serialized_gateway_read_scoped_docs(reference
     })
     payload = json.loads(result["result"]["content"][0]["text"])
     assert payload["ok"] and "complete condition" in payload["text"]
+    restored = await _dispatch(gateway, {
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "documentation_read", "arguments": {"reference": payload["reference"]}},
+    })
+    assert json.loads(restored["result"]["content"][0]["text"])["source"] == payload["source"]
     invalid = await _dispatch(gateway, {
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "documentation_read", "arguments": {"root": str(tmp_path), "path": "private.md"}},

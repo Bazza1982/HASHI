@@ -17,22 +17,22 @@
   },
   "after": {
     "fyi": {
-      "characters": 3635,
-      "estimated_tokens": 909
+      "characters": 3666,
+      "estimated_tokens": 917
     },
     "engineering_guidance": {
       "characters": 4278,
       "estimated_tokens": 1070
     },
     "assembled_primer": {
-      "characters": 8164,
-      "estimated_tokens": 2041
+      "characters": 8195,
+      "estimated_tokens": 2049
     }
   },
   "bootstrap_char_budget": 16000,
   "additional_reader_tool_schema": {
-    "characters": 1007,
-    "estimated_tokens": 252
+    "characters": 1197,
+    "estimated_tokens": 300
   },
   "normal_bootstrap_occurrences": {
     "catalogue": 1,
@@ -43,6 +43,7 @@
     "voice guide": {
       "characters": 2271,
       "estimated_tokens": 568,
+      "serialized_response_characters": 2691,
       "pages": 1,
       "source": {
         "path": "docs/agent-guide/voice.md",
@@ -54,6 +55,7 @@
     "Phone context": {
       "characters": 1156,
       "estimated_tokens": 289,
+      "serialized_response_characters": 1662,
       "pages": 1,
       "source": {
         "path": "docs/HASHI_PHONE_CONTEXT_HANDOFF.md",
@@ -65,6 +67,7 @@
     "Compute truthfulness": {
       "characters": 1681,
       "estimated_tokens": 421,
+      "serialized_response_characters": 2207,
       "pages": 1,
       "source": {
         "path": "docs/HASHI_COMPUTE_SERVICE_DIRECTORY.md",
@@ -76,6 +79,7 @@
     "Move": {
       "characters": 5099,
       "estimated_tokens": 1275,
+      "serialized_response_characters": 5604,
       "pages": 1,
       "source": {
         "path": "docs/HASHI_AGENT_MOVE_V1.md",
@@ -87,6 +91,7 @@
     "PCM authority": {
       "characters": 2701,
       "estimated_tokens": 676,
+      "serialized_response_characters": 3220,
       "pages": 1,
       "source": {
         "path": "docs/HASHI_PCM_SYSTEM_DESIGN.md",

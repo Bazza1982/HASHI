@@ -5,6 +5,7 @@ explicitly, with scoped links, content revisions and visible continuation.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -100,17 +101,19 @@ def documentation_root(configured_root: Path | str) -> Path:
     return configured
 
 
-def documentation_path(root: Path, reference: str, *, from_path: str = "docs/AGENT_FYI.md") -> tuple[Path, str]:
+def documentation_path(root: Path, reference: str, *, from_path: str | None = None) -> tuple[Path, str]:
     root = root.resolve()
-    raw, fragment = urldefrag(unquote(str(reference)))
-    if not raw:
-        raw = from_path
+    raw, fragment = urldefrag(str(reference))
+    raw = unquote(raw)
+    source_path = from_path or "docs/AGENT_FYI.md"
     if urlsplit(raw).scheme or raw.startswith(("/", "\\")) or "\\" in raw:
         raise DocumentationError("outside_documentation", "Use a local Markdown documentation link.")
-    if raw.startswith("docs/") or raw in ROOT_DOCUMENTS:
+    if not raw:
+        target = root / source_path
+    elif from_path is None and (raw.startswith("docs/") or raw in ROOT_DOCUMENTS):
         target = root / raw
     else:
-        source = (root / from_path).resolve()
+        source = (root / source_path).resolve()
         if not (source.is_relative_to(root / "docs") or source in {root / p for p in ROOT_DOCUMENTS}):
             raise DocumentationError("outside_documentation", "Link source is outside approved documentation roots.")
         target = source.parent / raw
@@ -261,6 +264,18 @@ def validate_catalogue(path: Path, *, full: bool = False, text: str | None = Non
 def read_documentation(arguments: dict, *, code_root: Path) -> dict:
     """Read a complete document/section through explicit, revision-bound pages."""
     try:
+        arguments = dict(arguments)
+        reference = arguments.pop("reference", None)
+        if reference is not None:
+            if not isinstance(reference, str) or not re.fullmatch(r"hashi-doc:[A-Za-z0-9_-]{1,4000}", reference):
+                raise DocumentationError("invalid_reference", "Use a documentation reference returned by this reader.")
+            if any(key in arguments for key in ("path", "from_path", "section", "revision")):
+                raise DocumentationError("invalid_arguments", "Use either a saved reference or explicit document fields.")
+            token = reference.removeprefix("hashi-doc:")
+            saved = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8"))
+            if not isinstance(saved, dict) or set(saved) != {"path", "section", "revision"} or not all(isinstance(value, str) for value in saved.values()):
+                raise DocumentationError("invalid_reference", "Documentation reference fields are invalid.")
+            arguments.update(saved)
         operation = arguments.get("operation", "read")
         if operation not in {"read", "outline"}:
             raise DocumentationError("invalid_arguments", "Operation must be read or outline.")
@@ -270,7 +285,7 @@ def read_documentation(arguments: dict, *, code_root: Path) -> dict:
             raise DocumentationError("invalid_arguments", "Use a nonnegative offset and max_chars between 256 and 8000.")
         target, fragment = documentation_path(
             code_root, arguments.get("path", "docs/AGENT_FYI.md"),
-            from_path=arguments.get("from_path", "docs/AGENT_FYI.md"),
+            from_path=arguments.get("from_path"),
         )
         text, revision = read_document_bytes(target)
         expected = arguments.get("revision")
@@ -301,7 +316,11 @@ def read_documentation(arguments: dict, *, code_root: Path) -> dict:
                     end = boundary + 2
             payload = {"text": body[offset:end]}
             complete = end == len(body)
-        result = {"ok": True, "source": source, **payload, "complete": complete}
+        identity = {"path": source["path"], "section": selected or "", "revision": revision}
+        token = base64.urlsafe_b64encode(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+        if len(token) > 4000:
+            raise DocumentationError("reference_oversized", "Section identity is too long; read the document without a section selector.")
+        result = {"ok": True, "source": source, "reference": "hashi-doc:" + token, **payload, "complete": complete}
         if not complete:
             result["continuation"] = {
                 "operation": operation, "path": source["path"], "section": selected or "",
@@ -348,7 +367,7 @@ def validate_knowledge_migration(root: Path) -> list[str]:
         for record in records:
             if record["original_text"] != originals[record["source_id"]]:
                 errors.append(f"migration {record['source_id']}: original knowledge differs")
-            target, fragment = documentation_path(root, record["destination"], from_path="docs/AGENT_FYI.md")
+            target, fragment = documentation_path(root, record["destination"])
             destination, _ = read_document_bytes(target)
             section, _ = section_text(destination, fragment)
             if record["verification_text"] not in section:

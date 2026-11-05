@@ -2476,7 +2476,8 @@ TOOL_SCHEMAS.extend(
                     "properties": {
                         "operation": {"type": "string", "enum": ["read", "outline"], "default": "read"},
                         "path": {"type": "string", "description": "Repository-relative document or link from from_path.", "default": "docs/AGENT_FYI.md"},
-                        "from_path": {"type": "string", "description": "Source document advertising a relative link.", "default": "docs/AGENT_FYI.md"},
+                        "from_path": {"type": "string", "description": "Source document advertising a relative link; omit for a repository-relative document id."},
+                        "reference": {"type": "string", "maxLength": 4010, "description": "Saved hashi-doc reference; use instead of path/from_path/section/revision to reread after compaction or handoff."},
                         "section": {"type": "string", "description": "Heading or anchor; omit for the complete document."},
                         "offset": {"type": "integer", "minimum": 0, "default": 0},
                         "max_chars": {"type": "integer", "minimum": 256, "maximum": 8000, "default": 4000},
@@ -2659,3 +2660,4 @@ for _schema in TOOL_SCHEMAS:
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())
+# HASHI-Fingerprint: hfp_3903542f06f0421c9d644955e87b9629

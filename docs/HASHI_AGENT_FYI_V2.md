@@ -32,7 +32,7 @@ A read accepts `path`, optional `from_path` and `section`, and a page size of 25
 
 The existing qualified-generation binding chooses packaged documents over a mutable developer checkout. The gateway freezes that derived documentation root when serializing its context, so CLI continuation does not depend on inheriting launcher environment variables. This projection is not a new configuration owner. Clean tracked documentation is included in Function artifacts; unpublished local files remain excluded.
 
-A backend with no allowed reader reports that limitation instead of fabricating content. Agents keep small path/section/revision references across compaction/handoff and reread when needed. General chat does not fetch domain guides or engineering contracts.
+A backend with no allowed reader reports that limitation instead of fabricating content. Read results include a small `hashi-doc:` reference. Keep it in task continuity or handoff notes and pass it back as `reference` to reread that source/section. The existing compaction evidence validator recognizes this prefix and rejects a capsule that drops a required reference; no PCM redesign or additional state writer is introduced. A reference grants no filesystem authority, and changed source is reported explicitly. General chat does not fetch domain guides or engineering contracts.
 
 ## Verification and context accounting
 

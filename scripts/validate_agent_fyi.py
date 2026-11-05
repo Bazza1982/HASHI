@@ -54,6 +54,7 @@ def context_metrics(root: Path) -> dict:
             examples[name] = first
             continue
         total = first["text"]
+        response_chars = len(json.dumps(first, ensure_ascii=False))
         current = first
         pages = 1
         while not current["complete"]:
@@ -61,8 +62,10 @@ def context_metrics(root: Path) -> dict:
             if not current["ok"]:
                 raise ValueError(f"Metric continuation failed: {path}: {current}")
             total += current["text"]
+            response_chars += len(json.dumps(current, ensure_ascii=False))
             pages += 1
-        examples[name] = {**_size(total), "pages": pages, "source": first["source"]}
+        examples[name] = {**_size(total), "serialized_response_characters": response_chars,
+                          "pages": pages, "source": first["source"]}
     occurrences = {"catalogue": primer.count(fyi), "engineering_guidance": primer.count(rules)}
     return {
         "token_accounting": "Estimate only: ceil(Unicode characters / 4). No backend tokenizer was installed; no model calls.",
