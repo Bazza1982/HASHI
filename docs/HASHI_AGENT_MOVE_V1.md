@@ -304,7 +304,9 @@ alone. Preview remains read-only; actual preparation revision-safely assigns a
 missing lifecycle ID. Move preserves that ID and carries no raw Bot token in
 delivery state. The receiver validates the transferred credential, rebinds only
 the instance component, and publishes the state before activation. Clone always
-creates a fresh lifecycle ID, excludes Telegram credentials, pending recovery
+creates a fresh lifecycle ID and removes any inherited nested lifecycle shadow
+from its target configuration, retaining other settings and the source row.
+It excludes Telegram credentials, pending recovery
 state, and `undelivered/` content. A Move with referenced undelivered business
 responses must use full-workspace mode; identity-memory mode fails before
 source mutation. Rollback and verified source cleanup retire only the exact

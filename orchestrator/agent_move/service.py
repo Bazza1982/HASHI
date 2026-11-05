@@ -1663,6 +1663,11 @@ def _prepare_import_config(
     if operation == "clone":
         row[AGENT_LIFECYCLE_FIELD] = new_agent_lifecycle_id()
         row["telegram_token_key"] = target_agent_id
+        extra = row.get("extra")
+        if isinstance(extra, dict) and AGENT_LIFECYCLE_FIELD in extra:
+            # A legacy shadow belongs to the source incarnation, never Clone.
+            row["extra"] = dict(extra)
+            row["extra"].pop(AGENT_LIFECYCLE_FIELD)
     else:
         lifecycle_id = row.get(AGENT_LIFECYCLE_FIELD)
         if lifecycle_id is None:
