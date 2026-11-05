@@ -278,10 +278,12 @@ def test_pure_python_without_trailing_newline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_with_real_patch_when_available(tmp_path) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["LF", "CRLF"])
+async def test_end_to_end_with_real_patch_when_available(tmp_path, newline) -> None:
     if builtins._find_patch_command() is None:
         pytest.skip("no patch executable located")
-    target = _write(tmp_path)
-    result = await _apply(tmp_path)
+    target = _write(tmp_path, text=BASE_TEXT.replace("\n", newline))
+    result = await _apply(tmp_path, patch=SIMPLE_DIFF.replace("\n", newline))
     assert result.startswith("OK: patch applied to")
-    assert _read(target) == "one\nTWO\nthree\n"
+    assert _read(target) == "one\nTWO\nthree\n".replace("\n", newline)
+# HASHI-Fingerprint: hfp_f446b257335c400c99ade201ce2c82cb

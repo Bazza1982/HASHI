@@ -56,7 +56,10 @@ List files and directories.
 ## System Tools
 
 ### apply_patch
-Apply a unified diff patch to a file.
+Apply a unified diff patch to a file. A rejected dry run leaves the file
+unchanged. On native Windows, GNU patch uses binary mode for both dry run and
+application so LF and CRLF files retain their requested bytes. Existing Git
+and Python fallbacks do not override an authoritative patch rejection.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `path` | Yes | Target file path |

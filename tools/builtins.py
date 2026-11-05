@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import signal
-from itertools import islice
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1018,9 +1017,12 @@ def _apply_patch_with_patch_command(
     import subprocess
 
     payload = patch_str.encode("utf-8", "surrogateescape")
+    # Native Windows GNU patch otherwise opens files in text mode and may
+    # rewrite LF bytes as CRLF. Both phases must use the same byte semantics.
+    binary_args = ["--binary"] if os.name == "nt" else []
     try:
         dry_run = subprocess.run(
-            [patch_cmd, "--dry-run", "-u", str(path)],
+            [patch_cmd, *binary_args, "--dry-run", "-u", str(path)],
             input=payload,
             capture_output=True,
         )
@@ -1031,7 +1033,7 @@ def _apply_patch_with_patch_command(
 
     try:
         applied = subprocess.run(
-            [patch_cmd, "-u", str(path)],
+            [patch_cmd, *binary_args, "-u", str(path)],
             input=payload,
             capture_output=True,
         )
@@ -2501,3 +2503,4 @@ async def execute_xai_imagine(args: dict, secrets: dict, global_config: Any = No
     lines = [f"Generated {len(result.urls)} image(s) with {result.model}:"]
     lines.extend(result.urls)
     return "\n".join(lines)
+# HASHI-Fingerprint: hfp_4e678c6c984d41ca8a16f1d42d23ab7e
