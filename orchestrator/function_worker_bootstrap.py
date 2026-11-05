@@ -23,7 +23,7 @@ from orchestrator.runtime_contract import (
 
 def run_generation_process(connection, bootstrap: dict) -> None:
     try:
-        if bootstrap.get("process_group") and os.name != "nt":
+        if bootstrap.get("process_group") and os.name != "nt" and os.getsid(0) != os.getpid():
             os.setsid()
         code_root = Path(bootstrap["code_root"]).resolve()
         artifact = Path(bootstrap["generation_root"]).resolve()
@@ -69,21 +69,58 @@ def run_function_worker_process(connection, bootstrap: dict) -> None:
 QUALIFICATION_RESULT_PREFIX = "HASHI_RUNTIME_RELEASE="
 
 
-def qualify_process() -> None:
-    payload = json.loads(sys.stdin.read())
+def qualify_payload(payload: dict) -> dict:
     code_root = Path(payload["code_root"]).resolve()
     runtime = enforce_runtime_contract(code_root)
     compare_runtime_fingerprints(RuntimeFingerprint.from_mapping(payload["runtime"]), runtime)
     os.environ["HASHI_SOURCE_ROOT"] = str(code_root)
     # Product qualification is the same import boundary as a prepared child.
+    profile = json.loads((code_root / "runtime-entry.json").read_text(encoding="utf-8"))
+    if payload["qualifier"] != profile["qualifier"] or payload["entrypoint"] != profile["entrypoint"]:
+        raise ValueError("qualification entrypoint mismatch")
     module, separator, attribute = payload["qualifier"].partition(":")
     if not separator:
         raise ValueError("invalid qualification entrypoint")
     with candidate_import_guard():
         qualifier = getattr(importlib.import_module(module), attribute)
     result = qualifier(payload)
+    return result
+
+
+def qualify_process() -> None:
+    result = qualify_payload(json.loads(sys.stdin.read()))
     print(QUALIFICATION_RESULT_PREFIX + json.dumps(result), flush=True)
 
 
+def run_private_call(connection, bootstrap, purpose, nonce):
+    from orchestrator.function_worker_protocol import encode_envelope
+    try:
+        if purpose == "qualification":
+            result = qualify_payload(bootstrap)
+        elif purpose == "candidate-probe":
+            with candidate_import_guard():
+                from orchestrator.function_generation import probe_candidate_payload
+            result = probe_candidate_payload(bootstrap)
+        else:
+            raise ValueError("unknown protected call")
+        response = {"version": 1, "kind": "response", "id": nonce, "ok": True, "result": result}
+    except Exception as exc:
+        response = {"version": 1, "kind": "response", "id": nonce, "ok": False,
+                    "error": {"type": type(exc).__name__, "message": str(exc)}}
+    try:
+        connection.send_bytes(encode_envelope(response))
+    finally:
+        connection.close()
+
+
 if __name__ == "__main__":
-    qualify_process()
+    if len(sys.argv) == 3 and sys.argv[1] == "--ipc-handle":
+        from orchestrator.runtime_process import receive_private_bootstrap
+        channel, bootstrap, purpose, nonce = receive_private_bootstrap(int(sys.argv[2]))
+        if purpose == "generation":
+            run_generation_process(channel, bootstrap)
+        else:
+            run_private_call(channel, bootstrap, purpose, nonce)
+    else:
+        qualify_process()
+# HASHI-Fingerprint: hfp_c6a0b80f5e2245c3b83fabd39a38fbaf

@@ -24,6 +24,7 @@ from typing import Any
 CORE_HOST_ROLE = "core-host"
 FUNCTIONS_ROLE = "functions"
 _RUNTIME_ROLES = frozenset({CORE_HOST_ROLE, FUNCTIONS_ROLE})
+_PROCESS_RUNTIME = None
 
 
 class RuntimeContractError(RuntimeError):
@@ -38,6 +39,7 @@ CORE_SOURCE_PATHS = (
     "orchestrator/kernel_artifact.py",
     "orchestrator/kernel_import_guard.py",
     "orchestrator/kernel_process.py",
+    "orchestrator/runtime_process.py",
     "orchestrator/function_worker_bootstrap.py",
     "orchestrator/function_worker_protocol.py",
 )
@@ -102,6 +104,12 @@ class RuntimeFingerprint:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> RuntimeFingerprint:
+        if not isinstance(value, Mapping) or set(value) != set(cls.__dataclass_fields__):
+            raise RuntimeContractError("Runtime fingerprint schema mismatch")
+        integer_fields = {"pointer_bits", "core_api", "function_api", "worker_protocol", "generation_schema"}
+        for name, item in value.items():
+            if type(item) is not (int if name in integer_fields else str):
+                raise RuntimeContractError(f"Runtime fingerprint field type mismatch: {name}")
         role = value.get("role")
         if role not in _RUNTIME_ROLES:
             raise RuntimeContractError("Runtime fingerprint has a missing or invalid role")
@@ -434,7 +442,15 @@ def current_runtime_fingerprint(
         or sysconfig.get_config_var("EXT_SUFFIX")
         or ""
     )
+    installation = ""
+    if _PROCESS_RUNTIME is not None:
+        approved = _PROCESS_RUNTIME.fingerprint
+        if approved.role == policy.role:
+            if approved.executable != executable or approved.environment_prefix != str(Path(sys.prefix).resolve()):
+                raise RuntimeContractError("Process runtime binding does not match the observed interpreter")
+            installation = approved.installation_digest
     return RuntimeFingerprint(
+        installation_digest=installation,
         role=policy.role,
         implementation=implementation,
         python=platform.python_version(),
@@ -818,3 +834,19 @@ def load_qualified_runtime(
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     runtime = replace(runtime, installation_digest="sha256:" + hashlib.sha256(encoded).hexdigest())
     return QualifiedRuntime(path, digest, runtime)
+
+
+def current_process_runtime() -> QualifiedRuntime | None:
+    """Projection of the installation admitted over the private parent channel."""
+    return _PROCESS_RUNTIME
+
+
+def bind_process_runtime(qualified: QualifiedRuntime, *, code_root: Path) -> None:
+    """Bind once after observing this interpreter; never select from Agent/env input."""
+    global _PROCESS_RUNTIME
+    observed = enforce_runtime_contract(code_root, role=qualified.fingerprint.role)
+    observed = replace(observed, installation_digest=qualified.fingerprint.installation_digest)
+    compare_runtime_fingerprints(qualified.fingerprint, observed)
+    if _PROCESS_RUNTIME is not None:
+        compare_runtime_fingerprints(_PROCESS_RUNTIME.fingerprint, qualified.fingerprint)
+    _PROCESS_RUNTIME = qualified

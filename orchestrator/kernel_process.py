@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import multiprocessing
 import os
 import signal
 import subprocess
@@ -13,10 +12,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from orchestrator.function_worker_bootstrap import (
-    run_generation_process,
     QUALIFICATION_RESULT_PREFIX,
 )
 from orchestrator.function_worker_protocol import JsonConnectionPeer
+from orchestrator.runtime_process import launch_function_process_async, run_protected_call_async
 from orchestrator.kernel_artifact import verify_artifact
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
@@ -63,16 +62,6 @@ async def qualify(
     """Run product qualification out of process; verify its exact receipt here."""
     compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root))
     profile = json.loads((code_root / "runtime-entry.json").read_text(encoding="utf-8"))
-    script = code_root / "orchestrator" / "function_worker_bootstrap.py"
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-I",
-        str(script),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=code_root,
-    )
     payload = {
         "code_root": str(code_root),
         "bridge_home": str(bridge_home),
@@ -80,26 +69,7 @@ async def qualify(
         "entrypoint": profile["entrypoint"],
         "qualifier": profile["qualifier"],
     }
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(json.dumps(payload).encode()),
-            240,
-        )
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        raise
-    lines = [
-        line[len(RECEIPT_PREFIX) :]
-        for line in stdout.decode().splitlines()
-        if line.startswith(RECEIPT_PREFIX)
-    ]
-    if process.returncode or len(lines) != 1:
-        raise RuntimeError(
-            "Function qualification failed: " + stderr.decode(errors="replace")[-2000:]
-        )
-    release = json.loads(lines[0])
+    release = await run_protected_call_async(payload, purpose="qualification", timeout=240)
     compare_runtime_fingerprints(
         runtime, RuntimeFingerprint.from_mapping(release["runtime"])
     )
@@ -111,81 +81,6 @@ async def qualify(
         raise ValueError("qualification entrypoint mismatch")
     verify_artifact(artifact, release["manifest"])
     return release
-
-
-class _WindowsProcessJob:
-    """OS-owned descendant cleanup even if the shared process dies first."""
-
-    def __init__(self, pid: int):
-        import ctypes
-        from ctypes import wintypes
-
-        size_t = ctypes.c_size_t
-
-        class BasicLimits(ctypes.Structure):
-            _fields_ = [
-                ("process_time", ctypes.c_int64),
-                ("job_time", ctypes.c_int64),
-                ("flags", wintypes.DWORD),
-                ("min_working", size_t),
-                ("max_working", size_t),
-                ("active_processes", wintypes.DWORD),
-                ("affinity", size_t),
-                ("priority", wintypes.DWORD),
-                ("scheduling", wintypes.DWORD),
-            ]
-
-        class Limits(ctypes.Structure):
-            _fields_ = [
-                ("basic", BasicLimits),
-                ("io", ctypes.c_uint64 * 6),
-                ("process_memory", size_t),
-                ("job_memory", size_t),
-                ("peak_process_memory", size_t),
-                ("peak_job_memory", size_t),
-            ]
-
-        api = ctypes.WinDLL("kernel32", use_last_error=True)
-        api.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        api.CreateJobObjectW.restype = wintypes.HANDLE
-        api.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        api.SetInformationJobObject.restype = wintypes.BOOL
-        api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        api.OpenProcess.restype = wintypes.HANDLE
-        api.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        api.AssignProcessToJobObject.restype = wintypes.BOOL
-        api.CloseHandle.argtypes = [wintypes.HANDLE]
-        api.CloseHandle.restype = wintypes.BOOL
-        self.api, self.handle = api, api.CreateJobObjectW(None, None)
-        process = None
-        try:
-            if not self.handle:
-                raise ctypes.WinError(ctypes.get_last_error())
-            limits = Limits()
-            limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            if not api.SetInformationJobObject(
-                self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-            process = api.OpenProcess(0x0101, False, pid)
-            if not process or not api.AssignProcessToJobObject(self.handle, process):
-                raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException:
-            self.close()
-            raise
-        finally:
-            if process:
-                api.CloseHandle(process)
-
-    def close(self):
-        if self.handle:
-            self.api.CloseHandle(self.handle)
-            self.handle = None
 
 
 class ProcessClient:
@@ -206,17 +101,9 @@ class ProcessClient:
     @classmethod
     async def prepare(cls, bootstrap: dict):
         verify_artifact(Path(bootstrap["generation_root"]), bootstrap["manifest"])
-        context = multiprocessing.get_context("spawn")
-        parent, child = context.Pipe(duplex=True)
-        process = context.Process(
-            target=run_generation_process, args=(child, bootstrap), daemon=False
-        )
-        process.start()
-        child.close()
+        process, parent = await launch_function_process_async(bootstrap)
         client = cls(process, parent)
         try:
-            if os.name == "nt" and bootstrap.get("process_group"):
-                client.job = _WindowsProcessJob(process.pid)
             ready = await client.peer.request("prepare", timeout=240)
             if (
                 ready.get("pid") != process.pid
@@ -482,3 +369,4 @@ class KernelRuntime:
             if self.active:
                 await self.active.close()
             self.publish("stopped")
+# HASHI-Fingerprint: hfp_7470e3beed48486aa5bb508435d70826
