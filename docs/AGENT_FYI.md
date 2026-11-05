@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- Core 5.0.0a1：[标准依赖迁移候选](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md)仅准备/离线验证/独立评审；Python与API不变，锁指纹变化，不能热采用或原地升级运行Core。正式部署另定。
+
 - Presence公开字幕沿用认证FC发件箱，支持text/media；主会话/代次和route仍由既有owner核验。Portable语音样例按当前manifest及资源摘要验收，不固定数量。[FC](HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md)。
 
 - Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。

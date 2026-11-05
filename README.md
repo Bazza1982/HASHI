@@ -46,8 +46,10 @@ and connected services. See the [integration guide](docs/INTEGRATIONS.md).
 
 ## Project Status
 
-Current source metadata is **v4.0.0-beta.1** (Python: **4.0.0b1**). This is a
-Beta release for small-scale public testing, not a general-production release.
+Current source metadata is **v5.0.0-alpha.1** (Python: **5.0.0a1**), a
+[Core dependency migration candidate](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md)
+prepared for offline validation and review. It has not been published or adopted
+as a running release. The earlier v4 Beta remains a historical testing release.
 
 The repository, npm registry, and GitHub Releases can be at different points.
 A source version does not prove that a matching npm package or installer has
@@ -65,7 +67,7 @@ before downloading.
 | Portable Windows | A verified USB installation bundle can carry HASHI to a new Windows PC and install it locally with its private runtime |
 | Device/browser control | Requires the relevant worker, browser, permissions, and per-platform validation |
 
-Detailed candidate scope is in the
+The previous Beta scope is in the
 [release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md).
 Historical milestones are recorded in
 [CHANGELOG.md](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md).

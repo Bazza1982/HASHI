@@ -12,6 +12,12 @@ HASHI2 evidence is [this migration record](HASHI2_MINIMAL_CORE_2026-09-07.md).
 Earlier API 2 implementation and verification status is recorded in
 [`HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 
+Prepared dependency generation: product 5.0.0a1 updates the standard dependency
+lock while retaining the Python patch, Core/Function APIs and Worker protocol.
+This remains a planned Core migration because the runtime fingerprint changes.
+Its [preparation and review record](HASHI_CORE_DEPENDENCY_GENERATION_5.md) does
+not authorize deployment or an in-place update of a running Core.
+
 ## Decision
 
 HASHI Core owns one mandatory runtime. Functional code runs in replaceable,

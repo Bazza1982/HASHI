@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Prepare Core generation 5.0.0-alpha.1 with fixed standard HTTP, certificate,
+  header-container and image-library dependencies; keep Python/API versions
+  unchanged. Source preparation is separate from registry publication and live
+  adoption. See [the migration candidate](docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md).
 - Reduce model-facing Ollama reference overhead while retaining complete private
   sources; page new tool results and close tool use near capacity without
   replaying completed actions, dropping the task or reducing the output reserve.
