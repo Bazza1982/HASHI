@@ -72,11 +72,13 @@ async def deliver_agentpresence_audio_event(
             "size_bytes": size_bytes,
         }
 
+    from orchestrator.agent_presence_captions import caption_content
     adapter = AgentPresenceConnectorAdapter(
         getattr(getattr(runtime, "global_config", None), "bridge_home", None),
         owner_id,
         enabled=True,
         media_resolver=resolve_media,
+        caption_resolver=lambda event: caption_content(runtime, owner_id, event),
     )
     dispatcher = FrontendDispatcher(
         store,

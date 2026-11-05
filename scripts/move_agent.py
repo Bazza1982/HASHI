@@ -627,7 +627,12 @@ def _upsert_secrets(secrets: dict, root: Path):
         else new_config_json(secrets_file)
     )
     existing.update(secrets)
-    write_config_json(secrets_file, existing)
+    from orchestrator.workbench_auth import _windows_remote_runtime_sids
+
+    write_config_json(
+        secrets_file, existing,
+        private_full_control_sids=_windows_remote_runtime_sids(root),
+    )
     print(f"  secrets.json updated on target ({len(secrets)} keys)")
 
 
@@ -1030,4 +1035,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# HASHI-Fingerprint: hfp_c2b0de34a93a47d7a64b50dee54a3394
+# HASHI-Fingerprint: hfp_0b5f6c7cead54752bd85be36fbd020c0

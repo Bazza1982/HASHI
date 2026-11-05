@@ -65,6 +65,32 @@ class AgentPresenceControls:
     def route(self):
         return agent_presence_settings.load_settings(self.api.global_config.bridge_home)
 
+
+    async def desktop_context(self, owner):
+        """Project existing route/primary owners without waiting on Worker state."""
+        if self.api._is_governed_profile():
+            raise ControlError("agentpresence_controls_profile_unsupported", 501)
+        if owner != self.api.session_store.owner_id_for(self.api.global_config):
+            raise ControlError("agentpresence_owner_mismatch", 403)
+        route = await asyncio.to_thread(self.route)
+        name = route["default_agent"]
+        runtime = self.api._runtime_map().get(name)
+        if not name or runtime is None:
+            raise ControlError("agentpresence_agent_unavailable", 409)
+        session = await asyncio.to_thread(
+            self.api.session_store.resolve_primary_session,
+            owner_id=owner, agent_id=name, establish=True,
+        )
+        if await asyncio.to_thread(self.route) != route:
+            raise ControlError("agentpresence_route_changed")
+        return {
+            "ok": True, "desktop_context_version": 1,
+            "instance_id": self.api.global_config.instance_id,
+            "agent_id": name, "route_revision": route["revision"],
+            "session_id": session["session_id"],
+            "context_generation": session["context_generation"],
+        }
+
     async def worker(self, name, body):
         from orchestrator.admin_local_testing import try_execute_slash_command_text
         runtime = self.api._runtime_map().get(name)
@@ -179,3 +205,31 @@ def register_agentpresence_controls(api):
 
     api.app.router.add_get(_PATH, handle)
     api.app.router.add_post(_PATH, handle)
+
+
+    async def desktop_context(request):
+        try:
+            instance = str(request.query.get("instance_id") or "")
+            if request.path.startswith("/api/v1/"):
+                owner = api._strict_authenticated_owner(request)
+                if owner is None:
+                    raise ControlError("not_authenticated", 401)
+                if instance.upper() != str(api.global_config.instance_id).upper():
+                    raise ControlError("hashi_instance_mismatch", 409)
+            else:
+                rejection = service.auth(request, instance)
+                if rejection is not None:
+                    return rejection
+                owner = api.session_store.owner_id_for(api.global_config)
+            result = await service.desktop_context(owner)
+            return web.json_response(result, headers=_HEADERS)
+        except ControlError as exc:
+            return web.json_response({"ok": False, "error_code": exc.code},
+                                     status=exc.status, headers=_HEADERS)
+        except (OSError, ValueError, TypeError, KeyError):
+            return web.json_response({"ok": False, "error_code": "desktop_context_unavailable"},
+                                     status=503, headers=_HEADERS)
+
+    api.app.router.add_get("/api/agentpresence/desktop-context", desktop_context)
+    api.app.router.add_get("/api/v1/agentpresence/desktop-context", desktop_context)
+# HASHI-Fingerprint: hfp_bda35c38a2484786bc51e029db04271b

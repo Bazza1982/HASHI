@@ -112,4 +112,29 @@ def test_config_writer_preserves_default_and_seals_service_candidate_before_byte
     if not include_writer:
         require_private_path(target, trusted_sids=("S-1-5-19",))
 
-# HASHI-Fingerprint: hfp_7b3aada70d0b4a709ab546ce116d2b0f
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
+@pytest.mark.parametrize("operation", ["move_publish", "move_rollback", "legacy_import"])
+def test_runtime_secret_publishers_keep_registered_remote(tmp_path, monkeypatch, operation):
+    from orchestrator import workbench_auth
+    from orchestrator.agent_move.service import _atomic_json, _restore_json_snapshot
+    from orchestrator.config_json import read_config_json
+    from scripts.move_agent import _upsert_secrets
+
+    path = tmp_path / "secrets.json"
+    write_config_json(path, {"hashi_remote_shared_token": "synthetic-network"})
+    original = path.read_bytes()
+    document = read_config_json(path)
+    document["agent-token"] = "synthetic-agent"
+    monkeypatch.setattr(workbench_auth, "_windows_remote_runtime_sids", lambda root: ("S-1-5-19",))
+    if operation == "move_publish":
+        _atomic_json(path, document)
+    elif operation == "move_rollback":
+        _restore_json_snapshot(path, original, published_revision=document.revision)
+    else:
+        _upsert_secrets({"agent-token": "synthetic-agent"}, tmp_path)
+    acl = subprocess.run(["icacls.exe", str(path)], capture_output=True, text=True, check=True).stdout
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl
+    assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
+    assert read_config_json(path)["hashi_remote_shared_token"] == "synthetic-network"
+# HASHI-Fingerprint: hfp_1701280affd948bb94f99f30d9e723ab

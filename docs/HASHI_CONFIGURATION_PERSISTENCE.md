@@ -222,6 +222,20 @@ through a configuration writer merely to make a static search empty.
 
 ## Operator and Agent FYI
 
+Agent deletion's unshared-credential cleanup publishes private candidates with
+the registered Remote runtime principals resolved by
+`workbench_auth.resolve_remote_runtime_sids`; it does not infer the account from
+the current writer or a machine path. Deletion resolves that registration from
+the canonical `BridgePaths.bridge_home`, even when `secrets_path` uses a legacy
+file outside that home. Identity-resolution or credential publication failures
+propagate into the deletion journal's `cleanup_pending`
+receipt, without recording `secrets_cleaned`. This prevents a different-account
+writer from dropping Remote's grant on replacement. It does not repair already
+published production ACLs, change Tool admission, or adopt code into live
+Functions. Agent Move and legacy import writers require their own migration and
+validation under their existing contracts; this repair changes only deletion's
+lookup of the registered instance Remote consumers.
+
 UTF-8 editor output with or without BOM is supported at these migrated read
 boundaries. A conflict asks for a fresh read, not permission to overwrite.
 Unreadable or incompatible saved preferences require diagnosis; do not delete
@@ -300,3 +314,17 @@ configuration edits reuse the same owner policy. Revision conflicts and
 committed durability errors still propagate without retry. This fixes a native
 ordinary-Worker failure where an atomic startup rewrite removed the installed
 Safety account's read access, leaving admission unable to read current policy.
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 031 Revision-checked private configuration publication
+
+JSON写入在锁和版本检查下验证私有候选，再原子替换；展示默认值只读。
+冲突须重读并重新选择，不自动重放，不用旧快照覆盖已发布结果。[配置持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
+
+### FYI v1 032 Bounded endpoint rename retries
+
+Endpoint publication retries only bounded Windows rename blocking on the same
+fsynced candidate; permanent failure preserves state and never replays.

@@ -1,25 +1,30 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
 
 from orchestrator.agent_deletion import (
-    AgentBusyError,
-    AgentDeletionError,
     AgentDeletionService,
     AgentNotFoundError,
     CleanupPendingError,
     ConfirmationMismatchError,
     ConfigConflictDeletionError,
-    LastActiveAgentDeletionError,
-    PreviewExpiredError,
     PreviewInvalidError,
     SharedWorkspaceError,
     UnmanagedWorkspaceError,
 )
 from orchestrator.pathing import BridgePaths
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_remote_principal(monkeypatch):
+    # Unit tests must not query this machine's registered production tasks.
+    monkeypatch.setattr(
+        "orchestrator.workbench_auth._windows_remote_runtime_sids", lambda root: ()
+    )
 
 
 def _setup_paths(tmp_path: Path, agents: list[dict], tasks: dict | None = None, secrets: dict | None = None) -> BridgePaths:
@@ -318,6 +323,96 @@ def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path):
     assert repeat["operation_id"] == receipt["operation_id"]
 
 
+@pytest.mark.parametrize("separate_home", [False, True])
+def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch, separate_home):
+    from orchestrator import workbench_auth
+    from tools import private_files
+    import os
+
+    paths = _setup_paths(
+        tmp_path,
+        agents=[
+            {"name": "momo", "is_active": False, "telegram_token_key": "momo_token"},
+            {"name": "koko", "is_active": True, "telegram_token_key": "shared_token"},
+        ],
+        secrets={
+            "momo_token": "remove-me", "shared_token": "keep-me",
+            "hashi_remote_shared_token": "synthetic-network",
+            "workbench_admin_token": "synthetic-loopback",
+        },
+    )
+    if separate_home:
+        home = tmp_path / "canonical-instance"
+        home.mkdir()
+        paths = replace(paths, bridge_home=home, workspaces_root=home / "workspaces")
+        paths.workspaces_root.mkdir()
+    readers = ("S-1-5-19",) if os.name == "nt" else ()
+    resolved = []
+    monkeypatch.setattr(
+        workbench_auth, "_windows_remote_runtime_sids",
+        lambda root: resolved.append(root) or readers,
+    )
+    protection = []
+    protect = private_files.protect_private_file
+
+    def track(path, *, additional_full_control_sids=()):
+        if path.name.startswith(".secrets.json."):
+            protection.append(tuple(additional_full_control_sids))
+        protect(path, additional_full_control_sids=additional_full_control_sids)
+
+    monkeypatch.setattr(private_files, "protect_private_file", track)
+    service = AgentDeletionService(paths)
+    preview = service.preview("momo")
+    result = service.delete("momo", preview_token=preview.preview_token, confirmed_agent_id="momo")
+    assert result["ok"]
+    assert resolved == [paths.bridge_home]
+    if readers:
+        assert protection == [readers]
+    assert json.loads(paths.secrets_path.read_text(encoding="utf-8")) == {
+        "shared_token": "keep-me",
+        "hashi_remote_shared_token": "synthetic-network",
+        "workbench_admin_token": "synthetic-loopback",
+    }
+
+
+@pytest.mark.parametrize('failure_mode', ['publication', 'principal'])
+def test_delete_reports_pending_when_credential_publication_fails(tmp_path, monkeypatch, failure_mode):
+    import orchestrator.agent_deletion as deletion
+
+    paths = _setup_paths(
+        tmp_path,
+        agents=[{"name": "momo", "is_active": False}, {"name": "koko", "is_active": True}],
+        secrets={"momo": "synthetic-token", "hashi_remote_shared_token": "keep-network"},
+    )
+    (paths.workspaces_root / "momo").mkdir()
+    original = paths.secrets_path.read_bytes()
+    write = deletion.write_config_json
+
+    def fail_secret(path, payload, **kwargs):
+        if path == paths.secrets_path:
+            raise OSError("synthetic credential publication failure")
+        return write(path, payload, **kwargs)
+
+    if failure_mode == 'publication':
+        monkeypatch.setattr(deletion, "write_config_json", fail_secret)
+    else:
+        from orchestrator import workbench_auth
+
+        def fail_principal(root):
+            raise RuntimeError('synthetic principal lookup failure')
+
+        monkeypatch.setattr(workbench_auth, '_windows_remote_runtime_sids', fail_principal)
+    service = AgentDeletionService(paths)
+    preview = service.preview("momo")
+    with pytest.raises(CleanupPendingError) as error:
+        service.delete("momo", preview_token=preview.preview_token, confirmed_agent_id="momo")
+    receipt = service.get_receipt(error.value.operation_id)
+    assert receipt["status"] == "cleanup_pending"
+    assert "secrets_cleaned" not in receipt["steps_completed"]
+    assert paths.secrets_path.read_bytes() == original
+    assert (paths.workspaces_root / "momo").is_dir()
+
+
 def test_delete_cleanup_pending_on_quarantine_error(tmp_path, monkeypatch):
     paths = _setup_paths(
         tmp_path,
@@ -444,3 +539,4 @@ async def test_workbench_api_advertises_agent_deletion(tmp_path):
     data = json.loads(res.text)
     assert "agent_deletion" in data
     assert data["agent_deletion"]["supported"] is True
+# HASHI-Fingerprint: hfp_1ae8da14caf34df7bdbe11f0b2b8034d

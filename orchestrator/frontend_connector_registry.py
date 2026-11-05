@@ -608,7 +608,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "egress": ["message", "state", "notification", "media"],
         "canonical_feed": "persistent_session_events",
         "owner_mirror": True,
-        "delivery_content_modes": ["media"],
+        "delivery_content_modes": ["text", "media"],
         "customizations": (),
     },
 )
@@ -1234,3 +1234,4 @@ __all__ = [
     "require_connector_operation",
     "unregister_connector",
 ]
+# HASHI-Fingerprint: hfp_be48be20b1d94ea0a76efa8a923c4c70

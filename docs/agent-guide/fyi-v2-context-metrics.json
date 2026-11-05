@@ -1,0 +1,129 @@
+{
+  "token_accounting": "Estimate only: ceil(Unicode characters / 4). No backend tokenizer was installed; no model calls.",
+  "baseline_commit": "87100678cad23da58cd069ef288ba832501a19ae",
+  "before": {
+    "fyi": {
+      "characters": 10813,
+      "estimated_tokens": 2704
+    },
+    "engineering_guidance": {
+      "characters": 3834,
+      "estimated_tokens": 959
+    },
+    "assembled_primer": {
+      "characters": 14782,
+      "estimated_tokens": 3696
+    }
+  },
+  "after": {
+    "fyi": {
+      "characters": 3666,
+      "estimated_tokens": 917
+    },
+    "engineering_guidance": {
+      "characters": 4278,
+      "estimated_tokens": 1070
+    },
+    "assembled_primer": {
+      "characters": 8195,
+      "estimated_tokens": 2049
+    }
+  },
+  "bootstrap_char_budget": 16000,
+  "additional_reader_tool_schema": {
+    "characters": 1197,
+    "estimated_tokens": 300
+  },
+  "normal_bootstrap_occurrences": {
+    "catalogue": 1,
+    "engineering_guidance": 1
+  },
+  "duplicate_bootstrap_characters": 0,
+  "on_demand_examples": {
+    "voice guide": {
+      "characters": 3175,
+      "estimated_tokens": 794,
+      "serialized_response_characters": 3596,
+      "pages": 1,
+      "source": {
+        "path": "docs/agent-guide/voice.md",
+        "sha256": "b2247d76ccfd8c36e5ca47bb509903d71a3b9b07707803398ff0e83b0ae5c5c2",
+        "section": null,
+        "line": 1
+      }
+    },
+    "Phone interpretation": {
+      "characters": 1187,
+      "estimated_tokens": 297,
+      "serialized_response_characters": 1642,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PHONE_INTERPRETATION.md",
+        "sha256": "e64671cbc1d4d17e01362fadde36c7ed3cac4e1b55ea296e078be45f634c80ec",
+        "section": "Transport",
+        "line": 32
+      }
+    },
+    "Phone context": {
+      "characters": 1156,
+      "estimated_tokens": 289,
+      "serialized_response_characters": 1662,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PHONE_CONTEXT_HANDOFF.md",
+        "sha256": "251e4dca00bace54e9fbfe7549dae1fcf1636e1642bdc0c60a21a9c9560d2ec0",
+        "section": "Freeze before action admission",
+        "line": 15
+      }
+    },
+    "Presence desktop": {
+      "characters": 3063,
+      "estimated_tokens": 766,
+      "serialized_response_characters": 3603,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md",
+        "sha256": "eaef8944185e56cfefd3bad7b8d52c23f59b7a5cfd8abf6f91210f35243cfb9d",
+        "section": "Presence desktop context",
+        "line": 1
+      }
+    },
+    "Compute truthfulness": {
+      "characters": 1681,
+      "estimated_tokens": 421,
+      "serialized_response_characters": 2207,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_COMPUTE_SERVICE_DIRECTORY.md",
+        "sha256": "af599f2b4fb701a81349e11a6440942422e2fc3e7f7073dda9ec6948705244ee",
+        "section": "Compatibility and truthfulness",
+        "line": 117
+      }
+    },
+    "Move": {
+      "characters": 5099,
+      "estimated_tokens": 1275,
+      "serialized_response_characters": 5604,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_AGENT_MOVE_V1.md",
+        "sha256": "5aa645bdefd9cc56d3a33972f2f712feba7ecb402bceee562a42276bd2052a11",
+        "section": "Transaction",
+        "line": 393
+      }
+    },
+    "PCM authority": {
+      "characters": 2701,
+      "estimated_tokens": 676,
+      "serialized_response_characters": 3220,
+      "pages": 1,
+      "source": {
+        "path": "docs/HASHI_PCM_SYSTEM_DESIGN.md",
+        "sha256": "db1183c530a2b7c6e3c9912ce11ac764f1bd844ab74b31a9a1dba677c95cb480",
+        "section": "7. PCM Authority and Conflict Resolution",
+        "line": 410
+      }
+    }
+  },
+  "scope": "Reference primer only; excludes user request, Session history and backend tool schemas. Explicit /fyi plus an armed Session primer is deduplicated by runtime tests."
+}

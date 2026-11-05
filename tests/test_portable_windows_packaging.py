@@ -642,13 +642,17 @@ def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
     tts_preview_root = (
         destination / "orchestrator" / "tts_voice_preview_assets" / "v1"
     )
+    source_manifest = (
+        ROOT / "orchestrator" / "tts_voice_preview_assets" / "v1" / "manifest.json"
+    ).read_bytes()
+    assert (tts_preview_root / "manifest.json").read_bytes() == source_manifest
     tts_manifest = json.loads(
         (tts_preview_root / "manifest.json").read_text(encoding="utf-8")
     )
     assert tts_manifest["schema_version"] == 1
     assert tts_manifest["version"] == "v1"
     assert tts_manifest["kind"] == "tts_voice_presets"
-    assert len(tts_manifest["entries"]) == 108
+    assert tts_manifest["entries"], "the packaged voice preview catalogue must not be empty"
     for entry in tts_manifest["entries"]:
         payload = (tts_preview_root / entry["path"]).read_bytes()
         if entry["format"] == "ogg":
@@ -1137,3 +1141,4 @@ def test_portable_launcher_set_includes_explicit_update_and_rollback_entries():
         assert "chcp 65001" in source
         assert "%~dp0" in source
         assert action in source
+# HASHI-Fingerprint: hfp_7b9ae8d410ad4030a9f9862572082417

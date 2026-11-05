@@ -2803,6 +2803,14 @@ def _load_json_or_default(path: Path, default: Any) -> Any:
     return _load_json(path)
 
 
+def _credential_publication_options(path: Path) -> dict:
+    if path.name.casefold() != "secrets.json":
+        return {}
+    from orchestrator.workbench_auth import _windows_remote_runtime_sids
+
+    return {"private_full_control_sids": _windows_remote_runtime_sids(path.parent)}
+
+
 def _atomic_json(path: Path, value: Any, *, mode: int | None = None) -> None:
     del mode  # the shared primitive applies the platform-private policy
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2815,7 +2823,7 @@ def _atomic_json(path: Path, value: Any, *, mode: int | None = None) -> None:
             raise AgentMoveError("new managed JSON documents must be objects")
         value = new_config_json(path, value)
     publisher = write_agent_config_json if path.name == "agents.json" else write_config_json
-    publisher(path, value)
+    publisher(path, value, **_credential_publication_options(path))
 
 
 def _restore_json_snapshot(
@@ -2835,7 +2843,10 @@ def _restore_json_snapshot(
         raise AgentMoveError(f"invalid recovery JSON file: {path.name}") from exc
     if isinstance(value, dict):
         publisher = write_agent_config_json if path.name == "agents.json" else write_config_json
-        publisher(path, value, expected_revision=published_revision)
+        publisher(
+            path, value, expected_revision=published_revision,
+            **_credential_publication_options(path),
+        )
         return
     if isinstance(value, list):
         snapshot = ConfigList(

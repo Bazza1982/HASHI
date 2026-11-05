@@ -204,3 +204,16 @@ independent SQLite connection fencing, concurrent single-effect idempotency
 and canonical Agent scope. These are isolated evidence, not live model or
 external client screenshots. Actual HASHI1 adoption and client/model acceptance
 are pending the task coordinator's authorized canary; no other instance is used.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 035 Owner-bound questions and uncertain answers
+
+Telegram proactive routes: owner-only; revalidate actor/egress after restart.
+Only owner's same-ID private chat binds. `/askme`: instance/Agent cards; off: plain
+text. Offer original-task continuation/Agent stop. `unknown` never cancels/retries;
+Codex expiry keeps authenticated partial answers. 无效答复不代表问题结束；按实际状态提示，结果不明先刷新核对。
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md), [questions](HASHI_RUN_QUESTIONS.md).
