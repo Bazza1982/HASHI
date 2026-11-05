@@ -15,8 +15,8 @@ from orchestrator.fingerprint.coverage import _relative_engine_path, observe_eng
 from orchestrator.fingerprint.models import FingerprintPolicy
 from tests.test_fingerprint_admission import runtime_at
 from tests.test_fingerprint_execution import registry_at, events
-from tests.test_permission_registry import environment
-from tests.test_permission_execution_gate import find_pending
+from tests.test_permission_registry import environment as environment
+from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, find_pending
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,7 @@ async def test_management_cas_applies_to_future_admission_and_preserves_earlier_
     config_path = tmp_path / "agents.json"
     write_config_json(config_path, {"global": {"instance_id": "TEST"}, "agents": []})
     runtime.global_config.config_path = config_path
-    first_id = await runtime.enqueue_request(7, "old", "api", "old", idempotency_key="old")
+    await runtime.enqueue_request(7, "old", "api", "old", idempotency_key="old")
     first = runtime.queue.get_nowait()
     _, audit, _ = registry_at(tmp_path)
     admin = ConfigAdmin(SimpleNamespace(config_path=config_path))
@@ -106,7 +106,10 @@ async def test_supervised_write_uses_permission_result_without_reopening_target(
     # The real approval path signals its waiter; this test checks receipt-only
     # evidence, rather than relying on a polling tick inside its watchdog.
     registry._permission_waiter.notify()
-    result = await asyncio.wait_for(task, 2)
+    # This crosses the durable permission ledger and receipt revalidation.
+    # Use the shared deadlock watchdog, independently of permission expiry;
+    # a completed file effect must not lose its verification at two seconds.
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert not result.is_error and (tmp_path / "result.txt").read_text() == "approved"
     assert reads == []
     assert result.details["fingerprint"]["evidence_status"] == "permission_result_only"

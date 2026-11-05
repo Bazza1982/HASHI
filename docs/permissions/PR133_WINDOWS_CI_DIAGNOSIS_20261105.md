@@ -1,5 +1,11 @@
 # PR #133 Windows CI contention and watchdogs
 
+## Final integration: fingerprint receipt verification
+
+At integrated source `80ac21876b7011fc7dca5a2c5afe9dd804f21a2b`, GitHub run `42019903648` failed the Windows fingerprint receipt-only integration at its two-second test watchdog. The retained native runner trace reached `PermissionExecutionGate._verified_receipt` and was cancelled while reading back the committed operation; it did not report an additional file effect or a permission rejection. Its exact host storage/scheduling event is not reconstructable from that log.
+
+A controlled local arrangement delayed each real ledger commit by 250 ms, retaining the actual SQLite transactions, witness commits, file operation and all original assertions. Both enabled-policy and invalid-schema variants failed at the same receipt readback with the original two-second watchdog; 50 delayed commits across the two cases took about 14.18 seconds in total. This reproduces the mechanism without claiming to measure the historical runner's disk latency. Reusing the existing shared permission-contract deadlock watchdog passed both variants and the entire fingerprint integration module (10 cases); 52 real delayed commits took about 14.50 seconds. No product expiry, cancellation ordering, SQLite durability, policy, rate limit, effect, scope or fingerprint assertion changes.
+
 Owner: PAO. Engineering layer: replaceable Functions and their contract tests.
 Source integration remains separate from L2 release qualification.
 
