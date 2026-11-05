@@ -42,3 +42,29 @@ deduplication, scoped rejection, ambient preemption and speech ownership.
 
 See [runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) and
 [Frontend Connector architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+## Native captions (2026-11-05)
+
+The standard optional Connector now accepts public text as well as media. The
+existing frozen owner route and durable outbox remain delivery authority. After
+a canonical completed Run, one bounded optional task claims its exact existing
+AgentPresence task; no history scan, chat copy, new listener or new transcript is
+introduced. Opted-out or unrelated routes cannot receive captions.
+
+agent_presence_captions.py derives the current default Agent, primary Session,
+context generation and route revision from their existing owners. It projects
+only a visible public user/assistant Message and public text blocks. Commands,
+reasoning, tools, historical Sessions and changed generations are excluded. Native
+captions work without Workbench. Presence's own switch controls presentation
+independently of audio. Public long replies are replacement snapshots, with
+paging/review in Presence; caption close never cancels an Agent Run.
+
+For voice media with public caption text, the existing audio upload binds that
+caption to its actual speak receipt. Actual player clock progress changes the
+caption from preparing to playing. Stop fences that output only. Call captions
+remain with the Workbench media owner, avoiding duplicate call audio.
+
+Focused checks: test_agent_presence_captions.py (real SessionStore, standard
+projection, outbox claim/replay and canonical scope), test_agent_presence_notify.py,
+desktop-context tests and terminal resolution regressions. Native executable,
+Worker adoption, real audio and physical-device acceptance are separate facts.
