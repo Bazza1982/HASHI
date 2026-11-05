@@ -1456,6 +1456,13 @@ owns renditions and endpoint receipts. These changes stay in Functions.
 - A valid explicit Session wins over shared-primary routing for both published
   and already-delivered text. Owner/Agent and context-generation checks still
   fail closed; invalid bindings never fall back into another conversation.
+- A command may deliberately select an owned successor Session, such as the
+  fresh Session created by `/forget`. Only after PAO's durable binding succeeds,
+  the local command adapter projects completion into that selected Session and
+  its current generation. The original invocation metadata remains immutable.
+  This is an explicit command transition, not a retry or a stale-binding
+  fallback: foreign owner/Agent bindings and later generation changes still
+  fail closed, and an uncertain operation is never re-executed for display.
 - Typed command admission atomically records centrally redacted user input in
   the existing SessionStore transaction. Actions do not invent user input.
   Unified ingress also redacts invocation arguments before reservation and

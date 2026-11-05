@@ -548,3 +548,54 @@ def test_legacy_menu_update_rebuilds_typed_actions_and_text_not_raw_html(
         updated["message_context"]["frontend_presentation"]["content_blocks"]
         == menus.message(menu)["presentation"]["content_blocks"]
     )
+
+
+@pytest.mark.asyncio
+async def test_local_command_projects_deliberate_owned_session_successor(command_runtime):
+    from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
+    from orchestrator.session_store import SessionConflict
+
+    runtime, metadata, _primary = command_runtime
+    original_metadata = dict(metadata)
+    successor = runtime.session_store.create_session(
+        owner_id="user:7", agent_id=runtime.name, title="Successor",
+    )
+    update = _FakeUpdate(7, 7, _CaptureStore([]), "/new", session_metadata=metadata)
+    await runtime_session._bind_session(runtime, update, successor["session_id"])
+    publication = runtime_session.publish_frontend_message_for_update(
+        runtime, update, role="assistant", text="Bound successor",
+        source="frontend.command", publication_id="successor-result",
+    )
+    assert publication["session_id"] == successor["session_id"]
+    assert update._hashi_session_id == successor["session_id"]
+    assert update._hashi_session_context_generation == successor["context_generation"]
+    assert metadata == original_metadata
+    assert runtime.session_store.messages(
+        successor["session_id"], owner_id="user:7",
+    )[0]["text"] == "Bound successor"
+    assert not runtime.session_store.messages(metadata["session_id"], owner_id="user:7")
+
+    # An independently stale generation still cannot publish into the new Session.
+    update._hashi_session_context_generation += 1
+    with pytest.raises(SessionConflict):
+        runtime_session.publish_frontend_message_for_update(
+            runtime, update, role="assistant", text="Must be rejected",
+            source="frontend.command", publication_id="stale-result",
+        )
+    assert len(runtime.session_store.messages(successor["session_id"], owner_id="user:7")) == 1
+
+
+@pytest.mark.asyncio
+async def test_foreign_session_bind_does_not_change_command_projection(command_runtime):
+    from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
+
+    runtime, metadata, _primary = command_runtime
+    foreign = runtime.session_store.create_session(
+        owner_id="user:8", agent_id=runtime.name, title="Foreign",
+    )
+    update = _FakeUpdate(7, 7, _CaptureStore([]), "/resume", session_metadata=metadata)
+    with pytest.raises(SessionNotFound):
+        await runtime_session._bind_session(runtime, update, foreign["session_id"])
+    assert update._hashi_session_id == metadata["session_id"]
+    assert update._hashi_session_context_generation == metadata["context_generation"]
+# HASHI-Fingerprint: hfp_eacca55c1dfc4ba69df8bc17e62648a4
