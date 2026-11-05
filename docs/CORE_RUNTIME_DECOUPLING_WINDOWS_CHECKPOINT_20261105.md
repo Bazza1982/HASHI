@@ -191,3 +191,29 @@ No PR137 package version is adopted yet. Its exact cookie/reference-lifetime
 probes reproduce two expected failures against old packages. Only reviewed
 public wheel inputs were cached. Native account/WAC, independent human Core
 review, formal release packaging and operator adoption remain separate gates.
+
+## Canonical Functions-only build
+
+The builder now exposes build_reference_functions and the build-functions
+CLI operation. It accepts the existing qualified Core reference, materializes
+only a fresh FR/base from the frozen reference, checks cross-role compatibility,
+and revalidates the same CR before returning. It never publishes the fixed
+selector or performs adoption. The existing actual same-Core dependency fixture
+test now uses this canonical API instead of manually cloning/qualifying FR.
+All original activation-failure, rollback and durable-counter assertions remain.
+
+Native Windows role/build/profile/seal scope passed 43 cases in 501.39 seconds
+(command 503.00) on exact tree
+389e0c152563dd31d73c89bacf56d853fab5e35e496fe37c240c83bd60ccc19f.
+The added no-write test rejects output within the existing Core base. CLI
+absence was reproduced before implementation; CLI help and Ruff pass after.
+
+The ee760645 Windows/Linux CI failure was one new fixture's observation through
+the editable build workspace, whose project distribution metadata is outside
+the sealed FR site. The fixture now observes through the same exact minimal
+Core code artifact used by native qualification. A separate actual control
+injected synthetic workspace egg-info: unchanged dependency validation rejected
+it, then qualified the same untouched FR from the clean code artifact with the
+same FR_ID. This is fixture isolation; no seal or package assertion was relaxed.
+Ruff and ten builder/profile boundary cases pass after the correction. Final CI
+for the combined checkpoint is still pending. No PR137 pin has changed.

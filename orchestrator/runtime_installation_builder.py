@@ -19,6 +19,8 @@ import subprocess
 from orchestrator.runtime_contract import (
     CORE_HOST_ROLE, FUNCTIONS_ROLE, load_runtime_policy, validate_standard_dependencies,
     load_qualified_runtime, verify_runtime_files, RuntimeContractError,
+    qualified_runtime_from_reference, runtime_installation_reference,
+    compare_runtime_boundary, compare_runtime_fingerprints,
 )
 
 
@@ -181,8 +183,7 @@ def _copy_runtime_tree(source, destination, *, base=False):
     return destination
 
 
-def build_reference_roles(code_root, reference_path, *, expected_digest, destination):
-    """Materialize a fresh pair with original exact packages and independent seals."""
+def _validated_reference(code_root, reference_path, expected_digest, destination):
     code_root, reference_path = Path(code_root).resolve(), Path(reference_path).resolve()
     destination = Path(destination).resolve()
     if destination.exists():
@@ -208,28 +209,40 @@ def build_reference_roles(code_root, reference_path, *, expected_digest, destina
     if _metadata(functions_source) != reference["distributions"]:
         raise ValueError("Reference packages changed after capture")
     validate_standard_dependencies(code_root, load_runtime_policy(code_root), installed=reference["distributions"])
+    return code_root, reference_path, destination, reference, base_source, functions_source
+
+
+def _materialize_role(code_root, base, functions_source, environment, role):
+    base_python = base / ("python.exe" if os.name == "nt" else "bin/python3")
+    subprocess.run([str(base_python), "-I", "-B", "-m", "venv", "--without-pip",
+                    "--copies", str(environment)], check=True, capture_output=True, timeout=60)
+    # CPython venv creates lib64 -> lib on some POSIX hosts even with
+    # --copies. Remove only this redundant alias in the newly built env.
+    alias = environment / "lib64"
+    if alias.is_symlink():
+        if alias.resolve(strict=True) != (environment / "lib").resolve(strict=True):
+            raise ValueError("Unexpected lib64 redirect in new runtime")
+        alias.unlink()
+    if role == FUNCTIONS_ROLE:
+        site = environment / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
+        # venv --without-pip makes an empty site directory; replace that
+        # newly created empty directory, never a pre-existing environment.
+        site.rmdir()
+        _copy_runtime_tree(functions_source, site)
+    _write_profile(code_root, environment, role)
+    return environment
+
+
+def build_reference_roles(code_root, reference_path, *, expected_digest, destination):
+    """Materialize a fresh pair with original exact packages and independent seals."""
+    code_root, reference_path, destination, reference, base_source, functions_source = _validated_reference(
+        code_root, reference_path, expected_digest, destination)
     destination.mkdir(parents=True)
     base = _copy_runtime_tree(base_source, destination / "base", base=True)
-    base_python = base / ("python.exe" if os.name == "nt" else "bin/python3")
     environments = {}
     for role, name in ((CORE_HOST_ROLE, "core"), (FUNCTIONS_ROLE, "functions")):
-        environment = destination / "runtimes" / name
-        subprocess.run([str(base_python), "-I", "-B", "-m", "venv", "--without-pip",
-                        "--copies", str(environment)], check=True, capture_output=True, timeout=60)
-        # CPython venv creates lib64 -> lib on some POSIX hosts even with
-        # --copies. Remove only this redundant alias in the newly built env.
-        alias = environment / "lib64"
-        if alias.is_symlink():
-            if alias.resolve(strict=True) != (environment / "lib").resolve(strict=True):
-                raise ValueError("Unexpected lib64 redirect in new runtime")
-            alias.unlink()
-        if role == FUNCTIONS_ROLE:
-            site = environment / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
-            # venv --without-pip makes an empty site directory; replace that
-            # newly created empty directory, never a pre-existing environment.
-            site.rmdir()
-            _copy_runtime_tree(functions_source, site)
-        _write_profile(code_root, environment, role)
+        environment = _materialize_role(
+            code_root, base, functions_source, destination / "runtimes" / name, role)
         environments[role] = qualify_environment(
             code_root, environment, base, destination / "qualifications" / (name + ".json"), role)
     # Re-read the captured source closures: inconsistent copies never qualify.
@@ -245,3 +258,36 @@ def build_reference_roles(code_root, reference_path, *, expected_digest, destina
             "core": environments[CORE_HOST_ROLE].fingerprint.to_dict(),
             "functions": environments[FUNCTIONS_ROLE].fingerprint.to_dict(),
             "reference_digest": expected_digest}
+
+
+def build_reference_functions(code_root, reference_path, *, expected_digest, destination, core_reference):
+    """Build only a new FR; keep the exact existing CR receipt and files.
+
+    This returns a candidate descriptor. It never updates the fixed selector,
+    starts/stops a Core, installs services or changes an existing environment.
+    """
+    code_root, reference_path, destination, reference, base_source, functions_source = _validated_reference(
+        code_root, reference_path, expected_digest, destination)
+    core = qualified_runtime_from_reference(core_reference, code_root=code_root, role=CORE_HOST_ROLE)
+    core_record = json.loads(core.manifest_path.read_bytes())
+    protected = (Path(core.fingerprint.environment_prefix), Path(core_record["base_root"]))
+    if destination.is_relative_to(code_root):
+        raise ValueError("Functions runtime destination must be outside program source")
+    if any(destination.is_relative_to(path) or path.is_relative_to(destination) for path in protected):
+        raise ValueError("Functions runtime destination overlaps the existing Core installation")
+    destination.mkdir(parents=True)
+    base = _copy_runtime_tree(base_source, destination / "base", base=True)
+    environment = _materialize_role(
+        code_root, base, functions_source, destination / "functions", FUNCTIONS_ROLE)
+    functions = qualify_environment(
+        code_root, environment, base, destination / "qualifications/functions.json", FUNCTIONS_ROLE)
+    compare_runtime_boundary(core.fingerprint, functions.fingerprint, expected_functions=functions.fingerprint)
+    verify_runtime_files(base_source, reference["base_files"], manifest_path=reference_path)
+    verify_runtime_files(functions_source, reference["functions_files"], manifest_path=reference_path)
+    unchanged = qualified_runtime_from_reference(core_reference, code_root=code_root, role=CORE_HOST_ROLE)
+    compare_runtime_fingerprints(core.fingerprint, unchanged.fingerprint)
+    return {"schema_version": 1, "destination": str(destination),
+            "core": runtime_installation_reference(unchanged),
+            "functions": runtime_installation_reference(functions),
+            "core_runtime_id": unchanged.runtime_id, "functions_runtime_id": functions.runtime_id,
+            "reference_digest": expected_digest, "automatic_adoption": False}

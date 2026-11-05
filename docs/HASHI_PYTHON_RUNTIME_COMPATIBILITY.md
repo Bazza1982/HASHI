@@ -57,12 +57,22 @@ alongside the existing product/source/FG facts. Missing Core receipts remain
 unknown. Public version facts omit interpreter and installation paths. Source,
 prepared candidate, active route and live acceptance remain separate states.
 
-The v5 checkpoint is still HOLD at complete original-dependency business parity.
-Fixture-package same-Core handoff is not PR #137 security acceptance. The five
-security upgrades, full Linux/native-business qualification, independent review,
-complete packaging and operator adoption are not declared complete by this
-contract update. See the [Windows source checkpoint](CORE_RUNTIME_DECOUPLING_WINDOWS_CHECKPOINT_20261105.md)
-for tested scope and retained failures.
+The canonical installer also offers build-functions through
+scripts/build_runtime_roles.py. It accepts a frozen reference and the existing
+qualified Core manifest/digest, creates only a new FR in a fresh destination,
+and revalidates the original CR unchanged. It returns a candidate descriptor;
+it never writes the fixed selector, adopts the candidate, starts/stops Core,
+or installs a service. Existing environments and program-source directories
+are not valid output destinations.
+
+The complete original-dependency business scope passed at source 030689c4
+on native Windows and its push/PR CI. The independent-FR builder is exercised
+by actual same-Core fixture-package replacement, rejection and rollback with
+the existing durable-counter/no-replay assertions. This mechanism is not
+PR137 security acceptance. Final role/build qualification, the five security
+upgrades, independent review, complete packaging and operator adoption remain
+separate gates. See the [Windows source checkpoint](CORE_RUNTIME_DECOUPLING_WINDOWS_CHECKPOINT_20261105.md)
+for exact tested scope and retained failures.
 
 ## Core v4 coupled baseline
 

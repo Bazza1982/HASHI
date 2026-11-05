@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from orchestrator.runtime_installation_builder import (  # noqa: E402
-    snapshot_reference, build_reference_roles,
+    snapshot_reference, build_reference_roles, build_reference_functions,
 )
 
 
@@ -26,12 +26,22 @@ def main(argv=None):
     build.add_argument("--reference", type=Path, required=True)
     build.add_argument("--reference-digest", required=True)
     build.add_argument("--output", type=Path, required=True)
+    functions = operations.add_parser("build-functions")
+    functions.add_argument("--reference", type=Path, required=True)
+    functions.add_argument("--reference-digest", required=True)
+    functions.add_argument("--core-manifest", type=Path, required=True)
+    functions.add_argument("--core-manifest-digest", required=True)
+    functions.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.operation == "snapshot-reference":
         digest = snapshot_reference(ROOT, base_root=args.base_root,
                                     functions_site=args.functions_site, destination=args.output,
                                     expected_dependency_digest=args.baseline_dependency_digest)
         result = {"reference": str(args.output.resolve()), "digest": digest}
+    elif args.operation == "build-functions":
+        result = build_reference_functions(
+            ROOT, args.reference, expected_digest=args.reference_digest, destination=args.output,
+            core_reference={"path": str(args.core_manifest.resolve()), "digest": args.core_manifest_digest})
     else:
         result = build_reference_roles(ROOT, args.reference,
                                        expected_digest=args.reference_digest, destination=args.output)

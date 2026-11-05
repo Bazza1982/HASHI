@@ -19,7 +19,7 @@ from orchestrator.runtime_contract import (
     runtime_installation_reference,
 )
 from orchestrator.runtime_installation_builder import (
-    build_reference_roles, qualify_environment, snapshot_reference,
+    build_reference_roles, build_reference_functions, qualify_environment, snapshot_reference,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,18 +164,30 @@ def test_same_core_pid_can_replace_fr_dependency_and_rollback_without_replaying(
     original = Path(native_roles["functions"]["environment_prefix"])
     references = []
     runtime_ids = []
+    selected = json.loads(Path(native_roles["selection"]).read_bytes())
+    core_reference = selected["core"]
     for version in ("1", "2"):
-        environment = tmp_path / ("functions-" + version)
-        shutil.copytree(original, environment)
-        metadata = _site_packages(environment) / ("hashi_runtime_fixture-" + version + ".dist-info")
+        seed = tmp_path / ("captured-functions-" + version)
+        shutil.copytree(_site_packages(original), seed)
+        metadata = seed / ("hashi_runtime_fixture-" + version + ".dist-info")
         metadata.mkdir()
         (metadata / "METADATA").write_text(
             f"Name: hashi-runtime-fixture\nVersion: {version}\n", encoding="utf-8")
-        qualified = qualify_environment(
-            Path(native_roles["code_root"]), environment, release / "base",
-            tmp_path / ("qualified-" + version + ".json"), FUNCTIONS_ROLE)
-        references.append(runtime_installation_reference(qualified))
-        runtime_ids.append(qualified.runtime_id)
+        packages = dict(native_roles["locked"], **{"hashi-runtime-fixture": version})
+        expected = "sha256:" + hashlib.sha256(
+            "\n".join(f"{name}=={value}" for name, value in sorted(packages.items())).encode()).hexdigest()
+        reference = tmp_path / ("reference-" + version + ".json")
+        pin = snapshot_reference(
+            Path(native_roles["code_root"]), base_root=release / "base", functions_site=seed,
+            destination=reference, expected_dependency_digest=expected)
+        candidate = build_reference_functions(
+            Path(native_roles["code_root"]), reference, expected_digest=pin,
+            destination=tmp_path / ("functions-" + version), core_reference=core_reference)
+        assert candidate["core"] == core_reference
+        assert candidate["core_runtime_id"] == native_roles["CR_ID"]
+        assert candidate["automatic_adoption"] is False
+        references.append(candidate["functions"])
+        runtime_ids.append(candidate["functions_runtime_id"])
     requests = []
     from orchestrator.kernel_artifact import manifest_digest
     for label, failure in (("old", ""), ("new", ""), ("rejected", "activate")):
@@ -311,8 +323,9 @@ def test_selector_change_protects_new_and_bound_old_fr_and_corruption_denies(nat
     metadata = _site_packages(candidate)/"hashi_role_policy_fixture-2.dist-info"
     metadata.mkdir()
     (metadata/"METADATA").write_text("Name: hashi-role-policy-fixture\nVersion: 2\n",encoding="utf-8")
-    newer = qualify_environment(ROOT,candidate,Path(native_roles["destination"])/"base",
-                                tmp_path/"new-functions.json",FUNCTIONS_ROLE)
+    newer = qualify_environment(Path(native_roles["code_root"]), candidate,
+                                Path(native_roles["destination"])/"base",
+                                tmp_path/"new-functions.json", FUNCTIONS_ROLE)
     assert newer.runtime_id != bound.runtime_id
     assert _admit_role_write(registry,workspace/"ordinary-before.txt") is None
     try:
@@ -333,3 +346,15 @@ def test_selector_change_protects_new_and_bound_old_fr_and_corruption_denies(nat
     finally:
         selector.write_bytes(previous)
     assert selector.read_bytes() == previous
+
+
+def test_functions_only_builder_never_writes_inside_existing_core_base(native_roles):
+    destination = Path(native_roles["destination"]) / "base/forbidden-functions-build"
+    core_reference = json.loads(Path(native_roles["selection"]).read_bytes())["core"]
+    assert not destination.exists()
+    with pytest.raises(ValueError, match="existing Python environment|Core installation"):
+        build_reference_functions(
+            Path(native_roles["code_root"]), native_roles["reference_path"],
+            expected_digest=native_roles["reference_digest"], destination=destination,
+            core_reference=core_reference)
+    assert not destination.exists()
