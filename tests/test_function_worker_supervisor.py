@@ -1690,16 +1690,13 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     connection = SimpleNamespace(close=lambda: None)
     process_args = []
 
-    def build_process(**kwargs):
-        process_args.append(kwargs["args"])
-        return process
+    async def launch(bootstrap):
+        process_args.append(bootstrap)
+        return process, connection
 
-    context = SimpleNamespace(
-        Pipe=lambda **kwargs: (connection, connection), Process=build_process
-    )
     monkeypatch.setattr(
-        "orchestrator.function_worker_supervisor.multiprocessing.get_context",
-        lambda *args: context,
+        "orchestrator.function_worker_supervisor.launch_function_process_async",
+        launch,
     )
     ready_wait = asyncio.Event()
     retired = []
@@ -1732,8 +1729,9 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(retired) == 1 and not supervisor._candidates
-    assert process_args[0][1]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]
-    assert process_args[0][1]["runtime"]["dependency_digest"] == (
+    assert process_args[0]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]
+    assert process_args[0]["runtime"]["dependency_digest"] == (
         "worker-full-distribution-set"
     )
     assert cache_calls == [(("policy", tmp_path), tmp_path)]
+# HASHI-Fingerprint: hfp_1c65cb7af92e496dace719aeb3d865e9

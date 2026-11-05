@@ -379,27 +379,31 @@ def test_ci_runtime_matrix_uses_only_the_canonical_minor():
         assert set(declared) <= {policy.python_text}, path.name
 
 
-def test_main_enforces_core_runtime_before_other_project_imports():
-    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
-    guard_index = next(
-        index
-        for index, node in enumerate(tree.body)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Name)
-            and child.func.id == "enforce_runtime_contract"
-            for child in ast.walk(node)
-        )
-    )
-    first_function_import = next(
-        index
-        for index, node in enumerate(tree.body)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "orchestrator.instance_lock"
-    )
+def test_main_rejects_an_invalid_core_before_instance_or_function_side_effects(
+    tmp_path, monkeypatch, capsys
+):
+    import importlib.util
 
-    assert guard_index < first_function_import
+    spec = importlib.util.spec_from_file_location("isolated_main_entry", ROOT / "main.py")
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+
+    def reject_core(code_root, *, role):
+        assert code_root == ROOT
+        assert role == "core-host"
+        raise RuntimeContractError("intentional invalid Core runtime")
+
+    def unexpected_side_effect(*args, **kwargs):
+        pytest.fail("unqualified Core reached instance or Functions setup")
+
+    monkeypatch.setattr(entry, "enforce_runtime_contract", reject_core)
+    for name in ("load_core_runtime_selection", "canonical_instance_home",
+                 "instance_runtime_dir", "InstanceLock", "KernelRuntime", "write_record"):
+        monkeypatch.setattr(entry, name, unexpected_side_effect)
+    home = tmp_path / "must-not-be-created"
+    assert entry.main(["--bridge-home", str(home), "--replace-functions"]) == 78
+    assert not home.exists()
+    assert "intentional invalid Core runtime" in capsys.readouterr().err
 
 
 def test_core_has_no_static_binding_to_replaceable_function_modules():
@@ -486,3 +490,4 @@ def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():
                     violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
 
     assert violations == []
+# HASHI-Fingerprint: hfp_33bec0c8ea5b44bab7df74cb62059871
