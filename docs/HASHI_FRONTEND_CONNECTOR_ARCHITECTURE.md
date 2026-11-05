@@ -465,11 +465,13 @@ public command is discovered from the shared RuntimeCommand registry; it is not
 a Telegram command implementation or a Backend/API special case. All
 command-capable Connectors may invoke it through their existing command adapter.
 
-When enabled, PAO freezes AgentPresence as an optional media destination at Run
-admission. This mirror stays media-only even though an explicit AgentPresence
-primary ingress also supports text replies. The connector registry qualifies
-these primary and mirror content modes separately. Canonical reply voice then
-receives its own outbox task and receipt;
+When enabled, PAO freezes AgentPresence as an optional destination at Run
+admission. It accepts public caption text and media through the existing durable
+outbox, as specified by [native captions](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05).
+Caption projection still requires the selected default Agent, primary Session
+and current generation; it excludes commands, reasoning, tools and private
+content. Opting out affects future Run routes while existing routes remain
+frozen. Canonical reply voice receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The

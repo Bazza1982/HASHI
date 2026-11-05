@@ -609,7 +609,6 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "canonical_feed": "persistent_session_events",
         "owner_mirror": True,
         "delivery_content_modes": ["text", "media"],
-        "mirror_delivery_content_modes": ["media"],
         "customizations": (),
     },
 )
@@ -1061,18 +1060,11 @@ def owner_mirror_connector_ids() -> tuple[str, ...]:
     )
 
 
-def connector_delivery_content_modes(
-    connector_id: str, *, role: str = "primary"
-) -> tuple[str, ...]:
-    """Return the route-role filter, independently of primary ingress support."""
-
-    if role not in {"primary", "mirror"}:
-        raise ValueError("invalid connector delivery role")
+def connector_delivery_content_modes(connector_id: str) -> tuple[str, ...]:
+    """Return an optional event-content filter for one Connector route."""
 
     descriptor = _descriptor(str(connector_id or "").strip().casefold())
-    raw = descriptor.get("mirror_delivery_content_modes") if role == "mirror" else None
-    if raw is None:
-        raw = descriptor.get("delivery_content_modes")
+    raw = descriptor.get("delivery_content_modes")
     if raw is None:
         return ()
     if not isinstance(raw, (list, tuple)):

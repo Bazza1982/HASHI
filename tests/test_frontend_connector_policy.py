@@ -391,7 +391,7 @@ def test_legacy_run_route_projects_to_endpoint_level_delivery_intent():
     ] == [("backend_api", "primary"), ("telegram", "mirror")]
 
 
-def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
+def test_agentpresence_route_is_frozen_and_supports_public_captions_and_media(tmp_path):
     set_connector_preference(tmp_path, "owner-a", "agentpresence", "mirror", True)
     additional = configured_owner_mirror_destinations(
         request_metadata={"owner_id": "owner-a"},
@@ -416,8 +416,11 @@ def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
         content_modes=["text"],
     )
     assert [item["connector_id"] for item in text_intent["destinations"]] == [
-        "backend_api"
+        "backend_api", "agentpresence"
     ]
+    caption_destination = text_intent["destinations"][1]
+    assert caption_destination["role"] == "mirror"
+    assert caption_destination["content_modes"] == ["text"]
 
     media_intent = delivery_intent_from_run_route(
         route,
@@ -432,11 +435,27 @@ def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
         if item["connector_id"] == "agentpresence"
     )
     assert agentpresence["role"] == "mirror"
-    assert agentpresence["content_modes"] == ["media"]
+    assert agentpresence["content_modes"] == ["media", "text"]
+
+    # The preference change affects new Runs, never the already-frozen route.
+    future_mirrors = configured_owner_mirror_destinations(
+        request_metadata={"owner_id": "owner-a"}, state_root=tmp_path
+    )
+    assert future_mirrors == ()
+    future_route = freeze_run_delivery_route(
+        message_source_id="api", session_surface="workbench",
+        session_channel_key="workbench:primary", chat_id=123,
+        telegram_requested=False, additional_mirrors=future_mirrors,
+    )
+    future_intent = delivery_intent_from_run_route(
+        future_route, event_id="evt-future", session_id="ses-1",
+        idempotency_key="future", content_modes=["text", "media"],
+    )
+    assert [item["connector_id"] for item in future_intent["destinations"]] == ["backend_api"]
 
 
 @pytest.mark.parametrize("content_modes", [["text"], ["text", "media"]])
-def test_agentpresence_primary_keeps_text_without_widening_mirror_modes(content_modes):
+def test_agentpresence_primary_keeps_text_and_media_content(content_modes):
     route = freeze_run_delivery_route(
         message_source_id="agentpresence",
         session_surface="agentpresence",
