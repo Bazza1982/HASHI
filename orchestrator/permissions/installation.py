@@ -61,7 +61,15 @@ def _scopes(values, cwd):
 
 class InstancePolicies:
     def __init__(self, manager, installation, *, private_path, run_store, runner=None):
-        self.manager, self.installation, self.store = manager, installation, run_store
+        self.manager, self.installation = manager, installation
+        # Policy is also read under the authority transaction. The native Run
+        # barrier holds run_store's mutex before entering that transaction, so
+        # sharing its mutex here reverses the lock order during preflight.
+        # An independent reader sees the same committed PAO Workzones through
+        # SQLite WAL; it neither caches policy nor writes a second profile.
+        self.store = SessionStore(
+            run_store.db_path, instance_id=run_store.instance_id,
+            attachment_root=run_store.attachment_files_root)
         self._private_path, self.runner = private_path, runner
         self.config = ConfigAdmin(type("ConfigPaths", (), {"config_path": manager.config_path})())
         self._frozen, self._current = {}, {}

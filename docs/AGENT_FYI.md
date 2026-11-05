@@ -19,6 +19,7 @@
 - run_script 的可选列表可省略；默认值仅作执行视图，跨 helper/Runner 保留原审核参数摘要。[执行决定](permissions/IMPLEMENTATION_DECISION_20261030.md)。
 - L2 host 恢复与审计回原 owner；审计按 epoch 去重，失败不退本地 spool。心跳不是进展；私有桌面/管道/身份不扩权。SCM/profile 回收须核对 SID 与双 hive；维护后的延迟回收不冒充即时卸载。[原生证据与未完成范围](permissions/L2_INTEL_LOCAL_QUALIFICATION_20261105.md)、[WAC](permissions/L2_WINDOWS.md)、[状态](permissions/IMPLEMENTATION_STATUS.md)。
 - JSON 用读版本、锁、私有候选和原子发布；显示默认值不能写回，冲突/已提交耐久性错误不重试。agents.json 为已安装 Safety SID 保留只读权，包括 Move 发布与恢复；secrets 不共享，不复制旧 ACL。[持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
+- 权限策略从同一 PAO 数据库独立读取已提交 Workzone，避免与执行栅栏倒序等锁；不缓存或放宽权限。[锁顺序](permissions/L2_POLICY_LOCK_ORDER_20261105.md)。
 - Move 确认后向前收尾，迁出/返回凭证绑定源实例和 lifecycle；恢复只处理事务仍拥有的发布，不覆盖他人修改。Clone 用 PAO owner 快照、可恢复重试，不写 Move-only 源生命周期。[Move/Clone](HASHI_AGENT_MOVE_V1.md)。
 - Workzone 按 Agent/版本修改，Run 冻结精确根，不合并成共同父目录；已存状态继续可见。Windows 拒绝 POSIX 根；停止状态 stopped、Worker 故障 offline、配置停用 inactive 分开。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
 
