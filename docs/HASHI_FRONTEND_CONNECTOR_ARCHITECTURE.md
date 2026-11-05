@@ -1558,3 +1558,33 @@ The isolated HASHI1 Workbench consumes authoritative creation/Provider views,
 keeps future avatars by authenticated instance/Agent identity and stores the
 complete selected roster. Its private source/build/live evidence is separate
 from adoption of a shared Workbench.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 010 Attachment descriptions and guarded PCM edits
+
+- 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+
+### FYI v1 034 Atomic non-voice attachments and retention
+
+Non-voice attachments commit atomically to the Agent's ignored
+`.attachments/{session}/{message}/`; only its home reads them, and Session
+retention deletes them. Access failures differ from integrity mismatches;
+diagnostics omit paths.
+
+### FYI v1 040 Telegram access gates and bidirectional activation
+
+Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+Telegram须用户及Bot绑定的双向证据；单Agent启用空闲等待≤15m，校验凭据/创建/stop。
+回执或未知即停自动提交；状态只读、重试不重存，保留待收更新。
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+### FYI v1 051 Redacted commands, notices and preserved history
+
+Command history redacts args; originals execute. PAO notices keep Session/locale
+without Workers; scope-check and retry delivery only. Remote pages fairly;
+closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+`/new` preserves history; PAO owns Agent deletion.

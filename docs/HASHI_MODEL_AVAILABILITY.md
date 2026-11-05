@@ -94,3 +94,13 @@ levels, explicit effort overrides, restrictions and empty denial, hidden cache
 entries, cache revisions, malformed/missing cache fallback and Agent creation.
 Running Worker adoption and external model calls are separate evidence; offline
 validation does not establish them.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 026 Instance opt-ins and shared model compatibility
+
+配置管身份/端口/Workzone/端点/模型，勿外泄秘密/路径。实例opt-in用`allowed_backends`/runtime effort，共享兼容用合格registry。
+能力/价格未知不等于不支持/免费；选择须持久化。HERV3继承[Provider策略](HASHI_MODEL_AVAILABILITY.md)，不继承Engine授权。

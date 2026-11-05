@@ -523,3 +523,35 @@ configuration or adapter identity.
 Focused red/green coverage reproduces the old leak and verifies the corrected
 card. Source implementation and offline tests are complete; Function adoption
 and live Telegram verification remain separate until performed.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 015 Habit reset snapshots and measured recovery
+
+- 习惯重置按实测恢复结果提示，快照/审计/界面共用诊断号；恢复不全保留快照，不覆盖原位置的新记录。
+
+### FYI v1 016 Continuous Engine execution and narrow limits
+
+- HERV3 has no whole-run size/time/call ceiling. Preserve state/evidence;
+  cancellation, safety, transport, Provider and single-Tool limits remain. [HERV3](HERV3_UPGRADE.md).
+
+### FYI v1 018 Request-scoped visual fallback
+
+- Image fallback: selected model, same-Provider vision, LAN Compute;
+  visible/request-only. [admission](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+
+### FYI v1 042 Public HERV3 identity and independent controls
+
+HERV3: `her-v3`; `her-v2` is compatibility only. Telegram cards show
+the public ID. JEV defaults off.
+Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
+counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
+
+### FYI v1 043 Privacy Level 2 restrictions and adoption evidence
+
+Privacy Level 2 is HERV3/DeepSeek-only, risk-accepted and fail-closed on
+detector errors. Isolated dependencies or synthetic readiness prove neither
+activation nor Worker adoption.

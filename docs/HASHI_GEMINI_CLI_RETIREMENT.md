@@ -48,3 +48,13 @@ exclude the old adapter/skill and include the replacement skill.
 HASHI3 implementation does not establish deployment on another instance.
 Actual Function adoption, agy execution and interactive hardware/browser
 acceptance are separate facts in the scoped execution record.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 041 Retired Engine and retained model compatibility
+
+Retired Gemini CLI: use Antigravity; retain history/usage and qualified Gemini
+models; no account ban. [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
