@@ -35,6 +35,15 @@ files and manifest are never sent to a Runner or normal backup restore target.
 Partial or changed archives fail closed and are preserved for investigation;
 a new incident ID may be selected after an explicit fresh inspection.
 
+The manifest is atomically published for the installed Safety SID, System and
+Administrators. An elevated operator can differ from the service account; its
+extra user ACE is deliberately excluded while the candidate is still empty.
+The completed manifest must pass the same private-path check immediately and
+on exact replay. Never expand the trusted SID set to bypass this check.
+Unqualified archives made by an earlier Draft remain preserved for explicit
+operator reconciliation. Do not issue a new recovery ID merely to repair an
+archive when its original ledger recovery may already have committed.
+
 The ledger owner applies one attached-database transaction:
 
 - revoke active and reserved grants, withdraw pending requests and expire old
@@ -72,6 +81,13 @@ A legacy-to-schema-9 migration uses the authority's existing atomic migration an
 attached witness transaction. Validate preserved task/decision data, valid L1
 grants and fresh execution binding. A failed precommit migration must leave the
 old schema usable. Interruptions after commit must recover the complete new pair.
+
+Preserved lease history does not authorize a changed installed policy revision.
+Changing the qualified runtime descriptor changes that revision: retain the
+old records and require current-policy decisions instead of rewriting old grants
+to match. A precommit rollback to the exact original program and descriptor can
+retain its still-valid L1 authorization. Never restore an old ledger to achieve
+that behavior after schema 9 has committed.
 
 Rollback selects a complete compatible qualified program generation. It never
 restores older grants, copies a witness backward or changes user_version to make

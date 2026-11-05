@@ -161,4 +161,42 @@ def test_native_archive_preserves_both_databases_and_detects_changed_evidence(se
         ownership.close()
     assert authority.evaluate(context, [scope])
 
+
+@pytest.mark.platform
+def test_native_archive_is_private_to_distinct_service_and_replays(service):
+    import ctypes
+    import os
+    import subprocess
+    if os.name != "nt":
+        pytest.skip("native Windows service archive ACL")
+    if not ctypes.WinDLL("shell32").IsUserAnAdmin():
+        pytest.skip("elevated archive operator")
+    from orchestrator.permissions.ledger_maintenance import _archive
+    from orchestrator.permissions.windows_ipc import current_process_user_sid
+    from orchestrator.permissions.windows_security import require_private_path
+
+    service_sid = "S-1-5-18"
+    if current_process_user_sid() == service_sid:
+        pytest.skip("requires a distinct operator SID")
+    path, authority, issuer, clock, context, scope = service
+    approve(authority, issuer, clock, context, [scope])
+    private = path.parent / "service-private"
+    private.mkdir()
+    subprocess.run(
+        ["icacls.exe", str(private), "/inheritance:r", "/grant:r",
+         "*S-1-5-18:(OI)(CI)(F)", "*S-1-5-32-544:(OI)(CI)(F)", "/Q"],
+        check=True, capture_output=True,
+    )
+    ledger = private / "permissions.sqlite"
+    copy_database(path, ledger)
+    copy_database(authority.continuity_path, ledger.with_name(ledger.name + ".continuity"))
+    observation = PermissionAuthority.inspect_ledger(ledger)
+    inputs = dict(recovery_id="e" * 32, expected_revision=observation["revision"],
+                  reason="distinct service archive", sid=service_sid)
+    archive = _archive(private, ledger, **inputs)
+    require_private_path(archive / "archive.json", trusted_sids=(service_sid,))
+    before = (ledger.read_bytes(), ledger.with_name(ledger.name + ".continuity").read_bytes())
+    assert _archive(private, ledger, **inputs) == archive
+    assert before == (ledger.read_bytes(), ledger.with_name(ledger.name + ".continuity").read_bytes())
+
 # HASHI-Fingerprint: hfp_cef62eae6d50427b902beb3a7d7ecad9

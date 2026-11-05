@@ -75,3 +75,41 @@ def test_config_writer_binds_a_cross_account_runtime_principal_on_creation(tmp_p
     ).stdout
     assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl
     assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
+@pytest.mark.parametrize("include_writer", [True, False])
+def test_config_writer_preserves_default_and_seals_service_candidate_before_bytes(
+    tmp_path, monkeypatch, include_writer,
+):
+    import ctypes
+    import json
+    from orchestrator.permissions.windows_security import require_private_path
+    from tools import private_files
+    if not ctypes.WinDLL("shell32").IsUserAnAdmin():
+        pytest.skip("elevated cross-principal publication")
+    target = tmp_path / "service.json"
+    observed = []
+    real_protect = private_files.protect_private_file
+
+    def protect_empty(candidate, **options):
+        assert candidate.read_bytes() == b""
+        real_protect(candidate, **options)
+        if include_writer:
+            with pytest.raises(PermissionError, match="untrusted data/control"):
+                require_private_path(candidate, trusted_sids=("S-1-5-19",))
+        else:
+            require_private_path(candidate, trusted_sids=("S-1-5-19",))
+        observed.append(True)
+
+    monkeypatch.setattr(private_files, "protect_private_file", protect_empty)
+    options = {} if include_writer else {"private_include_writer": False}
+    write_config_json(
+        target, {"private": "synthetic"},
+        private_full_control_sids=("S-1-5-19",), **options,
+    )
+    assert observed == [True]
+    assert json.loads(target.read_text(encoding="utf-8")) == {"private": "synthetic"}
+    if not include_writer:
+        require_private_path(target, trusted_sids=("S-1-5-19",))
+
+# HASHI-Fingerprint: hfp_7b3aada70d0b4a709ab546ce116d2b0f

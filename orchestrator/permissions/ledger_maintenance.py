@@ -50,7 +50,8 @@ def _archive(private, ledger, *, recovery_id, expected_revision, reason, sid):
         hashes[name] = sha256(target.read_bytes()).hexdigest()
     write_config_json(destination / "archive.json", new_config_json(
         destination / "archive.json", {"version": 1, **identity, "sha256": hashes},
-    ))
+    ), private_full_control_sids=(sid,), private_include_writer=False)
+    require_private_path(destination / "archive.json", trusted_sids=(sid,))
     return destination
 
 

@@ -61,6 +61,13 @@ directory synchronization failed: do not restore an old snapshot or replay the
 operation automatically. Re-read and reconcile the current state. Candidates
 use the primitive's private-file policy; this batch does not change that policy.
 
+The default Windows policy retains the writer plus explicit runtime principals.
+An operator publishing a service-private artifact can explicitly use
+private_include_writer=False together with private_full_control_sids. This
+omits the operator's extra user ACE; System and Administrators retain access.
+The private DACL is applied to the empty candidate before bytes are written.
+The ordinary configuration and agents.json publication defaults are unchanged.
+
 ## Language preference behavior
 
 Display-only reads may fall back to the instance default when preferences
