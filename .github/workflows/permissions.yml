@@ -230,7 +230,7 @@ jobs:
         run: python -m ruff check orchestrator/flexible_backend_manager.py --ignore E402
       - name: Test permission and legacy contracts
         run: >-
-          python -m pytest -q
+          python -m pytest -q -p tests.permission_sqlite_observer --durations=20
           tests/test_permission_agent_tools.py
           tests/test_permission_safety_command.py
           tests/test_safety_failure_details.py
