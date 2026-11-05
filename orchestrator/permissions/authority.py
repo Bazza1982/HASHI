@@ -518,6 +518,7 @@ class PermissionAuthority:
         self._wall_anchor = float(clock())
         self._monotonic_anchor = float(monotonic())
         self._clock_lock = threading.Lock()
+        self._transaction_lock = threading.RLock()
         self._clock_observations: dict[int, tuple[float, float]] = {}
         self._service_generation: str | None = None
         if not math.isfinite(self._wall_anchor) or not math.isfinite(self._monotonic_anchor):
@@ -713,6 +714,15 @@ class PermissionAuthority:
 
     @contextmanager
     def _transaction(self):
+        # Queue this service's writers before opening their SQLite connections.
+        # Otherwise local callers consume SQLite's external-writer busy budget
+        # while another local commit is still flushing both durable databases.
+        # Independent owners still meet BEGIN IMMEDIATE and generation fencing.
+        with self._transaction_lock, self._ledger_transaction() as connection:
+            yield connection
+
+    @contextmanager
+    def _ledger_transaction(self):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")

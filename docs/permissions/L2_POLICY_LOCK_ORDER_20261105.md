@@ -9,3 +9,9 @@ A focused regression independently reproduced a lock-order defect in the install
 InstancePolicies now uses a separate SessionStore reader over the same canonical PAO database, instance and attachment configuration. SQLite WAL exposes committed Workzone state without waiting on the in-process Run mutex. No policy snapshot is cached or written to another profile. The authority transaction, real Run fence, policy revision, protected resources, scope ceilings, once consumption and native start rechecks remain in place. A committed Workzone change still invalidates an earlier policy revision.
 
 The regression exercises actual authority evaluation and an actual PAO Run barrier in both L1 and L2. Its timeout is a deadlock watchdog, not a performance target. Red, green, integrated software and native qualification results are kept separately; a software pass is not a service deployment or external frontend pass. See [current WAC closeout](L2_WAC_CLOSEOUT_20261105.md).
+
+## Authority writer coordination
+
+Each PermissionAuthority now queues its own transactions before opening their SQLite connections. This prevents its local threads from exhausting SQLite's external-writer busy timeout behind another local durable commit. The queue covers rollback and trusted-time persistence, and releases on every exit. Independent authorities retain SQLite serialization and service-generation fencing; no failed transaction is blindly retried.
+
+Native Run barrier -> authority queue -> SQLite remains the dispatch order. Policy reads inside the authority still use the independent canonical PAO reader, never the Run barrier's in-process mutex. Both databases retain FULL rollback-journal commits and matching continuity tokens. Integration watchdogs are separate from permission expiry and native cancellation ordering. See [Windows CI diagnosis and red/green evidence](PR133_WINDOWS_CI_DIAGNOSIS_20261105.md).
