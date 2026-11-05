@@ -27,7 +27,8 @@ def unpack_plan(raw):
     cwd = Path(raw["cwd"])
     if not cwd.is_absolute():
         raise PermissionDenied("script workzone identity is missing")
-    expected = describe_tool(TOOL_NAME, arguments, cwd=cwd, read_roots=())
+    # Verify the exact reviewed argument representation before using defaulted views.
+    expected = describe_tool(TOOL_NAME, raw["arguments"], cwd=cwd, read_roots=())
     value = raw["descriptor"]
     descriptor = ToolDescriptor(value["tool_name"], tuple(Scope(**item) for item in value["scopes"]),
                                 value["arguments_digest"], value["coverage"], tuple(value["limitations"]))

@@ -10,6 +10,8 @@ Windows Python profile 只包含固定的 `registryRead` capability，满足 SxS
 
 run_script 的正式接口是源码、明确输入及临时输出名称。实际输入文件不在脚本进程内开放；输出回传后保存正式成果仍走文件代理。当前 profile 不支持任意 shell、进程树、隐含联网、原始凭证或安装依赖。目录大小监测是软限制，不称硬配额。
 
+2026-11-05 实机并发补验发现：省略可选 inputs/outputs 时，helper 补入空列表，导致 Runner 重算的摘要与原审批不符，合法脚本被拒绝。固定 helper 现保留原审核 JSON 跨边界传递，Runner 先按原表示验证摘要，再使用缺省值执行；不更换现有摘要算法或重写存量批准。源码、输入、输出与其余执行事实变化仍被拒绝。跨真实 helper/Runner 的协议回归原先三失败、一通过，修复后相关二十二项通过；原生并发须在完整新版本重跑，不能把模型答复完成当作脚本执行成功。
+
 已确认尚未执行的文件绑定失败，必须在所有初始资源关闭后记录 authority-owned prestart failure；不创建假 claim，不消费 once。其摘要与加密结果可核对恢复。已经创建 claim、可能 ResumeThread、部分写入或无法确认清理的错误仍保持 unknown/待对账。权限数据库版本 8 的迁移是一个事务，原有决定和 lease 不改写。
 
 HTTP 的域名、方法、DNS 固定与连接验证不构成禁止外传证明；调用者可在 URL 路径携带信息，因此 GET/HEAD 也需要 send。具名凭证由安装配置限制精确 HTTPS origin、方法和允许响应字段；秘密不进模型、日志或返回体。

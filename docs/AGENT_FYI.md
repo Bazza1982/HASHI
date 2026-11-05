@@ -16,6 +16,7 @@
 - 权限账本 schema 9 用独立见证拒绝旧备份复活撤销；普通备份不回滚见证。仅受信 Windows 操作者可离线归档、撤销旧权限并保进度，不自动重放未知效果；[维护流程](permissions/LEDGER_MAINTENANCE.md)、[决定](permissions/L2_LEDGER_CONTINUITY_20261105.md)、[补验责任](permissions/L2_WAC_CLOSEOUT_20261105.md)。
 
 - L0 保留原执行行为。L1 保留现有批准/续跑；Workzone 不自动成为 OS 硬围栏。L2 硬 Workzone 只保证已验收的 HERV3 受控链：精确根、缺根拒绝、普通审批不扩根，换工具/脚本不能逃逸；独立 backend 和 Compute 执行须另验。[硬边界](permissions/L2_HARD_WORKZONE.md)。
+- run_script 的可选列表可省略；默认值仅作执行视图，跨 helper/Runner 保留原审核参数摘要。[执行决定](permissions/IMPLEMENTATION_DECISION_20261030.md)。
 - L2 host 恢复与审计回原 owner；审计按 epoch 去重，失败不退本地 spool。心跳不是进展；私有桌面/管道/身份不扩权。SCM/profile 回收须核对 SID 与双 hive；维护后的延迟回收不冒充即时卸载。[原生证据与未完成范围](permissions/L2_INTEL_LOCAL_QUALIFICATION_20261105.md)、[WAC](permissions/L2_WINDOWS.md)、[状态](permissions/IMPLEMENTATION_STATUS.md)。
 - JSON 用读版本、锁、私有候选和原子发布；显示默认值不能写回，冲突/已提交耐久性错误不重试。agents.json 为已安装 Safety SID 保留只读权，包括 Move 发布与恢复；secrets 不共享，不复制旧 ACL。[持久化](HASHI_CONFIGURATION_PERSISTENCE.md)。
 - Move 确认后向前收尾，迁出/返回凭证绑定源实例和 lifecycle；恢复只处理事务仍拥有的发布，不覆盖他人修改。Clone 用 PAO owner 快照、可恢复重试，不写 Move-only 源生命周期。[Move/Clone](HASHI_AGENT_MOVE_V1.md)。
