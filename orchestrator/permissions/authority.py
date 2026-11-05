@@ -518,7 +518,9 @@ class PermissionAuthority:
         self._wall_anchor = float(clock())
         self._monotonic_anchor = float(monotonic())
         self._clock_lock = threading.Lock()
-        self._transaction_lock = threading.RLock()
+        from orchestrator.permissions.transaction_queue import LedgerTransactionQueue
+
+        self._transaction_lock = LedgerTransactionQueue()
         self._clock_observations: dict[int, tuple[float, float]] = {}
         self._service_generation: str | None = None
         if not math.isfinite(self._wall_anchor) or not math.isfinite(self._monotonic_anchor):

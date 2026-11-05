@@ -9,7 +9,7 @@ PAO owns tool capability, permission admission and recovery in Functions. PCM pr
 ## Distinctions
 Permission levels and model privacy levels are different axes. Identity assurance, relay origin and role names do not grant side effects. An answer to a Run question supplies information, not approval. Unknown commits, private denials and ordinary failures must remain distinct.
 
-L0 retains ordinary execution; personal L1 approval does not authenticate a governed L2 decision. Hard L2 Workzone guarantees apply only to qualified HERV3 execution paths; an independent backend or external Compute executor needs separate qualification. Ordinary approval cannot expand the Workzone.
+L0 retains ordinary execution; personal L1 approval does not authenticate a governed L2 decision. The opt-in [governed browser approval path](../permissions/GOVERNED_HUMAN_APPROVAL.md) uses a normal frontend URL button, an independently verified human login, exact issued decisions, and the original Run fence. Its invitation grants nothing. Hard L2 Workzone guarantees apply only to qualified HERV3 execution paths; an independent backend or external Compute executor needs separate qualification. Ordinary approval cannot expand the Workzone.
 
 ## Authoritative documents
 - [PAO tools and permissions](../HASHI_PAO_SYSTEM_DESIGN.md#24-skills-tools-permissions-and-execution).

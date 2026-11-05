@@ -185,9 +185,22 @@ def _decision_markup(runtime, update, request_id, *, compact=False):
     view = authority.get_session_request(subject, request_id)
     if view.request.state != "pending" or view.task_state not in {"active", "paused"} or view.binding_state != "active":
         return None, ""
-    actions = current_permission_ingress().issue_actions(
-        subject, request_id, view.request.revision, presentation_id=str(update.update_id),
-    )
+    from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
+    from orchestrator.permissions.wire import PermissionRemoteError
+
+    ingress = current_permission_ingress()
+    try:
+        actions = ingress.issue_actions(
+            subject, request_id, view.request.revision, presentation_id=str(update.update_id),
+        )
+    except (SessionDecisionDenied, PermissionRemoteError) as error:
+        if isinstance(error, PermissionRemoteError) and error.code != "SessionDecisionDenied":
+            raise
+        url = ingress.human_approval_link(subject, request_id, view.request.revision,
+                                          locale=ui_language.current_locale())
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            ui_language.tr("safety.human_open"), url=url,
+        )]]), ""
     if compact:
         actions = tuple(sorted(
             (action for action in actions if action.lifetime != "run"),

@@ -167,6 +167,12 @@ jobs:
           tests/test_permission_ledger_maintenance.py
           tests/test_permission_signed_receipts.py tests/test_permission_actions.py
           tests/test_permission_transaction_contention.py
+          tests/test_permission_service_responsiveness.py tests/test_permission_human_approval.py
+          tests/test_agent_fyi.py tests/test_agent_deletion.py tests/test_private_files.py
+          tests/test_agent_move_service.py tests/test_agent_move_manager.py
+          tests/test_agent_move_coordinator.py tests/test_agent_move_package.py tests/test_remote_agent_move.py
+          tests/test_workzone.py tests/test_runtime_workzone.py tests/test_workzone_pending_projection.py
+          tests/test_workbench_workzone_management.py tests/test_telegram_access_workzone.py
           tests/test_permission_policy_run_lock.py
           tests/test_permission_remote_presentation.py
           tests/test_permission_windows_file_binding.py tests/test_permission_windows_supervisor.py
@@ -259,6 +265,12 @@ jobs:
           tests/test_permission_capabilities.py
           tests/test_permission_actions.py
           tests/test_permission_transaction_contention.py
+          tests/test_permission_service_responsiveness.py tests/test_permission_human_approval.py
+          tests/test_agent_fyi.py tests/test_agent_deletion.py tests/test_private_files.py
+          tests/test_agent_move_service.py tests/test_agent_move_manager.py
+          tests/test_agent_move_coordinator.py tests/test_agent_move_package.py tests/test_remote_agent_move.py
+          tests/test_workzone.py tests/test_runtime_workzone.py tests/test_workzone_pending_projection.py
+          tests/test_workbench_workzone_management.py tests/test_telegram_access_workzone.py
           tests/test_permission_policy_run_lock.py
           tests/test_permission_remote_presentation.py
           tests/test_permission_enterprise_decisions.py

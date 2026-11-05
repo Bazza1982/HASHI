@@ -355,10 +355,10 @@ def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch, separa
     protection = []
     protect = private_files.protect_private_file
 
-    def track(path, *, additional_full_control_sids=()):
+    def track(path, *, additional_full_control_sids=(), **options):
         if path.name.startswith(".secrets.json."):
             protection.append(tuple(additional_full_control_sids))
-        protect(path, additional_full_control_sids=additional_full_control_sids)
+        protect(path, additional_full_control_sids=additional_full_control_sids, **options)
 
     monkeypatch.setattr(private_files, "protect_private_file", track)
     service = AgentDeletionService(paths)

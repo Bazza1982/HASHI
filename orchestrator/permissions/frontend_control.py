@@ -24,12 +24,14 @@ class PermissionIngress:
     controller: object = field(repr=False, compare=False)
     session_token: str = field(repr=False, compare=False)
     connection_binding: str
+    approval_link: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if (not isinstance(self.subject, PermissionSubject)
                 or not callable(getattr(self.controller, "submit_session_decision", None))
                 or not isinstance(self.session_token, str)
-                or not isinstance(self.connection_binding, str) or not self.connection_binding):
+                or not isinstance(self.connection_binding, str) or not self.connection_binding
+                or self.approval_link is not None and not callable(self.approval_link)):
             raise ValueError("original authenticated frontend context is required")
 
     def issue_actions(self, subject, request_id, revision, *, presentation_id):
@@ -38,6 +40,13 @@ class PermissionIngress:
         return self.controller.issue_session_actions(
             subject, request_id, revision, session_token=self.session_token,
             presentation_id=presentation_id,
+        )
+
+    def human_approval_link(self, subject, request_id, revision, *, locale):
+        if subject != self.subject or not callable(self.approval_link):
+            raise SessionDecisionDenied("governed human approval is unavailable")
+        return self.approval_link(
+            subject, request_id, revision, locale=locale, connection_binding=self.connection_binding,
         )
 
     def submit_action(self, subject, action_id):

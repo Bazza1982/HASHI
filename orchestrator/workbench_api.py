@@ -552,6 +552,8 @@ class WorkbenchApiServer:
         register_call_api(self)
         from orchestrator.standby.routes import register_standby_api
         register_standby_api(self)
+        from orchestrator.permissions.human_approval import register_human_approval
+        register_human_approval(self)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)

@@ -1,10 +1,12 @@
 """One authority queues its own writers instead of losing a valid UI action."""
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from threading import Event
+from threading import Event, local
+import time
 
 import pytest
 
-from tests.test_permission_actions import _issue, setup_actions as setup_actions
+from tests.test_permission_actions import _issue, _receipt, setup_actions as setup_actions
+from tests.test_permission_signed_receipts import _token
 
 
 def test_same_authority_waits_for_its_active_commit_without_sqlite_busy_failure(setup_actions, monkeypatch):
@@ -53,4 +55,51 @@ def test_same_authority_waits_for_its_active_commit_without_sqlite_busy_failure(
     assert first_action == second_action
     assert authority.decision_count(request.request_id) == 0
     assert not authority.evaluate(context, [scope], operation_id="operation")
+def test_waiting_revocation_precedes_later_status_poll(setup_actions, monkeypatch):
+    authority, key, _, _, context, scope, request = setup_actions
+    action = _issue(authority, context, request, [scope], lifetime="task")
+    lease = authority.decide(_token(key, _receipt(action, context)), approved_scopes=[scope], action_id=action.action_id)
+    entered, release = Event(), Event()
+    caller, commits = local(), []
+    advance = authority._advance_continuity
+
+    def commit(connection):
+        advance(connection)
+        commits.append(caller.label)
+        if caller.label == "first":
+            entered.set()
+            assert release.wait(10)
+
+    def invoke(label):
+        caller.label = label
+        if label == "revoke":
+            return authority.revoke(context, lease.lease_id)
+        return authority.evaluate(context, [scope], operation_id="future")
+
+    def queued(count):
+        # Observe arrival only to arrange the schedule; the assertion below
+        # concerns the real committed revocation and later access result.
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            with authority._transaction_lock._condition:
+                if len(authority._transaction_lock._waiting) >= count:
+                    return
+            time.sleep(.001)
+        raise AssertionError("caller did not reach the transaction boundary")
+
+    monkeypatch.setattr(authority, "_advance_continuity", commit)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(invoke, "first")
+        try:
+            assert entered.wait(10)
+            revoke = pool.submit(invoke, "revoke")
+            queued(1)
+            later = pool.submit(invoke, "later")
+            queued(2)
+        finally:
+            release.set()
+        assert first.result(timeout=10)
+        revoke.result(timeout=10)
+        assert not later.result(timeout=10)
+    assert commits == ["first", "revoke", "later"]
 # HASHI-Fingerprint: hfp_43b6547acd8f4ef3826059d1587a5249

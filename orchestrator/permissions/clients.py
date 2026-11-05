@@ -37,8 +37,12 @@ def service_clients(global_config):
     raw = getattr(global_config, "permission_service", None)
     required = {"version", "instance_id", "pao_endpoint", "control_endpoint", "public_key"}
     if (not isinstance(raw, dict) or not required.issubset(raw)
-            or set(raw) - required - {"service_sid"} or raw["version"] != 1):
+            or set(raw) - required - {"service_sid", "approval_origin"} or raw["version"] != 1):
         raise PermissionDenied("a qualified permission service installation is required")
+    if "approval_origin" in raw:
+        from orchestrator.permissions.human_approval import approval_origin
+
+        approval_origin(raw["approval_origin"])
     if str(raw["instance_id"]).upper() != str(global_config.instance_id).upper():
         raise PermissionDenied("permission service belongs to another instance")
     from orchestrator.permissions.windows_ipc import _PIPE
