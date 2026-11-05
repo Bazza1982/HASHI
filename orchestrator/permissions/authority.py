@@ -715,16 +715,16 @@ class PermissionAuthority:
             connection.close()
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, *, force_commit=False):
         # Queue this service's writers before opening their SQLite connections.
         # Otherwise local callers consume SQLite's external-writer busy budget
         # while another local commit is still flushing both durable databases.
         # Independent owners still meet BEGIN IMMEDIATE and generation fencing.
-        with self._transaction_lock, self._ledger_transaction() as connection:
+        with self._transaction_lock, self._ledger_transaction(force_commit=force_commit) as connection:
             yield connection
 
     @contextmanager
-    def _ledger_transaction(self):
+    def _ledger_transaction(self, *, force_commit=False):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -736,8 +736,13 @@ class PermissionAuthority:
                 if active is None or active["value"] != self._service_generation:
                     raise PermissionDenied("permission service generation is fenced")
             yield connection
-            self._advance_continuity(connection)
-            connection.commit()
+            if force_commit or connection.total_changes:
+                self._advance_continuity(connection)
+                connection.commit()
+            else:
+                # All reads and fences still ran under the same transaction.
+                # No state or time changed, so no new durable head is needed.
+                connection.rollback()
         except BaseException:
             # Roll back business state, but do not forget a later clock observed
             # by the rejected transaction: a restart must not revive a lease.
@@ -746,12 +751,16 @@ class PermissionAuthority:
             connection.rollback()
             if observation is not None:
                 try:
+                    previous_changes = connection.total_changes
                     connection.execute("BEGIN IMMEDIATE")
                     self._check_continuity(connection)
                     self._store_time_floor(connection, "wall_high_water", observation[0])
                     self._store_time_floor(connection, "effective_high_water", observation[1])
-                    self._advance_continuity(connection)
-                    connection.commit()
+                    if connection.total_changes != previous_changes:
+                        self._advance_continuity(connection)
+                        connection.commit()
+                    else:
+                        connection.rollback()
                 except BaseException as exc:
                     connection.rollback()
                     raise PermissionDenied("trusted time could not be persisted") from exc
@@ -916,7 +925,8 @@ class PermissionAuthority:
             raise ValueError("permission ledger pending uniqueness is incomplete")
 
     def _initialize(self) -> None:
-        with self._transaction() as connection:
+        # DDL/PRAGMA schema changes are not counted by SQLite total_changes.
+        with self._transaction(force_commit=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version in {1, 2, 3, 4, 5, 6, 7, 8, _SCHEMA_VERSION}:
                 self._validate_schema(connection, version)
@@ -1017,6 +1027,8 @@ class PermissionAuthority:
         old = cls._time_floor(connection, key)
         if old is not None:
             value = max(value, old)
+            if value == old:
+                return
         connection.execute(
             "INSERT INTO authority_metadata(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

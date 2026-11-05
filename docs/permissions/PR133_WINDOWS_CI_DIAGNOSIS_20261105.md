@@ -1,5 +1,17 @@
 # PR #133 Windows CI contention and watchdogs
 
+## Final native read: remove unchanged-state durable writes
+
+At `0484226bbf757d550730deef2a4b2e25a62d55a9`, PR run `42024751560` passed on both platforms, but the independent Windows push run `42024742848` failed the original bound-read case at its unchanged ten-second contract watchdog (1249 passed, 17 skipped, one failure). Its preserved trace waited for the synchronous file supervisor to settle after cancellation. It has no inner-thread transaction timing; the exact hosted storage/scheduling event remains unmeasured.
+
+The source rewrote both identical trusted-time floors and the continuity head during status-only reads. A controlled run delays each real ledger commit by 900 ms and keeps the original native read function, all its assertions and the same ten-second watchdog. Before correction it makes 28 commits and times out. After correction it makes nine commits and passes; that probe and the complete Windows supervisor module pass together (16 checks). These are controlled measurements, not reconstructed timings of the failed hosted runner.
+
+A read now skips floor writes only when the exact durable value is unchanged. Every call still acquires the same FIFO transaction, checks the independent witness and live service/Run/permission facts, and reads current database state. If neither authority data nor trusted time changes, it releases that transaction without another commit or witness rotation. Any mutation or exact time advance still requires the original atomic FULL dual-database/witness commit. There is no time rounding, cache, batching interval, rate limit, retry or deadline extension.
+
+Schema initialization explicitly commits because SQLite row-change counts do not include DDL or user_version updates. Rejected transactions compare row changes after their business rollback before persisting new time. A real witness-abort regression rejects the old read-only flush, while also proving that revocation or a new clock floor cannot succeed when their witness write fails. Successful and rejected reads with new time both persist the floor and reject a later rollback/restart.
+
+The existing FIFO test now arranges a real new clock floor before holding its first durable commit; the later unchanged-time denied poll needs no write. The stale-maintenance test likewise creates a real persisted time revision, retaining its original conflict and atomicity assertions. No original failure is overwritten or called a pass.
+
 ## Final integration: fingerprint receipt verification
 
 At integrated source `80ac21876b7011fc7dca5a2c5afe9dd804f21a2b`, GitHub run `42019903648` failed the Windows fingerprint receipt-only integration at its two-second test watchdog. The retained native runner trace reached `PermissionExecutionGate._verified_receipt` and was cancelled while reading back the committed operation; it did not report an additional file effect or a permission rejection. Its exact host storage/scheduling event is not reconstructable from that log.

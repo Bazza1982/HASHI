@@ -330,4 +330,45 @@ def test_wal_ledger_is_rejected_without_migrating_or_fencing_the_live_owner(serv
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
     assert authority.evaluate(context, [scope])
+def test_unchanged_status_read_does_not_rewrite_durable_witness(service):
+    from contextlib import closing
+    import sqlite3
+
+    path, authority, issuer, clock, context, scope = service
+    request, _, lease = approve(authority, issuer, clock, context, [scope])
+    witness = authority.continuity_path
+    with closing(sqlite3.connect(witness)) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_update BEFORE UPDATE ON ledger_head "
+            "BEGIN SELECT RAISE(ABORT,'injected witness failure'); END"
+        )
+    # No new time or authority state: a read must not require another flush.
+    assert authority.evaluate(context, [scope])
+    assert authority.get_request(context, request.request_id).request_id == request.request_id
+    # A real authority change must still fail closed if its witness cannot commit.
+    with pytest.raises((PermissionDenied, sqlite3.DatabaseError)):
+        authority.revoke(context, lease.lease_id)
+    assert authority.evaluate(context, [scope])
+    clock.value += 1
+    with pytest.raises((PermissionDenied, sqlite3.DatabaseError)):
+        authority.evaluate(context, [scope])
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_new_time_from_status_read_is_durable_before_restart(service, rejected):
+    path, authority, issuer, clock, context, scope = service
+    approve(authority, issuer, clock, context, [scope])
+    before = authority.continuity_path.read_bytes()
+    clock.value += 1
+    if rejected:
+        with pytest.raises(PermissionDenied):
+            authority.get_request(context, "absent")
+    else:
+        assert authority.evaluate(context, [scope])
+    assert authority.continuity_path.read_bytes() != before
+    clock.value -= 1
+    with pytest.raises(PermissionDenied, match="clock rollback"):
+        _reopen(path, issuer, clock)
+
+
 # HASHI-Fingerprint: hfp_8c38980848b44ab383f3cf782dbcd5b3

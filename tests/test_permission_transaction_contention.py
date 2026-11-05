@@ -56,7 +56,7 @@ def test_same_authority_waits_for_its_active_commit_without_sqlite_busy_failure(
     assert authority.decision_count(request.request_id) == 0
     assert not authority.evaluate(context, [scope], operation_id="operation")
 def test_waiting_revocation_precedes_later_status_poll(setup_actions, monkeypatch):
-    authority, key, _, _, context, scope, request = setup_actions
+    authority, key, _, clock, context, scope, request = setup_actions
     action = _issue(authority, context, request, [scope], lifetime="task")
     lease = authority.decide(_token(key, _receipt(action, context)), approved_scopes=[scope], action_id=action.action_id)
     entered, release = Event(), Event()
@@ -88,6 +88,7 @@ def test_waiting_revocation_precedes_later_status_poll(setup_actions, monkeypatc
         raise AssertionError("caller did not reach the transaction boundary")
 
     monkeypatch.setattr(authority, "_advance_continuity", commit)
+    clock[0] += 1  # The first poll has new trusted time to durably commit.
     with ThreadPoolExecutor(max_workers=3) as pool:
         first = pool.submit(invoke, "first")
         try:
@@ -101,5 +102,5 @@ def test_waiting_revocation_precedes_later_status_poll(setup_actions, monkeypatc
         assert first.result(timeout=10)
         revoke.result(timeout=10)
         assert not later.result(timeout=10)
-    assert commits == ["first", "revoke", "later"]
+    assert commits == ["first", "revoke"]  # The denied unchanged-time poll is read-only.
 # HASHI-Fingerprint: hfp_43b6547acd8f4ef3826059d1587a5249

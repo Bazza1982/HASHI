@@ -18,7 +18,7 @@ L0 retains ordinary execution; personal L1 approval does not authenticate a gove
 - [Windows L2 contract](../permissions/L2_WINDOWS.md).
 - [Live runtime protection](../HASHI_LIVE_RUNTIME_PROTECTION.md).
 - [Ledger continuity](../permissions/L2_LEDGER_CONTINUITY_20261105.md) and [trusted offline maintenance](../permissions/LEDGER_MAINTENANCE.md): independent witness, private archives, progress-preserving recovery and idempotent replay.
-- [Authority/Run lock ordering](../permissions/L2_POLICY_LOCK_ORDER_20261105.md) and [Windows CI diagnosis](../permissions/PR133_WINDOWS_CI_DIAGNOSIS_20261105.md): durable time, writer coordination and separate contract watchdogs.
+- [Authority/Run lock ordering](../permissions/L2_POLICY_LOCK_ORDER_20261105.md) and [Windows CI diagnosis](../permissions/PR133_WINDOWS_CI_DIAGNOSIS_20261105.md): durable time, FIFO writer coordination and separate contract watchdogs. Only exact unchanged-state/time reads avoid a redundant flush; new authority or time still requires the atomic dual-database witness commit.
 - [Frontend presentation boundary](../permissions/L2_FRONTEND_PRESENTATION_20261105.md) and [formal WAC closeout](../permissions/L2_WAC_CLOSEOUT_20261105.md): distinguish authenticated decisions, pending qualification and historical native receipts.
 
 ## Source and verification

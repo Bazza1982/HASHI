@@ -85,6 +85,7 @@ def test_failed_maintenance_is_atomic_and_does_not_displace_live_authority(servi
     approve(authority, issuer, clock, context, [scope])
     revision = PermissionAuthority.inspect_ledger(path)["revision"]
     if fault == "stale":
+        clock.value += 1  # A newly persisted floor makes the captured revision stale.
         assert authority.evaluate(context, [scope])
     if fault == "witness":
         with closing(sqlite3.connect(authority.continuity_path)) as connection:
