@@ -624,7 +624,8 @@ def seal_portable_roles(staging: Path, build_temp: Path, cache: Path | None = No
     create_capsule(
         staging, app, build_temp / "role-qualifications",
         function_manifest=manifest.to_dict(), function_source=source,
-        sidecar_roots=("runtime/bin", "runtime/media"))
+        sidecar_roots=("runtime/bin", "runtime/media",
+                       "app/hashi/voice_models/piper", "app/hashi/hashi_assets/ocr"))
     return pack_release_payloads(staging, app, cache_root=cache / "verified-runtime-payloads" if cache else None)
 
 

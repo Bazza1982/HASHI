@@ -371,3 +371,39 @@ resources. Complete final rebuilt Portable and npm artifacts and final full
 source CI are still pending at this implementation checkpoint. PR140 remains
 Draft; exact-tree independent human Core review, main integration, account/WAC
 qualification and operator adoption remain separate gates.
+
+## Capacity and native fixture follow-up
+
+The exact d1af76b1 npm artifact passed fresh installation, complete product
+preparation (668 modules/727 resources) and role resealing in 544.05 command
+seconds. Its original Python base and existing-data witness were unchanged;
+media/privacy opt-outs remain explicit. Linux runtime and both actual enterprise
+image profiles passed on that source. The original Windows PR patch gate
+preserved a 67-pass/1-fail voice-observation polling timeout; its branch continued
+through complete offline regression.
+
+The full Portable build correctly rejected 1114800128 bytes of 32 KiB allocated
+space after 1341.06 seconds. That failure and the unchanged 957000000-byte
+limit remain. Real lossless OCR/voice resource measurements recover 95617024
+allocated bytes; independently measured Deflate transfer of all 2294 original
+Core files recovers another 97845248 bytes. These are measurements, not a final
+capacity or installed-runtime acceptance claim.
+
+The platform capsule now carries six fixed complete payload roots. Windows
+expands Core using only native ZIP support, requires an exact ordinary-file
+closure, hashes every file, rejects aliases, startup hooks, size mismatches and
+overwrites, then invokes the canonical Python verifier. Core's uncompressed
+bytes/role identity are unchanged. All executable Function source remains
+expanded. Packed opaque OCR/voice resources additionally match their complete
+published source table; they cannot introduce Python source or replace any
+executable Function manifest member. Final installed qualification still
+requires every payload expanded.
+
+The voice fixture awaits its actual tracked observation/continuation tasks
+instead of repeatedly querying SQLite under a two-second polling deadline.
+Production observation timing is unchanged; original exact-content, bounded
+continuation and unconfirmed-playback assertions remain. The initial combined
+source-asset, packaging and voice scope passed 96 cases; native Core-transfer
+negatives and the full final rebuilt image remain to be qualified after this
+implementation checkpoint. Source setup instructions also use the existing
+qualified Functions launcher for onboarding.

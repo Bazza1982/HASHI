@@ -28,7 +28,9 @@ def main(argv=None):
                 "qualify-installed": qualify_relocated_roles,
                 "verify-installed": verify_installed_roles}[args.operation]
     result = function(image, code)
-    print(json.dumps({"status": "qualified", "operation": args.operation,
+    status = {"verify-bundle": "verified", "expand-bundle": "expanded",
+              "qualify-installed": "qualified", "verify-installed": "qualified"}[args.operation]
+    print(json.dumps({"status": status, "operation": args.operation,
                       "schema_version": result["schema_version"]}))
     return 0
 

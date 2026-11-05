@@ -5,8 +5,12 @@ bundle for a USB drive whose total capacity is 957,000,000 bytes. It does not
 write to or format a USB device.
 
 Core v5 bundles independently qualified Core and Functions interpreters. The
-Functions interpreter, speech resources and runtime tools travel in lossless
-LZMA ZIP payloads; Core remains directly available for the stdlib-only installer.
+Functions interpreter, speech resources, OCR resources and runtime tools travel
+in lossless LZMA ZIP payloads. Core uses a native-supported Deflate ZIP: the
+Windows installer verifies the archive and every extracted Core file before
+using Python, then the canonical qualifier verifies/expands the remaining
+payloads. No runtime selection is published at this stage. The executable
+Function catalogue stays expanded.
 The capsule retains every uncompressed file hash and runtime identity. Before
 changing an existing installation, staging verifies archive bytes and the full
 expanded file sets. Missing, extra, redirected, altered or unsafe members fail

@@ -660,11 +660,18 @@ async def test_reply_ack_is_not_audible_and_lost_ack_has_bounded_resume(phone):
 @pytest.mark.asyncio
 async def test_no_output_gets_one_substantive_continuation_and_then_stops(phone):
     await phone.manager._offer_action_reply(phone.binding, "answer-one", "The report has two completed checks and no incidents.")
-    async def wait_until_unconfirmed():
-        while not event_details(phone, "voice.live.action.reply_unconfirmed"):
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(wait_until_unconfirmed(), timeout=2.0)
+    # Await the real tracked observation/continuation chain. Polling SQLite
+    # every 10 ms competed with the same durable writes on Windows runners;
+    # this is a bounded behavior check, not a two-second latency contract.
+    for _ in range(2):
+        observers = [task for task in phone.manager._relay_tasks
+                     if task.get_name() == "hashi-live-reply-answer-one" and not task.done()]
+        assert observers, "The reply must have a tracked observation task"
+        await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in observers)), timeout=10)
+        if event_details(phone, "voice.live.action.reply_unconfirmed"):
+            break
+    assert not any(task.get_name() == "hashi-live-reply-answer-one" and not task.done()
+                   for task in phone.manager._relay_tasks)
     contents = [payload["content"] for _, payload in phone.updates]
     assert contents == ["The report has two completed checks and no incidents."] * 2
     assert event_details(phone, "voice.live.action.reply_unconfirmed")
@@ -855,3 +862,4 @@ async def test_effect_reply_uses_frozen_phone_locale_and_stale_judgment_is_rejec
     with pytest.raises(Exception, match="live_scope_changed"):
         await worker_actions.handle_phone_action_operation(runtime, "judge",
             {"owner_id":phone.owner_id, "scope":phone.scope, "state":{"utterance":"Record that"}})
+# HASHI-Fingerprint: hfp_99481fd120184d6eb355b6ab35eb7403

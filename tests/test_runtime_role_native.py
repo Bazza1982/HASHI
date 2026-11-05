@@ -413,7 +413,7 @@ def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_
     capsule = create_capsule(image, code, tmp_path / "build-observations",
                              function_manifest=manifest)
     original_ids = {name: record["runtime_id"] for name, record in capsule["roles"].items()}
-    capsule = pack_release_payloads(image, code, roots=("runtime/functions",))
+    capsule = pack_release_payloads(image, code, roots=("runtime/core", "runtime/functions"))
     assert (image / "runtime/functions.payload.zip").is_file()
     assert not (image / "runtime/functions").exists()
     assert {name: record["runtime_id"] for name, record in capsule["roles"].items()} == original_ids

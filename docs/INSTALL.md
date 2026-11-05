@@ -226,10 +226,11 @@ The optional Level 2 detector is prepared independently. It is never enabled
 automatically; a failed preparation leaves Level 2 unavailable. Explicit
 media opt-outs are reported as partial installations, not complete readiness.
 
-Open the local connection page from the repository root:
+Open the connection setup through the qualified Functions launcher from the
+repository root:
 
 ```bash
-python -m onboarding.onboarding_main
+node cli.js onboard
 ```
 
 Choose a detected CLI engine or a HERV3 Model Provider, enter any required

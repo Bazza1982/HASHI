@@ -84,14 +84,16 @@ def _verify_sidecar_files(root, table):
             raise RuntimeContractError(f"Sidecar resource hash mismatch: {relative}")
 
 
-PAYLOAD_ROOTS = ("runtime/functions", "runtime/media", "runtime/bin")
+SOURCE_ASSET_ROOTS = ("app/hashi/voice_models/piper", "app/hashi/hashi_assets/ocr")
+SIDECAR_ROOTS = ("runtime/media", "runtime/bin", *SOURCE_ASSET_ROOTS)
+PAYLOAD_ROOTS = ("runtime/core", "runtime/functions", *SIDECAR_ROOTS)
 MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 * 1024
 
 
 def _payload_files(value, relative):
-    if relative == "runtime/functions":
-        return value["roles"]["functions"]["files"]
-    if relative in {"runtime/media", "runtime/bin"} and relative in value["sidecars"]:
+    if relative in {"runtime/core", "runtime/functions"}:
+        return value["roles"][relative.rsplit("/", 1)[1]]["files"]
+    if relative in SIDECAR_ROOTS and relative in value["sidecars"]:
         return value["sidecars"][relative]
     raise RuntimeContractError("Unexpected release payload root")
 
@@ -142,9 +144,11 @@ def _verified_payload(image_root, relative, record, table):
         raise RuntimeContractError("Release payload metadata is invalid")
     for name, checksum in table.items():
         _payload_member(name)
+        if relative in SOURCE_ASSET_ROOTS and Path(name).suffix.lower() in {".py", ".pyc", ".pyo", ".pth"}:
+            raise RuntimeContractError("Opaque source asset payload cannot contain Python code or startup hooks")
         if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
             raise RuntimeContractError("Release payload file checksum is invalid")
-        if relative == "runtime/functions" and (
+        if relative in {"runtime/core", "runtime/functions"} and (
             name.lower().endswith(".pth") or Path(name).name.lower() in {
                 "sitecustomize.py", "sitecustomize.pyc", "usercustomize.py", "usercustomize.pyc"}):
             raise RuntimeContractError("Functions payload may not inject startup hooks")
@@ -156,6 +160,8 @@ def _verified_payload(image_root, relative, record, table):
             raise RuntimeContractError("Release payload archive checksum differs")
     with zipfile.ZipFile(path) as archive:
         for info in _payload_infos(archive, table, record):
+            if relative == "runtime/core" and info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+                raise RuntimeContractError("Core transfer payload must support the native installer")
             with archive.open(info) as stream:
                 if hashlib.file_digest(stream, "sha256").hexdigest() != table[info.filename]:
                     raise RuntimeContractError("Release payload content checksum differs")
@@ -165,7 +171,7 @@ def _verify_payload_root(image_root, relative, table, capsule_path):
     root = image_root / relative
     if root.resolve() != root:
         raise RuntimeContractError("Release payload destination is redirected")
-    if relative == "runtime/functions":
+    if relative in {"runtime/core", "runtime/functions"}:
         verify_runtime_files(root, table, manifest_path=capsule_path)
     else:
         _verify_sidecar_files(root, table)
@@ -200,7 +206,8 @@ def pack_release_payloads(image_root, code_root, *, roots=PAYLOAD_ROOTS, cache_r
                     created.append(target)
                     shutil.copyfileobj(source, output)
             else:
-                with zipfile.ZipFile(target, "x", compression=zipfile.ZIP_LZMA) as archive:
+                compression = zipfile.ZIP_DEFLATED if relative == "runtime/core" else zipfile.ZIP_LZMA
+                with zipfile.ZipFile(target, "x", compression=compression) as archive:
                     created.append(target)
                     for name in sorted(table):
                         archive.write(image_root / relative / name, name)
@@ -244,6 +251,70 @@ def pack_release_payloads(image_root, code_root, *, roots=PAYLOAD_ROOTS, cache_r
         raise
 
 
+def _expand_payload(image_root, record, table, destination_root):
+    with zipfile.ZipFile(image_root / record["archive"]) as archive:
+        for info in _payload_infos(archive, table, record):
+            destination = destination_root.joinpath(*_payload_member(info.filename).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, destination.open("xb") as output:
+                digest = hashlib.sha256()
+                while block := source.read(1024 * 1024):
+                    output.write(block)
+                    digest.update(block)
+            if digest.hexdigest() != table[info.filename]:
+                raise RuntimeContractError("Expanded release payload checksum differs")
+            if os.name != "nt":
+                destination.chmod((info.external_attr >> 16) & 0o777)
+
+
+def _verify_function_source(value, code_root):
+    from orchestrator.function_generation import SourceManifest, verify_source_manifest
+    from orchestrator.function_source_publication import validate_snapshot
+
+    manifest = SourceManifest.from_mapping(value["function_manifest"])
+    verify_source_manifest(manifest, code_root=code_root)
+    source = value["function_source"]
+    if source is None:
+        if (code_root / "orchestrator/runtime_app.py").is_file():
+            raise RuntimeContractError("A complete Portable product requires committed source publication")
+    else:
+        validate_snapshot(source, code_root, required_paths=[
+            entry.relative_path for entry in (*manifest.entries, *manifest.assets)])
+
+
+def _verify_capsule_source(image_root, code_root, value):
+    from orchestrator.function_generation import SourceManifest
+
+    manifest = SourceManifest.from_mapping(value["function_manifest"])
+    from orchestrator.function_source_publication import validate_snapshot
+
+    if value["function_source"] is not None:
+        validate_snapshot(value["function_source"], code_root)
+    for relative in SOURCE_ASSET_ROOTS:
+        if relative not in value.get("payloads", {}) or (image_root / relative).exists():
+            continue
+        prefix = (image_root / relative).relative_to(code_root).as_posix() + "/"
+        if any(entry.relative_path.startswith(prefix) for entry in (*manifest.entries, *manifest.assets)):
+            raise RuntimeContractError("Executable Function manifest members must remain expanded")
+        source = value["function_source"]
+        if source is not None:
+            declared = {name[len(prefix):]: record for name, record in source["files"].items()
+                        if name.startswith(prefix)}
+            table = _payload_files(value, relative)
+            if set(declared) != set(table):
+                raise RuntimeContractError("Packed source asset publication closure differs")
+            with zipfile.ZipFile(image_root / value["payloads"][relative]["archive"]) as archive:
+                for info in archive.infolist():
+                    record = declared[info.filename]
+                    if (record["sha256"] != table[info.filename]
+                            or record["executable"] != bool((info.external_attr >> 16) & 0o111)):
+                        raise RuntimeContractError("Packed source asset publication bytes/mode differ")
+    # Opaque OCR/voice resources do not belong to the executable Function
+    # catalogue. Its original complete verification stays unchanged; the
+    # full resource payload additionally matches its published source table.
+    _verify_function_source(value, code_root)
+
+
 def materialize_release_payloads(image_root, code_root):
     """Expand verified bytes only into fresh runtime roots before qualification."""
     image_root = Path(image_root).absolute()
@@ -259,20 +330,8 @@ def materialize_release_payloads(image_root, code_root):
             continue
         temporary = Path(tempfile.mkdtemp(prefix="." + target.name + ".expanding-", dir=target.parent))
         try:
-            with zipfile.ZipFile(image_root / record["archive"]) as archive:
-                for info in _payload_infos(archive, table, record):
-                    destination = temporary.joinpath(*_payload_member(info.filename).parts)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(info) as source, destination.open("xb") as output:
-                        digest = hashlib.sha256()
-                        while block := source.read(1024 * 1024):
-                            output.write(block)
-                            digest.update(block)
-                    if digest.hexdigest() != table[info.filename]:
-                        raise RuntimeContractError("Expanded release payload checksum differs")
-                    if os.name != "nt":
-                        destination.chmod((info.external_attr >> 16) & 0o777)
-            if relative == "runtime/functions":
+            _expand_payload(image_root, record, table, temporary)
+            if relative in {"runtime/core", "runtime/functions"}:
                 verify_runtime_files(temporary, table, manifest_path=image_root / CAPSULE_PATH)
             else:
                 _verify_sidecar_files(temporary, table)
@@ -331,7 +390,7 @@ def create_capsule(image_root, code_root, qualification_root, *, function_manife
                              expected_functions=functions.fingerprint)
     sidecars = {}
     for relative in sidecar_roots:
-        if relative not in {"runtime/bin", "runtime/media"}:
+        if relative not in SIDECAR_ROOTS:
             raise ValueError("Unexpected sidecar authority root")
         sidecars[relative] = file_table(image_root / relative)
     value = {"schema_version": 1, "core_source_digest": core_source_digest(code_root),
@@ -378,7 +437,7 @@ def verify_capsule(image_root, code_root):
             raise RuntimeContractError("Release capsule runtime root is redirected")
         if root.exists() or relative not in payloads:
             verify_runtime_files(root, record["files"], manifest_path=path)
-    if set(value["sidecars"]) - {"runtime/bin", "runtime/media"}:
+    if set(value["sidecars"]) - set(SIDECAR_ROOTS):
         raise RuntimeContractError("Release capsule sidecar root mismatch")
     for relative, files in value["sidecars"].items():
         root = image_root / relative
@@ -386,17 +445,7 @@ def verify_capsule(image_root, code_root):
             raise RuntimeContractError("Release capsule sidecar root is redirected")
         if root.exists() or relative not in payloads:
             _verify_sidecar_files(root, files)
-    from orchestrator.function_generation import SourceManifest, verify_source_manifest
-    manifest = SourceManifest.from_mapping(value["function_manifest"])
-    verify_source_manifest(manifest, code_root=code_root)
-    from orchestrator.function_source_publication import validate_snapshot
-    source = value["function_source"]
-    if source is None:
-        if (code_root / "orchestrator/runtime_app.py").is_file():
-            raise RuntimeContractError("A complete Portable product requires committed source publication")
-    else:
-        validate_snapshot(source, code_root, required_paths=[
-            entry.relative_path for entry in (*manifest.entries, *manifest.assets)])
+    _verify_capsule_source(image_root, code_root, value)
     return value
 
 

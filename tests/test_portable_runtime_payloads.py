@@ -1,8 +1,10 @@
 """Payload fixtures verify bytes only; they contain no runnable or qualified Python."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import zipfile
 
 import pytest
@@ -95,4 +97,150 @@ def test_registered_runtime_cannot_be_repacked_or_expanded(image):
         capsule.pack_release_payloads(root, code, roots=("runtime/functions",))
     with pytest.raises(RuntimeContractError, match="Qualified"):
         capsule.materialize_release_payloads(root, code)
+@pytest.fixture
+def source_asset_image(image):
+    root, code, value = image
+    for relative in capsule.SOURCE_ASSET_ROOTS:
+        target = root / relative / "fixture.bin"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"complete opaque native resource fixture")
+        value["sidecars"][relative] = file_table(root / relative)
+    value["function_source"] = {
+        "schema_version": 1, "source_commit": "1" * 40,
+        "core_source_digest": value["core_source_digest"],
+        "files": {path.relative_to(code).as_posix(): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "executable": bool(path.stat().st_mode & 0o111),
+        } for path in code.rglob("*") if path.is_file()},
+    }
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(value), encoding="utf-8")
+    return root, code, value
+
+
+def test_opaque_source_assets_roundtrip_with_full_publication_and_function_manifest(source_asset_image):
+    root, code, original = source_asset_image
+    before = file_table(code)
+    packed = capsule.pack_release_payloads(root, code, roots=capsule.SOURCE_ASSET_ROOTS)
+    assert packed["function_manifest"] == original["function_manifest"]
+    assert packed["function_source"] == original["function_source"]
+    assert all(not (root / relative).exists() for relative in capsule.SOURCE_ASSET_ROOTS)
+    assert capsule.verify_capsule(root, code) == packed
+    capsule.materialize_release_payloads(root, code)
+    after = file_table(code)
+    assert {name: after[name] for name in before} == before
+    assert set(after) - set(before) == {
+        "voice_models/piper.payload.zip", "hashi_assets/ocr.payload.zip"}
+    assert capsule.verify_capsule(root, code)["roles"] == original["roles"]
+
+
+def test_packed_resource_must_match_the_entire_published_source_table(source_asset_image):
+    root, code, _original = source_asset_image
+    packed = capsule.pack_release_payloads(root, code, roots=capsule.SOURCE_ASSET_ROOTS)
+    packed["function_source"]["files"]["voice_models/piper/fixture.bin"]["sha256"] = "0" * 64
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(packed), encoding="utf-8")
+    with pytest.raises(RuntimeContractError, match="publication bytes"):
+        capsule.materialize_release_payloads(root, code)
+    assert not (root / capsule.SOURCE_ASSET_ROOTS[0]).exists()
+
+
+def test_executable_function_members_cannot_hide_in_opaque_source_payloads(source_asset_image):
+    from orchestrator.function_generation import AssetEntry
+
+    root, code, _original = source_asset_image
+    packed = capsule.pack_release_payloads(root, code, roots=capsule.SOURCE_ASSET_ROOTS)
+    asset = "voice_models/piper/fixture.bin"
+    published = packed["function_source"]["files"][asset]
+    packed["function_manifest"] = build_source_manifest_from_entries(
+        (), assets=[AssetEntry(asset, published["sha256"], published["executable"])]).to_dict()
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(packed), encoding="utf-8")
+    with pytest.raises(RuntimeContractError, match="must remain expanded"):
+        capsule.verify_capsule(root, code)
+
+
+def test_opaque_resource_payload_cannot_introduce_python_source(source_asset_image):
+    root, code, value = source_asset_image
+    target = root / capsule.SOURCE_ASSET_ROOTS[0] / "uncommitted.py"
+    target.write_text("raise AssertionError('must never execute')", encoding="utf-8")
+    value["sidecars"][capsule.SOURCE_ASSET_ROOTS[0]] = file_table(target.parent)
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(RuntimeContractError, match="cannot contain Python"):
+        capsule.pack_release_payloads(root, code, roots=capsule.SOURCE_ASSET_ROOTS)
+    assert target.is_file()
+def _core_transfer_fixture(image):
+    root, code, value = image
+    (root / "runtime/core/python.exe").write_bytes(b"Non-executable transfer test fixture")
+    value["roles"]["core"]["files"] = file_table(root / "runtime/core")
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(value), encoding="utf-8")
+    return root, code, capsule.pack_release_payloads(root, code, roots=("runtime/core",))
+
+
+def _native_expand_core(root, tmp_path):
+    # Load only these function definitions, never the installer's main body.
+    installer = ROOT / "packaging/portable_windows/templates/launcher/Install-To-PC.ps1"
+    def quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+    script = tmp_path / "expand-core-only.ps1"
+    script.write_text(
+        "$ErrorActionPreference='Stop'\nSet-StrictMode -Version Latest\n"
+        "$tokens=$null; $errors=$null\n"
+        "$ast=[Management.Automation.Language.Parser]::ParseFile("
+        + quote(installer) + ",[ref]$tokens,[ref]$errors)\n"
+        "if ($errors.Count) { throw 'Installer parse failed' }\n"
+        "$names=@('Read-JsonObject','Get-Sha256','Assert-OrdinaryDirectory',"
+        "'Assert-TreeHasNoReparsePoints','Expand-PortableCorePayload')\n"
+        "foreach ($name in $names) {\n"
+        " $matches=@($ast.FindAll({param($node) $node -is "
+        "[Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true))\n"
+        " if ($matches.Count -ne 1) { throw 'Missing exact installer function' }\n"
+        " . ([ScriptBlock]::Create($matches[0].Extent.Text))\n}\n"
+        "Expand-PortableCorePayload -Root " + quote(root) + "\n",
+        encoding="utf-8-sig",
+    )
+    return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                          text=True, capture_output=True, timeout=60)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows installer transfer boundary")
+def test_native_core_expansion_verifies_every_byte_without_executing_a_runtime(image, tmp_path):
+    root, _code, value = _core_transfer_fixture(image)
+    result = _native_expand_core(root, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert file_table(root / "runtime/core") == value["roles"]["core"]["files"]
+    assert not (root / "runtime/hashi-runtime-release.json").exists()
+    assert not (root / "runtime-qualifications").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows installer transfer boundary")
+@pytest.mark.parametrize("failure", ("checksum", "extra", "escape", "startup", "oversize", "existing"))
+def test_native_core_expansion_refuses_corruption_aliases_hooks_and_overwrites(image, tmp_path, failure):
+    root, _code, value = _core_transfer_fixture(image)
+    archive = root / "runtime/core.payload.zip"
+    record = value["payloads"]["runtime/core"]
+    if failure == "checksum":
+        archive.write_bytes(archive.read_bytes() + b"modified archive")
+    elif failure in {"extra", "escape", "startup"}:
+        name = {"extra": "unlisted.bin", "escape": "../escape.bin",
+                "startup": "Lib/sitecustomize.py"}[failure]
+        with zipfile.ZipFile(archive, "a", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr(name, b"must never be used")
+        record["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if failure != "extra":
+            value["roles"]["core"]["files"][name] = hashlib.sha256(b"must never be used").hexdigest()
+            record["file_count"] += 1
+            record["uncompressed_bytes"] += len(b"must never be used")
+    elif failure == "oversize":
+        record["uncompressed_bytes"] -= 1
+    else:
+        destination = root / "runtime/core"
+        destination.mkdir()
+        (destination / "unknown.txt").write_bytes(b"keep this")
+    (root / capsule.CAPSULE_PATH).write_text(json.dumps(value), encoding="utf-8")
+    result = _native_expand_core(root, tmp_path)
+    assert result.returncode != 0
+    assert not (root / "escape.bin").exists()
+    if failure == "existing":
+        assert (root / "runtime/core/unknown.txt").read_bytes() == b"keep this"
+    else:
+        assert not (root / "runtime/core").exists()
+    assert not (root / "runtime/hashi-runtime-release.json").exists()
 # HASHI-Fingerprint: hfp_990ae4fcfd1f483e8a38afcf1e72d1fb

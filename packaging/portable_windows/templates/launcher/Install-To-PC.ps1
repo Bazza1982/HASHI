@@ -594,12 +594,106 @@ function Remove-NewInstallationSafely {
     }
 }
 
+function Expand-PortableCorePayload {
+    param([string]$Root)
+    $capsule = Read-JsonObject -Path (Join-Path $Root 'runtime\role-capsule.json')
+    if ($null -eq $capsule -or [int]$capsule.schema_version -ne 2) { return }
+    $property = $capsule.payloads.PSObject.Properties['runtime/core']
+    if ($null -eq $property) { return }
+    $record = $property.Value
+    if ([string]$record.archive -cne 'runtime/core.payload.zip' -or
+        [string]$record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [long]$record.file_count -lt 1 -or [long]$record.file_count -gt 100000 -or
+        [long]$record.uncompressed_bytes -lt 0 -or [long]$record.uncompressed_bytes -gt 4294967296 -or
+        [string]$capsule.roles.core.root -cne 'runtime/core' -or
+        [string]$capsule.roles.core.fingerprint.role -cne 'core-host') {
+        throw 'The Core transfer payload metadata is invalid.'
+    }
+    foreach ($relative in @('runtime\core', 'runtime\hashi-runtime-release.json', 'runtime-qualifications')) {
+        if (Test-Path -LiteralPath (Join-Path $Root $relative)) {
+            throw 'An existing or qualified Core runtime cannot be overwritten.'
+        }
+    }
+    Assert-TreeHasNoReparsePoints -Root (Join-Path $Root 'runtime') -Description 'The staged runtime'
+    $expected = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $capsule.roles.core.files.PSObject.Properties) {
+        $name = [string]$entry.Name
+        $leaf = ($name.Split('/')[-1]).ToLowerInvariant()
+        if ([string]$entry.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $name.ToLowerInvariant().EndsWith('.pth') -or
+            $leaf -in @('sitecustomize.py', 'sitecustomize.pyc', 'usercustomize.py', 'usercustomize.pyc')) {
+            throw 'The Core transfer file table or startup policy is invalid.'
+        }
+        $expected.Add($name, [string]$entry.Value)
+    }
+    if ($expected.Count -ne [long]$record.file_count -or -not $expected.ContainsKey('python.exe')) {
+        throw 'The Core transfer file closure is invalid.'
+    }
+    $archivePath = Join-Path $Root 'runtime\core.payload.zip'
+    if ((Get-Sha256 -Path $archivePath) -cne [string]$record.sha256) {
+        throw 'The Core transfer archive checksum differs.'
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $temporary = Join-Path $Root ('runtime\.core.expanding-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporary -ErrorAction Stop | Out-Null
+    $archive = $null
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $total = [long]0
+        foreach ($entry in $archive.Entries) {
+            $name = [string]$entry.FullName
+            $kind = ($entry.ExternalAttributes -shr 16) -band 0xF000
+            if (-not $expected.ContainsKey($name) -or -not $seen.Add($name) -or
+                $name -match '[\x00-\x1f<>:"\\|?*]' -or ($kind -ne 0 -and $kind -ne 0x8000) -or
+                ($entry.ExternalAttributes -band 0x400) -ne 0) {
+                throw 'The Core transfer archive contains an unsafe or unexpected member.'
+            }
+            foreach ($part in $name.Split('/')) {
+                if ($part -in @('', '.', '..') -or $part.EndsWith('.') -or $part.EndsWith(' ') -or
+                    $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') {
+                    throw 'The Core transfer archive contains an unsafe path.'
+                }
+            }
+            $total += [long]$entry.Length
+            if ($total -gt [long]$record.uncompressed_bytes) {
+                throw 'The Core transfer archive exceeds its declared size.'
+            }
+        }
+        if ($seen.Count -ne $expected.Count -or $total -ne [long]$record.uncompressed_bytes) {
+            throw 'The Core transfer archive is incomplete.'
+        }
+        foreach ($entry in $archive.Entries) {
+            $destination = Join-Path $temporary ($entry.FullName.Replace('/', '\'))
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
+            $inputStream = $entry.Open()
+            $outputStream = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $inputStream.CopyTo($outputStream) }
+            finally { $outputStream.Dispose(); $inputStream.Dispose() }
+            if ((Get-Sha256 -Path $destination) -cne $expected[$entry.FullName]) {
+                throw 'An expanded Core transfer file checksum differs.'
+            }
+        }
+        $archive.Dispose()
+        $archive = $null
+        if ((Get-Sha256 -Path $archivePath) -cne [string]$record.sha256) {
+            throw 'The Core transfer archive changed during expansion.'
+        }
+        Assert-TreeHasNoReparsePoints -Root $temporary -Description 'The expanded Core runtime'
+        [IO.Directory]::Move($temporary, (Join-Path $Root 'runtime\core'))
+    } finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    }
+}
+
 function Expand-PortableRuntimePayloads {
     param([string]$Root)
     $capsule = Read-JsonObject -Path (Join-Path $Root 'runtime\role-capsule.json')
     if ($null -eq $capsule -or [int]$capsule.schema_version -ne 2) { return }
     # This runs only after the complete staging copy passed SHA-256 verification.
-    # The already bundled zero-dependency interpreter uses stdlib extraction.
+    Expand-PortableCorePayload -Root $Root
+    # Core bytes passed native full-file checks; canonical Python verifies all roles.
     $python = Join-Path $Root 'runtime\core\python.exe'
     $qualifier = Join-Path $Root 'app\hashi\scripts\qualify_portable_runtime.py'
     & $python -I -B $qualifier expand-bundle --image-root $Root

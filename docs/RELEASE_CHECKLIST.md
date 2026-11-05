@@ -23,7 +23,7 @@
   - CPython is the approved 3.12.13 patch and packaging, container, CI and portable builders agree
   - Core uses its own empty lock; Functions wheels install into a fresh directory with --require-hashes from constraints/functions-py312.hashes.lock
   - standard npm/source, Windows controllers, Portable relocation and enterprise image probe the exact separate role pair
-  - Portable lossless payloads pass archive and complete expanded-file verification; qualification before expansion, path aliases, corruption and overwriting an installed runtime are rejected; role IDs remain unchanged after relocation
+  - Portable lossless payloads pass archive and complete expanded-file verification; native Core expansion verifies every file before executing Python; qualification before full expansion, path aliases, corruption, startup hooks and overwriting an installed runtime are rejected; role IDs remain unchanged after relocation
   - retain the unchanged 957 MB transfer/allocation limit, full speech model and expanded destination-space/whole-release rollback checks
   - Git-less packages require installer-owned source publication; local self-asserted manifests never authorize a Function generation
   - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
