@@ -114,6 +114,7 @@ from orchestrator.runtime_common import (
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from orchestrator.agent_fyi import build_agent_fyi_primer
+from orchestrator.agent_documentation import documentation_root
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -312,7 +313,7 @@ class FlexibleAgentRuntime:
         # Hashi Remote subprocess
         self._remote_process: asyncio.subprocess.Process | None = None
         self.skill_manager = skill_manager
-        self.agent_fyi_path = self.global_config.project_root / "docs" / "AGENT_FYI.md"
+        self.agent_fyi_path = documentation_root(self.global_config.project_root) / "docs" / "AGENT_FYI.md"
         self._pending_session_primer: str | None = None
         self._pending_session_primer_session_id: str | None = None
         self._pending_auto_recall_context: str | None = None
@@ -3135,7 +3136,10 @@ class FlexibleAgentRuntime:
             not getattr(self, "_pending_session_primer_session_id", None)
             or self._pending_session_primer_session_id == item_session_id
         ):
-            sections.append(self._pending_session_primer)
+            # Explicit /fyi already contains the current catalogue and common guidance.
+            # Consume the armed primer once without injecting that reference twice.
+            if not item.prompt.startswith("--- AGENT FYI ---\n"):
+                sections.append(self._pending_session_primer)
             self._pending_session_primer = None
             self._pending_session_primer_session_id = None
         if self._pending_auto_recall_context and (
@@ -14117,3 +14121,4 @@ class FlexibleAgentRuntime:
 
     async def shutdown(self):
         await runtime_lifecycle.shutdown(self)
+# HASHI-Fingerprint: hfp_7b4e0374060c4f4db74dab02d8cba9b8

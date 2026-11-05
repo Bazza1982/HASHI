@@ -614,7 +614,20 @@ def _asset_entries(
                 continue
             append_asset(source, relative_text)
 
-    for package in (*_ROOT_PACKAGES, "locales"):
+    # Documentation is an on-demand Function resource, never automatic prompt
+    # inclusion. Keep the same clean-Git publication rule as other assets.
+    from orchestrator.agent_documentation import ROOT_DOCUMENTS
+
+    for relative_text in sorted(ROOT_DOCUMENTS):
+        source = root / relative_text
+        if not source.is_file():
+            continue
+        if publishable is not None and relative_text not in publishable:
+            skipped_optional += 1
+            continue
+        append_asset(source, relative_text)
+
+    for package in (*_ROOT_PACKAGES, "locales", "docs"):
         package_root = root / package
         if not package_root.is_dir():
             continue
@@ -1175,3 +1188,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_ace9e962fbdc4b788ef579b2d372d163

@@ -119,3 +119,13 @@ earlier summary quarantine policy. The command warning and review must say
 that forgotten-period information can remain in untraceable material.
 Implementation, offline checks, HASHI3 Worker adoption and live acceptance
 must each be recorded against their exact source version.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 011 Scoped forgetting and retained audit
+
+- `/forget` removes traceable period data; untraceable summaries may remain.
+  Audit stays outside Context. [PCM](HASHI_PCM_FORGET_2026-10-28.md).

@@ -1438,3 +1438,14 @@ delivery as a separate concern.
 
 This design gives HASHI a serious orchestration primitive that fits both its
 personal assistant roots and its enterprise-grade Agent as Interface direction.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 039 Isolated scheduled work and read-only task lists
+
+Scheduler/恢复/`/bg`用代理自己的隐藏会话；执行、交付、回执分开且各自只终结一次。
+`/bg`入队信息固定，计划任务不承诺聊天回复；`/delay`和交互`/loop`保留上下文。
+任务列表只读权威快照，读取/解析失败带原因/编号，不显示空清单或触发迁移。

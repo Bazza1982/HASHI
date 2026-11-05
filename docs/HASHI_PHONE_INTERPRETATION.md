@@ -39,7 +39,7 @@ This does not claim to implement GPT-Live's conversational or delegation model.
 
 The configured Compute service advertises `hashi.phone.webrtc` and
 `hashi.phone.sideband`. The adapter resolves an exact configured
-node/service/model through the existing Compute directory. It freezes the
+node/service/model through the existing [Compute service directory](HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness). It freezes the
 resolved sideband endpoint for that provider session; browser fields cannot
 choose a provider URL. Credential headers come from the canonical Compute client.
 
@@ -85,3 +85,7 @@ These tests use synthetic microphone input. Physical microphone/speaker use,
 multiple simultaneous calls, a 30-minute call and speaker cloning are outside
 this qualification. Exact receipts, waveforms, source hashes and deployment notes
 belong to the instance evidence bundle, not this source repository.
+
+## FYI catalogue migration
+
+- Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。

@@ -1758,3 +1758,24 @@ No unresolved product-design question blocks the proof of concept.
 Implementation is approved only within the scope and invariants of this
 document. Live calls and audio-model tools remain separate future activation
 decisions.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 008 Audio provenance and failure handling
+
+- PAO语音：同Run确认、丢弃正常停止、放行后复核；文本用授权转写，HER保留来源，显式授权原生音频不等转写；原因跨入口/Worker保留；缺FFmpeg明确报错，不重试合成；/say分阶段报错，不明先查收。[audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md)。
+
+### FYI v1 013 Legacy audio ownership and immutable recovery claims
+
+- Legacy audio migration needs verified ownership/safe paths; PAO settlement
+  is cancellation-safe; HERV3 checkpoint claims are immutable.
+  [audio](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md),
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [HERV3](HERV3_UPGRADE.md).
+
+### FYI v1 049 Media binding and SafeVoice settlement
+
+媒体绑定草稿/实例/代理/Run，Remote不增权；SafeVoice同Run幂等确认/丢弃，各Engine正常终止且不调模型。
+Workbench保留`voice_message`来源并去重界面，普通音频保持可见；Telegram用自身renderer。

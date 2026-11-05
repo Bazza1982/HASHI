@@ -558,3 +558,12 @@ opaque `act` 没有明文 `/safety`，需从服务登记 action 解析；不能�
 [S-CMD-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interactions.py
 [S-CMD-ADAPTER-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interaction_adapters.py
 [S-CMD-TRANSPORT-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interaction_transport.py
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 022 Permission outcome presentation and unknown commits
+
+权限页面保留安全阶段/原因/编号；私密拒绝不泄漏对象，提交不明不谎称未授权，不重放；原认证和审批检查不变。

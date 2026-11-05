@@ -910,3 +910,15 @@ suite passes 158/158, and Protected Core remains clean. These are source and
 deterministic-browser checks. Post-fix HASHI4 Function adoption, a fresh
 renderer, and physical acoustic acceptance remain separate and pending the
 user's lifecycle action.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 020 Call frames and private LAN targets
+
+- Call frames are input-only/cleared camera-off; LAN targets are literal private
+  IPv4 without redirects; preview is not vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+  Tool screenshots use native images, not Base64; Ollama/public Provider IDs
+  follow [HERV3](HERV3_UPGRADE.md).

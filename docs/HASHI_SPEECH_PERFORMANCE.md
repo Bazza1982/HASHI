@@ -56,3 +56,17 @@ retried. Active, cancelled, expired and uncertain outcomes cannot authorize a
 new attempt. Workbench retains completed subsegments until the playback part
 is saved, and only retries the failed remainder. Lost acknowledgements use
 status retrieval under the same identity.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 003 Manual speech direction and reading voice
+
+- Speech: manual /voice and /call direction, frozen reading voice and confirmed-failure retry. [PAO](HASHI_SPEECH_PERFORMANCE.md).
+
+### FYI v1 052 Final-answer reading selection and playback receipts
+
+`/say`读最新final；`2`–`4`选条数，`1-3`选最近三条并从旧到新。跳过费用/命令/进度。
+Telegram须送达回执，Workbench/TUI本地播；reboot回执不证明播放。
