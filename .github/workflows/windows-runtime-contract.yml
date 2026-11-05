@@ -22,6 +22,17 @@ on:
       - "orchestrator/process_execution.py"
       - "orchestrator/reboot_manager.py"
       - "orchestrator/runtime_contract.py"
+      - "main.py"
+      - "orchestrator/kernel_process.py"
+      - "orchestrator/function_worker_bootstrap.py"
+      - "orchestrator/function_worker_supervisor.py"
+      - "orchestrator/runtime_process.py"
+      - "orchestrator/runtime_installation_builder.py"
+      - "scripts/build_runtime_roles.py"
+      - "runtime-entry.json"
+      - "constraints/core-host-py312.lock"
+      - "tests/test_runtime_*.py"
+      - "tests/test_kernel_cancellation.py"
       - "orchestrator/runtime_pipeline.py"
       - "orchestrator/workzone.py"
       - "tools/builtins.py"
@@ -55,6 +66,17 @@ on:
       - "orchestrator/process_execution.py"
       - "orchestrator/reboot_manager.py"
       - "orchestrator/runtime_contract.py"
+      - "main.py"
+      - "orchestrator/kernel_process.py"
+      - "orchestrator/function_worker_bootstrap.py"
+      - "orchestrator/function_worker_supervisor.py"
+      - "orchestrator/runtime_process.py"
+      - "orchestrator/runtime_installation_builder.py"
+      - "scripts/build_runtime_roles.py"
+      - "runtime-entry.json"
+      - "constraints/core-host-py312.lock"
+      - "tests/test_runtime_*.py"
+      - "tests/test_kernel_cancellation.py"
       - "orchestrator/runtime_pipeline.py"
       - "orchestrator/workzone.py"
       - "tools/builtins.py"
@@ -107,3 +129,17 @@ jobs:
           tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta
           tests/test_portable_bootstrap_failure_details.py
           tests/test_portable_windows_packaging.py
+
+
+      - name: Verify sealed Core and Functions runtime roles
+        timeout-minutes: 30
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_roles.py
+          tests/test_runtime_installation.py
+          tests/test_runtime_role_profiles.py
+          tests/test_runtime_process.py
+          tests/test_runtime_admission_failures.py
+          tests/test_kernel_cancellation.py
+          tests/test_runtime_builder_safety.py
+          tests/test_runtime_role_native.py

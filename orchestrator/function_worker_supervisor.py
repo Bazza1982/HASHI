@@ -586,6 +586,10 @@ class FunctionWorkerClient:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
 
+        close_process = getattr(self.process, "close", None)
+        if callable(close_process) and not self.process.is_alive():
+            close_process()
+
 
 class AgentRuntimeHandle:
     """Stable Core object whose active Worker target changes atomically."""

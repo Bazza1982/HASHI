@@ -17,6 +17,10 @@ PEER = '''
 import asyncio, os, sys
 from orchestrator.function_worker_protocol import JsonConnectionPeer
 async def serve(connection, bootstrap):
+    from pathlib import Path
+    home = Path(bootstrap["bridge_home"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "entered-product.txt").write_text(str(os.getpid()))
     stop = asyncio.Event()
     async def request(method, params):
         if method == "crash": os._exit(17)

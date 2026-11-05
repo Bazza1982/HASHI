@@ -98,9 +98,16 @@ def run_private_call(connection, bootstrap, purpose, nonce):
         if purpose == "qualification":
             result = qualify_payload(bootstrap)
         elif purpose == "candidate-probe":
+            profile = json.loads((Path(bootstrap["code_root"]) / "runtime-entry.json").read_text(encoding="utf-8"))
+            declaration = bootstrap["probe_entrypoint"]
+            if declaration != profile["candidate_probe"]:
+                raise ValueError("candidate probe entrypoint mismatch")
+            module, separator, attribute = declaration.partition(":")
+            if not separator:
+                raise ValueError("invalid candidate probe entrypoint")
             with candidate_import_guard():
-                from orchestrator.function_generation import probe_candidate_payload
-            result = probe_candidate_payload(bootstrap)
+                probe = getattr(importlib.import_module(module), attribute)
+            result = probe(bootstrap)
         else:
             raise ValueError("unknown protected call")
         response = {"version": 1, "kind": "response", "id": nonce, "ok": True, "result": result}

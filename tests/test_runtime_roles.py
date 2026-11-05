@@ -64,7 +64,7 @@ assert not bad, bad
 print(json.dumps(runtime.to_dict()))
 """
     result = subprocess.run(
-        [str(clean_core_python), "-I", "-c", code, str(clean_core_source)],
+        [str(clean_core_python), "-I", "-B", "-c", code, str(clean_core_source)],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr

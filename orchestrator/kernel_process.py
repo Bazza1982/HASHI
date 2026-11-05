@@ -18,7 +18,14 @@ from orchestrator.function_worker_protocol import JsonConnectionPeer
 from orchestrator.runtime_process import launch_function_process_async, run_protected_call_async
 from orchestrator.kernel_artifact import verify_artifact
 from orchestrator.runtime_contract import (
+    CORE_HOST_ROLE,
+    RuntimeContractError,
     RuntimeFingerprint,
+    compare_runtime_boundary,
+    load_core_runtime_selection,
+    current_process_runtime,
+    qualified_runtime_from_reference,
+    runtime_installation_reference,
     compare_runtime_fingerprints,
     enforce_runtime_contract,
 )
@@ -57,23 +64,32 @@ def write_record(path: Path, value: dict) -> None:
 
 
 async def qualify(
-    code_root: Path, bridge_home: Path, runtime: RuntimeFingerprint
+    code_root: Path, bridge_home: Path, runtime: RuntimeFingerprint, *, functions_runtime=None
 ) -> dict:
     """Run product qualification out of process; verify its exact receipt here."""
-    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root))
+    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root, role=runtime.role))
+    if runtime.role == CORE_HOST_ROLE and functions_runtime is None:
+        raise RuntimeContractError("Core host requires an independently qualified Functions runtime")
+    expected = functions_runtime.fingerprint if functions_runtime is not None else runtime
+    if runtime.role == CORE_HOST_ROLE:
+        compare_runtime_boundary(runtime, expected, expected_functions=expected)
     profile = json.loads((code_root / "runtime-entry.json").read_text(encoding="utf-8"))
     payload = {
         "code_root": str(code_root),
         "bridge_home": str(bridge_home),
-        "runtime": runtime.to_dict(),
+        "runtime": expected.to_dict(),
+        **({"core_runtime": runtime.to_dict()} if runtime.role == CORE_HOST_ROLE else {}),
         "entrypoint": profile["entrypoint"],
         "qualifier": profile["qualifier"],
     }
-    release = await run_protected_call_async(payload, purpose="qualification", timeout=240)
+    release = await run_protected_call_async(
+        payload, purpose="qualification", timeout=240, runtime=functions_runtime)
     compare_runtime_fingerprints(
-        runtime, RuntimeFingerprint.from_mapping(release["runtime"])
+        expected, RuntimeFingerprint.from_mapping(release["runtime"])
     )
-    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root))
+    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root, role=runtime.role))
+    if functions_runtime is not None:
+        release["functions_installation"] = runtime_installation_reference(functions_runtime)
     artifact = Path(release["generation_root"]).resolve()
     if not artifact.is_relative_to(bridge_home / "state" / "function_generations"):
         raise ValueError("qualified artifact is outside this instance")
@@ -100,8 +116,10 @@ class ProcessClient:
 
     @classmethod
     async def prepare(cls, bootstrap: dict):
-        verify_artifact(Path(bootstrap["generation_root"]), bootstrap["manifest"])
-        process, parent = await launch_function_process_async(bootstrap)
+        # The common launch owner verifies artifact and installation bytes
+        # immediately before starting the child; the child verifies them again.
+        selected = bootstrap.get("functions_installation")
+        process, parent = await launch_function_process_async(bootstrap, runtime=selected)
         client = cls(process, parent)
         try:
             ready = await client.peer.request("prepare", timeout=240)
@@ -159,6 +177,7 @@ class ProcessClient:
                     os.killpg(self.process.pid, signal.SIGKILL)
                     break
                 await asyncio.sleep(0.1)
+        self.process.close()
 
 
 class KernelRuntime:
@@ -175,10 +194,12 @@ class KernelRuntime:
         runtime: RuntimeFingerprint,
         *,
         arguments: dict | None = None,
+        functions_runtime=None,
     ):
         self.code_root = code_root.resolve()
         self.bridge_home = bridge_home.resolve()
         self.runtime = runtime
+        self.functions_runtime = functions_runtime
         self.arguments = arguments or {}
         self.active = None
         self.release = None
@@ -186,9 +207,40 @@ class KernelRuntime:
         self._switch_lock = asyncio.Lock()
         self.state_dir = instance_runtime_dir(self.bridge_home)
 
+    def selected_functions_runtime(self):
+        if self.runtime.role == CORE_HOST_ROLE:
+            selected = load_core_runtime_selection(self.code_root)
+            compare_runtime_fingerprints(self.runtime, selected.core.fingerprint)
+            return selected.functions
+        return self.functions_runtime
+
+    def release_functions_runtime(self, release):
+        if self.runtime.role == CORE_HOST_ROLE:
+            bound = current_process_runtime()
+            if bound is None or bound.fingerprint.role != CORE_HOST_ROLE:
+                raise RuntimeContractError("Core host has no admitted installation binding")
+            verified = qualified_runtime_from_reference(
+                runtime_installation_reference(bound), code_root=self.code_root, role=CORE_HOST_ROLE)
+            compare_runtime_fingerprints(self.runtime, verified.fingerprint)
+        reference = release.get("functions_installation")
+        if reference is not None:
+            selected = qualified_runtime_from_reference(reference, code_root=self.code_root)
+        else:
+            selected = self.selected_functions_runtime()
+        if self.runtime.role == CORE_HOST_ROLE:
+            if selected is None:
+                raise RuntimeContractError("Missing qualified Functions installation")
+            compare_runtime_boundary(self.runtime, selected.fingerprint,
+                                     expected_functions=selected.fingerprint)
+        expected = selected.fingerprint if selected is not None else self.runtime
+        if release.get("runtime") is not None:
+            compare_runtime_fingerprints(expected, RuntimeFingerprint.from_mapping(release["runtime"]))
+        return selected, expected
+
     def bootstrap(
         self, release, handoff=None, *, recovery=False, restore=False, initial=False
     ):
+        selected, functions_runtime = self.release_functions_runtime(release)
         terminal = None
         try:
             if sys.stdin.isatty():
@@ -201,7 +253,9 @@ class KernelRuntime:
             **release,
             "code_root": str(self.code_root),
             "bridge_home": str(self.bridge_home),
-            "runtime": self.runtime.to_dict(),
+            "runtime": functions_runtime.to_dict(),
+            **({"core_runtime": self.runtime.to_dict()} if self.runtime.role == CORE_HOST_ROLE else {}),
+            **({"functions_installation": runtime_installation_reference(selected)} if selected is not None else {}),
             "arguments": self.arguments,
             "handoff": handoff or {},
             "kernel_pid": os.getpid(),
@@ -224,6 +278,7 @@ class KernelRuntime:
                     if self.release
                     else None,
                     "runtime": self.runtime.to_dict(),
+                    "functions_runtime": self.release.get("runtime") if self.release else None,
                     **extra,
                 },
             )
@@ -232,7 +287,8 @@ class KernelRuntime:
 
     async def start(self, release=None, *, recovery=False):
         release = release or await qualify(
-            self.code_root, self.bridge_home, self.runtime
+            self.code_root, self.bridge_home, self.runtime,
+            functions_runtime=self.selected_functions_runtime(),
         )
         client = await ProcessClient.prepare(
             self.bootstrap(release, recovery=recovery, initial=self.release is None)
@@ -256,7 +312,8 @@ class KernelRuntime:
             retired = False
             try:
                 release = release or await qualify(
-                    self.code_root, self.bridge_home, self.runtime
+                    self.code_root, self.bridge_home, self.runtime,
+            functions_runtime=self.selected_functions_runtime(),
                 )
                 candidate = await ProcessClient.prepare(self.bootstrap(release))
                 self.publish("preparing_handoff")
@@ -265,14 +322,14 @@ class KernelRuntime:
                 handoff = await old.peer.request("quiesce", timeout=180)
                 verify_artifact(Path(release["generation_root"]), release["manifest"])
                 compare_runtime_fingerprints(
-                    self.runtime, enforce_runtime_contract(self.code_root)
+                    self.runtime, enforce_runtime_contract(self.code_root, role=self.runtime.role)
                 )
                 await old.close()
                 retired = True
                 await candidate.peer.request(
                     "activate", {"handoff": handoff}, timeout=360
                 )
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 if candidate is not None:
                     await candidate.close()
                 if retired:
@@ -299,6 +356,8 @@ class KernelRuntime:
                     await old.peer.request("resume", timeout=45)
                 self.release = previous
                 self.publish("active", result="rolled_back", error=str(exc))
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return False
             # Publication is the commit point. A later notification/transport
             # fault cannot be reported as an all-or-none rollback.

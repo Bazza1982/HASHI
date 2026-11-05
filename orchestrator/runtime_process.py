@@ -28,7 +28,7 @@ from orchestrator.runtime_contract import (
     CORE_HOST_ROLE, FUNCTIONS_ROLE, QualifiedRuntime, RuntimeContractError,
     RuntimeFingerprint, compare_runtime_boundary, compare_runtime_fingerprints,
     bind_process_runtime, current_process_runtime,
-    enforce_runtime_contract, load_qualified_runtime,
+    enforce_runtime_contract, load_qualified_runtime, qualified_runtime_from_reference,
 )
 
 _START_LOCK = threading.Lock()
@@ -87,6 +87,22 @@ class WindowsProcessJob:
         finally:
             if process:
                 api.CloseHandle(process)
+
+    def include(self, pid):
+        from ctypes import wintypes
+        self.api.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        self.api.IsProcessInJob.restype = wintypes.BOOL
+        handle = self.api.OpenProcess(0x1501, False, pid)
+        if not handle:
+            raise RuntimeContractError("Cannot own the admitted child")
+        try:
+            member = wintypes.BOOL()
+            if not self.api.IsProcessInJob(handle, self.handle, ctypes.byref(member)):
+                raise RuntimeContractError("Cannot observe admitted child Job membership")
+            if not member.value and not self.api.AssignProcessToJobObject(self.handle, handle):
+                raise RuntimeContractError("Cannot retain admitted child Job ownership")
+        finally:
+            self.api.CloseHandle(handle)
 
     def close(self):
         if self.handle:
@@ -177,9 +193,13 @@ class RuntimeProcess:
             self.kill()
         self.join(5)
         self._close_job()
+        if os.name == "nt" and self._process.returncode is not None:
+            handle = getattr(self._process, "_handle", None)
+            if handle is not None:
+                handle.Close()
 
 
-def _selected_runtime(code_root: Path, bootstrap: dict, selected: QualifiedRuntime | None):
+def _selected_runtime(code_root: Path, bootstrap: dict, selected: QualifiedRuntime | dict | None):
     if any(key in bootstrap for key in ("executable", "runtime_path", "functions_python", "runtime_manifest")):
         raise RuntimeContractError("Untrusted executable override in Function bootstrap")
     if selected is None:
@@ -195,11 +215,14 @@ def _selected_runtime(code_root: Path, bootstrap: dict, selected: QualifiedRunti
         observed = enforce_runtime_contract(code_root, role=FUNCTIONS_ROLE)
         compare_runtime_fingerprints(expected, observed)
         return expected, None
-    qualified = load_qualified_runtime(
-        selected.manifest_path, expected_digest=selected.manifest_digest,
-        code_root=code_root, role=FUNCTIONS_ROLE,
-    )
-    compare_runtime_fingerprints(selected.fingerprint, qualified.fingerprint)
+    if isinstance(selected, dict):
+        qualified = qualified_runtime_from_reference(selected, code_root=code_root)
+    else:
+        qualified = load_qualified_runtime(
+            selected.manifest_path, expected_digest=selected.manifest_digest,
+            code_root=code_root, role=FUNCTIONS_ROLE,
+        )
+        compare_runtime_fingerprints(selected.fingerprint, qualified.fingerprint)
     compare_runtime_fingerprints(expected, qualified.fingerprint)
     if bootstrap.get("core_runtime"):
         core = RuntimeFingerprint.from_mapping(bootstrap["core_runtime"])
@@ -225,7 +248,16 @@ def _validate_admission(process, result, nonce, generation, expected, qualified)
             base_image = Path(record["base_root"]) / "python.exe"
         else:
             base_image = Path(getattr(sys, "_base_executable", sys.executable))
-        allowed_images = {Path(expected.executable).resolve(), base_image.resolve()}
+        base_image = base_image.resolve()
+        selected_image = Path(expected.executable).resolve()
+        allowed_images = {base_image}
+        # A venv redirector is not the interpreter. A receipt naming its PID
+        # must never authorize product execution. Direct copied CPython images
+        # are admitted only when their bytes match the sealed base executable.
+        if selected_image == base_image or (
+                hashlib.sha256(selected_image.read_bytes()).digest()
+                == hashlib.sha256(base_image.read_bytes()).digest()):
+            allowed_images.add(selected_image)
         if image not in allowed_images:
             raise RuntimeContractError("Child OS executable does not match the selected runtime")
         if observed_pid != process._process.pid and parent_pid != process._process.pid:
@@ -234,6 +266,8 @@ def _validate_admission(process, result, nonce, generation, expected, qualified)
         raise RuntimeContractError("Child OS PID does not match the launched process")
     if not process.is_alive():
         raise RuntimeContractError("Admitted child already exited")
+    if os.name == "nt" and process.job is not None:
+        process.job.include(observed_pid)
     process.pid = observed_pid
     process.admission = dict(result)
 
@@ -251,7 +285,7 @@ def _request_generation(bootstrap, purpose):
         json.dumps(bootstrap, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | None = None,
+def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | dict | None = None,
                             timeout: float = 30.0, cancel_event=None, purpose="generation"):
     """Launch the exact selected FR, then authenticate it before product imports."""
     code_root = Path(bootstrap["code_root"]).resolve()
@@ -272,7 +306,8 @@ def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | None
         options = {"cwd": str(code_root), "close_fds": True, "stdin": subprocess.DEVNULL}
         environment = dict(os.environ)
         for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONUSERBASE",
-                    "__PYVENV_LAUNCHER__"):
+                    "__PYVENV_LAUNCHER__", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
             environment.pop(key, None)
         options["env"] = environment
         if os.name == "nt":

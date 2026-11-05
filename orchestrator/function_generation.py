@@ -945,6 +945,8 @@ def run_candidate_probe(
         "code_root": str(Path(code_root).resolve()),
         "module_names": list(module_names),
         "expected_runtime": expected_runtime.to_dict(),
+        "probe_entrypoint": json.loads(
+            (Path(code_root) / "runtime-entry.json").read_text(encoding="utf-8"))["candidate_probe"],
     }
     from orchestrator.runtime_process import run_protected_call
     try:

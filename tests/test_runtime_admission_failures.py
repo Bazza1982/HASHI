@@ -12,7 +12,8 @@ from orchestrator.runtime_contract import RuntimeContractError
 from tests.test_runtime_process import bootstrap
 
 
-@pytest.mark.parametrize("defect", ["nonce", "pid", "generation", "executable", "packages", "schema"])
+@pytest.mark.parametrize("defect", ["nonce", "pid", "generation", "executable", "packages", "schema",
+    pytest.param("launcher-pid", marks=pytest.mark.skipif(os.name != "nt", reason="Windows venv launcher identity"))])
 def test_forged_private_admission_never_runs_product(tmp_path, monkeypatch, defect):
     payload = bootstrap(tmp_path)
     decode = runtime_process.decode_envelope
@@ -30,6 +31,8 @@ def test_forged_private_admission_never_runs_product(tmp_path, monkeypatch, defe
                 value["nonce"] = "f" * 64
             elif defect == "pid":
                 value["pid"] = os.getpid()
+            elif defect == "launcher-pid":
+                value["pid"] = children[0].pid
             elif defect == "generation":
                 value["generation_id"] = "sha256:" + "0" * 64
             elif defect == "executable":
@@ -41,8 +44,14 @@ def test_forged_private_admission_never_runs_product(tmp_path, monkeypatch, defe
         return reply
     monkeypatch.setattr(runtime_process.subprocess, "Popen", observe)
     monkeypatch.setattr(runtime_process, "decode_envelope", forged)
-    with pytest.raises(RuntimeContractError):
-        runtime_process.launch_function_process(payload)
+    spawned = None
+    try:
+        with pytest.raises(RuntimeContractError):
+            spawned = runtime_process.launch_function_process(payload)
+    finally:
+        if spawned is not None:
+            spawned[1].close()
+            spawned[0].close()
     assert len(children) == 1
     assert children[0].poll() is not None
     assert not (tmp_path / "instance").exists()
