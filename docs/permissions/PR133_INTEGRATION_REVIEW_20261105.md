@@ -32,6 +32,22 @@ The FYI is now a compact linked index with substantial space below its 12,000
 character loader limit. [Operational details](../AGENT_FYI_OPERATIONS.md) retain
 the complete integrated pre-compaction guidance and its original decision links.
 
+## Follow-up main advance during recheck
+
+The initial current-head recheck on `99a4b84c` passed its native regressions and
+all seven GitHub workflows. During that run, main advanced to
+`41a91616055ab7d03536165e1e1b709d2783c97b` through Phone interpretation PR #132.
+Integrate that complete history before delivery. Its executable changes, tests
+and workflow remain unchanged; resolve only the FYI conflict by retaining the
+compact index and adding the interpretation guidance and detailed decision link.
+The existing Ollama guidance remains in the index and operational detail.
+
+No protected path changes in this additional main interval. Agent Move and the
+permission implementation retain their previously reviewed bytes. Rerun the
+combined review scope, including current-main changed tests and the updated
+Call/Phone workflow, plus the curated core gate on the committed final HEAD.
+Record fresh results and exact SHA in the PR; earlier receipts remain historical.
+
 ## Failure proof and checks
 
 The existing native configuration-publication test now also exercises the real

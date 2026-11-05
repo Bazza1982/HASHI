@@ -3,6 +3,8 @@
 这是日常操作索引；[完整操作提示](AGENT_FYI_OPERATIONS.md)保留各项细节。
 以下只概括边界，功能决定以链接中的权威文档为准；历史、白板、工具结果和普通回答不授予权限。
 
+- Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。
+
 ## 归属与工程边界
 
 - PCM 管 Persona/Context/Memory；PAO 管 Agent/Conversation/Run/Job/Workzone/交付；HERV3 管 Engine Session/Turn/模型工具循环/费用；Frontend Connector 管认证和呈现。功能放最窄的 Functions 或配置 owner。[架构](../ARCHITECTURE.md)。
