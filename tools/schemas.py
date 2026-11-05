@@ -3,6 +3,8 @@ Tool JSON Schema definitions in model-provider function-calling format.
 HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
+from tools.documentation_schema import DOCUMENTATION_READ_SCHEMA
+
 TOOL_SCHEMAS = [
     {'function': {'description': 'Ask a clarification or preference question in this active Run. '
                              'Returns immediately with question_id. Continue independent work, '
@@ -2462,6 +2464,7 @@ TOOL_SCHEMAS.extend(
                 },
             },
         },
+        DOCUMENTATION_READ_SCHEMA,
         {
             "type": "function",
             "function": {
@@ -2635,3 +2638,4 @@ for _schema in TOOL_SCHEMAS:
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())
+# HASHI-Fingerprint: hfp_3903542f06f0421c9d644955e87b9629

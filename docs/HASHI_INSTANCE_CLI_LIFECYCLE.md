@@ -31,3 +31,16 @@ is permitted when no operating-system lock remains held.
 Owner regressions use real child processes, real listening sockets and an
 orphaned descendant, plus mismatched readiness observations. These checks do not
 claim adoption by an installed launcher or shutdown of a running user instance.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 002 Instance identity and departure evidence
+
+- [实例](HASHI_INSTANCE_CLI_LIFECYCLE.md)保身份/验退出；[迁出](HASHI_AGENT_MOVE_V1.md)凭证收尾。
+
+### FYI v1 024 Complete instance update adoption
+
+`hashi update` adopts source, Core, Workers and Remote together or fails.

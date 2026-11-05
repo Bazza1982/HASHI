@@ -1,0 +1,43 @@
+# FYI v2 review evidence
+
+This is review evidence, never bootstrap content. The independent feature branch began at main `ea37129b` and incorporates complete main `87100678cad23da58cd069ef288ba832501a19ae`, including Presence #134 and the merged credential-cleanup fix #135. The FYI delta adds no Agent-deletion or Workbench repair implementation and no protected Core changes; all upstream fixes remain intact.
+
+## Knowledge and navigation
+
+The inventory re-enumerates all 59 substantive paragraphs/bullet groups from current main and checks actual retained content and links in their owning destinations. This includes Phone interpretation and the incoming Presence caption/portable-qualification topic; all earlier 58 groups retain their stable identifiers and destinations. The original complete FYI and root engineering guidance are preserved and checked against the recorded Git baseline. Historical qualification, portable-packaging and instance observations are explicitly historical. Detailed documents are extended, never shortened.
+
+The current merge resolved conflicts in `docs/AGENT_FYI.md` and `docs/HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md`. The compact catalogue remains unchanged while Voice navigation exposes the complete current Presence desktop/caption contracts. The feedback document retains both the entire upstream Native captions section and the original FYI clarification. The PAO document retains the entire current-main prefix, including Remote credential grants, cleanup_pending/secrets_cleaned and live-recovery limits. A preservation audit also confirms the original FYI runtime delta and all upstream code/tests. The Phone absence snapshot remains historical.
+
+The new entry has eight meaningful domains, discovery instructions and architecture/authority boundaries. Guides lead to current owning contracts and real source/test entry points. Phone interpretation direction, no-Agent-context/delegation behavior and adoption limits remain those of the upstream contract.
+
+## Failure proofs
+
+| Contract | Safe red state observed | Intended result |
+|---|---|---|
+| Reference read/revision | Root entry opened twice during one bootstrap | Validate and hash the same single read |
+| Primer consumption | Explicit refresh plus armed primer injected two catalogues | One catalogue, same authoritative request |
+| Useful navigation | TODO descriptions, empty guidance and guide-only authority passed | Reject each malformed catalogue |
+| Installed version | Installed reader returned newer mutable checkout text | Fresh imported artifact reads its packaged bytes |
+| CLI continuation | Removing launcher environment lost the installed root | Serialized gateway retains the derived root |
+| Approved roots | Guard mutation exposed a temporary fixture secret | Scope test detects the defect; intended reader rejects escape |
+| Complete sections | Truncation mutation omitted later conditions | Continuation reconstruction detects missing content |
+| Resource packaging | Asset mutation omitted documentation | Real artifact test detects unavailable resources |
+| Relative links | Root-looking names bypassed the explicit source document | Resolve each link from its actual source |
+| Incoming Presence navigation | Voice guide omitted the newly merged desktop contract and the focused navigation case failed | Guide links the current contract and the unchanged scoped reader retrieves its complete section |
+| Compaction continuity | No source reference survived as required evidence | Existing compaction guard retains the returned reference; reader can reopen it |
+
+Mutations changed only temporary test behavior and were restored in-process. No product mutation was retained or production secret read. Opaque documentation references grant no filesystem authority.
+
+## Validation and limits
+
+Earlier qualification before the latest main integration passed 51 FYI tests, including shared Registry/MCP transport, independently imported artifacts, path protection, saved references, actual compaction evidence validation and a validator subprocess with optional dependencies disabled. The earlier combined FYI/Phone interpretation/context/Compute checks passed 162 cases before the additional dependency-isolation case; Registry/MCP plus FYI passed 68 cases with one skip. The new Presence navigation case was observed failing before its guide link and passing afterward. Current committed-head regression and CI results are recorded on the PR rather than inferred from these earlier counts.
+
+The earlier curated Core gate passed 881 cases with one skip on its committed merged-source checkpoint. Final current-head qualification and CI results are recorded on the PR. CI validation remains dependency-free and the related Call workflow stays pinned to the already mandated Python 3.12.13 and locked standard dependency profile; the Core runtime guard is preserved. Checks requiring committed source run after checkpointing; an uncommitted-generation rejection is not adoption evidence.
+
+An expanded compatibility sweep exposed the unchanged legacy `test_hchat_draft_failure_shows_original_body_and_failure` assertion. Its bare-false fixture expects confirmed delivery failure; current main conservatively reports an unconfirmed submission. The HChat dispatcher and assertion are unchanged by FYI v2. That expanded sweep is not reported as all green.
+
+[Measurements](fyi-v2-context-metrics.json) reproduce the latest main wrapper: FYI 10,813 → 3,666 characters; engineering guidance 3,834 → 4,278; assembled reference 14,782 → 8,195. Tokens are estimated with characters/4, not claimed backend measurements. The additional reader schema contributes 1,197 serialized characters. Reference bodies occur once. Representative reads, including Presence desktop context, also report serialized response overhead. Detailed documents and inventories are never expanded into bootstrap.
+
+The Agent spot check followed Voice → Phone interpretation → Compute, Lifecycle → Move and PCM → authority sections, and reconciled the concurrently merged contract. General chat avoids detailed retrieval; saved references can reopen relevant material after continuity serialization. This does not qualify every installed model or frontend.
+
+Artifact/native/gateway scenarios qualify source and resource behavior. They do not claim production adoption, a physical-device trial, deployment or service restart. No model-dependent CI gate, vector store, configuration owner or documentation service was added.

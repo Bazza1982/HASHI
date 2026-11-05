@@ -194,3 +194,13 @@ commands and is rejected by interactive views. `--lang zh|en|auto` is invocation
 local. `/connect` opens a model-independent local page; API keys and Bot Tokens
 are entered only in password controls, whose events never reach chat or command
 preview handlers. Telegram remains optional after a backend is connected.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 047 Renderer locale and independent mirroring controls
+
+Renderer/catalog管UI文案。`/language`共享、`/tui language`本地，均不翻译回复/ID；TUI切换冻结运行身份/状态。
+Remote须认证；关闭镜像保原入口回复，`/think`与`/commentary`独立。

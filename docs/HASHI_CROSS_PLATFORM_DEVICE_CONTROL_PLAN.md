@@ -389,3 +389,13 @@ picker handoff are not claimed. Native-Windows Core, real two-Agent, real
 Telegram, locked/logoff/RDP/display-change, and physical-input stress canaries
 also remain unclaimed until their required configuration or disruptive-test
 window is authorized. See the linked closeout for exact evidence.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 045 Manual desktop stale-input boundary
+
+Manual Desktop stale input stays unexecuted until a fresh frame and never replays;
+other failures release control. See [desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
