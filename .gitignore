@@ -17,6 +17,7 @@ __pycache__/
 *.lock
 !constraints/core-host-py312.lock
 !constraints/standard-py312.lock
+!constraints/functions-py312.hashes.lock
 !constraints/transcription-py312.lock
 !constraints/ocr-py312.lock
 !constraints/tts-py312.lock

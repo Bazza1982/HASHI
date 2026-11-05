@@ -64,7 +64,7 @@ function checkRuntime(candidate, full) {
 
 function checkRolePair(candidate) {
   const result = spawnSync(candidate.command,
-    [...candidate.prefix, '-B', ROLE_CHECK, '--code-root', HASHI_ROOT],
+    [...candidate.prefix, '-B', ROLE_CHECK, '--code-root', HASHI_ROOT, '--import-functions'],
     { stdio: 'ignore', windowsHide: true, timeout: 180_000 });
   return result.status === 0;
 }

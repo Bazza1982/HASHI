@@ -29,6 +29,12 @@ def export_context(destination):
         shutil.copyfile(source, target)
         shutil.copymode(source, target)
     validate_snapshot(snapshot, destination, required_paths=snapshot["files"])
+    from orchestrator.build_provenance import capture_build_provenance
+    (destination / "BUILD_INFO.json").write_text(json.dumps({
+        "schema_version": 1,
+        "provenance": capture_build_provenance(
+            ROOT, artifact_kind="enterprise-container", release_channel="enterprise"),
+    }, sort_keys=True), encoding="utf-8")
     (destination / SNAPSHOT_NAME).write_text(json.dumps(snapshot, sort_keys=True), encoding="utf-8")
     return snapshot
 

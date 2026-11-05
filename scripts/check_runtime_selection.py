@@ -25,12 +25,37 @@ def checked_selection(code_root):
     return selected
 
 
+def check_function_imports(code_root, expected):
+    from orchestrator.function_generation import (
+        FUNCTION_GENERATION_ENTRYPOINTS, build_source_manifest,
+        probe_candidate_payload, verify_manifest_source_commit,
+    )
+    from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
+
+    manifest = build_source_manifest(
+        [*FUNCTION_GENERATION_ENTRYPOINTS, *(spec.module for spec in FUNCTION_MANAGER_SPECS)],
+        code_root=code_root)
+    verify_manifest_source_commit(manifest, code_root=code_root)
+    result = probe_candidate_payload({
+        "code_root": str(code_root), "module_names": list(manifest.module_names),
+        "expected_runtime": expected.to_dict(),
+    })
+    if not result.get("ok"):
+        from orchestrator.runtime_contract import RuntimeContractError
+        raise RuntimeContractError(
+            "Installed Functions import qualification failed: " + str(result.get("error")))
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--code-root", type=Path, default=ROOT)
     parser.add_argument("--core-command", action="store_true")
+    parser.add_argument("--import-functions", action="store_true")
     args = parser.parse_args(argv)
     selected = checked_selection(args.code_root)
+    if args.import_functions:
+        check_function_imports(args.code_root.resolve(), selected.functions.fingerprint)
     result = ([selected.core.fingerprint.executable, "-I", "-B"]
               if args.core_command else {
                   "core": selected.core.fingerprint.to_dict(),

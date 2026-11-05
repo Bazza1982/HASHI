@@ -50,4 +50,26 @@ def test_package_declares_role_bootstrap_selection_and_publication_inputs():
         "scripts/check_runtime_selection.py", "scripts/resolve_launch_runtime.py",
         "scripts/export_function_source.py",
     } <= set(package["files"])
+
+def test_installer_cannot_return_a_core_command_after_native_import_failure(monkeypatch):
+    from types import SimpleNamespace
+    from scripts import check_runtime_selection as selection
+
+    observed = []
+
+    def checked(_root):
+        observed.append("qualified")
+        return SimpleNamespace(
+            core=SimpleNamespace(fingerprint=SimpleNamespace(executable="qualified-core")),
+            functions=SimpleNamespace(fingerprint=object()))
+
+    def failed_import(_root, _runtime):
+        observed.append("native-import")
+        raise RuntimeError("native import failed")
+
+    monkeypatch.setattr(selection, "checked_selection", checked)
+    monkeypatch.setattr(selection, "check_function_imports", failed_import)
+    with pytest.raises(RuntimeError, match="native import failed"):
+        selection.main(["--core-command", "--import-functions"])
+    assert observed == ["qualified", "native-import"]
 # HASHI-Fingerprint: hfp_a34a2356edf643a9970c1063ccbf313d

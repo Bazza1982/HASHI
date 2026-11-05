@@ -303,9 +303,9 @@ hermes chat --provider xai-oauth --model grok-4.5 -q "Reply exactly: OK"
 pytest -q tests/test_xai_api_adapter.py
 
 # Gateway
-curl -s http://10.255.255.254:18801/v1/models | jq '.data[].id' | grep grok-4
+curl -s http://127.0.0.1:18801/v1/models | jq '.data[].id' | grep grok-4
 
-curl -s -X POST http://10.255.255.254:18801/v1/chat/completions \
+curl -s -X POST http://127.0.0.1:18801/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"grok-4.5","messages":[{"role":"user","content":"Reply exactly: OK"}]}'
 ```

@@ -19,6 +19,7 @@ from orchestrator.runtime_contract import (  # noqa: E402
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", choices=("core-host", "functions"), required=True)
+    parser.add_argument("--require-module", choices=("kubernetes",))
     args = parser.parse_args(argv)
     selected = load_core_runtime_selection(ROOT)
     installation = selected.core if args.role == CORE_HOST_ROLE else selected.functions
@@ -28,6 +29,10 @@ def main(argv=None):
         assert observed.dependency_digest == "sha256:" + __import__("hashlib").sha256(b"").hexdigest()
         assert "aiohttp" not in sys.modules
     else:
+        from scripts.check_runtime_selection import check_function_imports
+        check_function_imports(ROOT, observed)
+        if args.require_module:
+            __import__(args.require_module)
         from orchestrator.function_generation import (
             FUNCTION_GENERATION_ENTRYPOINTS, build_source_manifest, verify_manifest_source_commit)
         from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS

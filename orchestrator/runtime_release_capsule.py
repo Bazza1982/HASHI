@@ -6,8 +6,11 @@ qualification records remain external to the immutable interpreters.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,6 +26,59 @@ from orchestrator.runtime_installation_builder import (
 ROLE_ROOTS = {"core": ("runtime/core", CORE_HOST_ROLE),
               "functions": ("runtime/functions", FUNCTIONS_ROLE)}
 CAPSULE_PATH = "runtime/role-capsule.json"
+
+
+def _verify_sidecar_files(root, table):
+    """Seal helper resources without granting Core/Functions runtime authority."""
+    root = Path(root).absolute()
+    if root.resolve() != root or not root.is_dir():
+        raise RuntimeContractError("Sidecar resource path is redirected or unavailable")
+    if not isinstance(table, dict) or not table:
+        raise RuntimeContractError("Sidecar resource closure is empty")
+    for relative, checksum in table.items():
+        if (not isinstance(relative, str) or not relative or "\\" in relative
+                or ":" in relative or relative.startswith("/")
+                or any(part in {"", ".", ".."} for part in relative.split("/"))):
+            raise RuntimeContractError("Invalid sidecar resource path")
+        if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+            raise RuntimeContractError("Invalid sidecar resource hash")
+    observed = {}
+    pending = [(root, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                metadata = entry.stat(follow_symlinks=False)
+                if os.name == "nt" and metadata.st_ino == 0:
+                    metadata = os.stat(entry.path, follow_symlinks=False)
+                if (stat.S_ISLNK(metadata.st_mode)
+                        or getattr(metadata, "st_file_attributes", 0) & 0x400):
+                    raise RuntimeContractError("Sidecar resource path is redirected")
+                relative = prefix + entry.name
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append((Path(entry.path), relative + "/"))
+                elif stat.S_ISREG(metadata.st_mode):
+                    observed[relative] = (Path(entry.path), metadata)
+                else:
+                    raise RuntimeContractError("Sidecar resource contains a non-regular entry")
+    if set(observed) != set(table):
+        raise RuntimeContractError("Sidecar resource file closure changed")
+
+    def identity(value):
+        return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+    for relative, (file, expected) in observed.items():
+        digest = hashlib.sha256()
+        with file.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if identity(before) != identity(expected):
+                raise RuntimeContractError("Sidecar resource changed during verification")
+            while block := stream.read(1024 * 1024):
+                digest.update(block)
+            if identity(os.fstat(stream.fileno())) != identity(before):
+                raise RuntimeContractError("Sidecar resource changed during verification")
+        if digest.hexdigest() != table[relative]:
+            raise RuntimeContractError(f"Sidecar resource hash mismatch: {relative}")
 
 
 def _unique(pairs):
@@ -102,7 +158,7 @@ def verify_capsule(image_root, code_root):
     if set(value["sidecars"]) - {"runtime/bin", "runtime/media"}:
         raise RuntimeContractError("Release capsule sidecar root mismatch")
     for relative, files in value["sidecars"].items():
-        verify_runtime_files(image_root / relative, files, manifest_path=path)
+        _verify_sidecar_files(image_root / relative, files)
     from orchestrator.function_generation import SourceManifest, verify_source_manifest
     manifest = SourceManifest.from_mapping(value["function_manifest"])
     verify_source_manifest(manifest, code_root=code_root)

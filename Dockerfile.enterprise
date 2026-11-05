@@ -24,11 +24,11 @@ RUN python -B -m venv /opt/hashi-build/bootstrap \
 
 # Sidecars originate from the disposable build interpreter, before CR/FR are
 # sealed. Their future subprocesses cannot write into a sealed Core base.
-RUN PYTHONPATH=/opt/hashi-build/functions-site /opt/hashi-build/bootstrap/bin/python -B scripts/provision_privacy_runtime.py \
-    && PYTHONPATH=/opt/hashi-build/functions-site /opt/hashi-build/bootstrap/bin/python -B scripts/provision_privacy_runtime.py --check
+RUN /opt/hashi-build/bootstrap/bin/python -B scripts/provision_privacy_runtime.py \
+    && /opt/hashi-build/bootstrap/bin/python -B scripts/provision_privacy_runtime.py --check
 ENV HF_HUB_CACHE=/opt/hashi-media/model-cache
-RUN PYTHONPATH=/opt/hashi-build/functions-site /opt/hashi-build/bootstrap/bin/python -B scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media \
-    && PYTHONPATH=/opt/hashi-build/functions-site /opt/hashi-build/bootstrap/bin/python -B scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media --check
+RUN /opt/hashi-build/bootstrap/bin/python -B scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media \
+    && /opt/hashi-build/bootstrap/bin/python -B scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media --check
 ENV HASHI_TRANSCRIPTION_PYTHON=/opt/hashi-media/transcription/bin/python
 ENV HASHI_TTS_PYTHON=/opt/hashi-media/tts/bin/python
 

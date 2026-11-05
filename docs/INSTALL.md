@@ -83,6 +83,10 @@ primarily for managed deployments and tests. They do not make a Windows
 registry visible to WSL or vice versa. Both roots must remain outside the npm
 program directory so a later package uninstall cannot remove instance data.
 
+On Windows, keep a custom data root short (for example `C:\HASHIData`). Native
+third-party DLL loading can fail in very deep paths. Full Function import
+qualification must succeed before the installer publishes the runtime selection.
+
 ### Commands
 
 ```text

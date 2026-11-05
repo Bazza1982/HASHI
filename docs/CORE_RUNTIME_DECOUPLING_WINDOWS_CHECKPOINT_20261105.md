@@ -296,3 +296,35 @@ No existing Core, active environment, instance state or production service was
 modified. Independent human review of the exact protected Core tree, approval
 of main integration, account/WAC/client qualification and cold operator adoption
 remain separate release gates; no reviewer record is fabricated.
+
+## Real artifact failures retained and addressed
+
+The first b37127a7 public Portable build rejected a normal setuptools .pth in
+the separately delegated media helper. Core/FR startup hooks remain forbidden.
+Sidecar resource verification now checks the complete declared file set, hashes,
+regular-file/reparse rules and open-file identity before/after hashing; it does
+not assign runtime roles or execute helper files. The same .pth is still rejected
+by the unchanged Core runtime verifier. Added/missing files, modified hooks and
+escaping resource paths are rejected by the new negative scope.
+
+The first real npm tarball installed and sealed both roles in a fresh private
+directory, then full Core-driven product qualification rejected a native CFFI
+DLL in the deep Windows path. The generic Function contract was
+too small to catch this. Installer preflight now uses the canonical complete
+Function manifest/probe and source publication before publishing active.json.
+The actual deep installation is rejected by that probe; previous selection
+bytes remain unchanged. Final positive qualification uses a short fresh local
+test data root, reflecting Windows native-loader path limits.
+
+The first actual enterprise image exposed PYTHONPATH contamination: the sidecar
+pip subprocess saw the disposable seed site and skipped packages absent from
+the sidecar itself. The provisioning CLIs are proven stdlib-only; their build
+commands now run without that ambient seed path. Standard and Kubernetes image
+profiles are qualified separately, including complete imports and the optional
+backend. The packaging doctor follows the exact hashed-extra pipeline.
+
+Full documentation remains packaged. Deployment-specific address literals are
+generalized rather than excluded from leak detection; the canonical Functions
+hash lock is explicitly tracked. No assertion, Core startup restriction or
+runtime byte-seal rule was disabled. Actual rebuilt artifact and CI receipts
+are recorded separately from these source fixes in PR140.
