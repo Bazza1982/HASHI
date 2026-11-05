@@ -208,6 +208,20 @@ through a configuration writer merely to make a static search empty.
 
 ## Operator and Agent FYI
 
+Agent deletion's unshared-credential cleanup publishes private candidates with
+the registered Remote runtime principals resolved by
+`workbench_auth.resolve_remote_runtime_sids`; it does not infer the account from
+the current writer or a machine path. Deletion resolves that registration from
+the canonical `BridgePaths.bridge_home`, even when `secrets_path` uses a legacy
+file outside that home. Identity-resolution or credential publication failures
+propagate into the deletion journal's `cleanup_pending`
+receipt, without recording `secrets_cleaned`. This prevents a different-account
+writer from dropping Remote's grant on replacement. It does not repair already
+published production ACLs, change Tool admission, or adopt code into live
+Functions. Agent Move and legacy import writers require their own migration and
+validation under their existing contracts; this repair changes only deletion's
+lookup of the registered instance Remote consumers.
+
 UTF-8 editor output with or without BOM is supported at these migrated read
 boundaries. A conflict asks for a fresh read, not permission to overwrite.
 Unreadable or incompatible saved preferences require diagnosis; do not delete

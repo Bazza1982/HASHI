@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
@@ -16,6 +17,14 @@ from orchestrator.agent_deletion import (
     UnmanagedWorkspaceError,
 )
 from orchestrator.pathing import BridgePaths
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_remote_principal(monkeypatch):
+    # Unit tests must not query this machine's registered production tasks.
+    monkeypatch.setattr(
+        "orchestrator.workbench_auth._windows_remote_runtime_sids", lambda root: ()
+    )
 
 
 def _setup_paths(tmp_path: Path, agents: list[dict], tasks: dict | None = None, secrets: dict | None = None) -> BridgePaths:
@@ -314,7 +323,8 @@ def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path):
     assert repeat["operation_id"] == receipt["operation_id"]
 
 
-def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch):
+@pytest.mark.parametrize("separate_home", [False, True])
+def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch, separate_home):
     from orchestrator import workbench_auth
     from tools import private_files
     import os
@@ -331,6 +341,11 @@ def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch):
             "workbench_admin_token": "synthetic-loopback",
         },
     )
+    if separate_home:
+        home = tmp_path / "canonical-instance"
+        home.mkdir()
+        paths = replace(paths, bridge_home=home, workspaces_root=home / "workspaces")
+        paths.workspaces_root.mkdir()
     readers = ("S-1-5-19",) if os.name == "nt" else ()
     resolved = []
     monkeypatch.setattr(
@@ -350,7 +365,7 @@ def test_delete_preserves_remote_credential_reader(tmp_path, monkeypatch):
     preview = service.preview("momo")
     result = service.delete("momo", preview_token=preview.preview_token, confirmed_agent_id="momo")
     assert result["ok"]
-    assert resolved == [paths.secrets_path.parent]
+    assert resolved == [paths.bridge_home]
     if readers:
         assert protection == [readers]
     assert json.loads(paths.secrets_path.read_text(encoding="utf-8")) == {
@@ -369,6 +384,7 @@ def test_delete_reports_pending_when_credential_publication_fails(tmp_path, monk
         agents=[{"name": "momo", "is_active": False}, {"name": "koko", "is_active": True}],
         secrets={"momo": "synthetic-token", "hashi_remote_shared_token": "keep-network"},
     )
+    (paths.workspaces_root / "momo").mkdir()
     original = paths.secrets_path.read_bytes()
     write = deletion.write_config_json
 
@@ -394,6 +410,7 @@ def test_delete_reports_pending_when_credential_publication_fails(tmp_path, monk
     assert receipt["status"] == "cleanup_pending"
     assert "secrets_cleaned" not in receipt["steps_completed"]
     assert paths.secrets_path.read_bytes() == original
+    assert (paths.workspaces_root / "momo").is_dir()
 
 
 def test_delete_cleanup_pending_on_quarantine_error(tmp_path, monkeypatch):
