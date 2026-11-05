@@ -38,7 +38,7 @@ _BOOTSTRAP = Path(__file__).resolve().with_name("function_worker_bootstrap.py")
 class WindowsProcessJob:
     """Kill only this owned process tree, including after the parent crashes."""
 
-    def __init__(self, pid: int):
+    def __init__(self, pid: int | None = None):
         from ctypes import wintypes
         size_t = ctypes.c_size_t
 
@@ -78,9 +78,10 @@ class WindowsProcessJob:
             limits.basic.flags = 0x2000
             if not api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
                 raise ctypes.WinError(ctypes.get_last_error())
-            process = api.OpenProcess(0x0101, False, pid)
-            if not process or not api.AssignProcessToJobObject(self.handle, process):
-                raise ctypes.WinError(ctypes.get_last_error())
+            if pid is not None:
+                process = api.OpenProcess(0x0101, False, pid)
+                if not process or not api.AssignProcessToJobObject(self.handle, process):
+                    raise ctypes.WinError(ctypes.get_last_error())
         except BaseException:
             self.close()
             raise
@@ -99,8 +100,8 @@ class WindowsProcessJob:
             member = wintypes.BOOL()
             if not self.api.IsProcessInJob(handle, self.handle, ctypes.byref(member)):
                 raise RuntimeContractError("Cannot observe admitted child Job membership")
-            if not member.value and not self.api.AssignProcessToJobObject(self.handle, handle):
-                raise RuntimeContractError("Cannot retain admitted child Job ownership")
+            if not member.value:
+                raise RuntimeContractError("Admitted child escaped its owned Job")
         finally:
             self.api.CloseHandle(handle)
 
@@ -108,6 +109,205 @@ class WindowsProcessJob:
         if self.handle:
             self.api.CloseHandle(self.handle)
             self.handle = None
+
+    def __del__(self):
+        if getattr(self, "handle", None):
+            self.close()
+
+
+class _WindowsProcessHandle:
+    def __init__(self, api, value):
+        self.api, self.value = api, value
+
+    def __int__(self):
+        return int(self.value)
+
+    def Close(self):
+        if self.value is not None:
+            self.api.CloseHandle(self.value)
+            self.value = None
+
+    def __del__(self):
+        if getattr(self, "value", None) is not None:
+            self.Close()
+
+
+class _WindowsProcess:
+    """Small Popen-compatible owner for an atomically job-assigned process."""
+
+    def __init__(self, api, handle, pid, args):
+        self.api = api
+        self._handle = _WindowsProcessHandle(api, handle)
+        self.pid, self.args, self.returncode = int(pid), args, None
+
+    def poll(self):
+        from ctypes import wintypes
+        if self.returncode is None:
+            status = self.api.WaitForSingleObject(int(self._handle), 0)
+            if status == 258:
+                return None
+            if status != 0:
+                raise ctypes.WinError(ctypes.get_last_error())
+            code = wintypes.DWORD()
+            if not self.api.GetExitCodeProcess(int(self._handle), ctypes.byref(code)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.returncode = int(code.value)
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.poll() is None:
+            milliseconds = 0xffffffff if timeout is None else min(
+                0xfffffffe, max(0, int(timeout * 1000)))
+            result = self.api.WaitForSingleObject(int(self._handle), milliseconds)
+            if result == 258:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            if result != 0:
+                raise ctypes.WinError(ctypes.get_last_error())
+        return self.poll()
+
+    def kill(self):
+        if self.poll() is None and not self.api.TerminateProcess(int(self._handle), 1):
+            if self.poll() is None:
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _start_windows_process(command, *, environment, cwd, channel_handle, job):
+    """Create with an explicit handle list and Job assignment in the same syscall.
+
+    Assigning after Popen races the venv redirector. Suspending until a later
+    assignment can strand a child if the parent dies in between. JOB_LIST binds
+    ownership atomically, without running a debugger or requesting privileges.
+    """
+    from ctypes import wintypes
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD), ("reserved", wintypes.LPWSTR),
+            ("desktop", wintypes.LPWSTR), ("title", wintypes.LPWSTR),
+            ("x", wintypes.DWORD), ("y", wintypes.DWORD),
+            ("x_size", wintypes.DWORD), ("y_size", wintypes.DWORD),
+            ("x_chars", wintypes.DWORD), ("y_chars", wintypes.DWORD),
+            ("fill", wintypes.DWORD), ("flags", wintypes.DWORD),
+            ("show", wintypes.WORD), ("reserved_size", wintypes.WORD),
+            ("reserved_bytes", ctypes.POINTER(ctypes.c_byte)),
+            ("stdin", wintypes.HANDLE), ("stdout", wintypes.HANDLE),
+            ("stderr", wintypes.HANDLE),
+        ]
+
+    class ExtendedStartup(ctypes.Structure):
+        _fields_ = [("startup", StartupInfo), ("attributes", ctypes.c_void_p)]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [("process", wintypes.HANDLE), ("thread", wintypes.HANDLE),
+                    ("pid", wintypes.DWORD), ("tid", wintypes.DWORD)]
+
+    api = job.api
+    api.GetCurrentProcess.restype = wintypes.HANDLE
+    api.GetStdHandle.argtypes = [wintypes.DWORD]
+    api.GetStdHandle.restype = wintypes.HANDLE
+    api.DuplicateHandle.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    api.DuplicateHandle.restype = wintypes.BOOL
+    api.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.InitializeProcThreadAttributeList.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_size_t)]
+    api.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+    api.UpdateProcThreadAttribute.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_size_t, ctypes.c_void_p,
+        ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p]
+    api.UpdateProcThreadAttribute.restype = wintypes.BOOL
+    api.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+    api.CreateProcessW.argtypes = [
+        wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR,
+        ctypes.c_void_p, ctypes.POINTER(ProcessInformation)]
+    api.CreateProcessW.restype = wintypes.BOOL
+    api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    api.WaitForSingleObject.restype = wintypes.DWORD
+    api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    api.GetExitCodeProcess.restype = wintypes.BOOL
+    api.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    api.TerminateProcess.restype = wintypes.BOOL
+
+    temporary = []
+    attributes = None
+    initialized = False
+    process = ProcessInformation()
+    succeeded = False
+
+    def duplicate(handle):
+        current = api.GetCurrentProcess()
+        result = wintypes.HANDLE()
+        if not api.DuplicateHandle(current, handle, current, ctypes.byref(result), 0, True, 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        temporary.append(result.value)
+        return result.value
+
+    def null_handle(access):
+        handle = api.CreateFileW("NUL", access, 3, None, 3, 0x80, None)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return duplicate(handle)
+        finally:
+            api.CloseHandle(handle)
+
+    def standard_handle(number):
+        handle = api.GetStdHandle(number & 0xffffffff)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            return null_handle(0x40000000)
+        return duplicate(handle)
+
+    try:
+        stdin = null_handle(0x80000000)
+        stdout, stderr = standard_handle(-11), standard_handle(-12)
+        # Like Popen with redirected stdin, inherit only the private channel
+        # and explicitly duplicated standard I/O. Never inherit the Job handle.
+        inherited = (wintypes.HANDLE * 4)(channel_handle, stdin, stdout, stderr)
+        jobs = (wintypes.HANDLE * 1)(job.handle)
+        size = ctypes.c_size_t()
+        api.InitializeProcThreadAttributeList(None, 2, 0, ctypes.byref(size))
+        if not size.value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = ctypes.create_string_buffer(size.value)
+        if not api.InitializeProcThreadAttributeList(attributes, 2, 0, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        initialized = True
+        for key, value in ((0x00020002, inherited), (0x0002000d, jobs)):
+            if not api.UpdateProcThreadAttribute(
+                    attributes, 0, key, ctypes.cast(value, ctypes.c_void_p),
+                    ctypes.sizeof(value), None, None):
+                raise ctypes.WinError(ctypes.get_last_error())
+        startup = ExtendedStartup()
+        startup.startup.cb = ctypes.sizeof(startup)
+        startup.startup.flags = 0x100
+        startup.startup.stdin, startup.startup.stdout, startup.startup.stderr = stdin, stdout, stderr
+        startup.attributes = ctypes.cast(attributes, ctypes.c_void_p)
+        text = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
+        block = ctypes.create_unicode_buffer(
+            "\0".join(f"{key}={value}" for key, value in sorted(
+                environment.items(), key=lambda item: item[0].upper())) + "\0\0")
+        if not api.CreateProcessW(
+                command[0], text, None, None, True, 0x00080000 | 0x00000400,
+                block, str(cwd), ctypes.byref(startup), ctypes.byref(process)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        created = _WindowsProcess(api, process.process, process.pid, command)
+        succeeded = True
+        return created
+    finally:
+        if process.thread:
+            api.CloseHandle(process.thread)
+        if not succeeded and process.process:
+            api.TerminateProcess(process.process, 1)
+            api.CloseHandle(process.process)
+        if initialized:
+            api.DeleteProcThreadAttributeList(attributes)
+        for handle in temporary:
+            api.CloseHandle(handle)
 
 
 def _windows_child_identity(pid: int) -> tuple[int, Path]:
@@ -149,7 +349,7 @@ def _windows_child_identity(pid: int) -> tuple[int, Path]:
 class RuntimeProcess:
     """The process interface used by existing lifecycle and recovery owners."""
 
-    def __init__(self, process: subprocess.Popen):
+    def __init__(self, process: subprocess.Popen | _WindowsProcess):
         self._process = process
         self.pid = process.pid
         self.job = None
@@ -179,7 +379,12 @@ class RuntimeProcess:
 
     def kill(self):
         if os.name == "nt":
+            owned = self.job is not None
             self._close_job()
+            if owned:
+                # Job termination is asynchronous. Observe its completion
+                # before requesting another termination on a dying process.
+                self.join(5)
             if self.is_alive():
                 self._process.kill()
         else:
@@ -301,6 +506,7 @@ def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | dict
                                "method": "process.bootstrap", "params": params})
     parent, child = multiprocessing.get_context("spawn").Pipe(duplex=True)
     process = None
+    owned_job = None
     try:
         command = [str(Path(expected.executable)), "-I", "-B", str(_BOOTSTRAP), "--ipc-handle", str(child.fileno())]
         options = {"cwd": str(code_root), "close_fds": True, "stdin": subprocess.DEVNULL}
@@ -311,15 +517,17 @@ def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | dict
             environment.pop(key, None)
         options["env"] = environment
         if os.name == "nt":
+            owned_job = WindowsProcessJob()
             with _START_LOCK:
                 os.set_handle_inheritable(child.fileno(), True)
                 try:
-                    startup = subprocess.STARTUPINFO()
-                    startup.lpAttributeList = {"handle_list": [child.fileno()]}
-                    process = RuntimeProcess(subprocess.Popen(command, startupinfo=startup, **options))
+                    native = _start_windows_process(
+                        command, environment=environment, cwd=code_root,
+                        channel_handle=child.fileno(), job=owned_job)
+                    process = RuntimeProcess(native)
+                    process.job = owned_job
                 finally:
                     os.set_handle_inheritable(child.fileno(), False)
-            process.job = WindowsProcessJob(process._process.pid)
         else:
             process = RuntimeProcess(subprocess.Popen(
                 command, pass_fds=(child.fileno(),), start_new_session=True, **options))
@@ -347,6 +555,8 @@ def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | dict
         parent.close()
         if process is not None:
             process.close()
+        if owned_job is not None:
+            owned_job.close()
         raise
     finally:
         child.close()

@@ -143,3 +143,16 @@ jobs:
           tests/test_kernel_cancellation.py
           tests/test_runtime_builder_safety.py
           tests/test_runtime_role_native.py
+          --basetemp="${{ runner.temp }}/hashi-qualified-runtime-roles"
+          --junitxml="${{ runner.temp }}/hashi-runtime-roles.xml"
+          --durations=20
+      - name: Retain native role qualification receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-runtime-roles-${{ matrix.python-version }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/hashi-runtime-roles.xml
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/runtime-role-qualification.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/functions-dependency-handoff.json

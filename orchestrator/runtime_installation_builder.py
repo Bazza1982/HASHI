@@ -18,7 +18,7 @@ import subprocess
 
 from orchestrator.runtime_contract import (
     CORE_HOST_ROLE, FUNCTIONS_ROLE, load_runtime_policy, validate_standard_dependencies,
-    load_qualified_runtime, verify_runtime_files,
+    load_qualified_runtime, verify_runtime_files, RuntimeContractError,
 )
 
 
@@ -100,7 +100,12 @@ def observe_fingerprint(code_root, executable, role):
         "print(json.dumps(enforce_runtime_contract(root,role=sys.argv[2]).to_dict()))")
     result = subprocess.run([str(executable), "-I", "-B", "-c", script, str(code_root), role],
                             capture_output=True, text=True, encoding="utf-8",
-                            timeout=60, check=True)
+                            timeout=60, check=False)
+    if result.returncode != 0:
+        raise RuntimeContractError(
+            f"New {role} interpreter rejected observation (exit {result.returncode}): "
+            + result.stderr[-4000:]
+        )
     return json.loads(result.stdout)
 
 

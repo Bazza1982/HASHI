@@ -14,7 +14,8 @@ import sys
 import pytest
 
 from orchestrator.runtime_contract import (
-    CORE_HOST_ROLE, FUNCTIONS_ROLE, load_runtime_policy, locked_standard_dependencies,
+    CORE_HOST_ROLE, FUNCTIONS_ROLE, CORE_SOURCE_PATHS, RuntimeFingerprint, core_source_digest,
+    load_runtime_policy, locked_standard_dependencies,
     runtime_installation_reference,
 )
 from orchestrator.runtime_installation_builder import (
@@ -35,6 +36,15 @@ def _name(text):
 @pytest.fixture(scope="module")
 def native_roles(tmp_path_factory):
     directory = tmp_path_factory.mktemp("native-qualified-roles")
+    # Qualify the exact protected code artifact, rather than a build workspace
+    # whose project .egg-info is visible as ambient installed metadata.
+    code_root = directory / "core-source"
+    for relative in (*CORE_SOURCE_PATHS, "pyproject.toml", "runtime-entry.json",
+                     "constraints/standard-py312.lock", "constraints/core-host-py312.lock"):
+        target = code_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    assert core_source_digest(code_root) == core_source_digest(ROOT)
     seed = directory / "captured-standard-site"
     seed.mkdir()
     locked = locked_standard_dependencies(ROOT, load_runtime_policy(ROOT))
@@ -64,18 +74,26 @@ def native_roles(tmp_path_factory):
     packages = "\n".join(f"{k}=={v}" for k, v in sorted(locked.items()))
     dependency_digest = "sha256:" + hashlib.sha256(packages.encode()).hexdigest()
     reference = directory / "reference.json"
-    pin = snapshot_reference(ROOT, base_root=Path(sys.base_prefix).resolve(),
+    pin = snapshot_reference(code_root, base_root=Path(sys.base_prefix).resolve(),
                              functions_site=seed, destination=reference,
                              expected_dependency_digest=dependency_digest)
-    result = build_reference_roles(ROOT, reference, expected_digest=pin,
+    result = build_reference_roles(code_root, reference, expected_digest=pin,
                                    destination=directory / "release")
+    result["code_root"] = str(code_root)
     result["reference_path"] = str(reference)
     result["locked"] = locked
+    result["source_head"] = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    result["source_core_digest"] = core_source_digest(code_root)
+    result["CR_ID"] = RuntimeFingerprint.from_mapping(result["core"]).runtime_id
+    result["FR_ID"] = RuntimeFingerprint.from_mapping(result["functions"]).runtime_id
+    (directory / "runtime-role-qualification.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8")
     return result
 
 
-def _run(python, script, *args, timeout=90):
-    result = subprocess.run([str(python), "-I", "-B", "-c", script, str(ROOT), *map(str, args)],
+def _run(python, script, *args, timeout=90, code_root=ROOT):
+    result = subprocess.run([str(python), "-I", "-B", "-c", script, str(code_root), *map(str, args)],
                             capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -101,7 +119,7 @@ try: import aiohttp
 except ModuleNotFoundError: blocked=True
 assert blocked
 print(json.dumps(enforce_runtime_contract(Path(sys.argv[1]),role=CORE_HOST_ROLE).to_dict()))
-""")
+""", code_root=result["code_root"])
     assert observed["installation_digest"]
     assert observed["environment_prefix"] == result["core"]["environment_prefix"]
     assert observed["dependency_digest"] == result["core"]["dependency_digest"]
@@ -139,6 +157,7 @@ def test_same_core_pid_can_replace_fr_dependency_and_rollback_without_replaying(
     release = Path(native_roles["destination"])
     original = Path(native_roles["functions"]["environment_prefix"])
     references = []
+    runtime_ids = []
     for version in ("1", "2"):
         environment = tmp_path / ("functions-" + version)
         shutil.copytree(original, environment)
@@ -147,8 +166,10 @@ def test_same_core_pid_can_replace_fr_dependency_and_rollback_without_replaying(
         (metadata / "METADATA").write_text(
             f"Name: hashi-runtime-fixture\nVersion: {version}\n", encoding="utf-8")
         qualified = qualify_environment(
-            ROOT, environment, release / "base", tmp_path / ("qualified-" + version + ".json"), FUNCTIONS_ROLE)
+            Path(native_roles["code_root"]), environment, release / "base",
+            tmp_path / ("qualified-" + version + ".json"), FUNCTIONS_ROLE)
         references.append(runtime_installation_reference(qualified))
+        runtime_ids.append(qualified.runtime_id)
     requests = []
     from orchestrator.kernel_artifact import manifest_digest
     for label, failure in (("old", ""), ("new", ""), ("rejected", "activate")):
@@ -197,7 +218,13 @@ async def check():
                           "before":before,"after":after,"rollback":rollback}))
     finally: await kernel.active.close()
 asyncio.run(check())
-""", payload, tmp_path / "instance", timeout=150)
+""", payload, tmp_path / "instance", timeout=150, code_root=native_roles["code_root"])
+    observed["CR_ID"] = RuntimeFingerprint.from_mapping(observed["core"]).runtime_id
+    observed["FR_IDs"] = runtime_ids
+    observed["FG_ID"] = requests[0]["manifest"]["generation_id"]
+    observed["scope"] = "test-dependency mechanism; PR137 and full business parity remain unaccepted"
+    (tmp_path / "functions-dependency-handoff.json").write_text(
+        json.dumps(observed, indent=2), encoding="utf-8")
     assert observed["before"]["dependency"] == "1"
     assert observed["after"]["dependency"] == "2"
     assert observed["rollback"]["count"] == 1

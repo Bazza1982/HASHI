@@ -18,11 +18,10 @@ def test_forged_private_admission_never_runs_product(tmp_path, monkeypatch, defe
     payload = bootstrap(tmp_path)
     decode = runtime_process.decode_envelope
     children = []
-    popen = runtime_process.subprocess.Popen
-    def observe(*args, **kwargs):
-        child = popen(*args, **kwargs)
+    initialize = runtime_process.RuntimeProcess.__init__
+    def observe(self, child):
         children.append(child)
-        return child
+        initialize(self, child)
     def forged(frame):
         reply = decode(frame)
         if reply.get("kind") == "response" and reply.get("ok"):
@@ -42,7 +41,7 @@ def test_forged_private_admission_never_runs_product(tmp_path, monkeypatch, defe
             elif defect == "schema":
                 value["runtime"]["worker_protocol"] = True
         return reply
-    monkeypatch.setattr(runtime_process.subprocess, "Popen", observe)
+    monkeypatch.setattr(runtime_process.RuntimeProcess, "__init__", observe)
     monkeypatch.setattr(runtime_process, "decode_envelope", forged)
     spawned = None
     try:
@@ -64,16 +63,15 @@ async def test_cancelling_native_launch_reclaims_child_before_return(tmp_path, m
     release = threading.Event()
     validate = runtime_process._validate_admission
     children = []
-    popen = runtime_process.subprocess.Popen
-    def observe(*args, **kwargs):
-        child = popen(*args, **kwargs)
+    initialize = runtime_process.RuntimeProcess.__init__
+    def observe(self, child):
         children.append(child)
-        return child
+        initialize(self, child)
     def pause(*args):
         reached.set()
         assert release.wait(10), "test control failed to release admission"
         return validate(*args)
-    monkeypatch.setattr(runtime_process.subprocess, "Popen", observe)
+    monkeypatch.setattr(runtime_process.RuntimeProcess, "__init__", observe)
     monkeypatch.setattr(runtime_process, "_validate_admission", pause)
     task = asyncio.create_task(runtime_process.launch_function_process_async(payload))
     try:
