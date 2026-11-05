@@ -435,6 +435,29 @@ def test_agentpresence_route_is_frozen_and_receives_only_media(tmp_path):
     assert agentpresence["content_modes"] == ["media"]
 
 
+@pytest.mark.parametrize("content_modes", [["text"], ["text", "media"]])
+def test_agentpresence_primary_keeps_text_without_widening_mirror_modes(content_modes):
+    route = freeze_run_delivery_route(
+        message_source_id="agentpresence",
+        session_surface="agentpresence",
+        session_channel_key="owner-a",
+        chat_id=None,
+        telegram_requested=False,
+    )
+    intent = delivery_intent_from_run_route(
+        route,
+        event_id="evt-presence-primary",
+        session_id="ses-1",
+        idempotency_key="presence-primary",
+        content_modes=content_modes,
+    )
+    assert len(intent["destinations"]) == 1
+    destination = intent["destinations"][0]
+    assert destination["connector_id"] == "agentpresence"
+    assert destination["role"] == "primary"
+    assert destination["content_modes"] == sorted(content_modes)
+
+
 def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():
     route = freeze_run_delivery_route(
         message_source_id="hashi.internal",
@@ -492,3 +515,4 @@ def test_runtime_presentation_status_omits_provider_for_other_engines():
     assert status["model"] == "gpt-codex"
     assert "provider" not in status
     assert "her_v2" not in status
+# HASHI-Fingerprint: hfp_86897a5fc3194c74bf930e29a696f3cf

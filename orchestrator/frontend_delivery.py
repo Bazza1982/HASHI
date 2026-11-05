@@ -318,7 +318,7 @@ def delivery_intent_from_run_route(
             )
         except ValueError:
             connector_id = registered_connector_id(surface)
-        allowed_modes = connector_delivery_content_modes(connector_id)
+        allowed_modes = connector_delivery_content_modes(connector_id, role=role)
         selected_modes = (
             tuple(mode for mode in normalized_content_modes if mode in allowed_modes)
             if allowed_modes

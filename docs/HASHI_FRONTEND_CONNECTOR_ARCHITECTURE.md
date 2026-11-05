@@ -466,7 +466,10 @@ a Telegram command implementation or a Backend/API special case. All
 command-capable Connectors may invoke it through their existing command adapter.
 
 When enabled, PAO freezes AgentPresence as an optional media destination at Run
-admission. Canonical reply voice then receives its own outbox task and receipt;
+admission. This mirror stays media-only even though an explicit AgentPresence
+primary ingress also supports text replies. The connector registry qualifies
+these primary and mirror content modes separately. Canonical reply voice then
+receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The
