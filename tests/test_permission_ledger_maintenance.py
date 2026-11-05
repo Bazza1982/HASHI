@@ -166,7 +166,6 @@ def test_native_archive_preserves_both_databases_and_detects_changed_evidence(se
 def test_native_archive_is_private_to_distinct_service_and_replays(service):
     import ctypes
     import os
-    import subprocess
     if os.name != "nt":
         pytest.skip("native Windows service archive ACL")
     if not ctypes.WinDLL("shell32").IsUserAnAdmin():
@@ -174,6 +173,7 @@ def test_native_archive_is_private_to_distinct_service_and_replays(service):
     from orchestrator.permissions.ledger_maintenance import _archive
     from orchestrator.permissions.windows_ipc import current_process_user_sid
     from orchestrator.permissions.windows_security import require_private_path
+    from tools.private_files import protect_private_file
 
     service_sid = "S-1-5-18"
     if current_process_user_sid() == service_sid:
@@ -182,11 +182,10 @@ def test_native_archive_is_private_to_distinct_service_and_replays(service):
     approve(authority, issuer, clock, context, [scope])
     private = path.parent / "service-private"
     private.mkdir()
-    subprocess.run(
-        ["icacls.exe", str(private), "/inheritance:r", "/grant:r",
-         "*S-1-5-18:(OI)(CI)(F)", "*S-1-5-32-544:(OI)(CI)(F)", "/Q"],
-        check=True, capture_output=True,
-    )
+    # CI temp roots may carry explicit ACEs. Replace the fixture DACL instead
+    # of merely removing inheritance, then prove the installation precondition.
+    protect_private_file(private, additional_full_control_sids=(service_sid,), include_writer=False)
+    require_private_path(private, trusted_sids=(service_sid,))
     ledger = private / "permissions.sqlite"
     copy_database(path, ledger)
     copy_database(authority.continuity_path, ledger.with_name(ledger.name + ".continuity"))
