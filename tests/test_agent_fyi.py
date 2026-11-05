@@ -91,6 +91,14 @@ def test_catalogue_requires_useful_navigation_and_actual_contracts(reference_rep
     assert validate_catalogue(path, full=True)
 
 
+def test_catalogue_ci_validator_needs_no_optional_runtime_dependencies():
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(ROOT / "scripts/validate_agent_fyi.py")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_shipped_catalogue_navigation_migration_and_actual_bootstrap_budget():
     path = ROOT / "docs/AGENT_FYI.md"
     assert validate_catalogue(path, full=True) == []

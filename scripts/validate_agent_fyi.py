@@ -38,9 +38,9 @@ def context_metrics(root: Path) -> dict:
     fyi = (root / "docs/AGENT_FYI.md").read_text(encoding="utf-8").strip()
     rules = (root / "AGENTS.md").read_text(encoding="utf-8").strip()
     primer = build_agent_fyi_primer(root / "docs/AGENT_FYI.md")
-    from tools.schemas import TOOL_SCHEMA_MAP
+    from tools.documentation_schema import DOCUMENTATION_READ_SCHEMA
 
-    reader_schema = json.dumps(TOOL_SCHEMA_MAP["documentation_read"], ensure_ascii=False, separators=(",", ":"))
+    reader_schema = json.dumps(DOCUMENTATION_READ_SCHEMA, ensure_ascii=False, separators=(",", ":"))
     examples = {}
     for name, path, section in [
         ("voice guide", "docs/agent-guide/voice.md", ""),
