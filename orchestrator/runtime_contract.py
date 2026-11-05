@@ -454,7 +454,10 @@ def current_runtime_fingerprint(
 ) -> RuntimeFingerprint:
     implementation = str(getattr(sys.implementation, "name", "")).lower()
     cache_tag = str(getattr(sys.implementation, "cache_tag", "") or "")
-    executable = str(Path(sys.executable).resolve()) if sys.executable else ""
+    # Keep the interpreter invocation path: resolving a POSIX venv symlink
+    # launches the base interpreter and silently loses the selected prefix.
+    # Admission separately verifies the resolved OS process image.
+    executable = os.path.abspath(sys.executable) if sys.executable else ""
     # POSIX CPython normally exposes SOABI, while official Windows builds use
     # EXT_SUFFIX as their native-extension ABI identity.  Both are equally
     # valid representations of the platform ABI.

@@ -491,3 +491,19 @@ def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():
 
     assert violations == []
 # HASHI-Fingerprint: hfp_33bec0c8ea5b44bab7df74cb62059871
+
+
+def test_fingerprint_keeps_logical_interpreter_entry_not_resolved_base(tmp_path, monkeypatch):
+    alias = tmp_path / "venv" / "bin" / "python"
+    alias.parent.mkdir(parents=True)
+    base = tmp_path / "base-python"
+    base.write_bytes(b"not executed")
+    try:
+        alias.symlink_to(base)
+    except OSError:
+        pytest.skip("Creating symlinks requires a native platform privilege")
+    monkeypatch.setattr(sys, "executable", str(alias))
+    fingerprint = current_runtime_fingerprint(load_runtime_policy(ROOT), code_root=ROOT)
+    assert fingerprint.executable == str(alias.absolute())
+    assert Path(fingerprint.executable).resolve() == base
+    assert fingerprint.executable != str(base)

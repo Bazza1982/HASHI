@@ -87,7 +87,7 @@ def test_os_resource_lease_excludes_a_separate_worker_process(tmp_path):
           'from orchestrator.execution_resources import leases;'
           'exec("async def main():\\n Path(sys.argv[3]).write_text(\'ready\')\\n async with leases(sys.argv[2],[(\'scope\',1,False)],timeout=2):\\n  Path(sys.argv[4]).write_text(\'entered\')\\nasyncio.run(main())".replace("\\\\n","\\n"))')
     held=FileLease(tmp_path,'scope:0');assert held.try_acquire()
-    process=subprocess.Popen([sys.executable,'-I','-c',code,str(Path(__file__).resolve().parents[1]),str(tmp_path),str(ready),str(entered)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    process=subprocess.Popen([sys.executable,'-I','-B','-c',code,str(Path(__file__).resolve().parents[1]),str(tmp_path),str(ready),str(entered)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     try:
         import time
         deadline=time.monotonic()+2
@@ -105,3 +105,4 @@ def test_os_resource_lease_excludes_a_separate_worker_process(tmp_path):
 @pytest.mark.parametrize('value',[True,False,'2',2.5,0,65])
 def test_execution_limit_rejects_unqualified_configuration_values(value):
     with pytest.raises(ValueError):limit(value,'budget',8)
+# HASHI-Fingerprint: hfp_12b4015e6db54ed88682cc8a203b5e3e

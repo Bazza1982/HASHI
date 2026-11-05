@@ -1008,66 +1008,35 @@ def _format_patch_outcome(outcome: tuple[str, str], path: Path) -> str:
 def _apply_patch_with_patch_command(
     patch_cmd: str, path: Path, patch_str: str
 ) -> tuple[str, str] | None:
-    """Keep strict dry-run/apply verdicts with byte-preserving Windows input."""
-
+    """Honour a native patch verdict; never retry a rejected patch elsewhere."""
     import subprocess
-    import tempfile
 
     payload = patch_str.encode("utf-8", "surrogateescape")
+    original = path.read_bytes()
+    if b"\r\n" not in original and b"\n" in original:
+        # Record separators in a diff need not match the tool's transport.
+        # Only a uniformly LF target uses this normalization.
+        payload = payload.replace(b"\r\n", b"\n")
     binary_args = ["--binary"] if os.name == "nt" else []
-
-    def uniform_newline(value: bytes) -> bytes | None:
-        if b"\n" not in value:
-            return None
-        return b"\r\n" if b"\r\n" in value and b"\n" not in value.replace(b"\r\n", b"") else (
-            b"\n" if b"\r\n" not in value else None
-        )
-
-    def apply(input_args=(), input_payload=payload):
-        try:
-            dry_run = subprocess.run(
-                [patch_cmd, *binary_args, *input_args, "--dry-run", "-u", str(path)],
-                input=input_payload, capture_output=True,
-            )
-        except OSError:
-            return None
-        if dry_run.returncode != 0:
-            return ("rejected", _decode_patch_output(dry_run.stderr + dry_run.stdout))
-        try:
-            applied = subprocess.run(
-                [patch_cmd, *binary_args, *input_args, "-u", str(path)],
-                input=input_payload, capture_output=True,
-            )
-        except OSError:
-            return None
-        if applied.returncode != 0:
-            return ("failed", _decode_patch_output(applied.stderr + applied.stdout))
-        return ("ok", _decode_patch_output(applied.stdout).strip())
-
-    if os.name != "nt":
-        return apply()
-
     try:
-        target_newline = uniform_newline(path.read_bytes())
-        patch_newline = uniform_newline(payload)
-        if target_newline is not None and patch_newline is not None:
-            # Diff record separators follow a uniformly terminated target.
-            # Mixed target/patch bytes stay exact rather than being rewritten.
-            payload = payload.replace(b"\r\n", b"\n")
-            if target_newline == b"\r\n":
-                payload = payload.replace(b"\n", b"\r\n")
-        # Some native GNU ports translate stdin even in binary mode. A closed,
-        # private input file makes both phases consume the same exact bytes.
-        # The directory is protected while empty, before any patch is written.
-        from tools.private_files import protect_private_file
-        with tempfile.TemporaryDirectory(prefix=".hashi-patch-", dir=path.parent) as directory:
-            private = Path(directory)
-            protect_private_file(private)
-            patch_file = private / "input.patch"
-            patch_file.write_bytes(payload)
-            return apply(("--input", str(patch_file)), None)
-    except OSError as exc:
-        return ("rejected", f"cannot prepare private patch input: {exc}")
+        dry_run = subprocess.run(
+            [patch_cmd, *binary_args, "--dry-run", "-u", str(path)],
+            input=payload, capture_output=True,
+        )
+    except OSError:
+        return None
+    if dry_run.returncode != 0:
+        return ("rejected", _decode_patch_output(dry_run.stderr + dry_run.stdout))
+    try:
+        applied = subprocess.run(
+            [patch_cmd, *binary_args, "-u", str(path)],
+            input=payload, capture_output=True,
+        )
+    except OSError:
+        return None
+    if applied.returncode != 0:
+        return ("failed", _decode_patch_output(applied.stderr + applied.stdout))
+    return ("ok", _decode_patch_output(applied.stdout).strip())
 
 
 def _retarget_patch_headers(patch_str: str, filename: str) -> str:
@@ -1294,6 +1263,13 @@ async def execute_apply_patch(
 
     if not path.exists():
         return f"Error: file not found: {path}"
+
+    original = path.read_bytes()
+    if b"\r\n" in original and b"\n" not in original.replace(b"\r\n", b""):
+        # Some GNU ports strip CR even with --binary. Select the existing
+        # strict, byte-preserving engine before invoking any external tool.
+        # This is not a fallback after a native rejection.
+        return _format_patch_outcome(_apply_patch_with_python(path, patch_str), path)
 
     try:
         patch_cmd = _find_patch_command()

@@ -62,6 +62,13 @@ def snapshot_reference(code_root, *, base_root, functions_site, destination,
     if digest != expected_dependency_digest:
         raise ValueError("Reference dependency metadata does not match the approved baseline")
     validate_standard_dependencies(code_root, load_runtime_policy(code_root), installed=packages)
+    # Development CPython distributions may contain internal aliases. Capture
+    # their bytes into a fresh regular-file tree; qualified runtimes themselves
+    # still categorically reject redirected paths.
+    if any(path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+           for path in base_root.rglob("*")):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        base_root = _copy_runtime_tree(base_root, destination.with_suffix(".base"), base=True)
     value = {"schema_version": 1, "base_root": str(base_root),
              "base_files": file_table(base_root), "functions_site": str(functions_site),
              "functions_files": file_table(functions_site),
@@ -128,21 +135,49 @@ def qualify_environment(code_root, environment, base_root, manifest_path, role):
 
 
 def _copy_runtime_tree(source, destination, *, base=False):
-    source, destination = Path(source), Path(destination)
+    source, destination = Path(source).resolve(), Path(destination)
     def ignore(directory, names):
         excluded = {name for name in names if name == "__pycache__"}
         if base and Path(directory) == source / ("Lib" if os.name == "nt" else "lib/python3.12"):
             excluded.add("site-packages")
         if not base:
-            # uv's environment bootstrap is not an application dependency.
             excluded.update(name for name in names if name in {"_virtualenv.py", "_virtualenv.pth"})
         return excluded
+
+    def inventory():
+        table = {}
+        def visit(directory, relative, ancestors):
+            actual = directory.resolve(strict=True)
+            if not actual.is_relative_to(source) or actual in ancestors:
+                raise ValueError("Reference runtime link escapes its root or forms a cycle")
+            ancestors = ancestors | {actual}
+            entries = list(directory.iterdir())
+            excluded = ignore(directory, [entry.name for entry in entries])
+            for entry in entries:
+                if entry.name in excluded:
+                    continue
+                target = entry.resolve(strict=True)
+                if not target.is_relative_to(source):
+                    raise ValueError("Reference runtime link escapes its root")
+                name = f"{relative}/{entry.name}" if relative else entry.name
+                if entry.is_dir():
+                    visit(entry, name, ancestors)
+                elif entry.is_file():
+                    if entry.suffix.lower() == ".pth" or entry.name.lower() in {
+                            "sitecustomize.py", "usercustomize.py",
+                            "sitecustomize.pyc", "usercustomize.pyc"}:
+                        raise ValueError("Unexpected reference startup injection")
+                    table[name] = sha256(entry)
+                else:
+                    raise ValueError("Reference runtime contains a non-regular entry")
+        visit(source, "", set())
+        return table
+
+    before = inventory()
     shutil.copytree(source, destination, ignore=ignore)
-    for file in destination.rglob("*"):
-        if file.is_symlink() or getattr(file, "is_junction", lambda: False)():
-            raise ValueError("Copied runtime contains a redirected path")
-        if file.suffix.lower() == ".pth" or file.name.lower() in {"sitecustomize.py", "usercustomize.py"}:
-            raise ValueError("Unexpected reference startup injection")
+    if before != inventory() or before != file_table(destination):
+        raise ValueError("Reference runtime changed while being materialized")
+    verify_runtime_files(destination, before, manifest_path=destination.parent / "external-record")
     return destination
 
 
@@ -181,6 +216,13 @@ def build_reference_roles(code_root, reference_path, *, expected_digest, destina
         environment = destination / "runtimes" / name
         subprocess.run([str(base_python), "-I", "-B", "-m", "venv", "--without-pip",
                         "--copies", str(environment)], check=True, capture_output=True, timeout=60)
+        # CPython venv creates lib64 -> lib on some POSIX hosts even with
+        # --copies. Remove only this redundant alias in the newly built env.
+        alias = environment / "lib64"
+        if alias.is_symlink():
+            if alias.resolve(strict=True) != (environment / "lib").resolve(strict=True):
+                raise ValueError("Unexpected lib64 redirect in new runtime")
+            alias.unlink()
         if role == FUNCTIONS_ROLE:
             site = environment / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
             # venv --without-pip makes an empty site directory; replace that

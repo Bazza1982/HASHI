@@ -122,3 +122,31 @@ the existing budget at 8,354 characters.
 Original application pins remain unchanged. Source review, failed business
 parity, complete Linux/native qualification, PR #137 security adoption, release
 packaging/authority protection and operator adoption remain explicit HOLDs.
+
+## Windows patch and POSIX qualification follow-up
+
+The 7a912b0d CI failures are retained: Linux private launch lost the venv
+invocation path when resolving the interpreter symlink, and the reference
+builder rejected CPython's source aliases before materializing a sealed copy.
+Fingerprint observation now keeps the absolute invocation entry. OS process
+image verification remains resolved and exact. Reference capture materializes
+only root-contained aliases into fresh regular files, rejects escapes/cycles,
+checks copy consistency, and leaves source runtimes unchanged. Newly built
+POSIX venvs drop only their redundant internal lib64 alias before sealing;
+admission still rejects every link in an installed runtime.
+
+The Windows GNU port used in CI strips CR even with binary file input. Uniform
+CRLF targets now select the existing strict in-process diff engine before any
+external tool. LF native verdicts remain authoritative; invalid context still
+rejects without target writes. Original Fingerprint and voice assertions remain.
+The new negative route checks failed before repair; all 62 patch/Fingerprint/
+voice cases pass on the original split Functions dependencies. Logical-entry,
+manifest, reference-copy and actual launcher coverage passes 86 native Windows
+cases; three new defect cases failed before repair. Ruff passes.
+
+This changes protected Core bytes after 4a35c21f, so the former protected digest
+is historical evidence only. External qualification must bind the new exact C;
+it does not modify sealed runtime files. Linux CI, the complete original-version
+parity scope and final exact-tree human review are still pending at publication.
+No PR137 version, production process, active Python environment or service has
+been changed.

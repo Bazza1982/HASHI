@@ -71,3 +71,56 @@ def test_sealed_fr_policy_remains_exact_when_checkout_lock_changes(tmp_path):
     assert approved.fingerprint.runtime_policy_digest == runtime_policy_digest(code, policy)
     assert approved.fingerprint.dependency_digest == value["runtime"]["dependency_digest"]
 # HASHI-Fingerprint: hfp_faf292ef79bf466b8997c63367bae740
+
+
+def _symlink_or_skip(path, target, *, directory=False):
+    import pytest
+    try:
+        path.symlink_to(target, target_is_directory=directory)
+    except OSError:
+        pytest.skip("Creating symlinks requires a native platform privilege")
+
+
+def test_reference_copy_materializes_internal_aliases_but_seal_stays_strict(tmp_path):
+    import pytest
+    from orchestrator.runtime_contract import RuntimeContractError, verify_runtime_files
+    from orchestrator.runtime_installation_builder import _copy_runtime_tree, file_table
+    source = tmp_path / "source"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin/python3").write_bytes(b"captured interpreter bytes")
+    _symlink_or_skip(source / "bin/python", Path("python3"))
+    _symlink_or_skip(source / "aliases", Path("bin"), directory=True)
+    copied = _copy_runtime_tree(source, tmp_path / "fresh")
+    assert (source / "bin/python").is_symlink()
+    assert not any(path.is_symlink() for path in copied.rglob("*"))
+    assert (copied / "bin/python").read_bytes() == (source / "bin/python3").read_bytes()
+    assert (copied / "aliases/python").read_bytes() == (source / "bin/python3").read_bytes()
+    verify_runtime_files(copied, file_table(copied), manifest_path=tmp_path / "record")
+    with pytest.raises(RuntimeContractError, match="redirected path"):
+        verify_runtime_files(source, file_table(source), manifest_path=tmp_path / "record")
+
+
+def test_reference_copy_rejects_external_alias_before_copy(tmp_path):
+    import pytest
+    from orchestrator.runtime_installation_builder import _copy_runtime_tree
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"must not copy")
+    _symlink_or_skip(source / "escape", outside)
+    destination = tmp_path / "fresh"
+    with pytest.raises(ValueError, match="escapes"):
+        _copy_runtime_tree(source, destination)
+    assert not destination.exists()
+
+
+def test_reference_copy_rejects_directory_cycle_before_copy(tmp_path):
+    import pytest
+    from orchestrator.runtime_installation_builder import _copy_runtime_tree
+    source = tmp_path / "source"
+    source.mkdir()
+    _symlink_or_skip(source / "cycle", source, directory=True)
+    destination = tmp_path / "fresh"
+    with pytest.raises(ValueError, match="cycle"):
+        _copy_runtime_tree(source, destination)
+    assert not destination.exists()

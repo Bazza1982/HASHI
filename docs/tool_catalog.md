@@ -57,16 +57,12 @@ List files and directories.
 
 ### apply_patch
 Apply a unified diff patch to a file. A rejected dry run leaves the file
-unchanged. On native Windows, GNU patch uses binary mode and an owner-private
-input file for both dry run and application. Uniform LF/CRLF diff separators
-follow the target's existing convention; mixed bytes stay exact. Target bytes
-are not normalized before validation. Failure to protect the input rejects the
-operation without changing the target. Existing Git and Python fallbacks do
-not override an authoritative patch rejection.
-| Param | Required | Description |
-|-------|----------|-------------|
-| `path` | Yes | Target file path |
-| `patch` | Yes | Unified diff content |
+unchanged. Uniform CRLF files use the strict in-process adapter, selected
+before native tools, to preserve Windows line endings. LF files use native
+patch when available (binary mode on Windows); diff separators are normalized
+to LF. Mixed target line endings are never normalized. Native rejections remain
+authoritative and do not fall through to another adapter. Context mismatches
+are rejected without writing the target.
 
 ### process_list
 List running processes with PID, name, CPU%, MEM%.
