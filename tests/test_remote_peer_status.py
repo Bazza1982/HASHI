@@ -1255,7 +1255,9 @@ def test_remote_config_snapshot_prefers_bridge_home_runtime_state_when_separated
 
     cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
 
-    assert cfg["root"] == code_root
+    # HashiRoot owns credentials/configuration; CodeRoot owns program assets.
+    assert cfg["root"] == state_root
+    assert cfg["code_root"] == code_root
     assert cfg["state_root"] == state_root
     assert cfg["port"] == 8768
     assert cfg["ports"] == [8768]

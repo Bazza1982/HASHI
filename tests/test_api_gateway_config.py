@@ -209,8 +209,13 @@ def test_committed_durability_error_is_not_silently_retried_or_rolled_back(cfg, 
     path = gateway.config_path_for(cfg)
     _seed(path, {"enabled": False, "default_model": "gpt-5.5"})
     syncs = []
+    real_sync = config_json._sync_directory
 
     def fail(parent):
+        # Other gateway tests may still finish independent background snapshots.
+        # Inject only at this document's publication boundary.
+        if parent != path.parent:
+            return real_sync(parent)
         syncs.append(parent)
         raise OSError("injected directory sync failure")
 
@@ -336,3 +341,4 @@ async def test_service_success_keeps_existing_contract_and_saves_before_effects(
     assert ok is True and isinstance(message, str) and message
     assert events == ([] if operation == "already_running" else [operation])
     assert _saved(path)["enabled"] is (operation != "stop")
+# HASHI-Fingerprint: hfp_b659134890124901add40e6f02b84628
