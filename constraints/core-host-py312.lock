@@ -1,0 +1,3 @@
+# Approved Core host profile: CPython 3.12 stdlib only.
+# Zero third-party distributions is intentional and enforced, not an omitted lock.
+# Shared and Agent Function dependencies remain in their own exact role lock.

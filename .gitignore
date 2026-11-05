@@ -15,6 +15,7 @@ __pycache__/
 
 # Runtime state
 *.lock
+!constraints/core-host-py312.lock
 !constraints/standard-py312.lock
 !constraints/transcription-py312.lock
 !constraints/ocr-py312.lock
