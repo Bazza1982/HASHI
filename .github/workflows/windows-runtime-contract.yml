@@ -3,9 +3,9 @@ name: Windows runtime contract
 on:
   push:
     paths:
-      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "packaging/portable_windows/**"
       - "tests/test_portable_bootstrap_failure_details.py"
-      - "tests/test_portable_windows_packaging.py"
+      - "tests/test_portable_*.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"
@@ -47,9 +47,9 @@ on:
       - ".github/workflows/windows-runtime-contract.yml"
   pull_request:
     paths:
-      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "packaging/portable_windows/**"
       - "tests/test_portable_bootstrap_failure_details.py"
-      - "tests/test_portable_windows_packaging.py"
+      - "tests/test_portable_*.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"

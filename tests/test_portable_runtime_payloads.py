@@ -174,7 +174,7 @@ def _core_transfer_fixture(image):
     return root, code, capsule.pack_release_payloads(root, code, roots=("runtime/core",))
 
 
-def _native_expand_core(root, tmp_path):
+def _native_expand_core(root, tmp_path, *, without_file_hash=False):
     # Load only these function definitions, never the installer's main body.
     installer = ROOT / "packaging/portable_windows/templates/launcher/Install-To-PC.ps1"
     def quote(value):
@@ -193,7 +193,14 @@ def _native_expand_core(root, tmp_path):
         "[Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true))\n"
         " if ($matches.Count -ne 1) { throw 'Missing exact installer function' }\n"
         " . ([ScriptBlock]::Create($matches[0].Extent.Text))\n}\n"
-        "Expand-PortableCorePayload -Root " + quote(root) + "\n",
+        + (
+            "Import-Module Microsoft.PowerShell.Management,Microsoft.PowerShell.Utility -ErrorAction Stop\n"
+            "Remove-Item Function:\\Get-FileHash -ErrorAction SilentlyContinue\n"
+            "$PSModuleAutoLoadingPreference='None'\n"
+            "if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) { throw 'Hash command still available' }\n"
+            if without_file_hash else ""
+        )
+        + "Expand-PortableCorePayload -Root " + quote(root) + "\n",
         encoding="utf-8-sig",
     )
     return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(script)],
@@ -201,9 +208,10 @@ def _native_expand_core(root, tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows installer transfer boundary")
-def test_native_core_expansion_verifies_every_byte_without_executing_a_runtime(image, tmp_path):
+@pytest.mark.parametrize("without_file_hash", (False, True))
+def test_native_core_expansion_verifies_every_byte_without_executing_a_runtime(image, tmp_path, without_file_hash):
     root, _code, value = _core_transfer_fixture(image)
-    result = _native_expand_core(root, tmp_path)
+    result = _native_expand_core(root, tmp_path, without_file_hash=without_file_hash)
     assert result.returncode == 0, result.stdout + result.stderr
     assert file_table(root / "runtime/core") == value["roles"]["core"]["files"]
     assert not (root / "runtime/hashi-runtime-release.json").exists()

@@ -8,7 +8,8 @@ Core v5 bundles independently qualified Core and Functions interpreters. The
 Functions interpreter, speech resources, OCR resources and runtime tools travel
 in lossless LZMA ZIP payloads. Core uses a native-supported Deflate ZIP: the
 Windows installer verifies the archive and every extracted Core file before
-using Python, then the canonical qualifier verifies/expands the remaining
+using Python, with streaming SHA-256 independent of PowerShell module discovery.
+Then the canonical qualifier verifies/expands the remaining
 payloads. No runtime selection is published at this stage. The executable
 Function catalogue stays expanded.
 The capsule retains every uncompressed file hash and runtime identity. Before
