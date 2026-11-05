@@ -52,12 +52,12 @@ Use Node.js 18+ and npm 9+ as declared in the package metadata, plus the
 approved CPython 3.12.13 interpreter in the same OS environment.
 For the unreleased source candidate, follow [Source install](#source-install).
 
-Post-install prepares a versioned, user-scoped Python 3.12.13 virtual
-environment from `constraints/standard-py312.lock`. It prints “runtime is
-ready” only after the complete runtime contract passes. If Python, network, or
-dependency preparation fails, npm leaves the program entry installed but
-reports **runtime setup is incomplete**; the failed build is not adopted and
-no instance data is touched.
+Post-install prepares a versioned, user-scoped pair of independent Core and
+Functions environments using the approved CPython policies. It copies a fresh
+build/sidecar base first, installs only hashed Function wheels into a new
+directory, and seals the zero-application-dependency Core separately. It prints
+ready only after both qualified roles pass. Existing environments and instance
+data are not upgraded or changed; failed candidates are never selected.
 
 Post-install also prepares the HERV3 Level 2 privacy detector in a **separate**
 user-scoped environment from `requirements-privacy.txt`. The `hashi` launcher
@@ -204,42 +204,23 @@ python --version
 the Windows `py -3.12` launcher instead if needed, after verifying its exact
 patch version.
 
-On Linux/macOS, create and activate a new virtual environment:
+The v5 source candidate uses the same canonical preparation as npm. Install
+Node.js 18+ as well, keep the approved Python available, and run from the clean
+committed repository root:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+node postinstall.js
 ```
 
-On WSL, use `.venv-wsl` so a shared checkout does not reuse a Windows venv:
+Preparation creates fresh versioned runtimes outside the program, including
+separate privacy and speech helpers. It does not start Core or migrate an
+existing instance. Do not install application dependencies into a running
+interpreter or reuse an old coupled environment as Core. Windows and native
+Linux qualification are required; macOS acceptance remains a separate gate.
 
-```bash
-python -m venv .venv-wsl
-source .venv-wsl/bin/activate
-```
-
-On Windows PowerShell:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-If activation is blocked by local shell policy, invoke the environment's
-Python directly; do not change machine-wide execution policy for this guide.
-Install and check the standard runtime using that environment:
-
-```bash
-python -m pip install -r constraints/standard-py312.lock
-python scripts/check_runtime_contract.py --json
-python scripts/provision_privacy_runtime.py
-python scripts/provision_privacy_runtime.py --check
-```
-
-The last two commands prepare and verify the optional Level 2 detector in
-`.venv-privacy`, separate from the active HASHI interpreter. They need network
-access to download Presidio, spaCy, and the hash-pinned English model. If they
-fail, keep Level 1 and do not send sensitive content under a Level 2 claim.
+The optional Level 2 detector is prepared independently. It is never enabled
+automatically; a failed preparation leaves Level 2 unavailable. Explicit
+media opt-outs are reported as partial installations, not complete readiness.
 
 Open the local connection page from the repository root:
 
@@ -250,7 +231,8 @@ python -m onboarding.onboarding_main
 Choose a detected CLI engine or a HERV3 Model Provider, enter any required
 credentials in the masked local page, and confirm the minimal connection
 check. Telegram is optional. After setup, launch with the platform helper
-below, or run `python main.py` from the activated environment.
+below. The launcher resolves the installer-owned role pair; direct startup
+must use that qualified Core interpreter with -I -B, not the Functions Python.
 
 This runs the checked-out source. A GitHub source archive uses the same setup
 steps after extraction; it is not a portable installation bundle.
@@ -353,11 +335,16 @@ Follow [Source install](#source-install) before launching.
 
 ## Python dependency profiles
 
-For a normal local HASHI installation, use the standard source profile:
+For a normal local HASHI installation, use the canonical role preparation:
 
 ```bash
-python -m pip install -r constraints/standard-py312.lock
+node postinstall.js
 ```
+
+The Functions version authority is constraints/standard-py312.lock; installation
+uses its derived constraints/functions-py312.hashes.lock. Core has a separate
+empty application lock. Test/development environments are disposable tools,
+not production Core or Functions environments.
 
 `requirements.txt` is the human-maintained dependency input; launch and
 deployment use the generated lock above. The standard profile includes the

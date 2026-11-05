@@ -66,4 +66,12 @@ jobs:
           tests/test_fingerprint_integration.py
           tests/test_fingerprint_verify_export.py
       - name: Preserve protected Core
-        run: python scripts/check_protected_core_changes.py --base origin/main
+        shell: bash
+        env:
+          CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
+        run: |
+          core_args=(--base origin/main)
+          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+            core_args+=(--authorized --major-version-change)
+          fi
+          python scripts/check_protected_core_changes.py "${core_args[@]}"

@@ -263,15 +263,20 @@ def test_standard_lock_covers_every_standard_requirement_and_launch_path():
     }
 
     assert required_names <= locked_names
-    for relative in (
-        "bin/bridge-u.sh",
-        "bin/bridge-u.bat",
-        "Dockerfile.enterprise",
-        "mac/prepare_usb.sh",
-        "postinstall.js",
-    ):
+    routes = {
+        "bin/bridge-u.sh": "resolve_launch_runtime.py",
+        "bin/bridge-u.bat": "resolve_launch_runtime.py",
+        "Dockerfile.enterprise": "compile_enterprise_functions.py",
+        "mac/prepare_usb.sh": "standard-py312.lock",
+        "postinstall.js": "functions-py312.hashes.lock",
+    }
+    for relative, authority in routes.items():
         content = (ROOT / relative).read_text(encoding="utf-8")
-        assert "standard-py312.lock" in content
+        assert authority in content
+    compiler = (ROOT / "scripts/compile_enterprise_functions.py").read_text(encoding="utf-8")
+    assert "standard-py312.lock" in compiler
+    resolver = (ROOT / "scripts/resolve_launch_runtime.py").read_text(encoding="utf-8")
+    assert "_select_core_runtime" in resolver
 
 
 def test_windows_timezone_database_is_declared_and_hash_locked():
@@ -309,6 +314,12 @@ def test_all_first_party_launchers_run_the_runtime_contract_checker():
         content = (ROOT / relative).read_text(encoding="utf-8")
         if relative == "onboard-cli.js":
             assert "require('./cli')" in content
+            continue
+        if relative in {"bin/bridge-u.sh", "bin/bridge-u.bat"}:
+            assert "resolve_launch_runtime.py" in content
+            assert "--field core-executable" in content
+            assert "--field functions-executable" in content
+            assert "pip install" not in content
             continue
         assert "check_runtime_contract.py" in content
 

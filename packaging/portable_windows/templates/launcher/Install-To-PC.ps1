@@ -591,6 +591,64 @@ function Remove-NewInstallationSafely {
     }
 }
 
+function Assert-InstalledRuntimeQualification {
+    param([string]$Root, [switch]$Prepare)
+    $python = Join-Path $Root 'runtime\functions\python.exe'
+    $qualifier = Join-Path $Root 'app\hashi\scripts\qualify_portable_runtime.py'
+    $operation = if ($Prepare) { 'qualify-installed' } else { 'verify-installed' }
+    & $python -I -B $qualifier $operation --image-root $Root
+    if ($LASTEXITCODE -ne 0) { throw 'The copied HASHI runtimes failed verification.' }
+}
+
+function Protect-InstalledProgramTrustRoots {
+    param([string]$Root)
+    # Keep precisely the existing data access before changing its parent's ACL.
+    $data = Join-Path $Root 'data'
+    $dataAcl = Get-Acl -LiteralPath $data
+    $dataAcl.SetAccessRuleProtection($true, $true)
+    Set-Acl -LiteralPath $data -AclObject $dataAcl
+    $qualified = Join-Path $Root 'runtime-qualifications'
+    New-Item -ItemType Directory -Path $qualified -ErrorAction Stop | Out-Null
+    $admin = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $items = @((Get-Item -LiteralPath $Root -Force))
+    foreach ($relative in @('app', 'runtime', 'runtime-qualifications', 'launcher')) {
+        $directory = Join-Path $Root $relative
+        $items += @(Get-Item -LiteralPath $directory -Force)
+        $items += @(Get-ChildItem -LiteralPath $directory -Recurse -Force)
+    }
+    foreach ($item in $items) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The copied program contains an unsupported link.'
+        }
+        $acl = if ($item.PSIsContainer) {
+            [Security.AccessControl.DirectorySecurity]::new()
+        } else { [Security.AccessControl.FileSecurity]::new() }
+        $acl.SetOwner($admin)
+        $acl.SetAccessRuleProtection($true, $false)
+        $inherit = if ($item.PSIsContainer -and $item.FullName -ne $Root) {
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+        } else { [Security.AccessControl.InheritanceFlags]::None }
+        foreach ($principal in @($admin, $system, $users)) {
+            $rights = if ($principal.Value -eq $users.Value) {
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            } else { [Security.AccessControl.FileSystemRights]::FullControl }
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $principal, $rights, $inherit,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow)
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $item.FullName -AclObject $acl
+        $observed = Get-Acl -LiteralPath $item.FullName
+        if (-not $observed.AreAccessRulesProtected -or
+            $observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $admin.Value) {
+            throw 'The copied program trust-root permissions failed verification.'
+        }
+    }
+}
+
 try {
     Remove-Item -LiteralPath $script:InstallLog -Force -ErrorAction SilentlyContinue
     if (-not (Test-IsAdministrator)) {
@@ -618,6 +676,7 @@ try {
         throw 'HASHI is not installed at the selected destination; run the installer first.'
     }
     if ($script:WasUpdate -and [string]$existing.BundleId -eq $sourceBundleId) {
+        Assert-InstalledRuntimeQualification -Root $script:InstallRoot
         Install-DesktopShortcuts
         Write-InstallProgress `
             -Percent 100 `
@@ -809,6 +868,9 @@ try {
     Move-Item -LiteralPath $script:StageRoot -Destination $script:InstallRoot
     $script:StageRoot = ''
     $script:ActivatedThisRun = $true
+    Protect-InstalledProgramTrustRoots -Root $script:InstallRoot
+    Assert-InstalledRuntimeQualification -Root $script:InstallRoot -Prepare
+    Assert-InstalledRuntimeQualification -Root $script:InstallRoot
     Install-DesktopShortcuts
 
     if ($script:DisplacedPreviousRoot -and (Test-Path -LiteralPath $script:DisplacedPreviousRoot -PathType Container)) {

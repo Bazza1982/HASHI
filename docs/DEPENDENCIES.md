@@ -9,7 +9,7 @@ compatibility shim.
 
 | Need | Command | Includes |
 |---|---|---|
-| Normal local HASHI | `python -m pip install -r constraints/standard-py312.lock` | Core, media, Hashi Remote, TUI at the approved versions |
+| Normal local HASHI | `node postinstall.js` | Independently qualified zero-app Core and exact hashed Functions, plus separate helpers |
 | Development and tests | `python -m pip install -r requirements-dev.txt` | Standard profile and test tools |
 | Minimal source-checkout environment | `python -m pip install -e .` | Base Python dependencies; optional APIs, Remote, and TUI need their extras |
 | Every declared integration | `python -m pip install -e ".[all]"` | All optional profiles; potentially very large |

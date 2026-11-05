@@ -56,6 +56,24 @@ provenance.build_id = `sha256:${crypto
   .update(JSON.stringify(provenance, Object.keys(provenance).sort()))
   .digest('hex')}`;
 
+// The full file publication is created by the canonical Python/Core source
+// owner. A dirty checkout cannot be turned into a trusted Git-less package.
+const pythonChoices = [
+  ...(process.env.HASHI_PYTHON ? [[process.env.HASHI_PYTHON]] : []),
+  [path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')],
+  ['python3.12'], ...(process.platform === 'win32' ? [['py', '-3.12']] : []),
+  ['python3'], ['python'],
+];
+let exported = false;
+for (const [command, ...prefix] of pythonChoices) {
+  const result = spawnSync(command, [...prefix, '-B',
+    path.join(root, 'scripts', 'export_function_source.py'),
+    '--output', path.join(root, 'FUNCTION_SOURCE.json')],
+  { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.status === 0) { exported = true; break; }
+}
+if (!exported) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
+
 fs.writeFileSync(
   path.join(root, 'BUILD_INFO.json'),
   `${JSON.stringify({

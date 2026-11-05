@@ -21,13 +21,16 @@
 - Runtime contract:
   - `python scripts/check_runtime_contract.py --json`
   - CPython is the approved 3.12.13 patch and packaging, container, CI and portable builders agree
-  - standard dependencies install from `constraints/standard-py312.lock`
+  - Core uses its own empty lock; Functions wheels install into a fresh directory with --require-hashes from constraints/functions-py312.hashes.lock
+  - standard npm/source, Windows controllers, Portable relocation and enterprise image probe the exact separate role pair
+  - Git-less packages require installer-owned source publication; local self-asserted manifests never authorize a Function generation
   - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
 - Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"`
 - Python source distribution and wheel:
   `python scripts/build_python_release.py`. It builds committed `HEAD` in a
   temporary export; never run the packaging backend in a live runtime checkout.
+- Enterprise image: `python scripts/build_enterprise_image.py --tag hashi-qualification`; retain actual image/role identities and probe without real services/accounts.
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
   - the user guides and their local navigation targets are present in the

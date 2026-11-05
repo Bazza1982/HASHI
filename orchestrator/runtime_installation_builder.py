@@ -97,6 +97,14 @@ def _write_profile(code_root, environment, role):
     lock = profile / policy.standard_lock
     lock.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(Path(code_root) / policy.standard_lock, lock)
+    if role == FUNCTIONS_ROLE:
+        for relative in ("constraints/functions-py312.hashes.lock",
+                         "constraints/portable-windows-py312.hashes.lock"):
+            source = Path(code_root) / relative
+            if source.is_file():
+                target = profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
 
 
 def observe_fingerprint(code_root, executable, role):
@@ -118,13 +126,18 @@ def observe_fingerprint(code_root, executable, role):
     return json.loads(result.stdout)
 
 
-def qualify_environment(code_root, environment, base_root, manifest_path, role):
+def qualify_environment(code_root, environment, base_root, manifest_path, role, *, standalone=False):
     """Write a new external qualification record; never mutate sealed role files."""
     environment, base_root = Path(environment).resolve(), Path(base_root).resolve()
     manifest_path = Path(manifest_path).resolve()
     if manifest_path.exists() or manifest_path.is_relative_to(environment) or manifest_path.is_relative_to(base_root):
         raise ValueError("Qualification must be new and outside immutable runtime files")
-    executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if standalone:
+        if base_root != environment or (environment / "pyvenv.cfg").exists():
+            raise ValueError("Standalone qualification requires its exact own CPython base")
+        executable = environment / ("python.exe" if os.name == "nt" else "bin/python3")
+    else:
+        executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     runtime = observe_fingerprint(code_root, executable, role)
     value = {"schema_version": 1, "role": role, "runtime": runtime,
              "base_root": str(base_root), "base_files": file_table(base_root),
@@ -212,7 +225,7 @@ def _validated_reference(code_root, reference_path, expected_digest, destination
     return code_root, reference_path, destination, reference, base_source, functions_source
 
 
-def _materialize_role(code_root, base, functions_source, environment, role):
+def _materialize_role(code_root, base, functions_source, environment, role, *, wheel_lock=None):
     base_python = base / ("python.exe" if os.name == "nt" else "bin/python3")
     subprocess.run([str(base_python), "-I", "-B", "-m", "venv", "--without-pip",
                     "--copies", str(environment)], check=True, capture_output=True, timeout=60)
@@ -230,10 +243,18 @@ def _materialize_role(code_root, base, functions_source, environment, role):
         site.rmdir()
         _copy_runtime_tree(functions_source, site)
     _write_profile(code_root, environment, role)
+    if role == FUNCTIONS_ROLE and wheel_lock is not None:
+        source = Path(wheel_lock)
+        target = environment / "runtime-policy/extra-functions.hashes.lock"
+        expected = sha256(source)
+        shutil.copyfile(source, target)
+        if sha256(source) != expected or sha256(target) != expected:
+            raise ValueError("Additional Functions wheel lock changed during materialization")
     return environment
 
 
-def build_reference_roles(code_root, reference_path, *, expected_digest, destination):
+def build_reference_roles(code_root, reference_path, *, expected_digest, destination,
+                          functions_wheel_lock=None):
     """Materialize a fresh pair with original exact packages and independent seals."""
     code_root, reference_path, destination, reference, base_source, functions_source = _validated_reference(
         code_root, reference_path, expected_digest, destination)
@@ -242,7 +263,8 @@ def build_reference_roles(code_root, reference_path, *, expected_digest, destina
     environments = {}
     for role, name in ((CORE_HOST_ROLE, "core"), (FUNCTIONS_ROLE, "functions")):
         environment = _materialize_role(
-            code_root, base, functions_source, destination / "runtimes" / name, role)
+            code_root, base, functions_source, destination / "runtimes" / name, role,
+            wheel_lock=functions_wheel_lock if role == FUNCTIONS_ROLE else None)
         environments[role] = qualify_environment(
             code_root, environment, base, destination / "qualifications" / (name + ".json"), role)
     # Re-read the captured source closures: inconsistent copies never qualify.

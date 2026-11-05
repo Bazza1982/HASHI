@@ -312,6 +312,7 @@ def _is_python_environment_root(root: Path) -> bool:
                 [
                     str(executable),
                     "-I",
+                    "-B",
                     "-c",
                     "import pathlib, sys; print(pathlib.Path(sys.prefix).resolve())",
                 ],
@@ -386,3 +387,4 @@ def _require_narrow_existing_target(
         raise ValueError(f"refusing repository/instance root as a protection target: {path}")
     if not path.exists():
         raise FileNotFoundError(f"live protection target does not exist: {path}")
+# HASHI-Fingerprint: hfp_28d23d31323749878cfdc3431b47dd91

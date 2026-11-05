@@ -358,3 +358,106 @@ def test_functions_only_builder_never_writes_inside_existing_core_base(native_ro
             expected_digest=native_roles["reference_digest"], destination=destination,
             core_reference=core_reference)
     assert not destination.exists()
+
+
+def test_management_launcher_uses_only_the_qualified_core(native_roles, monkeypatch):
+    from scripts import hashi_instance_cli
+    from tools.instance_registry import InstanceRegistryError
+
+    code_root = Path(native_roles["code_root"])
+    checker = code_root / "scripts/check_runtime_selection.py"
+    checker.parent.mkdir(exist_ok=True)
+    shutil.copyfile(ROOT / "scripts/check_runtime_selection.py", checker)
+    monkeypatch.setattr(hashi_instance_cli, "_prepared_role_candidates",
+                        lambda _root: [[native_roles["functions"]["executable"]]])
+    command = hashi_instance_cli._select_core_runtime(code_root)
+    assert command == [native_roles["core"]["executable"], "-I", "-B"]
+    # The current test driver is not an installer-selected FR. Exact approved
+    # Python/dependencies alone must not authorize it to choose a Core.
+    monkeypatch.setattr(hashi_instance_cli, "_prepared_role_candidates",
+                        lambda _root: [[sys.executable]])
+    with pytest.raises(InstanceRegistryError, match="installer-qualified"):
+        hashi_instance_cli._select_core_runtime(code_root)
+
+
+def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_roles, tmp_path):
+    from orchestrator.kernel_artifact import manifest_digest
+    from orchestrator.runtime_contract import RuntimeContractError, qualified_runtime_from_reference
+    from orchestrator.runtime_release_capsule import (
+        create_capsule, qualify_relocated_roles, verify_capsule, verify_installed_roles,
+    )
+
+    image = tmp_path / "built-image"
+    code = image / "app/hashi"
+    shutil.copytree(Path(native_roles["code_root"]), code)
+    module = code / "orchestrator/capsule_fixture.py"
+    module.write_text("VALUE = 'immutable capsule fixture'\n", encoding="utf-8")
+    entries = [{"module": "orchestrator.capsule_fixture",
+                "relative_path": "orchestrator/capsule_fixture.py",
+                "sha256": hashlib.sha256(module.read_bytes()).hexdigest()}]
+    manifest = {"schema_version": 2, "generation_id": manifest_digest(entries),
+                "entries": entries, "assets": []}
+    base = Path(native_roles["destination"]) / "base"
+    for name in ("core", "functions"):
+        environment = image / "runtime" / name
+        shutil.copytree(base, environment)
+        site = _site_packages(environment)
+        if site.exists():
+            assert not any(site.iterdir())
+        else:
+            site.mkdir(parents=True)
+        if name == "functions":
+            site.rmdir()
+            shutil.copytree(_site_packages(native_roles["functions"]["environment_prefix"]), site)
+    capsule = create_capsule(image, code, tmp_path / "build-observations",
+                             function_manifest=manifest)
+    serialized = json.dumps(capsule)
+    assert str(tmp_path) not in serialized
+    assert str(ROOT) not in serialized
+    original_reference = {
+        "path": str(tmp_path / "build-observations/core.json"),
+        "digest": "sha256:" + hashlib.sha256(
+            (tmp_path / "build-observations/core.json").read_bytes()).hexdigest()}
+    moved = tmp_path / "relocated space 中文" / "image"
+    moved.parent.mkdir()
+    shutil.move(str(image), moved)
+    code = moved / "app/hashi"
+    with pytest.raises(RuntimeContractError):
+        qualified_runtime_from_reference(original_reference, code_root=code, role=CORE_HOST_ROLE)
+    selection = qualify_relocated_roles(moved, code)
+    assert verify_installed_roles(moved, code) == selection
+    observed = _run(moved / ("runtime/core/python.exe" if os.name == "nt" else "runtime/core/bin/python3"),
+                    """
+import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from orchestrator.runtime_contract import load_core_runtime_selection,bind_process_runtime,enforce_runtime_contract,CORE_HOST_ROLE
+root=Path(sys.argv[1]);selected=load_core_runtime_selection(root)
+bind_process_runtime(selected.core,code_root=root)
+core=enforce_runtime_contract(root,role=CORE_HOST_ROLE)
+assert not any(name=="aiohttp" or name.startswith("aiohttp.") for name in sys.modules)
+print(json.dumps({"core_id":selected.core.runtime_id,"fr_id":selected.functions.runtime_id,
+                  "core_dependency_digest":core.dependency_digest}))
+""", code_root=code)
+    assert observed["core_id"] == capsule["roles"]["core"]["runtime_id"]
+    assert observed["fr_id"] == capsule["roles"]["functions"]["runtime_id"]
+    assert observed["core_dependency_digest"] == "sha256:" + hashlib.sha256(b"").hexdigest()
+    policy = moved / "runtime/functions/runtime-policy/pyproject.toml"
+    unchanged = policy.read_bytes()
+    policy.write_bytes(unchanged + b"\n")
+    try:
+        with pytest.raises(RuntimeContractError, match="hash"):
+            verify_capsule(moved, code)
+    finally:
+        policy.write_bytes(unchanged)
+    capsule_path = moved / "runtime/role-capsule.json"
+    original = capsule_path.read_bytes()
+    invalid = json.loads(original)
+    invalid["roles"]["functions"]["root"] = "../foreign-python"
+    capsule_path.write_text(json.dumps(invalid), encoding="utf-8")
+    try:
+        with pytest.raises(RuntimeContractError, match="role/root"):
+            verify_capsule(moved, code)
+    finally:
+        capsule_path.write_bytes(original)
+    assert verify_installed_roles(moved, code) == selection

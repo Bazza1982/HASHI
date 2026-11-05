@@ -87,6 +87,8 @@ def _targets(code_root, core, own_reference, selector_stamp):
         roots.add(Path(record["base_root"]))
         files.add(runtime.manifest_path)
 
+        files.add(Path(runtime.fingerprint.environment_prefix).parent / "hashi-function-publication.json")
+        files.add(code_root / "FUNCTION_SOURCE.json")
     if own_reference is not None:
         own = qualified_runtime_from_reference(
             {"path": own_reference[0], "digest": own_reference[1]},

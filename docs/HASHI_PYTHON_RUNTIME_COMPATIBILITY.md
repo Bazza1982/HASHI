@@ -42,8 +42,9 @@ nonce, OS-observed executable/parent/PID, runtime identity and FG before product
 execution. Windows creates the owned Job and restricted handle list atomically
 with the child. No active environment is upgraded in place. The operator-owned
 selector is fixed relative to the Core prefix; it is not an Agent, Workzone,
-environment-variable or prompt override. Installation authority/ACL protection
-and the complete Portable/offline build pipeline still require Gate 5.
+environment-variable or prompt override. Platform installers materialize independent roles and re-observe relocated
+Portable environments at the final target. Independent review and complete
+artifact/OS acceptance still require Gate 5; source code alone is not that evidence.
 
 A later compatible FR update or rollback changes FR and its admitted Functions
 processes while C, CR and Core PID remain fixed. A CPython/stdlib/ABI change in
@@ -92,6 +93,44 @@ and preserves the same synthetic durable effect counter. --prepare-product
 also qualifies and prepares the complete identical FG under both FRs without
 activating connectors, real providers or services. Its evidence is independent
 of business tests and production adoption; the installed selector is untouched.
+
+### Complete distribution and installer trust
+
+Standard npm/source preparation uses a new copied CPython build/sidecar base,
+a disposable pip tool environment, hash-required empty-target Functions install,
+and the canonical role builder. Nothing is installed in an existing Core/FR.
+Sidecar preparation precedes role sealing and cannot create caches in a running
+or sealed Core base. The installer catalogue selects the management FR; initial
+Core launch accepts only the paired, qualified Core interpreter. An Agent's
+management-Python environment variable is not Core selection authority.
+
+Portable carries separate independently pinned runtime/core and runtime/functions
+trees. The public relative capsule binds observed CR/FR IDs, full file closures,
+the complete FG, public committed-source evidence and independent sidecar
+closures. It contains no build-machine interpreter or receipt paths. The
+installer verifies the complete existing SHA256SUMS coverage, copies atomically,
+preserves data permissions and data lineage, protects program/runtime/selector
+trust roots, then re-observes final paths before success. Generated absolute
+qualification records live outside both immutable interpreters. A failure
+restores the previous complete installation; relocation never rewrites sealed
+environment bytes to make an old receipt appear valid.
+
+A Git checkout still requires its exact clean committed source. A Git-less
+package requires a privately bound FR plus the fixed installer-owned
+hashi-function-publication.json beside that FR. Every requested source/asset
+must match its published bytes and executable mode. A package-local self-asserted
+FUNCTION_SOURCE.json alone grants no runtime authority. The tool write-denial
+policy covers both publication records and the installation selector. No
+fallback to a package record is allowed for a dirty or broken Git checkout.
+Publication stays outside the interpreter seal so FG and FR remain independent.
+
+Enterprise images build through scripts/build_enterprise_image.py: only a clean
+committed public export enters the context. Standard and optional Functions
+packages receive an exact platform wheel hash lock. Sidecars are prepared with
+a disposable build interpreter before the CR/FR copies are sealed. Main uses
+the absolute Core -I -B command, management/health uses FR, and installed source
+and runtime trees are read-only. The image workflow probes both actual roles
+with networking disabled; a successful source check is not a production canary.
 
 ## Core v4 coupled baseline
 

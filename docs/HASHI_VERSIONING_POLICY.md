@@ -182,6 +182,17 @@ runtime-compatibility specification even when the product label is unchanged.
 Sharing `X` or a release string never authorizes hot adoption across a rejected
 fingerprint or substitutes for a configuration/data migration check.
 
+Protected code C, Core runtime CR, Functions runtime FR and Function code FG
+have independent identities. A qualified Python/stdlib security patch in CR
+with unchanged protected code does not by itself consume X, but still requires
+separate native qualification and explicit cold-cutover approval. A compatible
+vendor dependency update in FR normally uses a maintenance revision and a new
+FR_ID, with the same Core PID, interpreter, CR_ID and protected-source digest.
+A significant new Function capability still uses Y; a protected implementation
+or contract change still uses X and the independent same-tree review gate.
+Neither an independent role ID nor a package version weakens compatibility,
+file seals, audit, rollback or adoption authority.
+
 Core v5's structured version payload adds `runtime_roles.core_host` and
 `runtime_roles.functions`. They project the admitted Core receipt and the
 observed current Functions process separately, retaining their actual runtime

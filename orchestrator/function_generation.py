@@ -829,13 +829,24 @@ def verify_manifest_source_commit(
     """Require every qualified source/asset byte to belong to clean Git HEAD."""
 
     root = Path(code_root).resolve()
-    checkout = _git_output(root, "rev-parse", "--show-toplevel").decode(
-        "utf-8", errors="replace"
-    ).strip()
+    try:
+        checkout = _git_output(root, "rev-parse", "--show-toplevel").decode(
+            "utf-8", errors="replace"
+        ).strip()
+    except FunctionGenerationError:
+        if (root / ".git").exists() or (root / ".git").is_symlink():
+            raise  # A broken/unavailable checkout can never become a package.
+        checkout = ""
     if not checkout or Path(checkout).resolve() != root:
-        raise FunctionGenerationError(
-            "Function generation must be qualified from a Git repository root"
-        )
+        from orchestrator.function_source_publication import verify_published_manifest
+        from orchestrator.runtime_contract import RuntimeContractError
+        try:
+            return verify_published_manifest(manifest, root)
+        except (OSError, ValueError, RuntimeContractError) as exc:
+            raise FunctionGenerationError(
+                "Function generation must be qualified from a Git repository root "
+                "or an installer-published sealed source: " + str(exc)
+            ) from exc
     commit = _git_output(root, "rev-parse", "--verify", "HEAD").decode(
         "ascii", errors="replace"
     ).strip().lower()

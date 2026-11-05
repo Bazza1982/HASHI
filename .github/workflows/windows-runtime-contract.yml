@@ -158,7 +158,7 @@ jobs:
           --basetemp="${{ runner.temp }}/hashi-qualified-runtime-roles"
           --junitxml="${{ runner.temp }}/hashi-runtime-roles.xml"
           --durations=20
-      - name: Verify the complete offline original-dependency regression scope
+      - name: Verify the complete offline dependency regression scope
         timeout-minutes: 90
         run: >-
           python -m pytest -q tests

@@ -249,3 +249,50 @@ it, then qualified the same untouched FR from the clean code artifact with the
 same FR_ID. This is fixture isolation; no seal or package assertion was relaxed.
 Ruff and ten builder/profile boundary cases pass after the correction. Final CI
 for the combined checkpoint is still pending. No PR137 pin has changed.
+
+## Verified security handoff and release-source checkpoint
+
+The original-pin 030689c4 offline Windows scope completed with 9021 passed,
+33 skipped, 246 deselected and 18 subtests; its branch/PR runtime CI passed.
+2940a5f4's subsequent actual-role fixture isolation passed Windows and Linux CI.
+Only after those results, e2c265f6 changes the five reviewed PR137 package pins
+in Functions and derives the standard/Portable hash locks. PR137 is not merged.
+
+The real 0/50 original and upgraded product installations qualified and prepared
+the same 667-module / 728-resource FG. One owned Core PID 42520 retained its CR
+while upgrading the actual five packages, rejecting an injected activation
+failure and rolling back, explicitly downgrading, then performing a second
+upgrade. The durable effect counter stayed 1 in all five states; all owned
+workers and the temporary Core retired. Both product environment seals remained
+valid. The new-package security scope passed 17 checks; the two original-package
+failures are preserved. This is runtime evidence, distinct from source CI.
+
+e2c265f6 branch Windows/Linux runtime CI passed. Its synthetic PR-merge Windows
+scope exposed a real pre-existing live-audit export ordering defect (9029 passed,
+1 failed, 33 skipped). Identical timestamps/random IDs could advance the cursor
+past unexported events, and the first 1000-row time-ordered window could stall
+later pages. Live export now queries the existing ledger by chain cursor/order
+before LIMIT. General chronological queries, ledger hashes and durable schema
+are unchanged. Three deterministic red cases (timestamp ties, clock reversal,
+1002 rows) turned green; all 36 live-export/ledger/export/anchor/WORM checks pass.
+
+Release-source changes cover installer-owned CR/FR selection, immutable role
+capsules and final-path qualification, fresh copied build Python, hashed npm
+Functions installation, Windows/Linux launchers, and the enterprise image.
+Git-less product admission requires a code-file snapshot anchored beside the
+actually bound qualified FR; a package-local snapshot alone grants no authority.
+Portable relocation preserves complete role byte seals and IDs; records are
+regenerated outside the runtime trees at the final installed path. Existing
+installation/data lineage and whole-program failure rollback remain.
+
+Native Windows relocation/catalogue scope passes 2 tests (293.55 seconds);
+package/launcher scope 90, sidecar/permission scope 67 with 3 platform skips,
+distribution/publication negatives 14, and final launcher/runtime selection
+scope 65 pass. These focused scopes overlap and must not be summed. Ruff,
+JavaScript and Bash syntax checks pass. Actual npm/Portable artifacts, image CI
+and the final complete offline scope remain pending at this source checkpoint.
+
+No existing Core, active environment, instance state or production service was
+modified. Independent human review of the exact protected Core tree, approval
+of main integration, account/WAC/client qualification and cold operator adoption
+remain separate release gates; no reviewer record is fabricated.

@@ -33,18 +33,20 @@ if str(HASHI_ROOT) not in sys.path:
     sys.path.insert(0, str(HASHI_ROOT))
 
 from orchestrator.runtime_contract import (  # noqa: E402
-    CORE_SOURCE_PATHS,
+    CORE_SOURCE_PATHS, CORE_HOST_ROLE,
     RuntimePolicy,
     core_source_digest,
     load_runtime_policy,
     locked_standard_dependencies,
 )
 from orchestrator.build_provenance import capture_build_provenance  # noqa: E402
+from orchestrator.agent_documentation import ROOT_DOCUMENTS  # noqa: E402
 from orchestrator.voice_preview_bundle import (  # noqa: E402
     validate_voice_preview_bundle,
 )
 
 _RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT)
+_CORE_RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT, role=CORE_HOST_ROLE)
 PYTHON_VERSION = _RUNTIME_POLICY.python_text
 PYTHON_BUILD_DATE = _RUNTIME_POLICY.portable_build_date
 STANDARD_LOCK_RELATIVE = Path(_RUNTIME_POLICY.standard_lock)
@@ -56,7 +58,8 @@ MEDIA_RUNTIME_LOCKS = {
     "tts": Path("constraints/tts-edge-py312.lock"),
 }
 ALLOWLISTED_LOCK_RELATIVES = frozenset(
-    (STANDARD_LOCK_RELATIVE, *MEDIA_RUNTIME_LOCKS.values())
+    (STANDARD_LOCK_RELATIVE, Path(_CORE_RUNTIME_POLICY.standard_lock),
+     Path("constraints/functions-py312.hashes.lock"), *MEDIA_RUNTIME_LOCKS.values())
 )
 
 
@@ -86,6 +89,13 @@ ASSETS = {
             f"{PYTHON_BUILD_DATE}/cpython-{PYTHON_VERSION}+{PYTHON_BUILD_DATE}"
             "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
         ),
+        "10b7a95b928e551fc78cac665999e1ae1f08fb738b255adb0a8d3b9c2824a9c0",
+    ),
+    "core-python": Asset(
+        f"cpython-{_CORE_RUNTIME_POLICY.python_text}+{_CORE_RUNTIME_POLICY.portable_build_date}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        ("https://github.com/astral-sh/python-build-standalone/releases/download/"
+         f"{_CORE_RUNTIME_POLICY.portable_build_date}/cpython-{_CORE_RUNTIME_POLICY.python_text}+{_CORE_RUNTIME_POLICY.portable_build_date}"
+         "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"),
         "10b7a95b928e551fc78cac665999e1ae1f08fb738b255adb0a8d3b9c2824a9c0",
     ),
     "ffmpeg": Asset(
@@ -126,6 +136,8 @@ ASSETS = {
 }
 
 SOURCE_DIRS = (
+    "bin",
+    "docs",
     "adapters",
     "agent_seeds",
     "apps",
@@ -154,10 +166,13 @@ ROOT_SOURCE_FILES = (
     "tui.py",
     "pyproject.toml",
     "requirements-privacy.txt",
+    *sorted(ROOT_DOCUMENTS),
     "LICENSE",
 )
 RUNTIME_POLICY_FILES = (
     STANDARD_LOCK_RELATIVE.as_posix(),
+    _CORE_RUNTIME_POLICY.standard_lock,
+    "constraints/functions-py312.hashes.lock",
     *(path.as_posix() for path in MEDIA_RUNTIME_LOCKS.values()),
 )
 ROOT_PACKAGE_FILES = (
@@ -355,6 +370,8 @@ def _runtime_input_paths(policy: RuntimePolicy) -> tuple[str, ...]:
             (
                 "pyproject.toml",
                 policy.standard_lock,
+                _CORE_RUNTIME_POLICY.standard_lock,
+                "constraints/functions-py312.hashes.lock",
                 RUNTIME_ENTRY_FILE,
                 *CORE_SOURCE_PATHS,
             )
@@ -551,9 +568,10 @@ def validate_portable_dependency_generation(
     return portable
 
 
-def extract_python(runtime_python: Path, cache: Path) -> None:
-    archive = download(ASSETS["python"], cache)
-    status(f"extract Python {PYTHON_VERSION}")
+def extract_python(runtime_python: Path, cache: Path, *, core_host=False) -> None:
+    asset = ASSETS["core-python" if core_host else "python"]
+    archive = download(asset, cache)
+    status(f"extract independently pinned Python: {asset.filename}")
     runtime_python.parent.mkdir(parents=True, exist_ok=True)
     if runtime_python.exists():
         raise RuntimeError(
@@ -571,6 +589,37 @@ def extract_python(runtime_python: Path, cache: Path) -> None:
         shutil.copytree(extracted_python, runtime_python)
     finally:
         shutil.rmtree(extraction_root, ignore_errors=True)
+
+
+def strip_fresh_bootstrap_packages(runtime_python: Path) -> None:
+    """Only a newly extracted, not-yet-qualified standalone tree is eligible."""
+    if (runtime_python / "runtime-policy").exists() or (runtime_python / "pyvenv.cfg").exists():
+        raise RuntimeError("Refusing to strip a qualified/existing environment")
+    remove_path(runtime_python / "Lib/site-packages")
+    (runtime_python / "Lib/site-packages").mkdir(parents=True)
+    remove_path(runtime_python / "Scripts")
+    for directory in runtime_python.rglob("__pycache__"):
+        if directory.is_dir():
+            shutil.rmtree(directory)
+
+
+def seal_portable_roles(staging: Path, build_temp: Path) -> dict:
+    from orchestrator.function_generation import (
+        FUNCTION_GENERATION_ENTRYPOINTS, build_source_manifest,
+    )
+    from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
+    from orchestrator.function_source_publication import packaged_tree_snapshot
+    from orchestrator.runtime_release_capsule import create_capsule
+
+    app = staging / "app/hashi"
+    manifest = build_source_manifest(
+        [*FUNCTION_GENERATION_ENTRYPOINTS, *(spec.module for spec in FUNCTION_MANAGER_SPECS)],
+        code_root=app)
+    source = packaged_tree_snapshot(HASHI_ROOT, app)
+    return create_capsule(
+        staging, app, build_temp / "role-qualifications",
+        function_manifest=manifest.to_dict(), function_source=source,
+        sidecar_roots=("runtime/bin", "runtime/media"))
 
 
 def install_python_dependencies(runtime_python: Path) -> None:
@@ -620,7 +669,7 @@ def install_media_helpers(staging: Path, app_hashi: Path, cache: Path) -> None:
             "-r", str(app_hashi / MEDIA_RUNTIME_LOCKS[kind])
         ])
         run(install)
-        command = [str(runtime / "python.exe"), "-I", str(app_hashi / "orchestrator" / worker)]
+        command = [str(runtime / "python.exe"), "-I", "-B", str(app_hashi / "orchestrator" / worker)]
         probe = ["--probe", "--edge-only"] if kind == "tts" else ["--probe"]
         run(command + probe)
         if kind == "transcription":
@@ -1144,7 +1193,10 @@ def validate_image(image_root: Path) -> None:
     forbidden = (
         "runtime/node",
         "app/workbench",
-        "runtime/python/Scripts/pip.exe",
+        "runtime/core/Scripts/pip.exe",
+        "runtime/functions/Scripts/pip.exe",
+        "runtime/hashi-runtime-release.json",
+        "runtime/hashi-function-publication.json",
         "app/hashi/adapters/codex_cli.py",
         "app/hashi/adapters/claude_cli.py",
         "app/hashi/adapters/gemini_cli.py",
@@ -1155,7 +1207,9 @@ def validate_image(image_root: Path) -> None:
     if present:
         raise RuntimeError(f"forbidden portable components are present: {present}")
     required = (
-        "runtime/python/python.exe",
+        "runtime/core/python.exe",
+        "runtime/functions/python.exe",
+        "runtime/role-capsule.json",
         "runtime/bin/ffmpeg.exe",
         "data/portable-instance.json",
         "app/hashi/__main__.py",
@@ -1246,14 +1300,20 @@ def build(args: argparse.Namespace) -> Path:
     build_temp = Path(tempfile.mkdtemp(prefix="hashi-portable-build-"))
     try:
         app_hashi = staging / "app" / "hashi"
-        runtime_python = staging / "runtime" / "python"
+        runtime_python = staging / "runtime" / "functions"
+        runtime_core = staging / "runtime" / "core"
         runtime_bin = staging / "runtime" / "bin"
         licenses = staging / "THIRD_PARTY_LICENSES"
         licenses.mkdir(parents=True, exist_ok=True)
 
         copy_hashi_source(app_hashi)
         validate_portable_runtime_inputs(app_hashi)
+        shutil.copyfile(HERE / "requirements.lock",
+                        app_hashi / "constraints/portable-windows-py312.hashes.lock")
+        extract_python(runtime_core, args.cache, core_host=True)
+        strip_fresh_bootstrap_packages(runtime_core)
         extract_python(runtime_python, args.cache)
+        strip_fresh_bootstrap_packages(runtime_python)
         install_python_dependencies(runtime_python)
         validate_bundled_runtime_contract(runtime_python, app_hashi)
         validate_bundled_function_contract(runtime_python, app_hashi)
@@ -1263,6 +1323,7 @@ def build(args: argparse.Namespace) -> Path:
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
         configure_data(staging, private_deepseek_key=private_deepseek_key)
         copy_launchers(staging)
+        roles = seal_portable_roles(staging, build_temp)
         validate_image(staging)
 
         categories = {
@@ -1288,6 +1349,8 @@ def build(args: argparse.Namespace) -> Path:
                 now=built_at,
             ),
             "python_version": PYTHON_VERSION,
+            "runtime_roles": {name: item["runtime_id"] for name, item in roles["roles"].items()},
+            "function_generation_id": roles["function_manifest"]["generation_id"],
             "pairing_token_ttl_seconds": PAIRING_TOKEN_TTL_SECONDS,
             "maximum_image_bytes": MAX_IMAGE_BYTES,
             "target_image_bytes": TARGET_IMAGE_BYTES,
@@ -1427,3 +1490,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_478db0ef16d743af87654bd8460e7d35
