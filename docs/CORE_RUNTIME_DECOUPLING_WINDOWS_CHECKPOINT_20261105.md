@@ -1,5 +1,37 @@
 # Core v5 atomic Windows launch checkpoint
 
+## Selective real dependency security handoff
+
+Following the successful original-version split/parity checkpoint, only the
+five reviewed package pins from PR137 changed. Other 45 standard packages and
+the Portable-only closure are unchanged. Derived hashed closures contain
+50 standard and 55 Portable packages. Fresh empty-target installation used
+only wheels with required SHA256 hashes; the five installed wheel file sets
+also matched the separately cached, reviewed official artifacts. PR137 itself
+was not merged and its coupled Core governance/version records were not copied.
+
+The old exact cookie/reference-lifetime probes previously failed as expected.
+The same probes plus image/certificate coverage and derived-lock checks now
+pass: 17 cases, 3.94 seconds. The actual Windows controller qualification took
+305.20 seconds, exit 0, source tree stable
+3260a376a1d8e1dd02c26ec86113d7179ba9da86905afb469bef9a2703ad605e.
+Core PID 42520, CR_ID
+cr:sha256:0e7a585adf8b26e508e188124a567951ce322cc3cd97a8ff9c819cdf6246ea18
+and protected source digest cbad4ed2987d209665d12af2c1c8c2ce05a3f492f11abfa8592f051fcce705ac
+remained identical throughout actual old/new package switching, failed
+activation rollback, downgrade and a second upgrade. The synthetic physical
+effect count stayed 1. Owned Functions and the temporary controller retired.
+
+Old FR_ID fr:sha256:8a8c26a2508384a3af659ac0895ee21db0550d0694a8799b017db85987b0dd50;
+new FR_ID fr:sha256:9f91b6ee0e7c95d2225ec316901cd99393c7dff6bf2292fa2efe63eb6adab6c1.
+Both separately prepared the same complete product FG
+sha256:50e0d452edfbd1ea606bc1c362bc4f92318531e0676d06f6b2fa641cc160305c,
+667 modules and 728 resources, with no service/connector activation or real
+provider/account use. Full post-upgrade business CI and packaging remain
+pending at this checkpoint, as do independent human review and adoption.
+Source evidence stays separate from live-client and L2/WAC qualification.
+
+
 Status: review-only source. This supplements the role/split checkpoints, without
 claiming complete Gate 2/3, security-dependency adoption or release readiness.
 

@@ -74,6 +74,25 @@ upgrades, independent review, complete packaging and operator adoption remain
 separate gates. See the [Windows source checkpoint](CORE_RUNTIME_DECOUPLING_WINDOWS_CHECKPOINT_20261105.md)
 for exact tested scope and retained failures.
 
+### Functions security maintenance on the split architecture
+
+The Functions version authority selectively adopts aiohttp 3.14.4, certifi
+2026.10.19, multidict 6.9.1, Pillow 13.0.0 and yarl 1.25.1 from PR137.
+Core's empty application lock, protected source, APIs and runtime stay unchanged.
+constraints/functions-py312.hashes.lock and Portable's requirements.lock are
+derived by scripts/compile_functions_locks.py; their exact 50/55 package closures
+must match the canonical Functions pins. Installation requires wheel hashes and
+builds a fresh directory, never upgrades a running interpreter.
+
+scripts/qualify_functions_dependency_handoff.py accepts an existing qualified
+pair and a Functions-only builder candidate. It launches one new isolated
+zero-application-dependency Core controller, checks real package ownership,
+performs upgrade, failed-candidate rollback, downgrade and a second upgrade,
+and preserves the same synthetic durable effect counter. --prepare-product
+also qualifies and prepares the complete identical FG under both FRs without
+activating connectors, real providers or services. Its evidence is independent
+of business tests and production adoption; the installed selector is untouched.
+
 ## Core v4 coupled baseline
 
 The remaining sections describe the installed v4 coupling and its historical
