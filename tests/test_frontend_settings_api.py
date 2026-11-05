@@ -157,7 +157,8 @@ async def test_frontend_settings_activity_uses_agent_scheduler_and_requires_dele
 
     deleted = await server.handle_v1_agent_settings_activity_delete(
         Request(operation="activity.scheduler.delete", job_id="workbench-daily",
-                payload={"kind": "cron", "explicit_user_confirmation": True})
+                payload={"kind": "cron", "explicit_user_confirmation": True,
+                         "expected_revision": decode(update)["result"]["job"]["deletion_revision"]})
     )
     assert deleted.status == 200
     assert decode(deleted)["result"]["job_id"] == "workbench-daily"
@@ -338,3 +339,4 @@ async def test_frontend_privacy_requires_fresh_value_and_downgrade_confirmation(
     assert applied.status == 200
     assert runtime.privacy_writes == [(0, 1)]
     assert decode(applied)["privacy"]["current_level"] == 0
+# HASHI-Fingerprint: hfp_c066c6d2f33145a88df8cbc4ce6b2381

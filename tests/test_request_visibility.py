@@ -43,9 +43,16 @@ def _accepted_run(session_id, run_id, message_id, request_id):
 
 
 def _admission_store(tmp_path, **extra):
+    from orchestrator.fingerprint.models import FingerprintPolicy
+
     return SimpleNamespace(
         session_workspace=lambda *args: tmp_path,
         get_message=lambda *args, **kwargs: {"content": []},
+        get_run=lambda run_id, *, owner_id: {
+            "run_id": run_id,
+            "owner_id": owner_id,
+            "fingerprint_policy": FingerprintPolicy().snapshot(),
+        },
         **extra,
     )
 
