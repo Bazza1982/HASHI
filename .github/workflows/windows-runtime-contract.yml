@@ -95,6 +95,7 @@ permissions:
 
 jobs:
   native-windows:
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +147,14 @@ jobs:
           --basetemp="${{ runner.temp }}/hashi-qualified-runtime-roles"
           --junitxml="${{ runner.temp }}/hashi-runtime-roles.xml"
           --durations=20
+      - name: Verify the complete offline original-dependency regression scope
+        timeout-minutes: 90
+        run: >-
+          python -m pytest -q tests
+          -m "not contract and not live and not platform and not real_wall_clock"
+          --basetemp="${{ runner.temp }}/hashi-offline-regression"
+          --junitxml="${{ runner.temp }}/hashi-offline-regression.xml"
+          --durations=25
       - name: Retain native role qualification receipts
         if: always()
         uses: actions/upload-artifact@v4
@@ -156,3 +165,4 @@ jobs:
             ${{ runner.temp }}/hashi-runtime-roles.xml
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/runtime-role-qualification.json
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/functions-dependency-handoff.json
+            ${{ runner.temp }}/hashi-offline-regression.xml

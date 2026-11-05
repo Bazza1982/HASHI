@@ -67,3 +67,26 @@ Core review, Linux qualification and operator adoption remain HOLD. No active
 environment, existing Core/service, real user task or production source has been
 changed. Draft publication on the authorized branch is for the requested human
 review and does not waive the existing merge/release guard.
+
+The final atomic launch byte tree has since passed 124 focused role, seal, IPC,
+cancellation, installation and Core-boundary cases, plus three real Windows
+sealed-role cases using the unchanged original application dependencies. The
+observed Core PID stayed constant through the fixture dependency update, failed
+candidate and explicit rollback; durable effects remained exactly once. This
+fixture is not the PR #137 security package upgrade.
+
+The complete product cold qualification and prepare also passed in the separate
+zero-dependency Core and original-dependency Functions runtimes: 666 modules and
+728 resources, 77.735 seconds cold qualification and 26.062 seconds prepare.
+No external product route was activated. The complete offline 9,032-case scope
+reached its 1,800-second outer deadline after about 66%; the preserved exit 124
+and incomplete JUnit do not constitute a suite pass. A full-scope rerun has a
+5,400-second outer budget, retaining the same markers and product timeouts.
+
+Windows CI now runs that complete offline scope after native role qualification
+and retains its JUnit even on failure. HCC CI recognizes the explicit Core-major
+authorization label and passes both existing guard flags; it still invokes the
+same major-version and independent exact-tree review checks. Real execution of
+its three authorization states rejects missing/unrecognized authorization and
+continues to reject the authorized candidate for its missing independent review.
+It does not mark source review, Gate 3 or release accepted.
