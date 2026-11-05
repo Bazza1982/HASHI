@@ -279,11 +279,33 @@ def test_pure_python_without_trailing_newline() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["LF", "CRLF"])
-async def test_end_to_end_with_real_patch_when_available(tmp_path, newline) -> None:
+@pytest.mark.parametrize("patch_newline", ["\n", "\r\n"], ids=["diff-LF", "diff-CRLF"])
+async def test_end_to_end_with_real_patch_when_available(tmp_path, newline, patch_newline, monkeypatch) -> None:
     if builtins._find_patch_command() is None:
         pytest.skip("no patch executable located")
     target = _write(tmp_path, text=BASE_TEXT.replace("\n", newline))
-    result = await _apply(tmp_path, patch=SIMPLE_DIFF.replace("\n", newline))
+    def forbidden_fallback(*_args, **_kwargs):
+        raise AssertionError("An authoritative native patch verdict must not fall through")
+    monkeypatch.setattr(builtins, "_apply_patch_with_python", forbidden_fallback)
+    monkeypatch.setattr(builtins, "_apply_patch_with_git", forbidden_fallback)
+    result = await _apply(tmp_path, patch=SIMPLE_DIFF.replace("\n", patch_newline))
     assert result.startswith("OK: patch applied to")
     assert _read(target) == "one\nTWO\nthree\n".replace("\n", newline)
 # HASHI-Fingerprint: hfp_f446b257335c400c99ade201ce2c82cb
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(builtins.os.name != "nt", reason="Native Windows private patch input")
+async def test_private_patch_input_failure_preserves_target_and_cleans_directory(tmp_path, monkeypatch):
+    import tools.private_files as private_files
+    target = _write(tmp_path)
+    original = target.read_bytes()
+    monkeypatch.setattr(builtins, "_find_patch_command", lambda: "unused-patch")
+    def deny(_path):
+        raise OSError("injected private-input ACL failure")
+    monkeypatch.setattr(private_files, "protect_private_file", deny)
+    result = await _apply(tmp_path)
+    assert result.startswith("Error: patch rejected (dry-run):")
+    assert "injected private-input ACL failure" in result
+    assert target.read_bytes() == original
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["notes.txt"]

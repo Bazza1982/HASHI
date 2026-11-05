@@ -57,9 +57,12 @@ List files and directories.
 
 ### apply_patch
 Apply a unified diff patch to a file. A rejected dry run leaves the file
-unchanged. On native Windows, GNU patch uses binary mode for both dry run and
-application so LF and CRLF files retain their requested bytes. Existing Git
-and Python fallbacks do not override an authoritative patch rejection.
+unchanged. On native Windows, GNU patch uses binary mode and an owner-private
+input file for both dry run and application. Uniform LF/CRLF diff separators
+follow the target's existing convention; mixed bytes stay exact. Target bytes
+are not normalized before validation. Failure to protect the input rejects the
+operation without changing the target. Existing Git and Python fallbacks do
+not override an authoritative patch rejection.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `path` | Yes | Target file path |

@@ -1,7 +1,6 @@
 """Formal frontend intentions bind a current human session and canonical Run."""
 from dataclasses import replace
 import sqlite3
-import time
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -16,11 +15,6 @@ from orchestrator.permissions.models import PermissionSubject, normalize_scope
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.signed_receipts import SignedReceiptVerifier
 from tests.test_permission_pao_fence import setup_run
-
-
-@pytest.fixture
-def permission_clock():
-    return time.time()
 
 
 @pytest.fixture

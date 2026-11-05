@@ -1008,40 +1008,66 @@ def _format_patch_outcome(outcome: tuple[str, str], path: Path) -> str:
 def _apply_patch_with_patch_command(
     patch_cmd: str, path: Path, patch_str: str
 ) -> tuple[str, str] | None:
-    """Run ``patch`` with the existing dry-run-then-apply contract.
-
-    Returns ``None`` only when the resolved binary cannot be executed, so the
-    caller can fall back; a real rejection is returned verbatim.
-    """
+    """Keep strict dry-run/apply verdicts with byte-preserving Windows input."""
 
     import subprocess
+    import tempfile
 
     payload = patch_str.encode("utf-8", "surrogateescape")
-    # Native Windows GNU patch otherwise opens files in text mode and may
-    # rewrite LF bytes as CRLF. Both phases must use the same byte semantics.
     binary_args = ["--binary"] if os.name == "nt" else []
-    try:
-        dry_run = subprocess.run(
-            [patch_cmd, *binary_args, "--dry-run", "-u", str(path)],
-            input=payload,
-            capture_output=True,
+
+    def uniform_newline(value: bytes) -> bytes | None:
+        if b"\n" not in value:
+            return None
+        return b"\r\n" if b"\r\n" in value and b"\n" not in value.replace(b"\r\n", b"") else (
+            b"\n" if b"\r\n" not in value else None
         )
-    except OSError:
-        return None
-    if dry_run.returncode != 0:
-        return ("rejected", _decode_patch_output(dry_run.stderr))
+
+    def apply(input_args=(), input_payload=payload):
+        try:
+            dry_run = subprocess.run(
+                [patch_cmd, *binary_args, *input_args, "--dry-run", "-u", str(path)],
+                input=input_payload, capture_output=True,
+            )
+        except OSError:
+            return None
+        if dry_run.returncode != 0:
+            return ("rejected", _decode_patch_output(dry_run.stderr + dry_run.stdout))
+        try:
+            applied = subprocess.run(
+                [patch_cmd, *binary_args, *input_args, "-u", str(path)],
+                input=input_payload, capture_output=True,
+            )
+        except OSError:
+            return None
+        if applied.returncode != 0:
+            return ("failed", _decode_patch_output(applied.stderr + applied.stdout))
+        return ("ok", _decode_patch_output(applied.stdout).strip())
+
+    if os.name != "nt":
+        return apply()
 
     try:
-        applied = subprocess.run(
-            [patch_cmd, *binary_args, "-u", str(path)],
-            input=payload,
-            capture_output=True,
-        )
-    except OSError:
-        return None
-    if applied.returncode != 0:
-        return ("failed", _decode_patch_output(applied.stderr))
-    return ("ok", _decode_patch_output(applied.stdout).strip())
+        target_newline = uniform_newline(path.read_bytes())
+        patch_newline = uniform_newline(payload)
+        if target_newline is not None and patch_newline is not None:
+            # Diff record separators follow a uniformly terminated target.
+            # Mixed target/patch bytes stay exact rather than being rewritten.
+            payload = payload.replace(b"\r\n", b"\n")
+            if target_newline == b"\r\n":
+                payload = payload.replace(b"\n", b"\r\n")
+        # Some native GNU ports translate stdin even in binary mode. A closed,
+        # private input file makes both phases consume the same exact bytes.
+        # The directory is protected while empty, before any patch is written.
+        from tools.private_files import protect_private_file
+        with tempfile.TemporaryDirectory(prefix=".hashi-patch-", dir=path.parent) as directory:
+            private = Path(directory)
+            protect_private_file(private)
+            patch_file = private / "input.patch"
+            patch_file.write_bytes(payload)
+            return apply(("--input", str(patch_file)), None)
+    except OSError as exc:
+        return ("rejected", f"cannot prepare private patch input: {exc}")
 
 
 def _retarget_patch_headers(patch_str: str, filename: str) -> str:

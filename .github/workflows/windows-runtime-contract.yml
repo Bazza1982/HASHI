@@ -119,6 +119,15 @@ jobs:
           fi
       - name: Install runtime and test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Verify native patch integrity and shared approval wiring
+        run: >-
+          python -m pytest -q
+          tests/test_apply_patch_cross_platform.py
+          tests/test_fingerprint_execution.py
+          tests/test_live_voice_actions.py
+          tests/test_permission_api_decisions.py
+          tests/test_permission_frontend_decisions.py
+          tests/test_permission_model_broker.py
       - name: Verify native Windows runtime and portable startup contracts
         run: >-
           python -m pytest -q
@@ -168,3 +177,46 @@ jobs:
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/runtime-role-qualification.json
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/functions-dependency-handoff.json
             ${{ runner.temp }}/hashi-offline-regression.xml
+
+  posix-runtime:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare the declared Linux Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python "3.12.13" .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install original runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Verify Linux sealed roles, private IPC and same-Core dependency handoff
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_roles.py
+          tests/test_runtime_installation.py
+          tests/test_runtime_role_profiles.py
+          tests/test_runtime_process.py
+          tests/test_runtime_admission_failures.py
+          tests/test_kernel_cancellation.py
+          tests/test_runtime_builder_safety.py
+          tests/test_runtime_role_native.py
+          --basetemp="${{ runner.temp }}/hashi-qualified-linux-roles"
+          --junitxml="${{ runner.temp }}/hashi-linux-runtime-roles.xml"
+          --durations=20
+      - name: Verify existing curated Core contracts on Linux
+        run: python -m pytest -q --junitxml="${{ runner.temp }}/hashi-linux-core.xml"
+      - name: Retain Linux qualification receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-runtime-roles-3.12.13
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/hashi-linux-runtime-roles.xml
+            ${{ runner.temp }}/hashi-linux-core.xml
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/runtime-role-qualification.json
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/functions-dependency-handoff.json

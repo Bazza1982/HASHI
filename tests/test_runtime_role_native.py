@@ -1,4 +1,4 @@
-"""Native Windows qualification of sealed roles; no services or external accounts."""
+"""Native Windows/Linux sealed-role qualification; no services or external accounts."""
 from __future__ import annotations
 
 import base64
@@ -25,8 +25,14 @@ from orchestrator.runtime_installation_builder import (
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = [
     pytest.mark.platform,
-    pytest.mark.skipif(os.name != "nt", reason="Native Windows role qualification; POSIX gate is separate"),
+    pytest.mark.skipif(os.name != "nt" and sys.platform != "linux",
+                       reason="This native gate qualifies Windows and Linux only"),
 ]
+
+
+def _site_packages(environment):
+    suffix = "Lib/site-packages" if os.name == "nt" else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    return Path(environment) / suffix
 
 
 def _name(text):
@@ -161,7 +167,7 @@ def test_same_core_pid_can_replace_fr_dependency_and_rollback_without_replaying(
     for version in ("1", "2"):
         environment = tmp_path / ("functions-" + version)
         shutil.copytree(original, environment)
-        metadata = environment / "Lib/site-packages" / ("hashi_runtime_fixture-" + version + ".dist-info")
+        metadata = _site_packages(environment) / ("hashi_runtime_fixture-" + version + ".dist-info")
         metadata.mkdir()
         (metadata / "METADATA").write_text(
             f"Name: hashi-runtime-fixture\nVersion: {version}\n", encoding="utf-8")
