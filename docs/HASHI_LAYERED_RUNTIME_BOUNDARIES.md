@@ -177,7 +177,11 @@ python scripts/check_protected_core_changes.py \
 The command-scoped `HASHI_CORE_EDIT_AUTHORIZED=1` records the same authorization
 but cannot waive any release gate. CI validates the manifest and requires the
 label, major-version increment, and matching added review record whenever
-protected paths change.
+protected paths, the product major version, or the standard lock declared by
+`[tool.hashi.runtime]` change. Changing the declared lock owner is also a runtime
+generation change. An unchanged protected-source digest does not waive this gate.
+The review seals project metadata and the active standard lock in addition to
+the protected-source digest. Missing or stale runtime seals fail closed.
 
 ## Layer 2: HASHI Functions
 

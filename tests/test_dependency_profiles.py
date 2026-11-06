@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import gc
 import subprocess
 import sys
 import tarfile
 import tomllib
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 from packaging.requirements import Requirement
@@ -206,3 +209,39 @@ def test_transcription_native_packages_have_a_separate_pinned_runtime():
     assert required <= helper_lock
     assert not {key[0] for key in required} & {key[0] for key in standard_input}
     assert not {key[0] for key in required} & {key[0] for key in standard_lock}
+
+
+def test_secure_shared_cookie_is_excluded_from_plain_http():
+    async def check():
+        import aiohttp
+        from yarl import URL
+
+        jar = aiohttp.CookieJar()
+        cookie = SimpleCookie()
+        cookie["session"] = "synthetic-cookie"
+        cookie["session"]["secure"] = True
+        jar.update_cookies(cookie)
+
+        assert "session" not in jar.filter_cookies(URL("http://example.invalid/"))
+        assert "session" in jar.filter_cookies(URL("https://example.invalid/"))
+
+    asyncio.run(check())
+
+
+def test_items_view_operations_release_operand_references():
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict({"seed": "value"})
+    sentinel = object()
+    operand = [(f"header-{index}", sentinel) for index in range(16)]
+    gc.collect()
+    before = sys.getrefcount(sentinel)
+
+    for _ in range(40):
+        result = operand | headers.items()
+        del result
+        result = headers.items() - operand
+        del result
+
+    gc.collect()
+    assert sys.getrefcount(sentinel) == before

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "change_id": "core-v5-standard-dependency-generation-20261105",
+  "authorization_reference": "Owner approval dated 2026-11-05 for a Core major-version dependency migration limited to independent source preparation, offline compatibility checks and independent review. Deployment, service switching and restarts are excluded.",
+  "implementer": "hashiko_1_1@MSI",
+  "reviewer": "/root/core_dependency_review@MSI",
+  "reviewed_at": "2026-11-05T14:33:46+11:00",
+  "verdict": "approved",
+  "product_version": "5.0.0a1",
+  "core_digest": "sha256:d244be3267fd2098aeea13ec8bbef037c4b0b3dd176d37dcf1c3ffb4cf8cc689",
+  "summary": "Approved for source preparation and PR review only, not release promotion, deployment or running adoption. The standard lock changes Core runtime identity while protected Core implementation and public protocols remain unchanged. Independent review found and verified repair of the stale Portable derived lock, placed security regressions in an existing CI-covered module, and checked metadata/provenance/navigation consistency. The broad product gate is not clean: all 31 remaining failures reproduce serially with unmodified source and its old lock; one additional baseline failure was explicitly deselected. No test assertion or business function was weakened to obtain this preparation approval.",
+  "base_commit": "25f88330cd91dd6d1541fcc05d155aeedd1c9a29",
+  "hash_format": "SHA256 of reviewed UTF-8 LF file bytes; each listed working file used LF at review time.",
+  "reviewed_files_sha256": {
+    "CHANGELOG.md": "sha256:fa0f285b694b1123d6766f15e5174bd7b2cb0df0fd8bc01dc57c2571c8eb7b2c",
+    "README.md": "sha256:10b41e355dececeb5053bfdc203fe759ff12653e93e0a0dcd46a949c5bfc764f",
+    "constraints/standard-py312.lock": "sha256:d1fd91284c04ae42ac0f1d053930967ddcd500ffe8bdaf73d6209582e78166d8",
+    "deploy/helm/hashi-enterprise/Chart.yaml": "sha256:c1d856380c33df8c6e534eba5807ad548ff7a24380d2e4af73aae49b30b4fecc",
+    "docs/AGENT_FYI.md": "sha256:bdde7829f75e94838fcbec56e8a8f02eec64edbf5e56b66b5d5158f771dd9035",
+    "docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md": "sha256:17dff88447c7b1bc33b59e67849c4004ebd33e7febb496f54cc0802e9aa144b1",
+    "docs/RELEASE_CHECKLIST.md": "sha256:073558a15a83770a4487eb69e9c8e7758f257e4f9e14beff434c5e7704ceed83",
+    "package.json": "sha256:097bc6569a95a0c60f628323c5df210f3ca49849880677c4e13fb7694db24940",
+    "packaging/portable_windows/requirements.lock": "sha256:f9da5d1a55a9a2f0b3db9c9afd7bd95f63c6a53869400b29874eee903f11a5b0",
+    "pyproject.toml": "sha256:00a7627444fe34c0c60f56c02fbc5e4231047bed049095b64c5b70ae6beb1508",
+    "requirements.txt": "sha256:05a0050455ead47c8cdeef8c2b08e2ab0db5044f2cf7bf40441b640df00a91c4",
+    "tests/contract/test_npm_package_contract.py": "sha256:6e5fb09566e61cc7de7e95be94b4f1b705e6210f755c9203afca37f5da48cc0a",
+    "tests/test_dependency_profiles.py": "sha256:4b9695f6d9516c45249deeef0d1d0be3e8309d7d005ad131cd186b59658f1dfe",
+    "docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md": "sha256:9e1097c64f5e66c6c40122d0336fdc18b75d6bbb9dc2fab6a31d4f0a4e8b9eb8"
+  },
+  "validation": {
+    "focused_runtime_worker_dependency_tests_passed": 229,
+    "default_core_gate": {
+      "passed": 883,
+      "skipped": 1
+    },
+    "npm_dry_run_contract_tests_passed": 2,
+    "python_build_preflight": "An isolated source export produced wheel/sdist metadata 5.0.0a1; not published or a qualified live artifact.",
+    "portable_derived_lock": {
+      "packages": 55,
+      "changed_versions": 5,
+      "require_hashes_download_passed": true,
+      "packaging_module_tests_passed": 38,
+      "independent_postfix_regression_tests_passed": 3
+    },
+    "security_behavior_red_green": {
+      "old_affected_packages_failed": 2,
+      "candidate_packages_passed": 2,
+      "network_requests": 0,
+      "real_user_data": false
+    },
+    "public_advisory_audit": "Candidate environment including validation tools and the 55-package Portable closure returned no findings; this does not prove all native libraries or call paths safe.",
+    "offline_product_selection": {
+      "passed": 8804,
+      "failed": 34,
+      "skipped": 33,
+      "subtests_passed": 18,
+      "original_failure_receipt_preserved": true,
+      "baseline_failures_reproduced_in_independent_serial_comparisons": 31,
+      "introduced_portable_drift_failures_repaired_and_retested": 3,
+      "unclassified_failures": 0,
+      "deselected_baseline_node": "tests/test_delay_command.py::test_delay_command_schedules_lists_and_cancels_persistent_message",
+      "antigravity_module_serial_passed": 38,
+      "excluded_markers": [
+        "contract",
+        "live",
+        "platform",
+        "real_wall_clock"
+      ],
+      "counts_are_overlapping_scopes_not_a_unique_test_total": true
+    },
+    "cross_platform_scope": "Windows CPython 3.12.13 execution. Linux/macOS dependency-marker closure was checked statically; native execution and adoption remain unverified.",
+    "privacy": "Reviewed complete added candidate content. No added machine-specific paths/endpoints, credentials, real image/model contents, or private usage/results were found."
+  },
+  "remaining_release_gates": {
+    "known_baseline_failures_total_including_deselected_node": 32,
+    "baseline_failures_are_not_repaired_or_accepted_by_this_migration": true,
+    "whole_offline_product_gate": "NOT a clean pass; resolution or explicit release adjudication remains required before release promotion.",
+    "core_change_approved_label": "Pending maintainer action before merge; this review record does not add the label or authorize merging.",
+    "production_adoption": "Requires a separately approved maintenance plan and real Core/Worker/frontend verification. No deployment, service switching, production runtime installation or restart occurred in this preparation."
+  }
+}

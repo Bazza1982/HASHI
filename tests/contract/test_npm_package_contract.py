@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -91,7 +92,10 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
     )
     provenance = build_info["provenance"]
     assert provenance["release_channel"] == "npm"
-    assert provenance["product_version"] == "4.0.0b1"
+    expected_version = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    assert provenance["product_version"] == expected_version
     assert provenance["build_id"].startswith("sha256:")
     assert not any(
         key in provenance for key in ("code_root", "path", "remote_url", "username")

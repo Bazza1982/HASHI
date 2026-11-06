@@ -106,8 +106,9 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HERV3 gates:
-  - release scope uses HASHI `v4.0.0-beta.1` as the single current repository,
-    Python package (`4.0.0b1`), root Node package, and Helm application line;
+  - source candidate scope uses HASHI `v5.0.0-alpha.1` (Python `5.0.0a1`)
+    consistently across root Node and Helm application metadata; source preparation
+    does not publish packages or promote the earlier v4 Beta;
     Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HERV3 changes run the touched compatibility module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation

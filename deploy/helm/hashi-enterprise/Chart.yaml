@@ -3,4 +3,4 @@ name: hashi-enterprise
 description: HASHI Enterprise AAI governed control plane baseline chart
 type: application
 version: 4.0.0-beta.1
-appVersion: "4.0.0-beta.1"
+appVersion: "5.0.0-alpha.1"
