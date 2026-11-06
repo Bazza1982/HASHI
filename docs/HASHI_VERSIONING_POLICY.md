@@ -217,10 +217,14 @@ edit or a successful offline check is not proof of running-version adoption.
   HASHI1 `main`; the Beta promotion is recorded through the repository release
   metadata, documentation index, release notes, roadmap, and checklist. Each
   checkout still requires separate synchronization evidence.
-- **Current version:** on 2026-09-21 the user approved the first v4 Beta for
-  small-scale public testing. The canonical public label is
-  `v4.0.0-beta.1`, with Python metadata `4.0.0b1`. Historical tags remain
-  unchanged, and registry/artifact publication remains a separate operation.
+- **Current development source:** the authorized Core/environment separation
+  migration uses `v5.0.0-alpha.1`, with Python metadata `5.0.0a1`; see the
+  [v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md). Its Core generation
+  increases from 4 to 5 and resets minor/patch to zero. This source candidate
+  is not a stable-release declaration or proof of package publication.
+  The last published GitHub pre-release observed on 2026-11-07 remains
+  `v4.0.0-beta.1`. Historical tags remain unchanged; publication and live
+  adoption are separate operations.
 - **Validation:** use the documentation-only scope in
   [Testing Policy](TESTING_POLICY.md): local link checks, `git diff --check`,
   and the protected-Core guard. Record actual results with the change; no

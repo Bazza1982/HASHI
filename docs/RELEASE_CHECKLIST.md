@@ -102,8 +102,10 @@
     agents or changing the active generation ID
   - change a disposable source after probe and verify the commit-time digest
     check restores the previous generation
-  - verify the staging receipt uses another PID and exactly matches Core's
-    executable, platform ABI, dependency digest, protected-Core digest and API levels
+  - verify the staging receipt uses another PID and exactly matches the selected
+    qualified Functions runtime; validate its protected-Core/API/protocol binding
+    against the admitted Core. CR and FR have separate executable, package and
+    runtime identities; do not require cross-role fingerprint equality
   - perform two successful `/reboot min` operations under the same Core PID
   - scan bridge logs for post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, and `LOCAL MODE`
 - Slim core docs:
@@ -111,8 +113,8 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HERV3 gates:
-  - release scope uses HASHI `v4.0.0-beta.1` as the single current repository,
-    Python package (`4.0.0b1`), root Node package, and Helm application line;
+  - release scope uses HASHI `v5.0.0-alpha.1` as the single source candidate,
+    Python package (`5.0.0a1`), root Node package, and Helm application line;
     Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HERV3 changes run the touched compatibility module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation

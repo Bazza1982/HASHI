@@ -326,7 +326,8 @@ explicit; malformed or targeted input never widens into a shared handoff:
 1. Resolve the requested lifecycle scope once; targeted modes contain exactly
    one immutable target and malformed input never falls back to all.
 2. Compile and hash the complete functional source/asset closure.
-3. Import and validate it in an isolated probe with the exact Core runtime.
+3. Import and validate it in an isolated probe using the selected qualified
+   Functions runtime, checking its binding to the admitted Core contract.
 4. Materialise a content-addressed immutable artifact.
 5. Spawn one candidate Worker per selected Agent and require a READY receipt.
 6. Fence only selected routes at admission so new messages cannot enter old

@@ -20,10 +20,11 @@
 - [Nagare developer install](#nagare-core-developer-install)
 
 Check [release and package selection](RELEASES.md) before choosing an archive
-or npm version. At the 2026-09-21 documentation review, npm latest was still
-1.0.1 and GitHub stable Latest was v2.0.0; neither represented the current
-v4.0.0-beta.1 source Beta. Registry and installer publication remain separate
-steps.
+or npm version. The 2026-11-07 publication check still found npm latest 1.0.1,
+GitHub stable Latest v2.0.0, and the published v4 Beta pre-release; none is the
+v5.0.0-alpha.1 development source. Registry and installer publication remain
+separate steps. Read [the v5 migration notes](RELEASE_NOTES_v5.0.0-alpha.1.md)
+before replacing an existing coupled v4 environment.
 
 ---
 
@@ -247,8 +248,9 @@ steps after extraction; it is not a portable installation bundle.
 ### Prerequisites
 - Windows 10/11
 - CPython 3.12.13 (approved Core; source compatibility is 3.12)
-- Node.js + npm for npm installation or Nagare visual editor development;
-  the direct Python source runtime does not require them
+- Node.js + npm for the supported source/npm environment preparation or
+  Nagare visual editor development; a prepared Core process does not itself
+  require Node.js unless a selected engine or tool does
 
 ### Install
 Follow [Source install](#source-install) or the explicit npm version path.
@@ -310,8 +312,8 @@ transaction behavior, and verification boundaries.
 
 ### Install
 Follow [Source install](#source-install). Homebrew alone does not guarantee
-the exact approved Python patch. Install Node.js/npm when using the npm
-command path or working on the Nagare editor.
+the exact approved Python patch. Install Node.js/npm for the supported
+source/npm environment preparation or work on the Nagare editor.
 
 For an offline handoff image, start from a clean checkout on a connected Mac:
 
@@ -333,7 +335,8 @@ native dependencies.
 ### Prerequisites
 - Ubuntu 22.04+ recommended
 - CPython 3.12.13 + venv
-- Node.js + npm for npm installation or Nagare editor work
+- Node.js + npm for the supported source/npm environment preparation or
+  Nagare editor work
 
 Follow [Source install](#source-install) before launching.
 

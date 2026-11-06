@@ -3,11 +3,35 @@
 All notable changes to HASHI will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and release numbering follows the [HASHI versioning policy](docs/HASHI_VERSIONING_POLICY.md):
+Core generation, functional generation, and maintenance revision.
 
 ---
 
 ## [Unreleased]
+
+Target source candidate: **v5.0.0-alpha.1** (Python **5.0.0a1**).
+This section describes prepared source, not a published tag or installer.
+
+### Core v5 upgrade
+
+- Separate protected Core code, the zero-application-dependency Core runtime,
+  the locked Functions runtime and the immutable Function-source generation.
+  v4 already isolated Worker processes; v5 removes the coupled environment
+  contract so compatible Functions dependency replacement and rollback can
+  preserve the Core process and interpreter.
+- Bind real isolated startup, private cross-interpreter process identity,
+  strict runtime seals and recovery to independently qualified installations.
+- Use the separate roles in source/npm preparation, Windows launchers,
+  Portable delivery and enterprise images; expose actual Core/Functions
+  identities separately in version diagnostics.
+- Carry forward Functions security dependency maintenance without installing
+  application packages into Core. Preserve exact hashed locks and fresh-build
+  qualification.
+
+See [the v5 upgrade notes](docs/RELEASE_NOTES_v5.0.0-alpha.1.md) for why the
+major changed, the other engine/context/permission/voice/portability work
+included since the v4 Beta, migration steps and publication limits.
 
 ### Added
 
@@ -26,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve trusted frontend identity and origin/activity routing for managed
+  background work, including Backend API transport registration.
+- Retain scoped Scheduler write authority through tools and the frontend
+  settings adapter without forwarding management credentials to Agents.
+- Restore local Remote availability after shared Functions handoff while
+  continuing to reject untrusted foreign peers.
+- Keep native MCP/Remote/hook children from writing bytecode into sealed
+  runtimes; retain Worker recovery, Agent controls and strict post-activity
+  qualification.
+- Qualify an independently replaced Functions environment from the fixed
+  Core anchor, including full Functions imports.
 - Align public HERV3 Provider identities across catalogues, live/offline status
   and creation so model/reasoning controls match the selected Provider; retain
   legacy adapter input compatibility and instance restrictions.
