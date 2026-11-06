@@ -670,7 +670,45 @@ accepts only files inside the Agent's authorized Workzones, applies the same
 advertised count and byte limits as frontend intake, verifies content hashes,
 and uses the tool-call identity for replay-safe idempotency. A reused identity
 with different bytes is rejected. Multiple tool calls may contribute ordered
-attachments to one reply, but the total limits still apply to the Message.
+attachments, but the count and aggregate-byte budgets apply to the whole Run,
+including incremental deliverables and the final reply. Splitting tool calls
+does not reset those budgets.
+
+The standard policy has one owner, `orchestrator.session_attachment_limits`.
+It defaults to 16 attachments, 64 MiB per file and 64 MiB aggregate. The
+tool schemas, preflight, Session storage and capability snapshot derive from
+that owner. An instance can select its limits in the ignored
+`<bridge_home>/state/session_attachment_limits.json` document:
+
+```json
+{
+  "version": 1,
+  "max_attachments_per_message": 64,
+  "max_attachment_bytes": 67108864,
+  "max_total_attachment_bytes_per_message": 67108864
+}
+```
+
+The document accepts count 1–1024 and each byte budget 1–1073741824. Missing
+fields keep their process/default values. File fields take precedence over
+inherited `HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE`,
+`HASHI_SESSION_MAX_ATTACHMENT_BYTES` and
+`HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES`, respectively. Invalid values,
+unknown document fields and unsupported versions reject the candidate rather
+than silently ignoring an operator's choice. Use the revision-aware
+`orchestrator.config_json` reader/writer for managed updates.
+
+A replacement shared Frontend Function and its Agent Workers read the selected
+document at startup. Adopt changes through the qualified shared Functions
+lifecycle; do not reload modules or cold-restart Core to change a limit.
+Verify the effective `/api/v1/capabilities` limits after adoption. Existing
+processes keep their selected snapshot. Raising only the count does not raise
+the memory budget; standard output still buffers file bytes, so increase byte
+budgets only with a matching resource allowance.
+
+HChat keeps its separate versioned 10-file/1-GiB streaming contract. Connector
+transport limits, such as Telegram media groups, remain connector-owned;
+they do not determine the standard Session attachment count.
 
 The public `frontend_connector` capability snapshot includes the
 connector-neutral registry and versioned FC contract families. The standard

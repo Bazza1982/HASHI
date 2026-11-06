@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+- 标准附件默认每轮16个、单件/累计64MiB；实例JSON可调，Schema/API同源。提前交付与最终回复共享预算；采用须更新共享Functions，非已上线证明。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#63-standard-assistant-attachment-output)。
+
 - Presence公开字幕沿用认证FC发件箱，支持text/media；主会话/代次和route仍由既有owner核验。Portable语音样例按当前manifest及资源摘要验收，不固定数量。[FC](HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md)。
 
 - Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。

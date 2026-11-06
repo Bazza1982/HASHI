@@ -42,6 +42,7 @@ from orchestrator.session_titles import (
     automatic_session_title,
     is_system_session_title,
 )
+from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
 from orchestrator.storage_profile import removable_storage_profile
 from orchestrator import pcm_forget_preview, pcm_forget_session
 
@@ -61,9 +62,9 @@ SESSION_KIND_AGENT_ACTIVITY = "agent_activity"
 SESSION_KINDS = frozenset(
     {SESSION_KIND_CONVERSATION, SESSION_KIND_AGENT_ACTIVITY}
 )
-MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
-MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
-MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_SESSION_ATTACHMENTS_PER_MESSAGE = SESSION_ATTACHMENT_LIMITS.count
+MAX_SESSION_ATTACHMENT_BYTES = SESSION_ATTACHMENT_LIMITS.attachment_bytes
+MAX_SESSION_ATTACHMENT_TOTAL_BYTES = SESSION_ATTACHMENT_LIMITS.total_bytes
 HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE = HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
 HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
 HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
@@ -13800,3 +13801,4 @@ __all__ = [
     "SessionStoreError",
     "StaleFencingToken",
 ]
+# HASHI-Fingerprint: hfp_ad055b664adf4021866241f73e249bed

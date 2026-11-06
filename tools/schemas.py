@@ -3,6 +3,12 @@ Tool JSON Schema definitions in model-provider function-calling format.
 HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
+from orchestrator.hchat_attachment_contract import HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
+from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
+
+_ATTACHMENT_SCHEMA_MAX_ITEMS = max(
+    SESSION_ATTACHMENT_LIMITS.count, HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
+)
 TOOL_SCHEMAS = [
     {'function': {'description': 'Ask a clarification or preference question in this active Run. '
                              'Returns immediately with question_id. Continue independent work, '
@@ -668,7 +674,7 @@ TOOL_SCHEMAS = [
                     "attachments": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 16,
+                        "maxItems": _ATTACHMENT_SCHEMA_MAX_ITEMS,
                         "description": "Ordered files to attach to the current assistant reply.",
                         "items": {
                             "type": "object",
@@ -729,7 +735,7 @@ TOOL_SCHEMAS = [
                     "attachments": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 16,
+                        "maxItems": _ATTACHMENT_SCHEMA_MAX_ITEMS,
                         "description": "Ordered, completed local files in this result.",
                         "items": {
                             "type": "object",
@@ -2635,3 +2641,4 @@ for _schema in TOOL_SCHEMAS:
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())
+# HASHI-Fingerprint: hfp_0db73fd1075d4483ad739f32a94f1a35
