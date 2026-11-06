@@ -667,7 +667,8 @@ def canonical_connector_id(
         return "tui"
     if normalized_surface in {"session-api", "session_api"} or "session-api" in transport:
         return "session_api"
-    if normalized_surface in {"workbench", "backend-api", "backend_api", "api"}:
+    if (normalized_surface in {"workbench", "backend-api", "backend_api", "api"}
+            or transport == "backend_api"):
         return "backend_api"
     if _matches(normalized_surface, "exchange") or "exchange" in transport:
         return "exchange"

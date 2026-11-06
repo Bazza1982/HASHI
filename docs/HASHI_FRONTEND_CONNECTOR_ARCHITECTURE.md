@@ -18,6 +18,13 @@ the authoritative rollout evidence and remaining gates are tracked in
 
 ## 1. Definition
 
+A registered ingress transport retains its identity when PAO selects an Agent
+activity Session. In particular, `backend_api` remains the Backend API
+Connector after a command-derived background Run moves to `agent-activity`.
+The original Conversation is a read-only origin reference; it cannot override
+the activity Session or its generation. Business source labels still describe
+the internal work, and missing or unknown transport identities fail closed.
+
 Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.

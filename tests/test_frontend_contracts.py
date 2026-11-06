@@ -107,6 +107,13 @@ def test_server_builds_opaque_endpoint_envelope_from_resolved_source_facts():
     assert agentpresence["connector"]["id"] == "agentpresence"
 
 
+
+def test_activity_policy_keeps_registered_backend_transport_and_rejects_unknown():
+    assert canonical_connector_id("background:prompt", ingress_transport="backend_api", surface="agent-activity") == "backend_api"
+    for transport in ("", "unregistered-transport"):
+        with pytest.raises(ValueError, match="unregistered frontend connector"):
+            canonical_connector_id("background:prompt", ingress_transport=transport, surface="agent-activity")
+
 def test_registry_maps_legacy_names_to_connector_neutral_ids():
     assert canonical_connector_id("api", ingress_transport="api_chat") == "backend_api"
     assert canonical_connector_id("api", ingress_transport="session-api") == "session_api"

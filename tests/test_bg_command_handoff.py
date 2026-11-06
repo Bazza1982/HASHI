@@ -68,6 +68,11 @@ async def test_bg_handoff_reaches_real_pao_activity_admission(tmp_path, monkeypa
             runtime, source=source, chat_id=chat_id, metadata=metadata)
         metadata.update(session_id=activity["session_id"], owner_id=owner,
                         session_surface=resolved_surface, session_channel_key=channel)
+        from orchestrator.frontend_delivery import telegram_delivery_for_admission
+        # enqueue_request re-evaluates the connector policy after PAO selects
+        # the activity route; this must retain the registered ingress identity.
+        telegram_delivery_for_admission(source=source, request_metadata=metadata,
+                                       state_root=tmp_path, agent_id=runtime.name)
         actual = runtime_session.accept_request(
             runtime, request_id="bg-real-admission", chat_id=chat_id, prompt=prompt,
             source=source, request_metadata=metadata, request_content=None,
