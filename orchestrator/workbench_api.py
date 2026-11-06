@@ -14176,13 +14176,28 @@ class WorkbenchApiServer:
             "enabled": bool(job.get("enabled", False)),
             "job": dict(job),
             **({"deletion_revision": scheduler_job_deletion_revision(job)}
-               if request is not None and self._can_view_deletion_revision(request, agent_name)
+               if request is not None and (
+                   self._can_view_deletion_revision(request, agent_name)
+                   or self._scheduler_tool_authenticated(request, agent_name, "hashi_scheduler_delete"))
                else {}),
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
             "her_v2_effort_policy": effort_policy,
         }
+
+    def _scheduler_tool_authenticated(self, request, agent_name: str, tool: str) -> bool:
+        from orchestrator.workbench_auth import verify_scheduler_tool_token
+
+        if self._is_governed_profile():
+            return False
+        headers = getattr(request, "headers", {})
+        return verify_scheduler_tool_token(
+            self.admin_token, headers.get("X-Hashi-Scheduler-Token", ""),
+            instance_id=str(getattr(self.global_config, "instance_id", "")),
+            agent_id=agent_name, audience=f"{request.scheme}://{request.host}",
+            tool=tool,
+        ) if headers.get("X-Hashi-Scheduler-Token") else False
 
     async def handle_agent_scheduler_jobs(self, request):
         """List this agent's authoritative HASHI Scheduler jobs."""
@@ -14482,9 +14497,10 @@ class WorkbenchApiServer:
         from orchestrator.skill_manager import SchedulerJobChanged
 
         agent_name = str(request.match_info.get("name") or "").strip()
-        denied = self._guard_agent_management_access(request, agent_name)
-        if denied is not None:
-            return denied
+        if not self._scheduler_tool_authenticated(request, agent_name, "hashi_scheduler_delete"):
+            denied = self._guard_agent_management_access(request, agent_name)
+            if denied is not None:
+                return denied
         runtime = self._runtime_map().get(agent_name.casefold())
         if runtime is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)

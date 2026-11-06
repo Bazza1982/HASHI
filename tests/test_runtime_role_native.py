@@ -694,3 +694,63 @@ print(json.dumps({"core_id":selected.core.runtime_id,"fr_id":selected.functions.
     finally:
         capsule_path.write_bytes(original)
     assert verify_installed_roles(moved, code) == selection
+
+
+def test_real_cli_tool_and_hook_entrypoints_preserve_installer_seals(native_roles, tmp_path, monkeypatch):
+    """A normal CLI invocation must not disqualify the next Core/Worker launch."""
+    from types import SimpleNamespace
+    import shlex
+    import tomllib
+    from adapters import hashi_mcp
+    from orchestrator import codex_native_hooks
+    from tools.registry import ToolRegistry
+
+    python = native_roles["functions"]["executable"]
+    registry = ToolRegistry(
+        allowed_tools=["file_read"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, audit_context={
+            "agent_name": "fixture",
+            "_runtime": SimpleNamespace(orchestrator=SimpleNamespace(
+                resolve_service_endpoint=lambda service, expected_instance=None: {
+                    "service": service, "instance_id": expected_instance or "seal-fixture",
+                    "base_url": "http://127.0.0.1:1"}))})
+    adapter = SimpleNamespace(
+        tool_registry=registry, config=SimpleNamespace(workspace_dir=tmp_path),
+        global_config=SimpleNamespace(project_root=ROOT, instance_id="seal-fixture"))
+    original_python = sys.executable
+    monkeypatch.setattr(sys, "executable", python)
+    try:
+        invocation = hashi_mcp.prepare_hashi_mcp(adapter, backend="codex-cli")
+        receipt = tmp_path / "native-hook-loaded.json"
+        flags = codex_native_hooks.hook_overrides(receipt_path=receipt)
+    finally:
+        monkeypatch.setattr(sys, "executable", original_python)
+    assert invocation is not None
+    environment = dict(os.environ)
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"):
+        environment.pop(name, None)
+    try:
+        result = subprocess.run(
+            [invocation["command"], *invocation["args"], "--help"],
+            cwd=invocation["cwd"], env=environment, capture_output=True,
+            text=True, encoding="utf-8", timeout=90)
+        assert result.returncode == 0, result.stderr
+        assert "--context" in result.stdout
+    finally:
+        invocation.close()
+    setting = next(value for value in flags if value.startswith("hooks.SessionStart="))
+    command = tomllib.loads(setting)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    hook = subprocess.run(
+        command if os.name == "nt" else shlex.split(command),
+        input=json.dumps({"hook_event_name": "SessionStart"}),
+        cwd=ROOT, env=environment, capture_output=True,
+        text=True, encoding="utf-8", timeout=30)
+    assert hook.returncode == 0, hook.stderr
+    assert json.loads(receipt.read_text(encoding="utf-8"))["loaded"] is True
+    check = subprocess.run(
+        [python, "-I", "-B", str(ROOT / "scripts/check_runtime_selection.py"),
+         "--code-root", str(ROOT), "--core-command"],
+        cwd=tmp_path, env=environment, capture_output=True,
+        text=True, encoding="utf-8", timeout=180)
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert json.loads(check.stdout)[1:] == ["-I", "-B"]

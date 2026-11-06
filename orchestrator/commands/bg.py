@@ -127,7 +127,7 @@ def _help_text(runtime: Any) -> str:
     )
 
 
-async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
+async def _run_task(runtime: Any, update: Any, context: Any, task_text: str) -> None:
     if not task_text:
         await _send(runtime, update, _usage())
         return
@@ -140,6 +140,9 @@ async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
     if not callable(enqueue):
         await _send(runtime, update, ui_language.tr("bg.error.queue_unsupported"))
         return
+    from orchestrator.command_request_context import command_request_context
+
+    binding = command_request_context(runtime, update, context, purpose="bg")
     prompt = (
         f"{BG_INSTRUCTION}\n\n"
         "--- USER TASK ---\n"
@@ -164,13 +167,15 @@ async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
             int(origin_session.get("next_message_ordinal") or 1) - 1,
         )
     request_id = await enqueue(
-        chat_id,
+        binding.chat_id,
         prompt,
         USER_BACKGROUND_JOB_REQUEST_SOURCE,
         f"Background task: {_short(task_text)}",
         request_metadata={
+            **binding.metadata,
             "agent_activity_context": activity_context,
         },
+        idempotency_key=binding.idempotency_key,
     )
     suffix = (
         f"\n{html.escape(ui_language.tr('bg.request'))}: "
@@ -334,7 +339,7 @@ async def bg_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(runtime, update, _help_text(runtime))
         return
     if action == "run":
-        await _run_task(runtime, update, rest)
+        await _run_task(runtime, update, context, rest)
         return
     if action == "list":
         await _list_jobs(runtime, update, rest)
@@ -358,3 +363,4 @@ COMMANDS = [
         callback=bg_command,
     )
 ]
+# HASHI-Fingerprint: hfp_4a7d33e8741a48399191e27867a46e9c

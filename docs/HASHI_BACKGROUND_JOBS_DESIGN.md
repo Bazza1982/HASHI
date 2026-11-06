@@ -90,6 +90,10 @@ POST /api/background-jobs/{job_id}/cancel
   explicit user `/bg` command exposes and admits that Tool. Status, tail,
   cancellation, and listing remain available for managing existing jobs; the
   explicit Backend API remains an operator surface.
+- A command-derived background Run retains its registered frontend connector,
+  Session, owner, generation and channel through `command_request_context`.
+  `/bg` cannot invent a connector or route a Workbench Run into Telegram;
+  its derived idempotency key prevents duplicate admission.
 - Terminal success/failure notifications can be delivered back to the user.
 - Terminal success/failure can also enqueue a one-shot
   `background-job-event` to the responsible agent. The event includes the

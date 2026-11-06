@@ -2904,7 +2904,10 @@ def create_app(
         discovery_status = dict(protocol_status_view.get("discovery") or {})
         health_state = (
             "ready"
-            if not discovery_status or discovery_status.get("state") in {"ready", "ready_empty", "disabled"}
+            # Foreign advertisements can fail authentication without disabling
+            # this local service. Keep peer trust failures in discovery.state;
+            # readiness still requires every configured discovery backend.
+            if not discovery_status or discovery_status.get("readiness") in {"ready", "disabled"}
             else "degraded"
         )
         if not authenticated:
@@ -5350,3 +5353,4 @@ def create_app(
         return _agent_move_response(request, result)
 
     return app
+# HASHI-Fingerprint: hfp_2147e26bcc4b4ed6b4d22f8ab591809b

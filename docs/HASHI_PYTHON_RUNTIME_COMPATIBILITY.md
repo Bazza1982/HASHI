@@ -125,6 +125,7 @@ fallback to a package record is allowed for a dirty or broken Git checkout.
 Publication stays outside the interpreter seal so FG and FR remain independent.
 
 Every process launched from a sealed FR, including the bundled Remote sidecar,
+per-invocation MCP tool server and generated native Python hooks,
 must disable runtime bytecode writes with the interpreter's `-B` contract (or
 an equivalent qualified launcher guarantee). Python caches belong to disposable
 build work before sealing; a live process must not add `__pycache__` or `.pyc`

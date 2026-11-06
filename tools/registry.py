@@ -2050,12 +2050,13 @@ class ToolRegistry:
             )
 
         if tool_name.startswith("hashi_scheduler_"):
-            from tools.hashi_scheduler import execute_hashi_scheduler_tool
+            from tools.hashi_scheduler import execute_hashi_scheduler_tool, scheduler_tool_credential
 
             return await execute_hashi_scheduler_tool(
                 tool_name,
                 arguments,
                 audit_context=self._effective_audit_context(),
+                credential=scheduler_tool_credential(self.secrets, self._effective_audit_context(), {tool_name}),
             )
 
         if tool_name.startswith("hashi_superloop_"):

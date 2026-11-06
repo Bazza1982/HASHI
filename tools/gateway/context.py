@@ -140,6 +140,12 @@ class GatewayContext:
             scoped_secrets["run_question_token"] = issue_tool_token(registry.secrets["workbench_admin_token"],
                 instance_id=str(getattr(global_config, "instance_id", None) or audit.get("instance_id") or ""),
                 agent_id=str(audit.get("agent_name") or ""), request_id=str(audit["request_id"]))
+        scheduler_tools = {tool for tool in allowed_tools if tool.startswith("hashi_scheduler_")}
+        if scheduler_tools:
+            from tools.hashi_scheduler import scheduler_tool_credential
+            credential = scheduler_tool_credential(registry.secrets, effective_audit, scheduler_tools)
+            if credential:
+                scoped_secrets["scheduler_tool_token"] = credential
         canonical = getattr(registry, "canonical_audit", None)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,

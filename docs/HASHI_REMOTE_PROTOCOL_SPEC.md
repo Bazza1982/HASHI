@@ -80,13 +80,21 @@ retry time. Partial startup is cleaned up as one unit. Startup and advertisement
 update failures use bounded exponential backoff; an unsuccessful update never
 advances the advertised snapshot revision.
 
-The public health/status projection distinguishes:
+The `discovery.state` projection distinguishes:
 
 - `ready_empty`: advertising and browsing work, but no peer is currently seen;
 - `ready`: discovery works and at least one peer has a trusted handshake;
 - `starting`: a configured backend has not completed initialization;
 - `degraded`: discovery failed, or visible peers have no accepted trust result;
 - `disabled`: no discovery backend is configured.
+
+The top-level Remote `/health.status` describes local availability: it is
+ready only when all configured discovery backends report ready (or discovery
+is intentionally disabled). Foreign advertisements rejected by HMAC must not
+disable a healthy local Remote or its authenticated Workbench route.
+`discovery.state`, `trust_state`, peer counts and rejection errors remain
+visible and unchanged; readiness grants no peer trust or protected API access.
+A starting or failed discovery backend still makes local health degraded.
 
 Periodic trust revalidation keeps the most recent accepted handshake visible
 while the replacement request is in flight. The public registry changes an

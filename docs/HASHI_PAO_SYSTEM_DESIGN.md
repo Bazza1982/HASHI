@@ -707,8 +707,18 @@ retried. Older backends lack this operation and must not be treated as guarded.
 The Backend API requires authenticated owner credentials, Agent visibility,
 and, in Governed mode, management authority. Its legacy DELETE route uses the
 same confirmation and revision checks. Read projections omit deletion revisions
-without an authenticated, visible owner. The current Agent Scheduler tool does
-not yet supply those credentials, so its deletion request is rejected.
+without an authenticated, visible owner or the matching personal-profile
+Scheduler capability. Agent Scheduler calls delegate a short-lived credential
+bound to instance, Agent, Run, local API audience and the allowed tool names.
+The administrative key stays inside the trusted runtime and is never written
+to a CLI/MCP context. The capability cannot authenticate owner, lifecycle or
+other Agent APIs; Governed deletion retains its management-authority checks.
+The delete tool reads the authenticated definition immediately before calling
+the same conditional-delete writer with its opaque revision and exact-task
+user authorization. A concurrent edit returns conflict without replay.
+Focused coverage: authenticated HTTP ToolRegistry and serialized gateway
+deletion, foreign Agent/instance/audience, expiry, tampering, stale revision,
+missing confirmation, and absence of administrative credentials in MCP.
 The user authorized a small HASHI Function change for Workbench on 2026-10-28.
 Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
 running adoption and external-frontend verification remain separate and pending.

@@ -64,6 +64,80 @@ async def test_scheduler_transport_timeout_is_safe_and_never_replays(tool_name, 
     assert request.await_count == 1
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_gateway", [False, True])
+async def test_authenticated_scheduler_tool_deletes_only_owned_confirmed_job(tmp_path, via_gateway):
+    from tools.registry import ToolRegistry
+    from tools.gateway.context import write_gateway_context, load_gateway_context
+
+    server, runtime = _server(tmp_path)
+    server.admin_token = "fixture-private-admin-key"
+    server.global_config.instance_id = "HASHI1"
+    async with TestServer(server.app) as upstream:
+        url = str(upstream.make_url("")).rstrip("/")
+        registry = ToolRegistry(
+            allowed_tools=["hashi_scheduler_status", "hashi_scheduler_delete"],
+            access_root=tmp_path, workspace_dir=runtime.workspace_dir,
+            secrets={"workbench_admin_token": server.admin_token},
+            audit_context={"agent_name": "momo", "instance_id": "HASHI1",
+                           "request_id": "fixture-request", "global_config": server.global_config,
+                           "workbench_api_base_url": url},
+        )
+        if via_gateway:
+            path = tmp_path / "gateway.json"
+            write_gateway_context(registry, path, backend="codex", workbench_api_base_url=url)
+            assert server.admin_token not in path.read_text(encoding="utf-8")
+            registry = load_gateway_context(path).build_registry()
+        result = await registry.execute("hashi_scheduler_delete", {
+            "job_id": "daily-report", "kind": "cron",
+            "authorization": "explicit_user_authorization",
+        })
+        assert not result.is_error, result.output
+        assert json.loads(result.output)["ok"] is True
+        assert runtime.skill_manager.get_job("cron", "daily-report") is None
+        assert runtime.skill_manager.get_job("cron", "other-agent")["agent"] == "lily"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_scoped_credential_never_grants_owner_or_other_agent(tmp_path):
+    import aiohttp
+    from orchestrator.workbench_auth import issue_scheduler_tool_token
+    from orchestrator.skill_manager import scheduler_job_deletion_revision
+
+    server, runtime = _server(tmp_path)
+    server.admin_token = "fixture-private-key"
+    server.global_config.instance_id = "HASHI1"
+    job = runtime.skill_manager.get_job("cron", "daily-report")
+    payload = {"kind": "cron", "expected_revision": scheduler_job_deletion_revision(job),
+               "authorization": "explicit_user_authorization"}
+    async with TestServer(server.app) as upstream:
+        base = str(upstream.make_url("")).rstrip("/")
+        def credential(**overrides):
+            args = dict(instance_id="HASHI1", agent_id="momo", request_id="fixture-run",
+                        audience=base, tools=["hashi_scheduler_delete"])
+            args.update(overrides)
+            return issue_scheduler_tool_token(server.admin_token, **args)
+        async with aiohttp.ClientSession() as client:
+            for token in ("", credential(agent_id="lily"), credential(instance_id="HASHI9"),
+                          credential(audience="http://127.0.0.1:1"), credential(tools=["hashi_scheduler_list"]),
+                          credential(now=0), credential() + "tampered"):
+                async with client.delete(base + "/api/agents/momo/scheduler/jobs/daily-report",
+                                         json=payload, headers={"X-Hashi-Scheduler-Token": token}) as response:
+                    assert response.status == 401
+                assert runtime.skill_manager.get_job("cron", "daily-report") == job
+            token = credential()
+            # A valid tool credential cannot authenticate arbitrary owner APIs.
+            async with client.get(base + "/api/v1/instance/identity",
+                                  headers={"X-Hashi-Scheduler-Token": token}) as response:
+                assert response.status == 401
+            for body, expected in (({**payload, "authorization": ""}, 403),
+                                   ({**payload, "expected_revision": "0" * 64}, 409)):
+                async with client.delete(base + "/api/agents/momo/scheduler/jobs/daily-report",
+                                         json=body, headers={"X-Hashi-Scheduler-Token": token}) as response:
+                    assert response.status == expected
+                assert runtime.skill_manager.get_job("cron", "daily-report") == job
+
 class _FakeRequest:
     def __init__(self, *, name="momo", batch_id=None, query=None, payload=None):
         self.match_info = {"name": name}
@@ -668,3 +742,4 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
 
     listed_after = await server.handle_agent_superloops(_FakeRequest())
     assert json.loads(listed_after.text)["loops"] == []
+# HASHI-Fingerprint: hfp_9ba0a064b6de48f6a5b9aa0cf7877b09

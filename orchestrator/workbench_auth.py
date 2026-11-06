@@ -145,3 +145,56 @@ def ensure_local_api_credential(
         private_full_control_sids=runtime_sids,
     )
     return updated
+
+
+def issue_scheduler_tool_token(secret, *, instance_id, agent_id, request_id, audience, tools, now=None):
+    """Delegate only this Run's allowed Scheduler calls, never API administration."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not all(isinstance(value, str) and value.strip()
+               for value in (secret, instance_id, agent_id, request_id, audience)):
+        raise ValueError("Scheduler tool credential requires a complete Run identity")
+    claims = {"purpose": "hashi-scheduler-tool-v1", "instance": instance_id,
+              "agent": agent_id, "request": request_id, "audience": audience,
+              "tools": sorted(set(tools)), "expires": int(time.time() if now is None else now) + 3600}
+    body = base64.urlsafe_b64encode(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + signature
+
+
+def verify_scheduler_tool_token(secret, token, *, instance_id, agent_id, audience, tool, now=None):
+    """Validate a scoped caller without turning it into a Workbench owner."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not secret or not isinstance(token, str) or len(token) > 8192:
+        return False
+    try:
+        body, signature = token.split(".")
+        expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if not isinstance(claims, dict):
+            return False
+        current = time.time() if now is None else now
+        return bool(
+            claims.get("purpose") == "hashi-scheduler-tool-v1"
+            and claims.get("instance") == instance_id
+            and claims.get("agent") == agent_id
+            and claims.get("audience") == audience
+            and isinstance(claims.get("request"), str) and claims["request"]
+            and isinstance(claims.get("tools"), list) and tool in claims["tools"]
+            and type(claims.get("expires")) is int
+            and current < claims["expires"] <= current + 3600
+        )
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+# HASHI-Fingerprint: hfp_639484c6271d473aa7a60c75fdeb69b3

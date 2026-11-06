@@ -20,6 +20,28 @@ def _scheduler_endpoint(audit_context: Mapping[str, Any] | None) -> tuple[str, s
     return workbench_endpoint(audit_context, require_agent=True)
 
 
+
+def scheduler_tool_credential(secrets, audit_context, allowed_tools):
+    """Keep the administrative key inside the trusted runtime, outside MCP context."""
+    scoped = secrets.get("scheduler_tool_token")
+    if scoped:
+        return str(scoped)
+    config = (audit_context or {}).get("global_config")
+    if getattr(config, "deployment_profile", "personal") != "personal":
+        return ""
+    secret = secrets.get("workbench_admin_token")
+    request = (audit_context or {}).get("request_id")
+    instance = getattr(config, "instance_id", None) or (audit_context or {}).get("instance_id")
+    agent = (audit_context or {}).get("agent_name")
+    if not (secret and request and instance and agent):
+        return ""
+    from orchestrator.workbench_auth import issue_scheduler_tool_token
+
+    base_url, _ = _scheduler_endpoint(audit_context)
+    return issue_scheduler_tool_token(secret, instance_id=str(instance), agent_id=str(agent),
+                                     request_id=str(request), audience=base_url,
+                                     tools=[tool for tool in allowed_tools if tool.startswith("hashi_scheduler_")])
+
 def _render_result(status: int, payload: dict[str, Any]) -> str:
     if status >= 400 or payload.get("ok") is False:
         raw_code = payload.get("error_code")
@@ -46,11 +68,17 @@ async def execute_hashi_scheduler_tool(
     arguments: Mapping[str, Any],
     *,
     audit_context: Mapping[str, Any] | None,
+    credential: str = "",
 ) -> str:
     try:
         base_url, agent = _scheduler_endpoint(audit_context)
     except ValueError as exc:
         return f"Error: {exc}"
+
+    async def request_json(method, url, **kwargs):
+        if credential:
+            kwargs["headers"] = {"X-Hashi-Scheduler-Token": credential}
+        return await _request_json(method, url, **kwargs)
 
     encoded_agent = quote(agent, safe="")
     args = dict(arguments or {})
@@ -63,7 +91,7 @@ async def execute_hashi_scheduler_tool(
             if "enabled" in args:
                 query["enabled"] = "true" if bool(args["enabled"]) else "false"
             suffix = f"?{urlencode(query)}" if query else ""
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "GET",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs{suffix}",
             )
@@ -74,7 +102,7 @@ async def execute_hashi_scheduler_tool(
                     "job_id": str(args.get("job_id") or "").strip(),
                 }
             )
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "GET",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/status?{query}",
             )
@@ -87,7 +115,7 @@ async def execute_hashi_scheduler_tool(
             query = urlencode(
                 {key: value for key, value in query_values.items() if value}
             )
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "GET",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/runs?{query}",
             )
@@ -97,7 +125,7 @@ async def execute_hashi_scheduler_tool(
                     "Error: hashi_scheduler_rerun requires explicit authorization for "
                     "this exact single job"
                 )
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "POST",
                 f"{base_url}/api/agents/{encoded_agent}/jobs/run",
                 payload={
@@ -117,7 +145,7 @@ async def execute_hashi_scheduler_tool(
             }
             if args.get("counts") is not None:
                 payload["counts"] = dict(args.get("counts") or {})
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "POST",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/recovery/"
                 f"{quote(batch_id, safe='')}/resolve",
@@ -126,7 +154,7 @@ async def execute_hashi_scheduler_tool(
         elif tool_name == "hashi_scheduler_create":
             payload = dict(args)
             payload["requested_by"] = "hashi_tool_gateway"
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "POST",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs",
                 payload=payload,
@@ -138,7 +166,7 @@ async def execute_hashi_scheduler_tool(
             payload = dict(args)
             payload.pop("job_id", None)
             payload["requested_by"] = "hashi_tool_gateway"
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "PATCH",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs/{quote(job_id, safe='')}",
                 payload=payload,
@@ -152,13 +180,24 @@ async def execute_hashi_scheduler_tool(
             job_id = str(args.get("job_id") or "").strip()
             if not job_id:
                 return "Error: hashi_scheduler_delete requires job_id"
-            status, payload = await _request_json(
+            status, snapshot = await request_json(
+                "GET",
+                f"{base_url}/api/agents/{encoded_agent}/scheduler/status?"
+                + urlencode({"kind": str(args.get("kind") or "").strip().lower(), "job_id": job_id}),
+            )
+            if status >= 400 or snapshot.get("ok") is False:
+                return _render_result(status, snapshot)
+            revision = (snapshot.get("status") or {}).get("deletion_revision")
+            if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+                return "Error: HASHI Scheduler deletion requires an authenticated task snapshot"
+            status, payload = await request_json(
                 "DELETE",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs/{quote(job_id, safe='')}",
                 payload={
                     "kind": str(args.get("kind") or "").strip().lower(),
                     "requested_by": "hashi_tool_gateway",
                     "authorization": "explicit_user_authorization",
+                    "expected_revision": revision,
                 },
             )
         else:
@@ -182,3 +221,4 @@ async def execute_hashi_scheduler_tool(
         return f"Error: invalid HASHI Scheduler tool arguments: {exc}"
 
     return _render_result(status, payload)
+# HASHI-Fingerprint: hfp_b8276aa6cac24043935744edb0bbdd9d

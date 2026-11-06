@@ -174,13 +174,14 @@ async def request_workbench_json(
     *,
     payload: dict[str, Any] | None = None,
     timeout_seconds: float = 30,
+    headers: Mapping[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Perform one bounded request and normalize the Backend API JSON shape."""
 
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     async with (
         aiohttp.ClientSession(timeout=timeout) as session,
-        session.request(method, url, json=payload) as response,
+        session.request(method, url, json=payload, headers=headers, allow_redirects=False) as response,
     ):
         try:
             body = await response.json()
@@ -190,3 +191,4 @@ async def request_workbench_json(
         if not isinstance(body, dict):
             body = {"ok": False, "error": "invalid Backend API response shape"}
         return response.status, body
+# HASHI-Fingerprint: hfp_89e5cc8996ef42aab48e894a2581637d
