@@ -20,6 +20,8 @@ on:
       - "locales/runtime/zh-CN.json"
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
+      - "orchestrator/agent_config_json.py"
+      - "orchestrator/workbench_api.py"
       - "orchestrator/flexible_backend_manager.py"
       - "orchestrator/flexible_agent_runtime.py"
       - "orchestrator/runtime_menu_views.py"
@@ -29,6 +31,7 @@ on:
       - "tests/test_permission_agent_tools.py"
       - "tests/test_permission_safety_command.py"
       - "tests/test_permission_frontend_views.py"
+      - "tests/test_frontend_settings_api.py"
       - "tests/test_permission_pao_fence.py"
       - "tests/test_session_store.py"
       - "tests/test_command_registry.py"
@@ -77,6 +80,8 @@ on:
       - "locales/runtime/zh-CN.json"
       - "orchestrator/config_admin.py"
       - "orchestrator/config.py"
+      - "orchestrator/agent_config_json.py"
+      - "orchestrator/workbench_api.py"
       - "orchestrator/flexible_backend_manager.py"
       - "orchestrator/flexible_agent_runtime.py"
       - "orchestrator/runtime_menu_views.py"
@@ -86,6 +91,7 @@ on:
       - "tests/test_permission_agent_tools.py"
       - "tests/test_permission_safety_command.py"
       - "tests/test_permission_frontend_views.py"
+      - "tests/test_frontend_settings_api.py"
       - "tests/test_permission_pao_fence.py"
       - "tests/test_session_store.py"
       - "tests/test_command_registry.py"
@@ -176,6 +182,7 @@ jobs:
           scripts/permissions/windows_probe_process.py tests/test_permission_probe_process.py
           tests/test_permission_capabilities.py
           tests/test_permission_agent_tools.py tests/test_permission_wait.py
+          tests/test_frontend_settings_api.py
           tests/test_permission_execution_gate.py tests/test_permission_registry.py tests/test_permissions_authority.py
           tests/test_permission_ledger_maintenance.py
           tests/test_permission_signed_receipts.py tests/test_permission_actions.py
@@ -260,6 +267,7 @@ jobs:
         run: >-
           python -m pytest -q --durations=20
           tests/test_permission_agent_tools.py
+          tests/test_frontend_settings_api.py
           tests/test_permission_safety_command.py
           tests/test_safety_failure_details.py
           tests/test_permission_frontend_views.py

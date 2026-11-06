@@ -292,10 +292,13 @@ async def test_frontend_permissions_reports_uncertain_state_when_persistence_rol
     runtime.backend_manager = manager
     runtime.config = manager.config
 
-    def conflict(*_args, **_kwargs):
+    publications = []
+
+    def conflict(path, proposed):
+        publications.append((path, proposed))
         raise ConfigConflictError("changed concurrently")
 
-    monkeypatch.setattr("orchestrator.config_json.write_config_json", conflict)
+    monkeypatch.setattr("orchestrator.agent_config_json.write_agent_config_json", conflict)
     response = await server.handle_v1_agent_settings_permissions_set(
         Request(operation="permissions.set_access_scope", payload={
             "backend": "codex-cli",
@@ -307,6 +310,11 @@ async def test_frontend_permissions_reports_uncertain_state_when_persistence_rol
 
     assert response.status == 503
     assert decode(response)["error_code"] == "settings_persistence_uncertain"
+    assert len(publications) == 1
+    assert publications[0][0] == config_path
+    assert publications[0][1]["agents"][0]["allowed_backends"][0]["access_scope"] == "workspace"
+    assert manager.current_backend.config.access_scope == "workspace"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == document
 
 
 async def test_frontend_privacy_requires_fresh_value_and_downgrade_confirmation(tmp_path) -> None:
