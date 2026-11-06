@@ -58,6 +58,13 @@ alongside the existing product/source/FG facts. Missing Core receipts remain
 unknown. Public version facts omit interpreter and installation paths. Source,
 prepared candidate, active route and live acceptance remain separate states.
 
+Shared Functions candidates leave Remote untouched while preparing. After
+the prior owner retires, commit restores the configured Remote through its
+existing lifecycle owner inside the pending connector boundary. A healthy OS
+supervisor is reused; a missing bundled child starts in the selected qualified
+FR. Failure remains degraded and retries through connector activation. A
+Worker-only success cannot qualify the complete Workbench connection chain.
+
 The canonical installer also offers build-functions through
 scripts/build_runtime_roles.py. It accepts a frozen reference and the existing
 qualified Core manifest/digest, creates only a new FR in a fresh destination,

@@ -237,6 +237,17 @@ class RuntimeAppHost:
             app._connector_activation_pending = True
             try:
                 app.startup_manager.reconcile_connector_status(pending=True, publish=False)
+                if getattr(app, "_shared_replacement_continuity", False):
+                    # Preparation must leave the old owner's Remote alone.
+                    # After retirement, the committed Functions owner restores
+                    # its configured sidecar before announcing readiness.
+                    try:
+                        await app.startup_manager._ensure_remote_lifecycle()
+                        remote = getattr(app, "remote_lifecycle_status", {}) or {}
+                        if remote.get("enabled") is not False and not remote.get("available"):
+                            errors["remote"] = str(remote.get("action") or "unavailable")
+                    except Exception as exc:
+                        errors["remote"] = f"{type(exc).__name__}: {exc}"
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)

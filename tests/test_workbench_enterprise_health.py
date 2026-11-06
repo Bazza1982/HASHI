@@ -10,6 +10,63 @@ import pytest
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_ok", [True, False])
+async def test_shared_functions_commit_restores_remote_and_gates_health(tmp_path, monkeypatch, remote_ok):
+    from unittest.mock import AsyncMock
+    from orchestrator.runtime_app_host import RuntimeAppHost
+    from orchestrator.startup_manager import StartupManager
+    from orchestrator import remote_lifecycle
+
+    started, release = asyncio.Event(), asyncio.Event()
+    settings = SimpleNamespace(enabled=True, supervised=False, port=18474)
+    async def launch(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return {"ok": remote_ok, "action": "started_child" if remote_ok else "remote_activation_failed",
+                "settings": settings, "reason": "" if remote_ok else "fixture activation failed"}
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", launch)
+    monkeypatch.setattr(remote_lifecycle, "inspect_remote", AsyncMock(return_value={
+        "ok": False, "action": "remote_activation_failed", "settings": settings}))
+    monkeypatch.delenv("HASHI_REMOTE_ROOT", raising=False)
+    app = SimpleNamespace(paths=SimpleNamespace(bridge_home=tmp_path, instance_id="TEST"),
+        global_cfg=SimpleNamespace(authorized_id=1, bridge_home=tmp_path, project_root=tmp_path),
+        runtimes=[], shared_generation_id="new-functions", api_gateway=None, whatsapp=None,
+        _shared_replacement_candidate=True, _handoff_draining=True,
+        _runtime_map=lambda: {}, _load_whatsapp_cfg=lambda: ({}, {}),
+        function_workers=SimpleNamespace(_telegram_ingress={}, broadcast_topology=AsyncMock()),
+        startup_status={"services_ready": True, "ready": True, "issues": [], "agent_states": {}})
+    app.startup_manager = StartupManager(app, None)
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = app
+    host = RuntimeAppHost(None, {})
+    host.app = app
+    host.task = asyncio.create_task(asyncio.Event().wait())
+    commit = asyncio.create_task(host.commit())
+    try:
+        # Old shared Functions have retired, so bundled Remote is absent.
+        # The candidate must restore it before claiming local readiness.
+        await asyncio.wait_for(started.wait(), timeout=.4)
+        pending = json.loads((await server.handle_health(_FakeRequest())).text)
+        assert not pending["ready"]
+        release.set()
+        result = await commit
+        payload = json.loads((await server.handle_health(_FakeRequest())).text)
+        assert payload["remote"]["available"] is remote_ok
+        assert payload["ready"] is remote_ok
+        assert payload["degraded"] is not remote_ok
+        assert result["degraded"] is not remote_ok
+    finally:
+        release.set()
+        host.stopping.set()
+        commit.cancel()
+        host.task.cancel()
+        if host.connector_task:
+            host.connector_task.cancel()
+        await asyncio.gather(commit, host.task, *([host.connector_task] if host.connector_task else []),
+                             return_exceptions=True)
+
 class _FakeRequest:
     pass
 
@@ -556,3 +613,4 @@ async def test_health_after_local_clone_removal_keeps_unrelated_failures(tmp_pat
     assert startup["total"] == startup["completed"] == 1 + int(failed)
     assert startup["ready_agents"] == 1
     assert startup["local_agents"] == 1
+# HASHI-Fingerprint: hfp_69f2e2d4d7ed4ad3b26bc89af0558695

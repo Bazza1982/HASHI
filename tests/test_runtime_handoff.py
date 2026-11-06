@@ -379,6 +379,12 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
             self.is_running = True
 
     flaky, healthy = Ingress(True), Ingress()
+    # This fixture tests Telegram/WhatsApp. Explicitly disable Remote in its
+    # own instance instead of inheriting the test driver's instance paths.
+    monkeypatch.delenv("HASHI_REMOTE_ROOT", raising=False)
+    remote_dir = tmp_path / "remote"
+    remote_dir.mkdir()
+    (remote_dir / "config.yaml").write_text("lifecycle:\n  remote_enabled: false\n", encoding="utf-8")
     whatsapp_calls = []
 
     async def start_whatsapp_transport(**kwargs):
@@ -398,7 +404,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         function_workers=SimpleNamespace(
             _telegram_ingress={"alpha": flaky, "beta": healthy}
         ),
-        global_cfg=SimpleNamespace(authorized_id=1),
+        global_cfg=SimpleNamespace(authorized_id=1, bridge_home=tmp_path, project_root=tmp_path),
         _runtime_map=lambda: {},
         _load_whatsapp_cfg=lambda: ({}, {"enabled": True}),
         start_whatsapp_transport=start_whatsapp_transport,
