@@ -661,6 +661,12 @@ Operational goal:
 - or during normal `/reboot`
 - never require cold restart of the whole HASHI system
 
+When shared Functions starts the bundled Remote from a qualified Functions
+runtime, the child interpreter is invoked with `-B`. Remote must not create
+runtime bytecode inside that sealed installation, because later Agent admission
+revalidates the same immutable file closure. This rule does not exclude cache
+files from verification or weaken the runtime seal.
+
 ## Implementation and verification receipt — 2026-09-13
 
 - Owner/layer: PAO Remote Function plus the Windows lifecycle adapter; no Core

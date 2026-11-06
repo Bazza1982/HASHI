@@ -124,6 +124,12 @@ policy covers both publication records and the installation selector. No
 fallback to a package record is allowed for a dirty or broken Git checkout.
 Publication stays outside the interpreter seal so FG and FR remain independent.
 
+Every process launched from a sealed FR, including the bundled Remote sidecar,
+must disable runtime bytecode writes with the interpreter's `-B` contract (or
+an equivalent qualified launcher guarantee). Python caches belong to disposable
+build work before sealing; a live process must not add `__pycache__` or `.pyc`
+files to the immutable FR closure. Runtime verification remains strict.
+
 Enterprise images build through scripts/build_enterprise_image.py: only a clean
 committed public export enters the context. Standard and optional Functions
 packages receive an exact platform wheel hash lock. Sidecars are prepared with
