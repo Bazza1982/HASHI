@@ -143,6 +143,22 @@ jobs:
           tests/test_portable_windows_packaging.py
 
 
+      - name: Quarantine wheel-build metadata before real entry qualification
+        shell: python
+        run: |
+          import os, shutil, subprocess
+          from pathlib import Path
+
+          metadata = Path("hashi_bridge.egg-info")
+          if metadata.exists():
+              if subprocess.check_output(["git", "ls-files", "--", metadata.name]).strip():
+                  raise RuntimeError("Refusing to move tracked package metadata")
+              destination = Path(os.environ["RUNNER_TEMP"]) / "hashi-entry-build-metadata" / metadata.name
+              if destination.exists():
+                  raise RuntimeError("Preserve the existing build-metadata evidence")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.move(str(metadata), str(destination))
+              print("Retained source-wheel metadata outside the qualified entry tree:", destination)
       - name: Verify sealed Core and Functions runtime roles
         timeout-minutes: 30
         run: >-
@@ -176,6 +192,10 @@ jobs:
             ${{ runner.temp }}/hashi-runtime-roles.xml
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/runtime-role-qualification.json
             ${{ runner.temp }}/hashi-qualified-runtime-roles/**/functions-dependency-handoff.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-help.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold-receipt.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold.log
+            ${{ runner.temp }}/hashi-entry-build-metadata/**
             ${{ runner.temp }}/hashi-offline-regression.xml
 
   posix-runtime:
@@ -193,6 +213,22 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install original runtime and test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Quarantine wheel-build metadata before real entry qualification
+        shell: python
+        run: |
+          import os, shutil, subprocess
+          from pathlib import Path
+
+          metadata = Path("hashi_bridge.egg-info")
+          if metadata.exists():
+              if subprocess.check_output(["git", "ls-files", "--", metadata.name]).strip():
+                  raise RuntimeError("Refusing to move tracked package metadata")
+              destination = Path(os.environ["RUNNER_TEMP"]) / "hashi-entry-build-metadata" / metadata.name
+              if destination.exists():
+                  raise RuntimeError("Preserve the existing build-metadata evidence")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.move(str(metadata), str(destination))
+              print("Retained source-wheel metadata outside the qualified entry tree:", destination)
       - name: Verify Linux sealed roles, private IPC and same-Core dependency handoff
         run: >-
           python -m pytest -q
@@ -220,3 +256,5 @@ jobs:
             ${{ runner.temp }}/hashi-linux-core.xml
             ${{ runner.temp }}/hashi-qualified-linux-roles/**/runtime-role-qualification.json
             ${{ runner.temp }}/hashi-qualified-linux-roles/**/functions-dependency-handoff.json
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/real-entry-help.json
+            ${{ runner.temp }}/hashi-entry-build-metadata/**
