@@ -12,6 +12,9 @@ from pathlib import Path
 from uuid import uuid4
 
 CODE_ROOT = Path(__file__).resolve().parent
+# Isolated script execution omits its directory; admit only this entry's root.
+sys.path.insert(0, str(CODE_ROOT))
+
 from orchestrator.runtime_contract import (
     CORE_HOST_ROLE, RuntimeContractError, bind_process_runtime,
     enforce_runtime_contract, load_core_runtime_selection,

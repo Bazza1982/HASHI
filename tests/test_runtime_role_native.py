@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
+import time
+from uuid import uuid4
 
 import pytest
 
@@ -360,7 +364,7 @@ def test_functions_only_builder_never_writes_inside_existing_core_base(native_ro
     assert not destination.exists()
 
 
-def test_management_launcher_uses_only_the_qualified_core(native_roles, monkeypatch):
+def test_management_launcher_uses_only_the_qualified_core(native_roles, monkeypatch, tmp_path):
     from scripts import hashi_instance_cli
     from tools.instance_registry import InstanceRegistryError
 
@@ -372,12 +376,232 @@ def test_management_launcher_uses_only_the_qualified_core(native_roles, monkeypa
                         lambda _root: [[native_roles["functions"]["executable"]]])
     command = hashi_instance_cli._select_core_runtime(code_root)
     assert command == [native_roles["core"]["executable"], "-I", "-B"]
+    entry = ROOT / "main.py"
+    assert entry.read_bytes() == (code_root / "main.py").read_bytes()
+    unrelated = tmp_path / "unrelated-working-directory"
+    unrelated.mkdir()
+    (unrelated / "orchestrator.py").write_text("raise RuntimeError('ambient import')\n")
+    invocation = [*command, str(entry), "--help"]
+    completed = subprocess.run(
+        invocation, cwd=unrelated, env=_entry_environment(command[0]),
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+    (tmp_path / "real-entry-help.json").write_text(json.dumps({
+        "argv": invocation, "returncode": completed.returncode,
+        "stdout": completed.stdout, "stderr": completed.stderr,
+        "main_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+        "cwd": str(unrelated), "child_path_injection": False,
+    }), encoding="utf-8")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "--bridge-home" in completed.stdout
+    assert not (unrelated / "__pycache__").exists()
     # The current test driver is not an installer-selected FR. Exact approved
     # Python/dependencies alone must not authorize it to choose a Core.
     monkeypatch.setattr(hashi_instance_cli, "_prepared_role_candidates",
                         lambda _root: [[sys.executable]])
     with pytest.raises(InstanceRegistryError, match="installer-qualified"):
         hashi_instance_cli._select_core_runtime(code_root)
+
+
+def _entry_environment(python):
+    allowed = {
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+        "SYSTEMDRIVE", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "NUMBER_OF_PROCESSORS", "LANG", "LC_ALL",
+    }
+    env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    system_path = (str(Path(os.environ["SystemRoot"]) / "System32")
+                   if os.name == "nt" else os.defpath)
+    git = shutil.which("git")
+    assert git is not None, "Checkout entry qualification requires Git"
+    env["PATH"] = os.pathsep.join((str(Path(python).parent), system_path, str(Path(git).parent)))
+    return env
+
+
+def _windows_process_parents():
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD), ("usage", wintypes.DWORD),
+            ("pid", wintypes.DWORD), ("heap", ctypes.c_size_t),
+            ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+            ("parent", wintypes.DWORD), ("priority", wintypes.LONG),
+            ("flags", wintypes.DWORD), ("image", wintypes.WCHAR * 260),
+        ]
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    api.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    api.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    api.Process32FirstW.restype = wintypes.BOOL
+    api.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    api.Process32NextW.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = api.CreateToolhelp32Snapshot(2, 0)
+    assert handle and handle != ctypes.c_void_p(-1).value
+    entry = ProcessEntry()
+    entry.size = ctypes.sizeof(entry)
+    parents = {}
+    try:
+        okay = api.Process32FirstW(handle, ctypes.byref(entry))
+        while okay:
+            parents[int(entry.pid)] = int(entry.parent)
+            okay = api.Process32NextW(handle, ctypes.byref(entry))
+    finally:
+        api.CloseHandle(handle)
+    return parents
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Real production-entry cold gate qualifies native Windows")
+def test_real_main_cold_start_ready_and_stop(native_roles, tmp_path):
+    from orchestrator.instance_lock import InstanceLock
+    from orchestrator.pcm import render_pcm_document
+
+    python = native_roles["core"]["executable"]
+    entry = ROOT / "main.py"
+    assert entry.read_bytes() == (Path(native_roles["code_root"]) / "main.py").read_bytes()
+    home = tmp_path / "entry-instance"
+    workspace = home / "workspaces" / "entry_probe"
+    workspace.mkdir(parents=True)
+    (workspace / "agent.md").write_text(render_pcm_document(
+        persona="Offline entry fixture", system="No external accounts or inference.",
+    ), encoding="utf-8")
+    unexpected_provider = home / "unexpected-provider-invocation.txt"
+    cli = home / "offline-codex.cmd"
+    cli.write_text(
+        '@echo off\n'
+        'if "%*"=="--version" (\n'
+        '  echo codex-cli 0.160.0\n'
+        '  exit /b 0\n'
+        ')\n'
+        f'echo unexpected>"{unexpected_provider}"\n'
+        'exit /b 93\n',
+        encoding="utf-8",
+    )
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    instance = "ENTRY_P1_" + uuid4().hex[:12].upper()
+    token = uuid4().hex
+    (home / "agents.json").write_text(json.dumps({
+        "global": {
+            "instance_id": instance, "authorized_id": 1,
+            "api_host": "127.0.0.1", "workbench_port": port,
+            "codex_cmd": str(cli), "timezone": "UTC",
+        },
+        "agents": [{
+            "name": "entry_probe", "type": "flex", "is_active": True,
+            "workspace_dir": str(workspace), "active_backend": "codex-cli",
+            "allowed_backends": [{"engine": "codex-cli"}],
+            "permission_settings": {"requested_level": "L0"},
+        }],
+    }), encoding="utf-8")
+    (home / "secrets.json").write_text(json.dumps({
+        "workbench_admin_token": token,
+    }), encoding="utf-8")
+    (home / "tasks.json").write_text(json.dumps({
+        "crons": [], "heartbeats": [], "nudges": [],
+    }), encoding="utf-8")
+    remote = home / "remote"
+    remote.mkdir()
+    (remote / "config.yaml").write_text(
+        "lifecycle:\n  remote_enabled: false\n  remote_supervised: false\n",
+        encoding="utf-8",
+    )
+    witness = home / "durable-witness.txt"
+    witness.write_bytes(b"existing isolated test state")
+    cwd = tmp_path / "unrelated-cold-cwd"
+    cwd.mkdir()
+    (cwd / "orchestrator.py").write_text("raise RuntimeError('ambient import')\n")
+    invocation = [python, "-I", "-B", str(entry), "--bridge-home", str(home)]
+    log = tmp_path / "real-entry-cold.log"
+    state = home / "state" / "instance"
+    snapshot = health = None
+
+    def api(method, path, *, authenticated=False):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        headers = {"Content-Type": "application/json"}
+        if authenticated:
+            headers["X-Workbench-Token"] = token
+        body = json.dumps({"reason": "isolated-entry-qualification"}) if method == "POST" else None
+        try:
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    with log.open("wb") as stream:
+        process = subprocess.Popen(
+            invocation, cwd=cwd, env=_entry_environment(python),
+            stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+        )
+        owned_pids = {process.pid}
+        try:
+            deadline = time.monotonic() + 480
+            while time.monotonic() < deadline:
+                assert process.poll() is None, log.read_text(encoding="utf-8", errors="replace")[-12000:]
+                try:
+                    snapshot = json.loads((state / "kernel.json").read_bytes())
+                    if snapshot.get("phase") == "active":
+                        status, health = api("GET", "/api/health", authenticated=True)
+                        if status == 200 and health.get("ready"):
+                            break
+                except (OSError, ValueError, http.client.HTTPException):
+                    pass
+                time.sleep(0.2)
+            else:
+                pytest.fail(log.read_text(encoding="utf-8", errors="replace")[-12000:])
+            # Windows venv redirectors keep a launcher PID above the real Core.
+            parents = _windows_process_parents()
+            while additional := {pid for pid, parent in parents.items() if parent in owned_pids} - owned_pids:
+                owned_pids.update(additional)
+            assert snapshot["kernel_pid"] in owned_pids
+            assert snapshot["function_pid"] in owned_pids
+            assert snapshot["function_pid"] != snapshot["kernel_pid"]
+            assert snapshot["runtime"]["role"] == CORE_HOST_ROLE
+            assert snapshot["functions_runtime"]["role"] == FUNCTIONS_ROLE
+            assert health["kernel_pid"] == snapshot["kernel_pid"]
+            assert health["instance_id"] == instance
+            assert health["ready"] and not health["degraded"]
+            assert not unexpected_provider.exists()
+            assert api("POST", "/api/admin/shutdown")[0] == 403
+            assert api("POST", "/api/admin/shutdown", authenticated=True)[0] == 200
+            assert process.wait(timeout=90) == 0
+            remaining = _windows_process_parents()
+            assert not owned_pids.intersection(remaining), "Test-owned interpreters survived normal stop"
+            stopped = json.loads((state / "kernel.json").read_bytes())
+            assert stopped["phase"] == "stopped"
+            assert stopped["kernel_pid"] == snapshot["kernel_pid"]
+            assert witness.read_bytes() == b"existing isolated test state"
+            assert not unexpected_provider.exists()
+            assert not (state / "process.pid").exists()
+            lock = InstanceLock(state / "process.lock")
+            lock.acquire()
+            lock.release()
+            (tmp_path / "real-entry-cold-receipt.json").write_text(json.dumps({
+                "argv": invocation, "instance": instance,
+                "launcher_pid": process.pid, "owned_process_pids": sorted(owned_pids),
+                "owned_processes_retired": True,
+                "main_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+                "cold_ready": snapshot, "health": health, "stopped": stopped,
+                "returncode": process.returncode, "child_path_injection": False,
+                "pythonpath_used": False, "provider_invoked": False,
+                "existing_test_state_preserved": True,
+            }), encoding="utf-8")
+        finally:
+            if process.poll() is None:
+                if snapshot and snapshot.get("kernel_pid") in owned_pids and health and health.get("instance_id") == instance:
+                    try:
+                        api("POST", "/api/admin/shutdown", authenticated=True)
+                        process.wait(timeout=60)
+                    except (OSError, ValueError, subprocess.TimeoutExpired, http.client.HTTPException):
+                        pass
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=30)
 
 
 def test_standalone_capsule_relocates_without_changing_role_bytes_or_ids(native_roles, tmp_path):
