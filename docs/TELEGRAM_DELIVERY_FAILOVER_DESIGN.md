@@ -5,6 +5,31 @@
 > The rules below supersede the historical schema-1 example and broad retry
 > language retained later in this document.
 
+## Configuration and RetryAfter failure boundary (2026-11-05)
+
+The canonical outer lifecycle ID must survive loading even when an Agent has a
+nonempty explicit `extra` object. PAO projects only that identity into the
+effective configuration; it does not merge unrelated outer settings. A valid
+legacy nested ID is preserved when Worker preparation publishes the canonical
+field. Malformed or conflicting identities reject loading/preparation before
+migration writes, rather than inventing an owner or rebinding existing state.
+
+A placeholder RetryAfter records the server window before notification. Once
+that record commits, notification preparation, sending, or result-recording
+failure is secondary: log it and keep the block, run the model once, and preserve
+any undelivered answer. Notifications never replay business work.
+
+If the incident itself cannot be published, stop that path with
+`TELEGRAM_RATE_LIMIT_RECOVERY_FAILED`, preserving the original exception chain
+and retry interval. Frontends show a localized Telegram delivery notice, not a
+model/backend failure or private owner details. This outcome does not authorize
+an automatic task retry, claim a notification was delivered, or overwrite an
+uncertain committed state. Owner isolation, quarantine and bounded recovery
+claims remain unchanged.
+
+This is source/offline behavior. PR publication does not adopt it into running
+Functions; no deployment, restart or live Telegram flood test is implied.
+
 ## Schema 2 ownership and recovery contract
 
 Every active Agent delivery record is bound to all three of:

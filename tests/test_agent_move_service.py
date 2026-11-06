@@ -1286,10 +1286,16 @@ def test_source_deactivation_rejects_history_mode_change_on_retry(tmp_path):
         )
 
 
+@pytest.mark.parametrize("legacy_nested", [False, True])
 def test_schema3_clone_is_active_without_telegram_and_schedules_stay_disabled(
-    tmp_path,
+    tmp_path, legacy_nested,
 ):
     source, target, _ = _roots(tmp_path)
+    if legacy_nested:
+        config = json.loads((source / "agents.json").read_text())
+        config["agents"][0]["agent_lifecycle_id"] = "a" * 32
+        config["agents"][0]["extra"] = {"agent_lifecycle_id": "a" * 32, "custom": "keep"}
+        _write_json(source / "agents.json", config)
     source_secrets = json.loads((source / "secrets.json").read_text())
     source_secrets["zelda_api_key"] = "safe-agent-key"
     _write_json(source / "secrets.json", source_secrets)
@@ -1347,6 +1353,19 @@ def test_schema3_clone_is_active_without_telegram_and_schedules_stay_disabled(
         "is_active"
     ] is True
     assert package.access_requirements["telegram_secret_included"] is False
+    from orchestrator.agent_incarnation import lifecycle_id_from_config
+    from orchestrator.config import ConfigManager
+    _, loaded, _ = ConfigManager(
+        target / "agents.json", target / "secrets.json", bridge_home=target, code_root=target
+    ).load()
+    cloned = next(agent for agent in loaded if agent.name == "zelda_copy")
+    assert lifecycle_id_from_config(cloned) == target_agent["agent_lifecycle_id"]
+    if legacy_nested:
+        assert target_agent["agent_lifecycle_id"] != "a" * 32
+        assert target_agent["extra"] == {"custom": "keep"}
+        assert json.loads((source / "agents.json").read_text())["agents"][0]["extra"] == {
+            "agent_lifecycle_id": "a" * 32, "custom": "keep"
+        }
 
 
 @pytest.mark.parametrize("runtime_change", ["config", "secret", "schedule", "workspace"])

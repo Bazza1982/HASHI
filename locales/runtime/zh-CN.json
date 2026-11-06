@@ -642,6 +642,8 @@
     "wip.action": "使用 /compact 可将恢复摘要写入当前会话，并清理正在使用的未完成工作记录。",
     "wip.stream_summary": "已以受限形式恢复上一轮未完成的 HERV3 工作；可使用 /compact 将其保存到会话上下文。",
     "error.backend_header": "后端错误（{backend}）",
+    "error.telegram_delivery_header": "Telegram 消息投递受限",
+    "error.telegram_rate_limit_recovery_failed": "Telegram 要求等待 {seconds} 秒，自动限流恢复暂不可用。请先检查投递状态再决定是否重新提交，避免重复执行已完成的任务。",
     "error.details": "错误详情：{error}",
     "error.code": "错误代码：{code}",
     "error.http_status": "HTTP 状态：{status}",

@@ -16,6 +16,7 @@ A HASHI Conversation Session is not an Engine Session or Provider Context. Claim
 - [Run questions](../HASHI_RUN_QUESTIONS.md).
 - [Command UI and locale contract](../HASHI_COMMAND_UI_STYLE_GUIDE.md).
 
+- [Telegram rate-limit identity and recovery boundary](../TELEGRAM_DELIVERY_FAILOVER_DESIGN.md#configuration-and-retryafter-failure-boundary-2026-11-05): canonical lifecycle loading, notification isolation, typed delivery failures and the focused lifecycle regressions.
 ## Source and verification
 Start with `orchestrator/session_store.py` and its API consumers. Other entry points include `orchestrator/frontend_delivery.py`, `orchestrator/message_context.py`, `remote/api/server.py` and `transports/chat_router.py`. Use the owning Session/API/delivery tests; `tests/test_runtime_pipeline.py` exercises context and delivery boundaries. Prefer a real serialized protocol test over a mocked acknowledgement.
 

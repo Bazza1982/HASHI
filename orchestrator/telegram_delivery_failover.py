@@ -16,6 +16,7 @@ from orchestrator import telegram_stream_policy
 from orchestrator.process_resources import async_path_lock
 from orchestrator.telegram_delivery_errors import (
     TelegramDeliveryError,
+    TelegramRateLimitRecoveryError,
     classify_telegram_delivery_error,
 )
 from orchestrator.telegram_delivery_state import (
@@ -818,6 +819,29 @@ async def _maybe_send_warning(
     request_id: str | None,
     response_path: Path | None,
 ) -> None:
+    # Operational notifications must not replace a committed RetryAfter window
+    # or abort/replay the business Run when preparation or result recording fails.
+    try:
+        await _send_warning(
+            source_runtime, chat_id=chat_id, record=record,
+            request_id=request_id, response_path=response_path,
+        )
+    except Exception:
+        logger.exception(
+            "Telegram rate-limit notification unavailable agent=%s request_id=%s; "
+            "the recorded wait remains active",
+            getattr(source_runtime, "name", "unknown"), request_id,
+        )
+
+
+async def _send_warning(
+    source_runtime: Any,
+    *,
+    chat_id: int | None,
+    record: dict[str, Any],
+    request_id: str | None,
+    response_path: Path | None,
+) -> None:
     if chat_id is None:
         return
     prepared = await _prepare_warning(
@@ -1043,7 +1067,17 @@ async def handle_retry_after(
                     requests.append(request_id)
             return (dict(record), response_path), True
 
-        saved_record, response_path = mutate_state(path, mutation)
+        try:
+            saved_record, response_path = mutate_state(path, mutation)
+        except Exception:
+            logger.exception(
+                "Telegram RetryAfter recovery unavailable agent=%s request_id=%s "
+                "retry_after_s=%s; no automatic request replay",
+                runtime_name, request_id, retry_after_s,
+            )
+            raise TelegramRateLimitRecoveryError(
+                retry_after_s=retry_after_s,
+            ) from exc
     await _maybe_send_warning(
         runtime,
         chat_id=chat_id,

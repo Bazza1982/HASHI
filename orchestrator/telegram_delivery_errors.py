@@ -79,6 +79,24 @@ class TelegramDeliveryError(RuntimeError):
         )
 
 
+class TelegramRateLimitRecoveryError(TelegramDeliveryError):
+    """Telegram rejected a send; its recovery state could not be published.
+
+    This is not a provider failure or permission to replay the business Run.
+    The original RetryAfter remains in the exception chain and safe wait field.
+    """
+
+    def __init__(self, *, retry_after_s: int) -> None:
+        super().__init__(
+            "TELEGRAM_RATE_LIMIT_RECOVERY_FAILED",
+            retryable=False,
+            permanent=False,
+            retry_after_s=retry_after_s,
+            error_type="RetryAfter",
+            reason="telegram_rate_limit_recovery_unavailable",
+        )
+
+
 def classify_telegram_delivery_error(exc: BaseException) -> TelegramDeliveryError:
     """Classify by exception type first; text only refines ``BadRequest``."""
 
