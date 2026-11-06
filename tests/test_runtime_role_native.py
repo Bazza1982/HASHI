@@ -403,6 +403,75 @@ def test_management_launcher_uses_only_the_qualified_core(native_roles, monkeypa
         hashi_instance_cli._select_core_runtime(code_root)
 
 
+@pytest.fixture(scope="module")
+def independent_management_functions(native_roles, tmp_path_factory):
+    original = json.loads(Path(native_roles["selection"]).read_bytes())
+    result = build_reference_functions(
+        Path(native_roles["code_root"]), native_roles["reference_path"],
+        expected_digest=native_roles["reference_digest"],
+        destination=tmp_path_factory.mktemp("independent-management-fr") / "release",
+        core_reference=original["core"],
+    )
+    assert result["core"] == original["core"]
+    assert result["core_runtime_id"] == native_roles["CR_ID"]
+    return result["functions"]
+
+
+@pytest.mark.parametrize("independent", [False, True])
+def test_core_management_checks_pair_after_independent_fr_replacement(
+    native_roles, independent_management_functions, independent, tmp_path,
+):
+    from orchestrator.config_json import read_config_json, write_config_json
+
+    selector = Path(native_roles["selection"])
+    before = read_config_json(selector)
+    replacement = dict(before)
+    if independent:
+        replacement["functions"] = independent_management_functions
+    command = [
+        native_roles["core"]["executable"], "-I", "-B",
+        str(ROOT / "scripts/check_runtime_selection.py"),
+        "--code-root", str(ROOT), "--core-command",
+    ]
+    if independent:
+        command.append("--import-functions")
+    unrelated = tmp_path / "unrelated-cwd"
+    unrelated.mkdir()
+    (unrelated / "orchestrator.py").write_text("raise RuntimeError('ambient import')\n")
+    try:
+        write_config_json(selector, replacement, expected_revision=before.revision)
+        result = subprocess.run(
+            command, cwd=unrelated, env=_entry_environment(command[0]),
+            capture_output=True, text=True, encoding="utf-8", timeout=240,
+        )
+        (tmp_path / "core-management-entry.json").write_text(json.dumps({
+            "argv": command, "code": result.returncode, "stdout": result.stdout,
+            "stderr": result.stderr, "independent": independent,
+            "source_head": native_roles["source_head"],
+            "core_dependency_digest": native_roles["core"]["dependency_digest"], "selector": replacement,
+        }), encoding="utf-8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(result.stdout) == [native_roles["core"]["executable"], "-I", "-B"]
+        assert not (unrelated / "__pycache__").exists()
+        # A missing selector in the standalone FR stays a rejection; it
+        # cannot choose a different Core from environment or command input.
+        if independent:
+            reference = json.loads(Path(independent_management_functions["path"]).read_bytes())
+            executable = reference["runtime"]["executable"]
+            rejected = subprocess.run(
+                [executable, "-I", "-B", str(ROOT / "scripts/check_runtime_selection.py"),
+                 "--code-root", str(ROOT), "--core-command"],
+                cwd=unrelated, env=_entry_environment(executable),
+                capture_output=True, text=True, encoding="utf-8", timeout=90,
+            )
+            assert rejected.returncode != 0
+            assert "Missing trusted Core/Functions runtime release selector" in rejected.stderr
+    finally:
+        current = read_config_json(selector)
+        write_config_json(selector, dict(before), expected_revision=current.revision)
+    assert dict(read_config_json(selector)) == dict(before)
+
+
 def _entry_environment(python):
     allowed = {
         "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",

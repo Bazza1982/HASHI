@@ -58,6 +58,13 @@ alongside the existing product/source/FG facts. Missing Core receipts remain
 unknown. Public version facts omit interpreter and installation paths. Source,
 prepared candidate, active route and live acceptance remain separate states.
 
+After an independent FR replacement, pair qualification runs from the fixed
+qualified Core interpreter. The management checker validates that caller against
+the Core-anchored selector and probes Functions through the existing qualified
+private child channel. It retains the original co-located FR caller when that
+installation is still selected. A standalone FR cannot invent a Core selector;
+no environment or executable override is added.
+
 Shared Functions candidates leave Remote untouched while preparing. After
 the prior owner retires, commit restores the configured Remote through its
 existing lifecycle owner inside the pending connector boundary. A healthy OS

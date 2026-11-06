@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the installer-owned CR/FR pair anchored to this management FR."""
+"""Validate the installer-owned CR/FR pair from its qualified Core anchor."""
 from __future__ import annotations
 
 import argparse
@@ -18,14 +18,19 @@ from orchestrator.runtime_contract import (  # noqa: E402
 def checked_selection(code_root):
     code_root = Path(code_root).resolve()
     selected = load_core_runtime_selection(code_root)
-    # A bootstrap/system/Agent-supplied Python cannot impersonate the selected FR.
-    bind_process_runtime(selected.functions, code_root=code_root)
+    # Independent FR replacements do not acquire a second Core selector.
+    # The fixed qualified Core can manage its pair; the original co-located
+    # FR remains supported only while it is the exact selected installation.
+    own = (selected.core
+           if Path(sys.prefix).resolve() == Path(selected.core.fingerprint.environment_prefix).resolve()
+           else selected.functions)
+    bind_process_runtime(own, code_root=code_root)
     compare_runtime_fingerprints(
-        selected.functions.fingerprint, enforce_runtime_contract(code_root))
+        own.fingerprint, enforce_runtime_contract(code_root, role=own.fingerprint.role))
     return selected
 
 
-def check_function_imports(code_root, expected):
+def check_function_imports(code_root, expected, *, selection=None):
     from orchestrator.function_generation import (
         FUNCTION_GENERATION_ENTRYPOINTS, build_source_manifest,
         probe_candidate_payload, verify_manifest_source_commit,
@@ -36,10 +41,25 @@ def check_function_imports(code_root, expected):
         [*FUNCTION_GENERATION_ENTRYPOINTS, *(spec.module for spec in FUNCTION_MANAGER_SPECS)],
         code_root=code_root)
     verify_manifest_source_commit(manifest, code_root=code_root)
-    result = probe_candidate_payload({
+    payload = {
         "code_root": str(code_root), "module_names": list(manifest.module_names),
         "expected_runtime": expected.to_dict(),
-    })
+    }
+    if selection is None:
+        result = probe_candidate_payload(payload)
+    else:
+        # Keep Functions imports out of the dependency-free Core. Reuse the
+        # existing qualified child, private channel and PID/nonce admission.
+        from orchestrator.runtime_process import run_protected_call
+        payload.update(
+            runtime=selection.functions.fingerprint.to_dict(),
+            core_runtime=selection.core.fingerprint.to_dict(),
+            probe_entrypoint=json.loads(
+                (code_root / "runtime-entry.json").read_text(encoding="utf-8"))["candidate_probe"],
+        )
+        result = run_protected_call(
+            payload, purpose="candidate-probe", runtime=selection.functions)
+
     if not result.get("ok"):
         from orchestrator.runtime_contract import RuntimeContractError
         raise RuntimeContractError(
@@ -55,7 +75,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     selected = checked_selection(args.code_root)
     if args.import_functions:
-        check_function_imports(args.code_root.resolve(), selected.functions.fingerprint)
+        check_function_imports(args.code_root.resolve(), selected.functions.fingerprint,
+                               selection=selected)
     result = ([selected.core.fingerprint.executable, "-I", "-B"]
               if args.core_command else {
                   "core": selected.core.fingerprint.to_dict(),
