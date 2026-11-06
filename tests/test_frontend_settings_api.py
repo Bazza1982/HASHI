@@ -13,11 +13,17 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 class Request:
     def __init__(self, *, operation=None, payload=None, target_instance="HASHI3",
-                 target_agent="momo", query=None, job_id=None):
+                 target_agent="momo", query=None, job_id=None, headers=None):
         self.match_info = {"name": "momo", "agent_id": "momo"}
         if job_id is not None:
             self.match_info["job_id"] = job_id
         self.query = query or {"instance_id": target_instance}
+        self.headers = (
+            {"X-Workbench-Token": "test-admin"}
+            if headers is None else dict(headers)
+        )
+        self.scheme = "http"
+        self.host = "127.0.0.1"
         self._body = {
             "type": "hashi.frontend-settings-operation",
             "version": 1,
@@ -68,8 +74,8 @@ def make_server(tmp_path: Path):
         config_path=config_path,
         global_config=global_config,
         orchestrator=orchestrator,
+        secrets={"workbench_admin_token": "test-admin"},
     )
-    server._strict_authenticated_owner = lambda _request: "owner"
     return server, runtime
 
 

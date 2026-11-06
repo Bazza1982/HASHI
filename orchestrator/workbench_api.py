@@ -386,10 +386,25 @@ def _saml_assertion_xml_from_payload(payload: dict) -> str:
 class _FrontendSettingsRequest:
     """Narrow adapter for reusing HASHI's existing scheduler owner handlers."""
 
-    def __init__(self, *, name: str, payload: dict | None = None, job_id: str = ""):
+    def __init__(
+        self,
+        *,
+        name: str,
+        payload: dict | None = None,
+        job_id: str = "",
+        source_request=None,
+    ):
         self.match_info = {"name": name, "job_id": job_id}
         self.query = {}
         self._payload = dict(payload or {})
+        source_headers = getattr(source_request, "headers", {})
+        self.headers = (
+            source_headers.copy()
+            if hasattr(source_headers, "copy")
+            else dict(source_headers or {})
+        )
+        self.scheme = str(getattr(source_request, "scheme", "http") or "http")
+        self.host = str(getattr(source_request, "host", "localhost") or "localhost")
 
     async def json(self):
         return dict(self._payload)
@@ -7669,7 +7684,7 @@ class WorkbenchApiServer:
             return error
         request_id = f"read-{uuid4().hex}"
         response = await self.handle_agent_scheduler_jobs(
-            _FrontendSettingsRequest(name=runtime.name)
+            _FrontendSettingsRequest(name=runtime.name, source_request=request)
         )
         return self._frontend_settings_scheduler_response(
             response, target=target, request_id=request_id
@@ -7683,7 +7698,11 @@ class WorkbenchApiServer:
             return error
         payload = dict(envelope["payload"])
         response = await self.handle_agent_scheduler_create(
-            _FrontendSettingsRequest(name=runtime.name, payload=payload)
+            _FrontendSettingsRequest(
+                name=runtime.name,
+                payload=payload,
+                source_request=request,
+            )
         )
         return self._frontend_settings_scheduler_response(
             response, target=target, request_id=envelope["request_id"]
@@ -7706,6 +7725,7 @@ class WorkbenchApiServer:
                 name=runtime.name,
                 job_id=job_id,
                 payload=dict(envelope["payload"]),
+                source_request=request,
             )
         )
         return self._frontend_settings_scheduler_response(
@@ -7736,6 +7756,7 @@ class WorkbenchApiServer:
                 name=runtime.name,
                 job_id=job_id,
                 payload=payload,
+                source_request=request,
             )
         )
         return self._frontend_settings_scheduler_response(
