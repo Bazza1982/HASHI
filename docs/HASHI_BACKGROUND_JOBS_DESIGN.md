@@ -91,7 +91,10 @@ POST /api/background-jobs/{job_id}/cancel
   cancellation, and listing remain available for managing existing jobs; the
   explicit Backend API remains an operator surface.
 - A command-derived background Run retains its registered frontend connector,
-  Session, owner, generation and channel through `command_request_context`.
+  owner and channel through `command_request_context`. Its originating
+  Conversation and generation are frozen in `agent_activity_context`; PAO
+  chooses the distinct activity Session and that Session's current generation.
+  Origin identifiers must not be supplied as the activity's admission target.
   `/bg` cannot invent a connector or route a Workbench Run into Telegram;
   its derived idempotency key prevents duplicate admission.
 - Terminal success/failure notifications can be delivered back to the user.

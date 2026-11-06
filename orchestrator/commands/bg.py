@@ -172,7 +172,10 @@ async def _run_task(runtime: Any, update: Any, context: Any, task_text: str) -> 
         USER_BACKGROUND_JOB_REQUEST_SOURCE,
         f"Background task: {_short(task_text)}",
         request_metadata={
-            **binding.metadata,
+            # Background work has its own PAO activity Session. The initiating
+            # Conversation remains a frozen origin reference, not its target.
+            **{key: value for key, value in binding.metadata.items()
+               if key not in {"session_id", "session_context_generation"}},
             "agent_activity_context": activity_context,
         },
         idempotency_key=binding.idempotency_key,
