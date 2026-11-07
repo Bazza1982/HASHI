@@ -262,7 +262,8 @@ def test_bridge_controller_does_not_swallow_process_termination_errors():
     assert "Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue" not in stop_block
 
 
-def test_bridge_controller_launches_qualified_core_with_gateway_and_scoped_logs(tmp_path):
+@pytest.mark.parametrize("explicit_gateway,old_gateway", [(False, False), (True, False), (False, True)])
+def test_bridge_controller_launches_qualified_core_with_gateway_and_scoped_logs(tmp_path, explicit_gateway, old_gateway):
     root = tmp_path / "hashi start with spaces"
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
@@ -287,10 +288,15 @@ $BridgeHome = $ProjectDir
 $MainScript = Join-Path $ProjectDir 'main.py'
 $PythonExe = {_ps_string(sys.executable)}
 $global:Launched = $false
+$global:Stopped = $false
 function Get-BridgeProcesses {{
-    if ($global:Launched) {{ @{{123=@{{Name='python.exe'}}}} }} else {{ @{{}} }}
+    if ($global:Launched) {{ @{{123=@{{Name='python.exe'}}}} }}
+    elseif (-not $global:Stopped -and [bool]::Parse('{old_gateway}')) {{
+        @{{122=@{{Cmd='python main.py --api-gateway'}}}}
+    }} else {{ @{{}} }}
 }}
 function Test-LockFileHeld {{ $false }}
+function Stop-BridgeProcesses {{ $global:Stopped = $true; $true }}
 function Remove-StaleFiles {{ }}
 function Get-ResumeAgentNames {{ @('alpha', 'beta space') }}
 function Start-Sleep {{ }}
@@ -303,7 +309,14 @@ function Start-Process {{
     $global:Launched = $true
     [pscustomobject]@{{HasExited=$false}}
 }}
-if (-not (Start-Bridge -ResumeMode -ApiGateway)) {{ exit 9 }}
+# Exercise the real restart dispatch with no old Core command-line evidence.
+$Action = 'restart'
+$Resume = $true
+$Force = $false
+$ApiGateway = [bool]::Parse('{explicit_gateway}')
+$Dispatch = $Ast.EndBlock.Statements |
+    Where-Object {{ $_ -is [System.Management.Automation.Language.SwitchStatementAst] }}
+& ([scriptblock]::Create($Dispatch.Extent.Text))
 """)
     assert result.returncode == 0, result.stderr
     launch = json.loads(captured.read_text(encoding="utf-8-sig"))
@@ -324,8 +337,8 @@ if (-not (Start-Bridge -ResumeMode -ApiGateway)) {{ exit 9 }}
         ctypes.windll.kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
     assert arguments == [
         "-I", "-B", str(root / "main.py"), "--bridge-home", str(root),
-        "--agents", "alpha", "beta space", "--api-gateway",
-    ]
+        "--agents", "alpha", "beta space",
+    ] + (["--api-gateway"] if explicit_gateway or old_gateway else [])
     assert Path(launch["Stdout"]).parent == root / "logs"
     assert Path(launch["Stderr"]).parent == root / "logs"
     assert launch["Stdout"] != launch["Stderr"]
@@ -815,3 +828,31 @@ function Invoke-RestMethod {{
     assert "RemoteHealthMode" in result.stdout
     assert "ready_empty" in result.stdout
 # HASHI-Fingerprint: hfp_fe0457bf7c984c12b12d7aa97547a06a
+
+def test_same_privilege_restart_fallback_forwards_gateway_policy(tmp_path):
+    root = tmp_path / "hashi manual fallback"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "RESTART-EXACT"}}), encoding="utf-8"
+    )
+    shutil.copyfile(ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py")
+    captured = tmp_path / "fallback.json"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $null }}
+function powershell.exe {{
+    param([switch]$NoProfile, [switch]$NonInteractive, $ExecutionPolicy,
+          $File, $Action, [switch]$Resume, [switch]$ApiGateway)
+    @{{File=$File; Action=$Action; Resume=[bool]$Resume; ApiGateway=[bool]$ApiGateway}} |
+        ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(captured)}
+    $global:LASTEXITCODE = 0
+}}
+& {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} trigger -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+    assert result.returncode == 0, result.stderr
+    received = json.loads(captured.read_text(encoding="utf-8-sig"))
+    assert Path(received["File"]) == ROOT / "bin/bridge_ctl.ps1"
+    assert received["Action"] == "restart"
+    assert received["Resume"] is True
+    assert received["ApiGateway"] is True

@@ -89,10 +89,16 @@ run that instance's Remote inside WSL.
   checker. The destination contract is stored in the durable receipt **before**
   launching a stop/start action. Failed qualification leaves the live instance
   running; no fallback to the coupled legacy virtual environment is allowed.
-- Terminal verification compares health against that qualified destination,
-  retaining the old runtime in `status_before`. This permits an approved cold
-  Core adoption without accepting an arbitrary Core digest change. Legacy
-  programs without an independent-Core policy retain the previous contract.
+- Terminal verification compares every frozen runtime field, including
+  `dependency_digest`, against that qualified destination B. The old runtime A
+  remains in `status_before`: A→B is valid adoption, while an unexpected B→C
+  fails verification even when only Functions dependencies differ or disappear.
+  `runtime_version_changed` compares against A; `runtime_version_verified`
+  compares against B. Legacy programs retain their pre-restart baseline contract.
+- Both Windows Remote recovery fallbacks explicitly request `-ApiGateway`,
+  preserving the required Gateway even without an old Core or command-line
+  metadata. Ordinary manual `bridge_ctl.ps1 restart` still preserves detected
+  Gateway use and does not enable it unless requested or previously observed.
 - Windows's separate runtime task starts the qualified Core with API Gateway.
   Its readiness check requires the exact instance and accepts local services
   ready with zero failed Agents when an optional connector is degraded. Remote

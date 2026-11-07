@@ -214,7 +214,8 @@ switch ($Action) {
                 -ExecutionPolicy Bypass `
                 -File $RuntimeController `
                 -Action restart `
-                -Resume
+                -Resume `
+                -ApiGateway
             exit $LASTEXITCODE
         }
         if (-not (Test-FixedRestartTask -Task $Task)) {

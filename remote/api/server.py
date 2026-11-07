@@ -1664,23 +1664,20 @@ def _status_kernel_pid(status: dict[str, Any]) -> int | None:
 
 
 def _restart_runtime_contract_mismatches(
-    expected: dict[str, Any], actual: dict[str, Any]
+    expected: dict[str, Any], actual: dict[str, Any], *, qualified_target: bool = False
 ) -> list[str]:
-    """Compare the stable Core contract while allowing cold adoption changes.
+    """Match a qualified destination exactly; retain legacy baseline tolerance.
 
-    A cold restart may intentionally adopt the approved dependency lock and a
-    newly qualified Function generation. The restarted Core has already
-    enforced its dependency contract before publishing health, so the complete
-    installed-set digest is diagnostic rather than an equality gate here.
+    A qualified target is the admitted destination B, not the old runtime A.
+    Its dependency digest must match too. Only a legacy pre-restart baseline
+    may tolerate a dependency change during cold adoption.
     """
-
-    if not expected:
-        return []
+    fields = _RUNTIME_VERSION_FIELDS if qualified_target else _RESTART_STABLE_RUNTIME_FIELDS
     return [
         field
-        for field in _RESTART_STABLE_RUNTIME_FIELDS
-        if expected.get(field) not in (None, "")
-        and actual.get(field) != expected.get(field)
+        for field in fields
+        if (qualified_target or expected.get(field) not in (None, ""))
+        and (expected.get(field) in (None, "") or actual.get(field) != expected.get(field))
     ]
 
 
@@ -1707,6 +1704,7 @@ def _restart_evidence(
     expected_runtime: dict[str, Any],
     expected_generation: str,
     previous_runtime: dict[str, Any] | None = None,
+    qualified_target: bool = False,
 ) -> dict[str, Any]:
     health = status.get("workbench_health") or {}
     new_pid = _status_kernel_pid(status)
@@ -1716,7 +1714,7 @@ def _restart_evidence(
     generation_id = _function_generation_id(status)
     backend_health_ok, backend_health_state = _restart_backend_health(status)
     runtime_contract_mismatches = _restart_runtime_contract_mismatches(
-        expected_runtime, runtime_version
+        expected_runtime, runtime_version, qualified_target=qualified_target
     )
     issues = (
         list(
@@ -1898,6 +1896,7 @@ def _hashi_restart_command() -> list[str]:
                 "-Action",
                 "restart",
                 "-Resume",
+                "-ApiGateway",
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
@@ -4565,6 +4564,7 @@ def create_app(
             expected_runtime=record["expected"]["runtime_version"] or {},
             expected_generation=record["expected"]["generation_id"] or "",
             previous_runtime=_runtime_version(before),
+            qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
         )
         while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
@@ -4576,6 +4576,7 @@ def create_app(
                 expected_runtime=record["expected"]["runtime_version"] or {},
                 expected_generation=record["expected"]["generation_id"] or "",
                 previous_runtime=_runtime_version(before),
+                qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
             )
         completed = _restart_evidence_complete(evidence)
         record.update(

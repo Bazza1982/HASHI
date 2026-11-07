@@ -572,7 +572,7 @@ switch ($Action) {
     "restart" {
         Write-Log "=== Restarting bridge-u-f ==="
         $RestartProcesses = Get-BridgeProcesses
-        $RestartApiGateway = Test-ApiGatewayWasEnabled -Processes $RestartProcesses
+        $RestartApiGateway = $ApiGateway -or (Test-ApiGatewayWasEnabled -Processes $RestartProcesses)
         $stopOk = Stop-BridgeProcesses -ForceImmediate:$Force
         if ($stopOk) {
             Remove-StaleFiles
