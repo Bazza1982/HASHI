@@ -422,7 +422,14 @@ function Start-Bridge {
     # Clean up any stale files
     Remove-StaleFiles
     
+    $RoleResolver = Join-Path $ProjectDir "scripts\resolve_launch_runtime.py"
+    $CorePythonExe = (& $PythonExe -B $RoleResolver --code-root $ProjectDir --field core-executable)
+    if ($LASTEXITCODE -ne 0 -or -not $CorePythonExe) {
+        throw "Runtime setup is incomplete; install the verified release before starting."
+    }
+    $CorePythonExe = ([string]$CorePythonExe).Trim()
     $LaunchArguments = @(
+        "-I", "-B",
         $MainScript,
         "--bridge-home", $BridgeHome
     )
@@ -454,7 +461,7 @@ function Start-Bridge {
         $env:PYTHONPATH = $ProjectDir
         $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
         $Launcher = Start-Process `
-            -FilePath $PythonExe `
+            -FilePath $CorePythonExe `
             -ArgumentList $ArgumentString `
             -WorkingDirectory $ProjectDir `
             -WindowStyle Hidden `

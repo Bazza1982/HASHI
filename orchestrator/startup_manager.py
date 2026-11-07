@@ -251,8 +251,9 @@ class StartupManager:
 
     async def _ensure_remote_lifecycle(self, global_config=None) -> None:
         if getattr(self.kernel, "_shared_replacement_candidate", False):
-            # Remote is an independent process; a hot shared handoff never
-            # installs, probes, starts, or restarts its lifecycle.
+            # An uncommitted candidate cannot touch the old owner's Remote.
+            # RuntimeAppHost.commit restores configured Remote only after
+            # retirement, inside the pending connector/readiness boundary.
             return
         if global_config is None:
             global_config = getattr(self.kernel, "global_cfg", None) or getattr(
@@ -1006,3 +1007,4 @@ class StartupManager:
             audit_root=instance_path if instance_path != "-" else None,
             styled=self._startup_animation_completed,
         )
+# HASHI-Fingerprint: hfp_3037e7b957c542ea92f68347974560c7

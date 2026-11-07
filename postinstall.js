@@ -12,8 +12,11 @@ const { preparedTTSPython, ttsLockDigest } = require('./tts-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
-const LOCK = path.join(HASHI_ROOT, 'constraints', 'standard-py312.lock');
+const LOCK = path.join(HASHI_ROOT, 'constraints', 'functions-py312.hashes.lock');
 const RUNTIME_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_contract.py');
+const BOOTSTRAP_PREPARE = path.join(HASHI_ROOT, 'scripts', 'prepare_runtime_bootstrap.py');
+const ROLE_PREPARE = path.join(HASHI_ROOT, 'scripts', 'prepare_runtime_roles.py');
+const ROLE_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_selection.py');
 const PRIVACY_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_privacy_runtime.py');
 const TRANSCRIPTION_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_transcription_runtime.py');
 const TTS_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_tts_runtime.py');
@@ -49,13 +52,20 @@ function sameEnvironmentCommand(command) {
 }
 
 function checkRuntime(candidate, full) {
-  const args = [...candidate.prefix, RUNTIME_CHECK, '--code-root', HASHI_ROOT];
+  const args = [...candidate.prefix, '-B', RUNTIME_CHECK, '--code-root', HASHI_ROOT];
   if (!full) args.push('--runtime-only');
   const result = spawnSync(candidate.command, args, {
     stdio: 'ignore',
     windowsHide: true,
     timeout: 60_000,
   });
+  return result.status === 0;
+}
+
+function checkRolePair(candidate) {
+  const result = spawnSync(candidate.command,
+    [...candidate.prefix, '-B', ROLE_CHECK, '--code-root', HASHI_ROOT, '--import-functions'],
+    { stdio: 'ignore', windowsHide: true, timeout: 180_000 });
   return result.status === 0;
 }
 
@@ -272,47 +282,62 @@ function main() {
   }
   const versionRoot = path.join(selectedDataRoot, 'runtimes', PACKAGE.version);
   const pointer = path.join(versionRoot, 'active.json');
-  try {
-    const active = JSON.parse(fs.readFileSync(pointer, 'utf8'));
-    const activePython = preparedRuntimeCandidate(versionRoot, active);
-    if (activePython) {
-      const candidate = { command: activePython, prefix: [] };
-      if (checkRuntime(candidate, true)) {
-        process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
-        tryPreparePrivacy(base, versionRoot);
-        const mediaStatus = prepareMedia(base, versionRoot);
-        process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
-        return mediaStatus;
-      }
-    }
-  } catch (_) {
-    // Build a new versioned runtime; a failed previous build is never adopted.
-  }
-
   fs.mkdirSync(versionRoot, { recursive: true });
-  const buildRoot = path.join(versionRoot, `build-${Date.now()}-${crypto.randomUUID()}`);
-  const venv = spawnSync(
-    base.command,
-    [...base.prefix, '-m', 'venv', buildRoot],
-    { stdio: 'inherit', windowsHide: true, timeout: 180_000 },
-  );
-  if (venv.status !== 0) {
+  const buildRoot = path.join(versionRoot, 'build-' + Date.now() + '-' + crypto.randomUUID());
+  const prepared = spawnSync(base.command, [
+    ...base.prefix, '-B', BOOTSTRAP_PREPARE, '--output', buildRoot,
+  ], { stdio: 'inherit', windowsHide: true, timeout: 300_000 });
+  const seedPython = preparedPython(path.join(buildRoot, 'bootstrap'));
+  if (prepared.status !== 0 || !fs.existsSync(seedPython)) {
     safeRemoveBuild(versionRoot, buildRoot);
-    incomplete('Could not create the user-scoped Python virtual environment.');
+    incomplete('Could not prepare an independent build interpreter.');
     return 1;
   }
-  const python = preparedPython(buildRoot);
-  const install = spawnSync(
-    python,
-    ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '-r', LOCK],
-    { stdio: 'inherit', windowsHide: true, timeout: 900_000 },
-  );
+  const isolatedBase = { command: seedPython, prefix: [] };
+  let activePython = '';
+  try {
+    activePython = preparedRuntimeCandidate(versionRoot, JSON.parse(fs.readFileSync(pointer, 'utf8')));
+  } catch (_) { /* A missing/invalid previous selection is never adopted. */ }
+  if (activePython) {
+    const candidate = { command: activePython, prefix: [] };
+    if (checkRuntime(candidate, true) && checkRolePair(candidate)) {
+      tryPreparePrivacy(isolatedBase, versionRoot);
+      const mediaStatus = prepareMedia(isolatedBase, versionRoot);
+      // Sidecar venvs keep the independent copied base; only this build tool retires.
+      fs.rmSync(path.join(buildRoot, 'bootstrap'), { recursive: true, force: true });
+      process.stdout.write('HASHI isolated roles are ready. No instance data was changed.\n');
+      return mediaStatus;
+    }
+  }
+  const functionsSite = path.join(buildRoot, 'functions-site');
+  const releaseRoot = path.join(buildRoot, 'release');
+  const install = spawnSync(seedPython, [
+    '-B', '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
+    '--only-binary=:all:', '--require-hashes', '--target', functionsSite, '-r', LOCK,
+  ], { stdio: 'inherit', windowsHide: true, timeout: 900_000 });
+  if (install.status !== 0) {
+    safeRemoveBuild(versionRoot, buildRoot);
+    incomplete('The hashed Functions dependencies could not be installed.');
+    return 1;
+  }
+  // Provision helpers from an independent base before sealing CR/FR copies.
+  // No ensurepip child can create stdlib caches in a running interpreter.
+  tryPreparePrivacy(isolatedBase, versionRoot);
+  const mediaStatus = prepareMedia(isolatedBase, versionRoot);
+  const build = spawnSync(seedPython, [
+    '-B', ROLE_PREPARE, '--functions-site', functionsSite, '--output', releaseRoot,
+    '--reference', path.join(buildRoot, 'reference.json'),
+  ], { stdio: 'inherit', windowsHide: true, timeout: 900_000 });
+  const python = preparedPython(path.join(releaseRoot, 'runtimes', 'functions'));
   const candidate = { command: python, prefix: [] };
-  if (install.status !== 0 || !checkRuntime(candidate, true)) {
-    safeRemoveBuild(versionRoot, buildRoot);
-    incomplete('The locked HASHI dependency generation could not be installed or verified.');
+  if (build.status !== 0 || !checkRuntime(candidate, true) || !checkRolePair(candidate)) {
+    // Helpers may already reference sidecar-base; preserve their complete base.
+    fs.rmSync(path.join(buildRoot, 'bootstrap'), { recursive: true, force: true });
+    incomplete('The independent Core and Functions roles could not be qualified.');
     return 1;
   }
+  fs.rmSync(path.join(buildRoot, 'bootstrap'), { recursive: true, force: true });
+  fs.rmSync(functionsSite, { recursive: true, force: true });
   atomicJson(pointer, {
     schema_version: 1,
     program_version: PACKAGE.version,
@@ -320,14 +345,13 @@ function main() {
     prepared_at: new Date().toISOString(),
   });
   process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
-  tryPreparePrivacy(base, versionRoot);
-  const mediaStatus = prepareMedia(base, versionRoot);
   process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
   return mediaStatus;
 }
 
 module.exports = {
   main,
+  checkRolePair,
   prepareTranscription,
   prepareTTS,
   prepareMedia,

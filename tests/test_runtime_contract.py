@@ -263,15 +263,20 @@ def test_standard_lock_covers_every_standard_requirement_and_launch_path():
     }
 
     assert required_names <= locked_names
-    for relative in (
-        "bin/bridge-u.sh",
-        "bin/bridge-u.bat",
-        "Dockerfile.enterprise",
-        "mac/prepare_usb.sh",
-        "postinstall.js",
-    ):
+    routes = {
+        "bin/bridge-u.sh": "resolve_launch_runtime.py",
+        "bin/bridge-u.bat": "resolve_launch_runtime.py",
+        "Dockerfile.enterprise": "compile_enterprise_functions.py",
+        "mac/prepare_usb.sh": "standard-py312.lock",
+        "postinstall.js": "functions-py312.hashes.lock",
+    }
+    for relative, authority in routes.items():
         content = (ROOT / relative).read_text(encoding="utf-8")
-        assert "standard-py312.lock" in content
+        assert authority in content
+    compiler = (ROOT / "scripts/compile_enterprise_functions.py").read_text(encoding="utf-8")
+    assert "standard-py312.lock" in compiler
+    resolver = (ROOT / "scripts/resolve_launch_runtime.py").read_text(encoding="utf-8")
+    assert "_select_core_runtime" in resolver
 
 
 def test_windows_timezone_database_is_declared_and_hash_locked():
@@ -309,6 +314,12 @@ def test_all_first_party_launchers_run_the_runtime_contract_checker():
         content = (ROOT / relative).read_text(encoding="utf-8")
         if relative == "onboard-cli.js":
             assert "require('./cli')" in content
+            continue
+        if relative in {"bin/bridge-u.sh", "bin/bridge-u.bat"}:
+            assert "resolve_launch_runtime.py" in content
+            assert "--field core-executable" in content
+            assert "--field functions-executable" in content
+            assert "pip install" not in content
             continue
         assert "check_runtime_contract.py" in content
 
@@ -379,27 +390,31 @@ def test_ci_runtime_matrix_uses_only_the_canonical_minor():
         assert set(declared) <= {policy.python_text}, path.name
 
 
-def test_main_enforces_core_runtime_before_other_project_imports():
-    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
-    guard_index = next(
-        index
-        for index, node in enumerate(tree.body)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Name)
-            and child.func.id == "enforce_runtime_contract"
-            for child in ast.walk(node)
-        )
-    )
-    first_function_import = next(
-        index
-        for index, node in enumerate(tree.body)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "orchestrator.instance_lock"
-    )
+def test_main_rejects_an_invalid_core_before_instance_or_function_side_effects(
+    tmp_path, monkeypatch, capsys
+):
+    import importlib.util
 
-    assert guard_index < first_function_import
+    spec = importlib.util.spec_from_file_location("isolated_main_entry", ROOT / "main.py")
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+
+    def reject_core(code_root, *, role):
+        assert code_root == ROOT
+        assert role == "core-host"
+        raise RuntimeContractError("intentional invalid Core runtime")
+
+    def unexpected_side_effect(*args, **kwargs):
+        pytest.fail("unqualified Core reached instance or Functions setup")
+
+    monkeypatch.setattr(entry, "enforce_runtime_contract", reject_core)
+    for name in ("load_core_runtime_selection", "canonical_instance_home",
+                 "instance_runtime_dir", "InstanceLock", "KernelRuntime", "write_record"):
+        monkeypatch.setattr(entry, name, unexpected_side_effect)
+    home = tmp_path / "must-not-be-created"
+    assert entry.main(["--bridge-home", str(home), "--replace-functions"]) == 78
+    assert not home.exists()
+    assert "intentional invalid Core runtime" in capsys.readouterr().err
 
 
 def test_core_has_no_static_binding_to_replaceable_function_modules():
@@ -486,3 +501,20 @@ def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():
                     violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
 
     assert violations == []
+# HASHI-Fingerprint: hfp_33bec0c8ea5b44bab7df74cb62059871
+
+
+def test_fingerprint_keeps_logical_interpreter_entry_not_resolved_base(tmp_path, monkeypatch):
+    alias = tmp_path / "venv" / "bin" / "python"
+    alias.parent.mkdir(parents=True)
+    base = tmp_path / "base-python"
+    base.write_bytes(b"not executed")
+    try:
+        alias.symlink_to(base)
+    except OSError:
+        pytest.skip("Creating symlinks requires a native platform privilege")
+    monkeypatch.setattr(sys, "executable", str(alias))
+    fingerprint = current_runtime_fingerprint(load_runtime_policy(ROOT), code_root=ROOT)
+    assert fingerprint.executable == str(alias.absolute())
+    assert Path(fingerprint.executable).resolve() == base
+    assert fingerprint.executable != str(base)

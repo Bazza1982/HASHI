@@ -18,7 +18,7 @@ from tests.test_permission_pao_fence import setup_run
 
 
 @pytest.fixture
-def control(tmp_path):
+def control(tmp_path, permission_clock):
     store, session, accepted, fence, context = setup_run(tmp_path)
     identity = IdentityService.from_path(tmp_path / "identity.sqlite")
     identity.create_organization(org_id="org", name="Test")
@@ -31,7 +31,8 @@ def control(tmp_path):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     authority = PermissionAuthority(tmp_path / "permissions.sqlite",
-                                    verifier=SignedReceiptVerifier({"approval": public}))
+                                    verifier=SignedReceiptVerifier({"approval": public}),
+                                    clock=lambda: permission_clock, monotonic=lambda: 0.0)
     authority.open_task(context)
     authority.register_runtime_context(context, run_guard=PaoRunFence(
         store, context=context, request_id=accepted.request_id,
@@ -57,12 +58,13 @@ def submit(control, command, *, invocation="invocation", token=None, subject=Non
     )
 
 
-def test_exact_partial_approval_and_retry_do_not_expand_or_duplicate(control):
+def test_exact_partial_approval_and_retry_do_not_expand_or_duplicate(control, permission_clock):
     _, _, authority, context, scope, request, _, _, _, _ = control
     command = f"approve {request.request_id} once --revision 1 --for 2m --actions read"
     started = authority.observed_time()
     outcome = submit(control, command)
     assert outcome.lease.lifetime == "once" and outcome.lease.scopes[0].actions == ("read",)
+    assert outcome.lease.expires_at == permission_clock + 120
     assert started + 120 <= outcome.lease.expires_at <= authority.observed_time() + 120
     read = replace(scope, actions=("read",))
     assert authority.evaluate(context, [read], operation_id="op")

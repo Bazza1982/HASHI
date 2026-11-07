@@ -15,6 +15,7 @@ from orchestrator.build_provenance import (
     inspect_source_checkout,
     product_version,
 )
+from orchestrator.runtime_contract import RuntimeContractError, RuntimeFingerprint
 from remote.runtime_identity import pid_is_alive, read_runtime_claim
 
 
@@ -143,10 +144,33 @@ def _fingerprint_mapping(value: Any) -> dict[str, Any]:
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         try:
-            return _mapping(to_dict())
+            result = _mapping(to_dict())
+            runtime_id = getattr(value, "runtime_id", None)
+            if runtime_id:
+                result["runtime_id"] = runtime_id
         except Exception:
             return {}
-    return _mapping(value)
+    else:
+        result = _mapping(value)
+    if result and not result.get("runtime_id"):
+        try:
+            result["runtime_id"] = RuntimeFingerprint.from_mapping(result).runtime_id
+        except RuntimeContractError:
+            pass  # Legacy partial display metadata is not a qualified role receipt.
+    return result
+
+
+def _runtime_role_fact(value: Any, *, role: str, pid: Any) -> dict[str, Any] | None:
+    fingerprint = _fingerprint_mapping(value)
+    if fingerprint.get("role") != role or not fingerprint.get("runtime_id"):
+        return None
+    # Public version data omits executable, prefix and installation-record paths.
+    fields = ("role", "runtime_id", "python", "platform_abi", "core_source_digest",
+              "dependency_digest", "runtime_policy_digest", "installation_digest")
+    return {
+        "pid": int(pid or 0) or None,
+        **{name: fingerprint.get(name) for name in fields},
+    }
 
 
 def _worker_row(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -446,6 +470,18 @@ def collect_version_payload(
             "remote": remote,
         },
         "source": source,
+        "runtime_roles": {
+            "core_host": _runtime_role_fact(
+                getattr(owner, "core_runtime_fingerprint", None)
+                or topology.get("core_runtime"),
+                role="core-host",
+                pid=getattr(owner, "kernel_pid", None) or topology.get("kernel_pid"),
+            ),
+            "functions": _runtime_role_fact(
+                fingerprint, role="functions",
+                pid=current_worker["pid"] if runtime is not None and current_worker else shared["pid"],
+            ),
+        },
         "compatibility": {
             "core_api": fingerprint.get("core_api"),
             "function_api": fingerprint.get("function_api"),
@@ -457,3 +493,4 @@ def collect_version_payload(
         },
         "state": {"code": state_code, "reasons": reasons},
     }
+# HASHI-Fingerprint: hfp_5147a3e54ca94017a5e172f7da18778a

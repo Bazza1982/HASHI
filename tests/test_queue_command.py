@@ -21,6 +21,9 @@ class _FakeRuntime:
         self.last_prompt = None
         self.last_response = None
         self.sent = []
+        from orchestrator import runtime_session
+
+        runtime_session.initialize_runtime_sessions(self)
 
     def _is_authorized_user(self, user_id):
         return user_id == 1
@@ -28,6 +31,11 @@ class _FakeRuntime:
     async def send_long_message(self, chat_id, text, **kwargs):
         self.sent.append({"chat_id": chat_id, "text": text, "kwargs": kwargs})
         return SimpleNamespace(ok=True)
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(_FakeRuntime, "workspace_dir", tmp_path, raising=False)
 
 
 def _request(request_id: str, prompt: str = "Do the thing") -> QueuedRequest:

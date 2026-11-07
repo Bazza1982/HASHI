@@ -13,6 +13,7 @@ on:
       - "docs/INSTALL.md"
       - "docs/LOGGING.md"
       - "pyproject.toml"
+      - "constraints/standard-py312.lock"
       - "setup.py"
       - ".github/workflows/nagare-smoke.yml"
       - "nagare-viz/**"
@@ -28,6 +29,7 @@ on:
       - "docs/INSTALL.md"
       - "docs/LOGGING.md"
       - "pyproject.toml"
+      - "constraints/standard-py312.lock"
       - "setup.py"
       - ".github/workflows/nagare-smoke.yml"
       - "nagare-viz/**"
@@ -68,6 +70,11 @@ jobs:
           assert payload["success"] is True
           assert set(payload["completed_steps"]) == {"step_write", "step_check"}
           PY
+
+      - name: Install locked standard runtime for integration contracts
+        run: |
+          . .venv-smoke/bin/activate
+          python -m pip install -r constraints/standard-py312.lock
 
       - name: Contract tests
         run: |

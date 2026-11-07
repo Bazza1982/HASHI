@@ -707,11 +707,81 @@ retried. Older backends lack this operation and must not be treated as guarded.
 The Backend API requires authenticated owner credentials, Agent visibility,
 and, in Governed mode, management authority. Its legacy DELETE route uses the
 same confirmation and revision checks. Read projections omit deletion revisions
-without an authenticated, visible owner. The current Agent Scheduler tool does
-not yet supply those credentials, so its deletion request is rejected.
-The user authorized a small HASHI Function change for Workbench on 2026-10-28.
-Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
-running adoption and external-frontend verification remain separate and pending.
+without an authenticated, visible owner or the matching personal-profile
+Scheduler capability. Agent Scheduler calls delegate a short-lived credential
+bound to instance, Agent, Run, local API audience and the allowed tool names.
+The administrative key stays inside the trusted runtime and is never written
+to a CLI/MCP context. The capability cannot authenticate owner, lifecycle or
+other Agent APIs; Governed deletion retains its management-authority checks.
+The delete tool reads the authenticated definition immediately before calling
+the same conditional-delete writer with its opaque revision. A concurrent edit
+returns conflict without replay.
+
+**Run-bound tool approval (2026-11-07).** The Agent-supplied
+`explicit_user_authorization` string is only a request/intent marker. It is
+never proof of a human decision. A scoped tool deletion first creates an
+idempotent PAO `run_approvals` request for the exact
+`activity.scheduler.delete` operation: Agent, task kind, job ID, full deletion
+revision and optional disabled-only condition. It returns
+`403 approval_required`, the approval ID and the existing decision path;
+`approval.requested` is published through the normal PAO event/outbox stream.
+The authenticated owner decides through the existing
+`POST /api/v1/approvals/{approval_id}` endpoint. Neither a scoped Scheduler token,
+an anonymous request, model text, nor an ordinary clarification answer can
+decide an approval. A denied or consumed decision cannot be changed into a
+fresh authorization by retrying the tool. A pending exact request reuses its ID.
+
+A later tool call may consume only the approved, exact-scope record from the
+same Run attempt. Consumption is durable before dispatch and is not refunded
+after a conflict, failure or unknown outcome. The existing `hold_active_run`
+fence is then reacquired and held through the short compare-and-delete effect.
+Stop between reservation and dispatch prevents deletion; stop concurrent with
+an admitted effect serializes behind that effect. Signed tokens bind the Run
+ID and fencing token as well as the request ID; the server checks the live PAO
+Run, worker, owner, active Session and context generation. Cancelled, stopped,
+completed, interrupted/revoked or superseded Runs cannot use an unexpired token
+to delete. Legacy request-only tokens cannot perform a scoped deletion.
+
+This reuses the existing PAO decision API/events, not a second approval UI or
+the L1/L2 permission service. Personal L0 listing, creation and editing remain
+unchanged. Authenticated frontend settings retain their explicit confirmation
+and revision-safe deletion; Governed management checks remain in force.
+Focused coverage includes real HTTP ToolRegistry and serialized gateway
+approved deletion, forged approval, owner-only decisions, stopped-Run replay,
+attempt/generation revocation, one-use decisions, concurrent stop, foreign
+Agent/instance/audience, expiry, tampering, stale revision and absence of
+administrative credentials in MCP. Source verification and running adoption
+remain separate.
+
+#### Backend mutation authentication (2026-11-07)
+
+Scheduler create/update, immediate run/recovery and Superloop create/update/delete
+authenticate before reading the body. A body-supplied gateway or authorization
+marker never grants access. Workbench owners retain the existing strict
+credentials, Agent visibility and Governed management checks. Personal-profile
+Agent tools use the existing signed capability, bounded to instance, Agent,
+API audience, allowed tools and the exact live PAO Run attempt. CLI/MCP delegates
+that scoped capability; it never receives the administrative signing key.
+A supplied invalid capability cannot fall back to owner authentication.
+
+Ordinary creation, editing, Superloop control and recovery do not acquire a new
+approval requirement. The existing explicit-authorization policies for an
+immediate single-job rerun and Superloop deletion use PAO's existing owner
+decision endpoint and one-use Run approval. Their exact scopes are respectively
+`activity.scheduler.run` (Agent, kind, job ID and current definition revision)
+and `activity.superloop.delete` (Agent and loop ID). Model strings cannot approve
+either action. Confirmed Scheduler deletion above retains its existing writer,
+ownership and revision checks unchanged.
+
+Short local effects reacquire and hold the Run fence through the write, including
+after body parsing. Async queue/Worker operations validate admission without
+holding a SQLite transaction across an await. An accepted scheduled child has
+its own lifecycle. Recovery additionally checks after its lock wait and before
+each additional dispatch. If the source Run stops midway, no further occurrences
+start; accepted effects are durably accounted and the unstarted remainder is
+skipped in a terminal resolution. Retrying that batch cannot duplicate work.
+Stopped, cancelled, completed, revoked or superseded Run credentials cannot
+initiate further mutations.
 
 #### Scheduler recovery conversation contract (2026-09-30)
 

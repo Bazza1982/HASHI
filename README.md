@@ -44,10 +44,21 @@ continuous loop.
 Capabilities depend on the selected engine, permissions, installed extras,
 and connected services. See the [integration guide](docs/INTEGRATIONS.md).
 
+## Why version 5
+
+v5 separates the stable HASHI Core from the application environment. Core
+runs in its own qualified Python installation with no third-party application
+packages; tools, providers and connectors run in replaceable Functions
+environments. Compatible Functions dependency updates and rollbacks can keep
+Core running. See [the v5 upgrade notes](docs/RELEASE_NOTES_v5.0.0-alpha.1.md)
+for the reason, architecture, other changes and migration steps.
+
 ## Project Status
 
-Current source metadata is **v4.0.0-beta.1** (Python: **4.0.0b1**). This is a
-Beta release for small-scale public testing, not a general-production release.
+Current development source metadata is **v5.0.0-alpha.1** (Python:
+**5.0.0a1**). This is the Core/environment separation candidate, not a stable
+production release. The most recent published GitHub pre-release remains
+v4.0.0-beta.1 until a separate v5 publication is completed.
 
 The repository, npm registry, and GitHub Releases can be at different points.
 A source version does not prove that a matching npm package or installer has
@@ -56,7 +67,7 @@ before downloading.
 
 | Area | Current boundary |
 |---|---|
-| Personal/local use | Primary development path; open for small-scale Beta testing |
+| Personal/local use | Primary development path; v5 Alpha candidate for controlled testing |
 | HERV3 | Native Python engine with one model/tool loop, optional Strategy Cards, Habits, and an experimental JEV companion |
 | Team/enterprise governance | Alpha profiles, policy, approvals, audit, and deployment artifacts; production deployment validation remains pending |
 | Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; the independently maintained Workbench v2 is an external client, not bundled with HASHI |
@@ -66,7 +77,7 @@ before downloading.
 | Device/browser control | Requires the relevant worker, browser, permissions, and per-platform validation |
 
 Detailed candidate scope is in the
-[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md).
+[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v5.0.0-alpha.1.md).
 Historical milestones are recorded in
 [CHANGELOG.md](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md).
 
@@ -85,11 +96,12 @@ npm view hashi-bridge versions --json
 
 Choose an actually published version using the guide. An unqualified npm
 install uses its registry's latest tag, which may still point to a legacy
-release until a matching Beta package is actually published.
+release until a matching candidate package is actually published.
 
-Source installs require the approved **CPython 3.12.13** runtime and locked
-dependencies. npm additionally requires Node.js and npm; it prepares a
-versioned Python environment but does not bundle a base Python interpreter.
+Source and npm preparation require the approved **CPython 3.12.13** runtime,
+Node.js and npm. The supported preparation creates separate qualified Core and
+Functions environments with locked dependencies; the npm tarball does not
+bundle a base Python interpreter.
 CLI engines, API credentials, and optional tool dependencies are configured
 separately. Telegram is optional.
 

@@ -111,6 +111,15 @@ execution has started. If ACK or scheduling is interrupted, replay uses the
 same sender identity and message ID. SessionStore idempotency ensures a crash
 between queueing and inbox finalisation still resolves to the original Run.
 
+Pending, scheduled-body and confirmation recovery follow durable inbox
+acceptance order, not wall-clock timestamps or message hashes. Acceptance
+assigns a private serial within the same SQLite write transaction; duplicate
+delivery retains its original position. Existing ledgers gain that serial
+atomically in their retained insertion order without changing payloads,
+timestamps, IDs, states or leases. Tied or regressing wall clocks cannot
+reverse accepted work. A failed item is released for retry and does not
+prevent later accepted items from recovering.
+
 A queued Exchange Run is the narrow exception to general startup
 reconciliation: a new receiving process reconstructs the in-memory queue item
 with the original request, Message, and Run IDs. Running Exchange Runs are

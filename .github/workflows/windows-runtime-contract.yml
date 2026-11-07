@@ -3,9 +3,9 @@ name: Windows runtime contract
 on:
   push:
     paths:
-      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "packaging/portable_windows/**"
       - "tests/test_portable_bootstrap_failure_details.py"
-      - "tests/test_portable_windows_packaging.py"
+      - "tests/test_portable_*.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"
@@ -22,6 +22,17 @@ on:
       - "orchestrator/process_execution.py"
       - "orchestrator/reboot_manager.py"
       - "orchestrator/runtime_contract.py"
+      - "main.py"
+      - "orchestrator/kernel_process.py"
+      - "orchestrator/function_worker_bootstrap.py"
+      - "orchestrator/function_worker_supervisor.py"
+      - "orchestrator/runtime_process.py"
+      - "orchestrator/runtime_installation_builder.py"
+      - "scripts/build_runtime_roles.py"
+      - "runtime-entry.json"
+      - "constraints/core-host-py312.lock"
+      - "tests/test_runtime_*.py"
+      - "tests/test_kernel_cancellation.py"
       - "orchestrator/runtime_pipeline.py"
       - "orchestrator/workzone.py"
       - "tools/builtins.py"
@@ -36,9 +47,9 @@ on:
       - ".github/workflows/windows-runtime-contract.yml"
   pull_request:
     paths:
-      - "packaging/portable_windows/templates/launcher/Bootstrap-Elevated.ps1"
+      - "packaging/portable_windows/**"
       - "tests/test_portable_bootstrap_failure_details.py"
-      - "tests/test_portable_windows_packaging.py"
+      - "tests/test_portable_*.py"
       - "adapters/claude_cli.py"
       - "adapters/codex_app_server.py"
       - "adapters/codex_cli.py"
@@ -55,6 +66,17 @@ on:
       - "orchestrator/process_execution.py"
       - "orchestrator/reboot_manager.py"
       - "orchestrator/runtime_contract.py"
+      - "main.py"
+      - "orchestrator/kernel_process.py"
+      - "orchestrator/function_worker_bootstrap.py"
+      - "orchestrator/function_worker_supervisor.py"
+      - "orchestrator/runtime_process.py"
+      - "orchestrator/runtime_installation_builder.py"
+      - "scripts/build_runtime_roles.py"
+      - "runtime-entry.json"
+      - "constraints/core-host-py312.lock"
+      - "tests/test_runtime_*.py"
+      - "tests/test_kernel_cancellation.py"
       - "orchestrator/runtime_pipeline.py"
       - "orchestrator/workzone.py"
       - "tools/builtins.py"
@@ -73,6 +95,7 @@ permissions:
 
 jobs:
   native-windows:
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +103,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # Managed CPython also supplies Windows security-only patch releases
       # that are absent from actions/python-versions.
       - uses: astral-sh/setup-uv@v6
@@ -94,6 +119,15 @@ jobs:
           fi
       - name: Install runtime and test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Verify native patch integrity and shared approval wiring
+        run: >-
+          python -m pytest -q
+          tests/test_apply_patch_cross_platform.py
+          tests/test_fingerprint_execution.py
+          tests/test_live_voice_actions.py
+          tests/test_permission_api_decisions.py
+          tests/test_permission_frontend_decisions.py
+          tests/test_permission_model_broker.py
       - name: Verify native Windows runtime and portable startup contracts
         run: >-
           python -m pytest -q
@@ -107,3 +141,133 @@ jobs:
           tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta
           tests/test_portable_bootstrap_failure_details.py
           tests/test_portable_windows_packaging.py
+
+
+      - name: Quarantine wheel-build metadata before real entry qualification
+        shell: python
+        run: |
+          import os, shutil, subprocess
+          from pathlib import Path
+
+          metadata = Path("hashi_bridge.egg-info")
+          if metadata.exists():
+              if subprocess.check_output(["git", "ls-files", "--", metadata.name]).strip():
+                  raise RuntimeError("Refusing to move tracked package metadata")
+              destination = Path(os.environ["RUNNER_TEMP"]) / "hashi-entry-build-metadata" / metadata.name
+              if destination.exists():
+                  raise RuntimeError("Preserve the existing build-metadata evidence")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.move(str(metadata), str(destination))
+              print("Retained source-wheel metadata outside the qualified entry tree:", destination)
+      - name: Verify sealed Core and Functions runtime roles
+        timeout-minutes: 30
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_roles.py
+          tests/test_runtime_installation.py
+          tests/test_runtime_role_profiles.py
+          tests/test_runtime_process.py
+          tests/test_runtime_admission_failures.py
+          tests/test_kernel_cancellation.py
+          tests/test_runtime_builder_safety.py
+          tests/test_runtime_role_native.py
+          --basetemp="${{ runner.temp }}/hashi-qualified-runtime-roles"
+          --junitxml="${{ runner.temp }}/hashi-runtime-roles.xml"
+          --durations=20
+      - name: Verify the complete offline dependency regression scope
+        timeout-minutes: 90
+        run: >-
+          python -m pytest -q tests
+          -m "not contract and not live and not platform and not real_wall_clock"
+          --basetemp="${{ runner.temp }}/hashi-offline-regression"
+          --junitxml="${{ runner.temp }}/hashi-offline-regression.xml"
+          --durations=25
+      - name: Retain native role qualification receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-runtime-roles-${{ matrix.python-version }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/hashi-runtime-roles.xml
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/runtime-role-qualification.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/functions-dependency-handoff.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-help.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold-receipt.json
+            ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold.log
+            ${{ runner.temp }}/hashi-entry-build-metadata/**
+            ${{ runner.temp }}/hashi-offline-regression.xml
+
+  posix-runtime:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare the declared Linux Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python "3.12.13" .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install original runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Quarantine wheel-build metadata before real entry qualification
+        shell: python
+        run: |
+          import os, shutil, subprocess
+          from pathlib import Path
+
+          metadata = Path("hashi_bridge.egg-info")
+          if metadata.exists():
+              if subprocess.check_output(["git", "ls-files", "--", metadata.name]).strip():
+                  raise RuntimeError("Refusing to move tracked package metadata")
+              destination = Path(os.environ["RUNNER_TEMP"]) / "hashi-entry-build-metadata" / metadata.name
+              if destination.exists():
+                  raise RuntimeError("Preserve the existing build-metadata evidence")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.move(str(metadata), str(destination))
+              print("Retained source-wheel metadata outside the qualified entry tree:", destination)
+      - name: Verify Linux sealed roles, private IPC and same-Core dependency handoff
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_roles.py
+          tests/test_runtime_installation.py
+          tests/test_runtime_role_profiles.py
+          tests/test_runtime_process.py
+          tests/test_runtime_admission_failures.py
+          tests/test_kernel_cancellation.py
+          tests/test_runtime_builder_safety.py
+          tests/test_runtime_role_native.py
+          --basetemp="${{ runner.temp }}/hashi-qualified-linux-roles"
+          --junitxml="${{ runner.temp }}/hashi-linux-runtime-roles.xml"
+          --durations=20
+      - name: Verify Backend mutation authentication and Run lifecycle on Linux
+        run: >-
+          python -m pytest -q
+          tests/test_backend_mutation_authorization.py
+          tests/test_scheduler_missed_recovery.py
+          tests/test_superloop_commands.py
+          tests/test_scheduler_run_authorization.py
+          tests/test_workbench_scheduler_api.py
+          tests/test_session_store.py
+          tests/test_frontend_settings_api.py
+          tests/test_permission_pao_fence.py
+          --junitxml="${{ runner.temp }}/hashi-linux-scheduler-authorization.xml"
+      - name: Verify existing curated Core contracts on Linux
+        run: python -m pytest -q --junitxml="${{ runner.temp }}/hashi-linux-core.xml"
+      - name: Retain Linux qualification receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-runtime-roles-3.12.13
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/hashi-linux-runtime-roles.xml
+            ${{ runner.temp }}/hashi-linux-scheduler-authorization.xml
+            ${{ runner.temp }}/hashi-linux-core.xml
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/runtime-role-qualification.json
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/functions-dependency-handoff.json
+            ${{ runner.temp }}/hashi-qualified-linux-roles/**/real-entry-help.json
+            ${{ runner.temp }}/hashi-entry-build-metadata/**

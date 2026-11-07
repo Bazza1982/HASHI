@@ -562,7 +562,8 @@ def test_new_workbench_process_recovers_an_acked_but_unscheduled_accept(
     assert len(calls) == 1
 
 
-def test_recovery_failure_for_one_item_does_not_block_the_next(tmp_path):
+@pytest.mark.parametrize("acceptance_clock", ["real", "tied", "backwards"])
+def test_recovery_failure_for_one_item_does_not_block_the_next(tmp_path, monkeypatch, acceptance_clock):
     _configure(tmp_path)
     first = _delivery()
     second = copy.deepcopy(first)
@@ -590,16 +591,28 @@ def test_recovery_failure_for_one_item_does_not_block_the_next(tmp_path):
     )
     first_prompt, first_evidence = _evidence(tmp_path, first)
     second_prompt, second_evidence = _evidence(tmp_path, second)
+    clock = [time.time()]
+    if acceptance_clock != "real":
+        monkeypatch.setattr("orchestrator.exchange_ingress.time", SimpleNamespace(time=lambda: clock[0]))
     first_record = service.accept(
         evidence=first_evidence,
         prompt=first_prompt,
     )
+    if acceptance_clock == "backwards":
+        clock[0] -= 10
     second_record = service.accept(
         evidence=second_evidence,
         prompt=second_prompt,
     )
 
+    with service.inbox._connection() as connection:
+        accepted_rows = [dict(row) for row in connection.execute(
+            "SELECT rowid, inbox_key, accepted_at FROM exchange_inbox ORDER BY rowid")]
+    pending_order = [record.inbox_key for record in service.inbox.pending()]
     recovered = asyncio.run(service.recover_pending())
+    print(json.dumps({"clock": acceptance_clock, "durable_acceptance": accepted_rows,
+                      "pending_order": pending_order,
+                      "enqueue_order": [kwargs["idempotency_key"] for _, kwargs in calls]}))
 
     assert len(calls) == 2
     assert [record.inbox_key for record in recovered] == [
@@ -607,6 +620,88 @@ def test_recovery_failure_for_one_item_does_not_block_the_next(tmp_path):
     ]
     assert service.inbox.get(first_record.inbox_key).state == "accepted"
     assert service.inbox.get(second_record.inbox_key).state == "scheduled"
+
+
+
+
+@pytest.mark.parametrize("state", ["accepted", "scheduled", "pending_confirmation"])
+def test_inbox_recovery_order_survives_reopen_and_compaction(tmp_path, monkeypatch, state):
+    import sqlite3
+
+    clock = time.time()
+    monkeypatch.setattr("orchestrator.exchange_ingress.time", SimpleNamespace(time=lambda: clock))
+    path = tmp_path / "inbox.sqlite3"
+    inbox = ExchangeInbox(path)
+    deliveries = [_delivery(), _delivery()]
+    deliveries[1].update(message_id="message_2", delivery_id="delivery_2")
+    records = [inbox.accept(delivery) for delivery in deliveries]
+    for i, record in enumerate(records):
+        if state == "scheduled":
+            inbox.mark_scheduled(record.inbox_key, request_id=f"request_{i}", run_id=f"run_{i}",
+                                 session_id=f"session_{i}", message_id=f"local_message_{i}")
+        elif state == "pending_confirmation":
+            inbox.mark_pending_confirmation(record.inbox_key, confirmation_id=f"confirm_{i}",
+                                            owner_id="owner")
+    with sqlite3.connect(path) as connection:
+        connection.execute("VACUUM")
+    reopened = ExchangeInbox(path)
+    query = {"accepted": reopened.pending, "scheduled": reopened.scheduled,
+             "pending_confirmation": reopened.pending_confirmations}[state]
+    assert [r.inbox_key for r in query()] == [r.inbox_key for r in records]
+    assert reopened.accept(deliveries[0]).replayed is True
+    assert [r.inbox_key for r in query()] == [r.inbox_key for r in records]
+
+
+def test_legacy_inbox_migration_preserves_acceptance_and_record_fields(tmp_path, monkeypatch):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+
+    clock = [time.time()]
+    monkeypatch.setattr("orchestrator.exchange_ingress.time", SimpleNamespace(time=lambda: clock[0]))
+    path = tmp_path / "legacy-inbox.sqlite3"
+    inbox = ExchangeInbox(path)
+    first_delivery = _delivery()
+    first = inbox.accept(first_delivery)
+    clock[0] -= 10
+    second_delivery = copy.deepcopy(first_delivery)
+    second_delivery.update(message_id="message_2", delivery_id="delivery_2")
+    second = inbox.accept(second_delivery)
+    # Recreate the previous on-disk schema, retaining its real accepted rows.
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(exchange_inbox)")}
+        if "acceptance_order" in columns:
+            connection.execute("DROP TRIGGER IF EXISTS exchange_inbox_assign_acceptance_order")
+            connection.execute("DROP INDEX exchange_inbox_acceptance_order")
+            connection.execute("ALTER TABLE exchange_inbox DROP COLUMN acceptance_order")
+    # Independent owners can initialize the legacy database concurrently.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        reopened = list(pool.map(lambda _: ExchangeInbox(path), range(3)))
+    for restored in reopened:
+        assert restored.get(first.inbox_key) == first
+        assert restored.get(second.inbox_key) == second
+        assert [r.inbox_key for r in restored.pending()] == [first.inbox_key, second.inbox_key]
+    clock[0] -= 10
+    third_delivery = copy.deepcopy(first_delivery)
+    third_delivery.update(message_id="message_3", delivery_id="delivery_3")
+    third = reopened[0].accept(third_delivery)
+    assert reopened[1].accept(first_delivery).replayed is True
+    assert [r.inbox_key for r in reopened[2].pending()] == [
+        first.inbox_key, second.inbox_key, third.inbox_key]
+    # An older shared Functions process can finish an in-flight INSERT after migration.
+    legacy_delivery = copy.deepcopy(first_delivery)
+    legacy_delivery.update(message_id="message_4", delivery_id="delivery_4")
+    seed = ExchangeInbox(tmp_path / "legacy-writer-input.sqlite3")
+    fourth = seed.accept(legacy_delivery)
+    columns = ("inbox_key", "idempotency_key", "payload_digest", "delivery_json",
+               "target_agent", "state", "accepted_at", "updated_at")
+    with seed._connection() as connection:
+        values = tuple(connection.execute(
+            "SELECT " + ",".join(columns) + " FROM exchange_inbox").fetchone())
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO exchange_inbox(" + ",".join(columns) +
+                           ") VALUES (" + ",".join("?" for _ in columns) + ")", values)
+    assert [r.inbox_key for r in reopened[2].pending()] == [
+        first.inbox_key, second.inbox_key, third.inbox_key, fourth.inbox_key]
 
 
 def test_signed_sender_cannot_target_a_different_local_instance(tmp_path):
@@ -820,3 +915,4 @@ def test_inbound_reply_cannot_swap_the_original_conversation(tmp_path):
 
     with pytest.raises(ExchangeIngressPermissionError):
         service.accept(evidence=evidence, prompt=prompt)
+# HASHI-Fingerprint: hfp_b1b36e7e40734f018f7114ae40c237e9

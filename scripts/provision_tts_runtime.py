@@ -20,12 +20,8 @@ from orchestrator.voice_synthesis_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TTS_RESULT_PREFIX,
 )
-from orchestrator.agent_config_json import write_agent_config_json
-from orchestrator.config_json import (  # noqa: E402
-    new_config_json,
-    read_config_json,
-    write_config_json,
-)
+from orchestrator.agent_config_json import write_agent_config_json  # noqa: E402
+from orchestrator.config_json import new_config_json, read_config_json  # noqa: E402
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -155,7 +151,7 @@ def probe_runtime(python: Path, *, lock_path: Path) -> dict[str, Any]:
     # Importing the local Kokoro/Torch stack for the first time can exceed one
     # minute on Windows while antivirus scans native wheels. It remains a
     # bounded, short-lived Function probe rather than a Core startup action.
-    completed = _run([str(python), "-I", str(WORKER_PATH), "--probe"], timeout=180.0)
+    completed = _run([str(python), "-I", "-B", str(WORKER_PATH), "--probe"], timeout=180.0)
     payload = _worker_payload(completed, action="probe")
     if str(payload.get("python") or "") != APPROVED_PYTHON:
         raise ProvisioningError(
@@ -201,6 +197,7 @@ def prepare_kokoro_model(
     command = [
         str(python),
         "-I",
+        "-B",
         str(WORKER_PATH),
         "--check-kokoro" if check_only else "--prepare-kokoro",
         "--model-cache",

@@ -28,7 +28,14 @@ else
     osascript -e 'display alert "HASHI Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
     exit 1
 fi
-if ! "$PYTHON_EXE" "$ROOT/scripts/check_runtime_contract.py" --code-root "$ROOT"; then
+MAIN_SCRIPT="$ROOT/main.py"
+MAIN_OPTIONS=()
+if [ -f "$ROOT/constraints/core-host-py312.lock" ]; then
+    PYTHON_EXE="$("$PYTHON_EXE" -I -B "$ROOT/scripts/resolve_launch_runtime.py" --code-root "$ROOT" --field functions-executable)" || exit 78
+    MAIN_SCRIPT="$ROOT/scripts/run_qualified_core.py"
+    MAIN_OPTIONS=(-I -B)
+fi
+if ! "$PYTHON_EXE" -B "$ROOT/scripts/check_runtime_contract.py" --code-root "$ROOT"; then
     osascript -e 'display alert "HASHI Error" message "Python or the dependency generation does not satisfy the HASHI Core runtime contract. Rebuild this installation." as critical'
     exit 78
 fi
@@ -49,7 +56,7 @@ echo "Log: $LOG_FILE"
 echo ""
 
 cd "$ROOT"
-PYTHONPATH="$ROOT" "$PYTHON_EXE" main.py --bridge-home "$ROOT" 2>&1 | tee -a "$LOG_FILE"
+PYTHONPATH="$ROOT" "$PYTHON_EXE" "${MAIN_OPTIONS[@]}" "$MAIN_SCRIPT" --bridge-home "$ROOT" 2>&1 | tee -a "$LOG_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 
 {

@@ -91,6 +91,26 @@ def _client_lan_mode(tmp_path, *, lan_mode: bool):
     return TestClient(app), protocol
 
 
+
+@pytest.mark.parametrize("readiness,expected", [("ready", "ready"), ("starting", "degraded"), ("degraded", "degraded")])
+def test_rejected_foreign_peer_does_not_disable_ready_local_remote(tmp_path, readiness, expected):
+    from remote.api import server as remote_server
+
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    discovery = {"readiness": readiness, "state": "degraded", "trust_state": "rejected",
+                 "peer_count": 1, "trusted_peer_count": 0, "rejected_peer_count": 1}
+    protocol.get_protocol_status = lambda: {"protocol_version": "2.0", "discovery": discovery}
+    with client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        health = response.json()
+        assert health["status"] == expected
+        assert health["discovery"]["trust_state"] == "rejected"
+        assert health["discovery"]["trusted_peer_count"] == 0
+        # Availability never confers trust or grants the protected gateway.
+        assert client.get("/workbench/v1/status").status_code == 401
+
 def test_load_shared_token_reports_an_unreadable_existing_file(tmp_path, monkeypatch):
     secrets_path = tmp_path / "secrets.json"
     secrets_path.write_text("{}\n", encoding="utf-8")

@@ -84,7 +84,7 @@ def test_authorized_core_change_still_requires_major_release_evidence(repository
 
     assert result.returncode == 4
     assert "major-version increment" in result.stderr
-    assert "independent review record" in result.stderr
+    assert "independent-human or owner-approved review record" in result.stderr
 
 
 def test_reviewed_major_core_change_passes(repository):
@@ -125,6 +125,61 @@ def test_reviewed_major_core_change_passes(repository):
 
     assert result.returncode == 0, result.stderr
     assert "authorized major-version change" in result.stdout
+
+
+
+@pytest.mark.parametrize(
+    ("record_updates", "expected_code"),
+    [
+        ({}, 0),
+        ({"owner_decision": "pending"}, 4),
+        ({"owner_decision_reference": ""}, 4),
+        ({"technical_review_reference": ""}, 4),
+        ({"owner": ""}, 4),
+        ({"core_digest": "sha256:" + "0" * 64}, 4),
+    ],
+)
+def test_solo_owner_approved_core_change_has_real_auditable_evidence(
+    repository, record_updates, expected_code
+):
+    (repository / "main.py").write_text("changed\n")
+    (repository / "pyproject.toml").write_text(
+        '[project]\nname = "hashi-test"\nversion = "5.0.0a1"\n'
+    )
+    git(repository, "add", "main.py", "pyproject.toml")
+    digest = check(repository, "--cached", "--print-core-digest").stdout.strip()
+    record = {
+        "schema_version": 1,
+        "approval_mode": "owner_approved",
+        "change_id": "core-v5-migration",
+        "authorization_reference": "Explicit sole-owner Core v5 migration authorization",
+        "implementer": "local-ai-implementer",
+        "reviewer": "GPT-6 AI technical review, not a human",
+        "owner": "sole-owner",
+        "owner_decision": "approved",
+        "owner_decision_reference": "Explicit owner approval, dated",
+        "technical_review_reference": "https://example.invalid/pr/140/review",
+        "reviewed_at": "2026-11-07T19:00:00+11:00",
+        "verdict": "approved",
+        "product_version": "5.0.0a1",
+        "core_digest": digest,
+        "summary": "Owner authorized after reviewing the technical evidence.",
+    }
+    record.update(record_updates)
+    review = repository / "docs" / "core-reviews" / "solo-owner-v5.json"
+    review.parent.mkdir(parents=True)
+    review.write_text(json.dumps(record))
+    git(repository, "add", str(review.relative_to(repository)))
+
+    result = check(
+        repository, "--cached", "--base", "HEAD",
+        "--authorized", "--major-version-change"
+    )
+    assert result.returncode == expected_code, result.stderr
+    if expected_code == 0:
+        assert "authorized major-version change" in result.stdout
+    else:
+        assert "no added Core review record matches" in result.stderr
 
 
 def test_installed_hook_blocks_core_commit_without_authorization(repository, monkeypatch):

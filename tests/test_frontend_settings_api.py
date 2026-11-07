@@ -13,11 +13,17 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 class Request:
     def __init__(self, *, operation=None, payload=None, target_instance="HASHI3",
-                 target_agent="momo", query=None, job_id=None):
+                 target_agent="momo", query=None, job_id=None, headers=None):
         self.match_info = {"name": "momo", "agent_id": "momo"}
         if job_id is not None:
             self.match_info["job_id"] = job_id
         self.query = query or {"instance_id": target_instance}
+        self.headers = (
+            {"X-Workbench-Token": "test-admin"}
+            if headers is None else dict(headers)
+        )
+        self.scheme = "http"
+        self.host = "127.0.0.1"
         self._body = {
             "type": "hashi.frontend-settings-operation",
             "version": 1,
@@ -68,8 +74,8 @@ def make_server(tmp_path: Path):
         config_path=config_path,
         global_config=global_config,
         orchestrator=orchestrator,
+        secrets={"workbench_admin_token": "test-admin"},
     )
-    server._strict_authenticated_owner = lambda _request: "owner"
     return server, runtime
 
 
@@ -157,7 +163,8 @@ async def test_frontend_settings_activity_uses_agent_scheduler_and_requires_dele
 
     deleted = await server.handle_v1_agent_settings_activity_delete(
         Request(operation="activity.scheduler.delete", job_id="workbench-daily",
-                payload={"kind": "cron", "explicit_user_confirmation": True})
+                payload={"kind": "cron", "explicit_user_confirmation": True,
+                         "expected_revision": decode(update)["result"]["job"]["deletion_revision"]})
     )
     assert deleted.status == 200
     assert decode(deleted)["result"]["job_id"] == "workbench-daily"
@@ -291,10 +298,13 @@ async def test_frontend_permissions_reports_uncertain_state_when_persistence_rol
     runtime.backend_manager = manager
     runtime.config = manager.config
 
-    def conflict(*_args, **_kwargs):
+    publications = []
+
+    def conflict(path, proposed):
+        publications.append((path, proposed))
         raise ConfigConflictError("changed concurrently")
 
-    monkeypatch.setattr("orchestrator.config_json.write_config_json", conflict)
+    monkeypatch.setattr("orchestrator.agent_config_json.write_agent_config_json", conflict)
     response = await server.handle_v1_agent_settings_permissions_set(
         Request(operation="permissions.set_access_scope", payload={
             "backend": "codex-cli",
@@ -306,6 +316,11 @@ async def test_frontend_permissions_reports_uncertain_state_when_persistence_rol
 
     assert response.status == 503
     assert decode(response)["error_code"] == "settings_persistence_uncertain"
+    assert len(publications) == 1
+    assert publications[0][0] == config_path
+    assert publications[0][1]["agents"][0]["allowed_backends"][0]["access_scope"] == "workspace"
+    assert manager.current_backend.config.access_scope == "workspace"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == document
 
 
 async def test_frontend_privacy_requires_fresh_value_and_downgrade_confirmation(tmp_path) -> None:
@@ -338,3 +353,4 @@ async def test_frontend_privacy_requires_fresh_value_and_downgrade_confirmation(
     assert applied.status == 200
     assert runtime.privacy_writes == [(0, 1)]
     assert decode(applied)["privacy"]["current_level"] == 0
+# HASHI-Fingerprint: hfp_c066c6d2f33145a88df8cbc4ce6b2381

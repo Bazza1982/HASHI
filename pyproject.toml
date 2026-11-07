@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hashi-bridge"
-version = "4.0.0b1"
+version = "5.0.0a1"
 description = "HASHI — local-first control plane for persistent, provider-agnostic AI agents."
 readme = "README.md"
 license = "MIT"
@@ -132,9 +132,14 @@ nagare = "nagare.cli:main"
 # Packaging metadata, launchers, containers, CI, and release documentation are
 # checked against it; ordinary function generations cannot override it.
 implementation = "cpython"
+# Core host and Function Python patches are qualified independently.
 python = "3.12.13"
+functions-python = "3.12.13"
+# The existing standard lock belongs to Functions; Core's role lock is empty.
 standard-lock = "constraints/standard-py312.lock"
+core-host-lock = "constraints/core-host-py312.lock"
 portable-build-date = "20260303"
+functions-build-date = "20260303"
 core-api = 3
 function-api = 3
 worker-model = "per-agent-process"
@@ -185,6 +190,13 @@ testpaths = [
     "tests/test_runtime_working_modes.py",
     "tests/test_runtime_lifecycle.py",
     "tests/test_runtime_contract.py",
+    "tests/test_runtime_roles.py",
+    "tests/test_runtime_installation.py",
+    "tests/test_runtime_role_profiles.py",
+    "tests/test_runtime_process.py",
+    "tests/test_runtime_admission_failures.py",
+    "tests/test_kernel_cancellation.py",
+    "tests/test_runtime_builder_safety.py",
     "tests/test_service_manager_scheduler_lease.py",
     "tests/test_service_endpoints.py",
     "tests/test_smart_tool_registry.py",

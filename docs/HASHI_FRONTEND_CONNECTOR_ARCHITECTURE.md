@@ -18,6 +18,13 @@ the authoritative rollout evidence and remaining gates are tracked in
 
 ## 1. Definition
 
+A registered ingress transport retains its identity when PAO selects an Agent
+activity Session. In particular, `backend_api` remains the Backend API
+Connector after a command-derived background Run moves to `agent-activity`.
+The original Conversation is a read-only origin reference; it cannot override
+the activity Session or its generation. Business source labels still describe
+the internal work, and missing or unknown transport identities fail closed.
+
 Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.
@@ -465,8 +472,13 @@ public command is discovered from the shared RuntimeCommand registry; it is not
 a Telegram command implementation or a Backend/API special case. All
 command-capable Connectors may invoke it through their existing command adapter.
 
-When enabled, PAO freezes AgentPresence as an optional media destination at Run
-admission. Canonical reply voice then receives its own outbox task and receipt;
+When enabled, PAO freezes AgentPresence as an optional destination at Run
+admission. It accepts public caption text and media through the existing durable
+outbox, as specified by [native captions](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05).
+Caption projection still requires the selected default Agent, primary Session
+and current generation; it excludes commands, reasoning, tools and private
+content. Opting out affects future Run routes while existing routes remain
+frozen. Canonical reply voice receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The
@@ -1456,6 +1468,13 @@ owns renditions and endpoint receipts. These changes stay in Functions.
 - A valid explicit Session wins over shared-primary routing for both published
   and already-delivered text. Owner/Agent and context-generation checks still
   fail closed; invalid bindings never fall back into another conversation.
+- A command may deliberately select an owned successor Session, such as the
+  fresh Session created by `/forget`. Only after PAO's durable binding succeeds,
+  the local command adapter projects completion into that selected Session and
+  its current generation. The original invocation metadata remains immutable.
+  This is an explicit command transition, not a retry or a stale-binding
+  fallback: foreign owner/Agent bindings and later generation changes still
+  fail closed, and an uncertain operation is never re-executed for display.
 - Typed command admission atomically records centrally redacted user input in
   the existing SessionStore transaction. Actions do not invent user input.
   Unified ingress also redacts invocation arguments before reservation and

@@ -243,7 +243,12 @@ def test_delete_lifecycle_conflict_fails(tmp_path):
         )
 
 
-def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path):
+def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path, monkeypatch):
+    from orchestrator import workbench_auth
+
+    # This temporary instance has no registered OS Remote task. Dedicated tests
+    # below still exercise credential-reader preservation and principal failure.
+    monkeypatch.setattr(workbench_auth, "_windows_remote_runtime_sids", lambda _root: ())
     paths = _setup_paths(
         tmp_path,
         agents=[

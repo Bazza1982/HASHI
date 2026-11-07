@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "approval_mode": "owner_approved",
+  "change_id": "core-v5-migration",
+  "authorization_reference": "Owner's explicit Core v5 major-version migration authorization in HASHI project conversation, 2026-11-05, reaffirmed 2026-11-07",
+  "implementer": "HASHI local AI development agents operating under Bazza1982's direction",
+  "reviewer": "OpenAI GPT-6 — AI technical reviewer (not a human)",
+  "owner": "Bazza1982 (human sole owner)",
+  "owner_decision": "approved",
+  "owner_decision_reference": "Explicit owner instruction in HASHI project conversation, 2026-11-07 approximately 19:02 Australia/Sydney: '我授权你马上给我修改这个不合理的规则 然后合并 马上'",
+  "technical_review_reference": "https://github.com/Bazza1982/HASHI/pull/140#issuecomment-6704269213",
+  "reviewed_at": "2026-11-07T19:09:47+11:00",
+  "verdict": "approved",
+  "product_version": "5.0.0a1",
+  "core_digest": "sha256:a4224d7072bf115a8ce1130ecf3e2a1da0980576916371fc54c6b8950755db41",
+  "summary": "Solo-owner authorization for Core v5 source migration and merge, based on repeated AI technical reviews and actual final-head Windows/Linux runtime CI. Independent-human reviewer rule was not authorized by the sole owner and is replaced by truthful owner approval plus documented AI technical review. The owner accepts residual source-merge risk. This record does not claim independent human review and does not authorize production deployment, L2 activation or release publication. Full downstream gated CI remains mandatory before merge."
+}

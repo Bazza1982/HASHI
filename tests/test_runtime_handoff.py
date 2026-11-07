@@ -270,7 +270,9 @@ def test_telegram_checkpoint_binds_offset_to_bot_across_shared_recovery(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("split_roles", [False, True])
 async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_older(
+    split_roles,
     tmp_path,
     monkeypatch,
 ):
@@ -283,7 +285,11 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
     )
 
     home = tmp_path / "instance"
+    from dataclasses import replace
+    from orchestrator.runtime_contract import CORE_HOST_ROLE
+
     runtime = enforce_runtime_contract(ROOT)
+    core_runtime = replace(runtime, role=CORE_HOST_ROLE, installation_digest="sha256:" + "a" * 64)
     qualified = generation(tmp_path, home, "qualified", runtime)
     current_source_commit = "f" * 40
     assert current_source_commit != qualified.generation.receipt.source_commit
@@ -293,6 +299,7 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
         config_loads.append(bootstrap_local_api_credential)
 
     app = SimpleNamespace(
+        runtime_fingerprint=runtime,
         global_cfg=SimpleNamespace(project_root=tmp_path),
         shutdown_manager=SimpleNamespace(start_exit_watchdog=lambda: None),
         _load_config_bundle=load_config_bundle,
@@ -323,6 +330,7 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
             "code_root": str(qualified.generation.code_root),
             "bridge_home": str(home),
             "runtime": runtime.to_dict(),
+            **({"core_runtime": core_runtime.to_dict()} if split_roles else {}),
             "source_commit": current_source_commit,
             "kernel_pid": 123,
             "arguments": {},
@@ -334,7 +342,11 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
         },
     )
 
-    await host.prepare()
+    ready = await host.prepare()
+
+    assert app.core_runtime_fingerprint == (core_runtime if split_roles else None)
+    assert ready["core_runtime_id"] == (core_runtime.runtime_id if split_roles else None)
+    assert ready["functions_runtime_id"] == runtime.runtime_id
 
     assert config_loads == [True]
     assert app._shared_replacement_candidate is True
@@ -367,6 +379,12 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
             self.is_running = True
 
     flaky, healthy = Ingress(True), Ingress()
+    # This fixture tests Telegram/WhatsApp. Explicitly disable Remote in its
+    # own instance instead of inheriting the test driver's instance paths.
+    monkeypatch.delenv("HASHI_REMOTE_ROOT", raising=False)
+    remote_dir = tmp_path / "remote"
+    remote_dir.mkdir()
+    (remote_dir / "config.yaml").write_text("lifecycle:\n  remote_enabled: false\n", encoding="utf-8")
     whatsapp_calls = []
 
     async def start_whatsapp_transport(**kwargs):
@@ -386,7 +404,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         function_workers=SimpleNamespace(
             _telegram_ingress={"alpha": flaky, "beta": healthy}
         ),
-        global_cfg=SimpleNamespace(authorized_id=1),
+        global_cfg=SimpleNamespace(authorized_id=1, bridge_home=tmp_path, project_root=tmp_path),
         _runtime_map=lambda: {},
         _load_whatsapp_cfg=lambda: ({}, {"enabled": True}),
         start_whatsapp_transport=start_whatsapp_transport,
@@ -426,3 +444,22 @@ def test_core_and_function_paths_share_one_canonical_instance_identity(
     assert build_bridge_paths(ROOT, raw).bridge_home == canonical
     literal = tmp_path / "$HASHI_SCOPE_TEST"
     assert build_bridge_paths(ROOT, literal, canonical_home=True).bridge_home == literal
+
+
+@pytest.mark.asyncio
+async def test_runtime_host_rejects_wrong_core_role_before_any_product_or_instance_work(tmp_path, monkeypatch):
+    from orchestrator import pathing
+    from orchestrator.runtime_app_host import RuntimeAppHost
+    from orchestrator.runtime_contract import RuntimeContractError
+
+    functions = enforce_runtime_contract(ROOT)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Wrong Core role reached instance path construction")
+    monkeypatch.setattr(pathing, "build_bridge_paths", forbidden)
+    host = RuntimeAppHost(None, {"core_runtime": functions.to_dict()})
+    with pytest.raises(RuntimeContractError, match="wrong runtime role"):
+        await host.prepare()
+    assert host.app is None
+    assert list(tmp_path.iterdir()) == []
+
+# HASHI-Fingerprint: hfp_c5262c7985f64ba89b3ae02e009cb54e

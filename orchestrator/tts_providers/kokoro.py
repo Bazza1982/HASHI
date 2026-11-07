@@ -71,6 +71,7 @@ class KokoroProvider(BaseTTSProvider):
         proc = await asyncio.create_subprocess_exec(
             python_exe,
             "-I",
+            "-B",
             "-c",
             code,
             stdout=asyncio.subprocess.PIPE,
@@ -90,3 +91,4 @@ class KokoroProvider(BaseTTSProvider):
             wav_path=wav_path,
             ogg_path=ogg_path,
         )
+# HASHI-Fingerprint: hfp_adf96e1c9b2f4868b0445a021b863c67
