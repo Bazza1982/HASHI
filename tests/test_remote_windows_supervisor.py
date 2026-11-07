@@ -181,12 +181,13 @@ function Start-ScheduledTask {{
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
 
 
-def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path):
+@pytest.mark.parametrize("health_mode", ["ready", "local-ready", "foreign", "failed-agent"])
+def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path, health_mode):
     root = tmp_path / "hashi restart runner"
     bin_dir = root / "bin"
     bin_dir.mkdir(parents=True)
     (root / "agents.json").write_text(
-        json.dumps({"global": {"workbench_port": 18891}}),
+        json.dumps({"global": {"workbench_port": 18891, "instance_id": "RESTART-EXACT"}}),
         encoding="utf-8",
     )
     stopped = tmp_path / "stopped.txt"
@@ -220,8 +221,14 @@ function Invoke-RestMethod {{
     param($Uri, $Method, $TimeoutSec)
     $global:HealthCalls++
     [pscustomobject]@{{
-        ready=($global:HealthCalls -ge 2)
-        status=$(if ($global:HealthCalls -ge 2) {{ 'ready' }} else {{ 'connecting' }})
+        ok=$true
+        instance_id=$(if ('{health_mode}' -eq 'foreign') {{ 'OTHER' }} else {{ 'RESTART-EXACT' }})
+        ready=($global:HealthCalls -ge 2 -and '{health_mode}' -ne 'local-ready' -and '{health_mode}' -ne 'failed-agent')
+        status=$(if ($global:HealthCalls -ge 2 -and '{health_mode}' -eq 'foreign') {{ 'ready' }} else {{ 'degraded' }})
+        startup=[pscustomobject]@{{
+            services_ready=($global:HealthCalls -ge 2)
+            failed_agents=$(if ('{health_mode}' -eq 'failed-agent') {{ 1 }} else {{ 0 }})
+        }}
     }}
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_task_runner.ps1')} `
@@ -231,6 +238,10 @@ function Invoke-RestMethod {{
 exit $LASTEXITCODE
 """)
 
+    if health_mode in {"foreign", "failed-agent"}:
+        assert result.returncode != 0
+        assert "Backend ready" not in log.read_text(encoding="utf-8-sig")
+        return
     assert result.returncode == 0, result.stderr
     assert stopped.read_text(encoding="utf-8-sig").strip() == "stop"
     assert started.read_text(encoding="utf-8-sig").strip() == (
@@ -251,22 +262,73 @@ def test_bridge_controller_does_not_swallow_process_termination_errors():
     assert "Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue" not in stop_block
 
 
-def test_bridge_controller_restarts_fixed_hidden_entrypoint_with_logs():
-    text = (ROOT / "bin/bridge_ctl.ps1").read_text(encoding="utf-8")
-    start_block = text.split("function Start-Bridge", 1)[1].split(
-        "function Show-Status", 1
-    )[0]
-    restart_block = text.split('"restart" {', 1)[1]
+def test_bridge_controller_launches_qualified_core_with_gateway_and_scoped_logs(tmp_path):
+    root = tmp_path / "hashi start with spaces"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    qualified_core = root / "qualified Core" / "python.exe"
+    (scripts / "resolve_launch_runtime.py").write_text(
+        f"print({str(qualified_core)!r})\n", encoding="utf-8"
+    )
+    captured = tmp_path / "launch.json"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$Tokens = $null
+$ParseErrors = $null
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_string(ROOT / 'bin/bridge_ctl.ps1')}, [ref]$Tokens, [ref]$ParseErrors)
+if ($ParseErrors.Count) {{ throw ($ParseErrors | Out-String) }}
+$Functions = $Ast.FindAll({{
+    param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}}, $false)
+. ([scriptblock]::Create(($Functions | ForEach-Object {{ $_.Extent.Text }}) -join [Environment]::NewLine))
+$ProjectDir = {_ps_string(root)}
+$BridgeHome = $ProjectDir
+$MainScript = Join-Path $ProjectDir 'main.py'
+$PythonExe = {_ps_string(sys.executable)}
+$global:Launched = $false
+function Get-BridgeProcesses {{
+    if ($global:Launched) {{ @{{123=@{{Name='python.exe'}}}} }} else {{ @{{}} }}
+}}
+function Test-LockFileHeld {{ $false }}
+function Remove-StaleFiles {{ }}
+function Get-ResumeAgentNames {{ @('alpha', 'beta space') }}
+function Start-Sleep {{ }}
+function Start-Process {{
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle,
+          $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    @{{FilePath=$FilePath; Arguments=$ArgumentList; Directory=$WorkingDirectory;
+      WindowStyle=$WindowStyle; Stdout=$RedirectStandardOutput; Stderr=$RedirectStandardError}} |
+        ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(captured)}
+    $global:Launched = $true
+    [pscustomobject]@{{HasExited=$false}}
+}}
+if (-not (Start-Bridge -ResumeMode -ApiGateway)) {{ exit 9 }}
+""")
+    assert result.returncode == 0, result.stderr
+    launch = json.loads(captured.read_text(encoding="utf-8-sig"))
+    assert launch["FilePath"] == str(qualified_core)
+    assert launch["Directory"] == str(root)
+    assert launch["WindowStyle"] == "Hidden"
 
-    assert "$MainScript" in start_block
-    assert "-FilePath $PythonExe" in start_block
-    assert "-WindowStyle Hidden" in start_block
-    assert "-RedirectStandardOutput $StdoutLog" in start_block
-    assert "-RedirectStandardError $StderrLog" in start_block
-    assert "--bridge-home" in start_block
-    assert "$LauncherBat" not in start_block
-    assert "Test-ApiGatewayWasEnabled" in restart_block
-    assert "-ApiGateway:$RestartApiGateway" in restart_block
+    # Exercise native Windows argv parsing, including spaces in both roots and Agents.
+    import ctypes
+    argc = ctypes.c_int()
+    parser = ctypes.windll.shell32.CommandLineToArgvW
+    parser.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    parser.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    argv = parser("python.exe " + launch["Arguments"], ctypes.byref(argc))
+    try:
+        arguments = [argv[index] for index in range(argc.value)][1:]
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+    assert arguments == [
+        "-I", "-B", str(root / "main.py"), "--bridge-home", str(root),
+        "--agents", "alpha", "beta space", "--api-gateway",
+    ]
+    assert Path(launch["Stdout"]).parent == root / "logs"
+    assert Path(launch["Stderr"]).parent == root / "logs"
+    assert launch["Stdout"] != launch["Stderr"]
 
 
 @pytest.mark.parametrize("root_name,exit_code", [("hashi", 0), ("hashi space 测试", 7)])
@@ -752,3 +814,4 @@ function Invoke-RestMethod {{
     assert observed_uri.read_text(encoding="utf-8-sig").strip() == "https://127.0.0.1:19002/health"
     assert "RemoteHealthMode" in result.stdout
     assert "ready_empty" in result.stdout
+# HASHI-Fingerprint: hfp_fe0457bf7c984c12b12d7aa97547a06a

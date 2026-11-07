@@ -69,20 +69,41 @@ independent of Function hot handoff and preserves the Remote process across it.
 HASHI may still start/stop Remote for convenience. Provider authorization uses
 live identity, trust, and capability evidence rather than launch mode.
 
-## v1 Topology
+## Native Windows and Linux/WSL restart
 
-v1 implements **Topology A only**:
+Remote and its controlled Core run in the same native OS environment. A Windows
+Remote controlling Linux processes across the WSL boundary is not supported;
+run that instance's Remote inside WSL.
 
-- Remote: Windows native
-- HASHI core: Windows native
-- launcher: `bin/bridge_ctl.ps1 -Action start -Resume`
-- fallback: `bin/bridge-u.bat --resume-last --no-pause`
-- PID checks: Windows PID semantics
-- Backend API health: HASHI Windows Backend API port
+- Windows uses the exact-instance `hashi_restart_ctl.ps1` actuator, with the
+  existing same-privilege `bridge_ctl.ps1` fallback for manual installations.
+  The platform protection policy's `service_targets` is an allowlist for
+  protection, **not** evidence of the live process's service owner. Remote must
+  not select an NSSM/SCM restart from that list.
+- Linux/WSL uses its local `bridge-u.sh --resume-last --api-gateway --force`
+  controller in an independent session. Both OS launch paths close stdin and
+  bind `BRIDGE_HOME`/`BRIDGE_CODE_ROOT` to the controlled root, discarding
+  inherited Python import paths. They never infer a sibling instance by prefix.
+- v5 restart first resolves the installed Core/Functions pair through the
+  authoritative installer selector and executes its isolated qualification
+  checker. The destination contract is stored in the durable receipt **before**
+  launching a stop/start action. Failed qualification leaves the live instance
+  running; no fallback to the coupled legacy virtual environment is allowed.
+- Terminal verification compares health against that qualified destination,
+  retaining the old runtime in `status_before`. This permits an approved cold
+  Core adoption without accepting an arbitrary Core digest change. Legacy
+  programs without an independent-Core policy retain the previous contract.
+- Windows's separate runtime task starts the qualified Core with API Gateway.
+  Its readiness check requires the exact instance and accepts local services
+  ready with zero failed Agents when an optional connector is degraded. Remote
+  still independently verifies old PID exit, new PID, runtime and generation.
 
-**Topology C** (Windows Remote -> WSL2 HASHI core) stays out of scope for v1.
-Treat it as a future advanced mode after separate launcher, PID, and log
-contracts exist for cross-boundary operation.
+After updating Windows supervisor assets, run the existing privileged
+`hashi_restart_ctl.ps1 ensure -HashiRoot <home> -Python <management-python>`
+under the intended runtime user. This updates mismatching fixed task definitions
+without triggering a restart. A later Limited Remote trigger refuses mismatching
+tasks instead of rewriting them or guessing a service. Back up existing task
+definitions before operational migration.
 
 ## Rescue Endpoints
 
@@ -149,8 +170,8 @@ outcome, status state, and error text when available.
 4. start HASHI again with the fixed launcher
 5. verify Backend API health
 6. verify the old PID exited, the new PID differs and is alive, Backend API
-   health is ready, instance identity matches, and runtime version plus Function
-   generation match the pre-restart expectation
+   health is ready, instance identity matches, runtime matches the qualified
+   destination contract, and the process publishes a Function generation
 7. update the restart record to `completed` or a failed phase
 8. append a structured audit event to `logs/remote_rescue_audit.jsonl`
 

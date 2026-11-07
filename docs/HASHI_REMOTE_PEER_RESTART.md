@@ -148,10 +148,14 @@ show that the old PID exited, a different live Core PID appeared, the instance
 identity matches, the stable Core runtime contract still matches, and the new
 process published a Function generation.
 
-Cold restart is also an adoption boundary. The approved dependency digest and
-Function generation may therefore change across it; those changes are recorded
-but are not compared to the pre-restart values as equality gates. The restarted
-Core enforces the active dependency contract before publishing health.
+Cold restart is also an adoption boundary. For an independent-Core installation,
+Remote qualifies the installer-selected destination before stopping the live
+process and freezes that contract in the receipt. Terminal verification uses
+that admitted destination, while `status_before` retains the old runtime.
+An approved Core adoption can therefore succeed; an unqualified target fails
+before cutover, and an unexpected Core digest still fails verification.
+Dependency and Function generation changes remain recorded, and the restarted
+Core enforces its active dependency contract before publishing health.
 
 Workbench health may be `degraded` when an optional connector such as
 Remote/HChat is unavailable. If local services are ready and no Agent failed to

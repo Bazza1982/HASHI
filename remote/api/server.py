@@ -32,6 +32,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -1812,15 +1813,24 @@ def _launch_hashi_process(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
     log_handle = log_path.open("ab")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.update(
+        BRIDGE_HOME=str(root),
+        BRIDGE_CODE_ROOT=str(root),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
     kwargs: dict[str, Any] = {
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
         "cwd": str(root),
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
     }
     if platform.system().lower() == "windows":
-        env = os.environ.copy()
         env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
-        kwargs["env"] = env
         if detach_on_windows:
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
                 subprocess,
@@ -1858,20 +1868,6 @@ def _hashi_restart_command() -> list[str]:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
     if platform.system().lower() == "windows":
-        service_target = _configured_windows_service_target()
-        service_ctl = root / "bin" / "hashi_service_ctl.ps1"
-        if service_target and service_ctl.exists():
-            return [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(service_ctl),
-                "-ServiceName",
-                service_target,
-            ]
         restart_ctl = root / "bin" / "hashi_restart_ctl.ps1"
         if restart_ctl.exists():
             return [
@@ -1883,6 +1879,8 @@ def _hashi_restart_command() -> list[str]:
                 "-File",
                 str(restart_ctl),
                 "trigger",
+                "-Python",
+                sys.executable,
                 "-HashiRoot",
                 str(root),
             ]
@@ -1910,34 +1908,10 @@ def _hashi_restart_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
 
 
-def _configured_windows_service_target() -> str | None:
-    """Return only an exact service target published by platform policy."""
+def _qualified_restart_runtime() -> dict[str, Any] | None:
+    from remote.restart_runtime import qualified_restart_runtime
 
-    if not _control_hashi_root:
-        return None
-    path = (
-        Path(_control_hashi_root)
-        / "state"
-        / "platform"
-        / "live-runtime-protection.json"
-    )
-    try:
-        if path.stat().st_size > 64 * 1024:
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    values = payload.get("service_targets") if isinstance(payload, dict) else None
-    if not isinstance(values, list):
-        return None
-    controlled = _controlled_instance_id({})
-    matches = {
-        str(value).strip()
-        for value in values
-        if str(value).strip().upper() == controlled
-        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(value).strip())
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+    return qualified_restart_runtime(Path(_control_hashi_root))
 
 
 def _restart_hashi_process() -> dict[str, Any]:
@@ -4518,14 +4492,29 @@ def create_app(
                 failure_stage="target_validation",
             )
             return JSONResponse(status_code=409, content=record)
+        phase = "runtime_qualification"
+        record["phase"] = phase
+        record = _write_restart_record(record)
         try:
+            # Freeze the installer-qualified destination before any destructive
+            # action. A cold restart can adopt an approved new Core generation;
+            # comparing it to the still-running old generation is incorrect.
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+            if qualified is not None:
+                record["expected"]["runtime_version"] = {
+                    key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
+                }
+                record["expected"]["runtime_source"] = "installer-qualified-target"
+            record["phase"] = "launch"
+            record = _write_restart_record(record)
+            phase = "launch"
             started = _restart_hashi_process()
         except Exception as exc:
             logger.exception("HASHI rescue restart failed")
             record.update(
                 {
                     "state": "failed",
-                    "phase": "launch",
+                    "phase": phase,
                     "completed_at": _utc_timestamp(),
                     "error": str(exc),
                 }
@@ -4545,7 +4534,7 @@ def create_app(
                 requester_agent=record["requester_agent"],
                 request_source=record["request_source"],
                 old_pid=old_pid,
-                failure_stage="launch",
+                failure_stage=phase,
             )
             return JSONResponse(
                 status_code=500,
