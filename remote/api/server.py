@@ -1706,11 +1706,13 @@ def _restart_evidence(
     target_instance: str,
     expected_runtime: dict[str, Any],
     expected_generation: str,
+    previous_runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     health = status.get("workbench_health") or {}
     new_pid = _status_kernel_pid(status)
     actual_instance = str(health.get("instance_id") or "").strip().upper()
     runtime_version = _runtime_version(status)
+    previous = expected_runtime if previous_runtime is None else previous_runtime
     generation_id = _function_generation_id(status)
     backend_health_ok, backend_health_state = _restart_backend_health(status)
     runtime_contract_mismatches = _restart_runtime_contract_mismatches(
@@ -1746,7 +1748,7 @@ def _restart_evidence(
             runtime_version and not runtime_contract_mismatches
         ),
         "runtime_version_changed": bool(
-            expected_runtime and runtime_version != expected_runtime
+            previous and runtime_version != previous
         ),
         "runtime_contract_mismatches": runtime_contract_mismatches,
         "generation_id": generation_id or None,
@@ -4562,6 +4564,7 @@ def create_app(
             target_instance=target_instance,
             expected_runtime=record["expected"]["runtime_version"] or {},
             expected_generation=record["expected"]["generation_id"] or "",
+            previous_runtime=_runtime_version(before),
         )
         while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
@@ -4572,6 +4575,7 @@ def create_app(
                 target_instance=target_instance,
                 expected_runtime=record["expected"]["runtime_version"] or {},
                 expected_generation=record["expected"]["generation_id"] or "",
+                previous_runtime=_runtime_version(before),
             )
         completed = _restart_evidence_complete(evidence)
         record.update(

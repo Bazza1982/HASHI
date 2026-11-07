@@ -1267,6 +1267,7 @@ def test_restart_qualifies_target_before_cutover_and_verifies_that_contract(tmp_
         assert launches == [target]
         assert body["expected"]["runtime_version"] == target
         assert body["evidence"]["runtime_version_verified"] is True
+        assert body["evidence"]["runtime_version_changed"] is True
         assert body["status_before"]["workbench_health"]["runtime"]["core_source_digest"] == "sha256:old-core"
     else:
         assert response.status_code == 500
