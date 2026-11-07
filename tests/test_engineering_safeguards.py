@@ -142,9 +142,9 @@ def test_reviewed_major_core_change_passes(repository):
 def test_solo_owner_approved_core_change_has_real_auditable_evidence(
     repository, record_updates, expected_code
 ):
-    (repository / "main.py").write_text("changed\\n")
+    (repository / "main.py").write_text("changed\n")
     (repository / "pyproject.toml").write_text(
-        '[project]\\nname = "hashi-test"\\nversion = "5.0.0a1"\\n'
+        '[project]\nname = "hashi-test"\nversion = "5.0.0a1"\n'
     )
     git(repository, "add", "main.py", "pyproject.toml")
     digest = check(repository, "--cached", "--print-core-digest").stdout.strip()
