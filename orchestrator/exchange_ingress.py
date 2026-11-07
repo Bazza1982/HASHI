@@ -308,6 +308,19 @@ class ExchangeInbox:
                 "CREATE UNIQUE INDEX IF NOT EXISTS exchange_inbox_acceptance_order "
                 "ON exchange_inbox(acceptance_order)"
             )
+            # Assign in the INSERT transaction, including in-flight legacy writers.
+            connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS exchange_inbox_assign_acceptance_order
+                AFTER INSERT ON exchange_inbox WHEN NEW.acceptance_order IS NULL
+                BEGIN
+                    UPDATE exchange_inbox
+                    SET acceptance_order=(SELECT COALESCE(MAX(acceptance_order), 0) + 1
+                                          FROM exchange_inbox)
+                    WHERE inbox_key=NEW.inbox_key;
+                END
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS exchange_inbox_pending
@@ -382,9 +395,8 @@ class ExchangeInbox:
                 """
                 INSERT INTO exchange_inbox(
                     inbox_key, idempotency_key, payload_digest, delivery_json,
-                    target_agent, state, acceptance_order, accepted_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'accepted',
-                    (SELECT COALESCE(MAX(acceptance_order), 0) + 1 FROM exchange_inbox), ?, ?)
+                    target_agent, state, accepted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)
                 """,
                 (
                     inbox_key,

@@ -670,6 +670,7 @@ def test_legacy_inbox_migration_preserves_acceptance_and_record_fields(tmp_path,
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(exchange_inbox)")}
         if "acceptance_order" in columns:
+            connection.execute("DROP TRIGGER IF EXISTS exchange_inbox_assign_acceptance_order")
             connection.execute("DROP INDEX exchange_inbox_acceptance_order")
             connection.execute("ALTER TABLE exchange_inbox DROP COLUMN acceptance_order")
     # Independent owners can initialize the legacy database concurrently.
@@ -686,6 +687,21 @@ def test_legacy_inbox_migration_preserves_acceptance_and_record_fields(tmp_path,
     assert reopened[1].accept(first_delivery).replayed is True
     assert [r.inbox_key for r in reopened[2].pending()] == [
         first.inbox_key, second.inbox_key, third.inbox_key]
+    # An older shared Functions process can finish an in-flight INSERT after migration.
+    legacy_delivery = copy.deepcopy(first_delivery)
+    legacy_delivery.update(message_id="message_4", delivery_id="delivery_4")
+    seed = ExchangeInbox(tmp_path / "legacy-writer-input.sqlite3")
+    fourth = seed.accept(legacy_delivery)
+    columns = ("inbox_key", "idempotency_key", "payload_digest", "delivery_json",
+               "target_agent", "state", "accepted_at", "updated_at")
+    with seed._connection() as connection:
+        values = tuple(connection.execute(
+            "SELECT " + ",".join(columns) + " FROM exchange_inbox").fetchone())
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO exchange_inbox(" + ",".join(columns) +
+                           ") VALUES (" + ",".join("?" for _ in columns) + ")", values)
+    assert [r.inbox_key for r in reopened[2].pending()] == [
+        first.inbox_key, second.inbox_key, third.inbox_key, fourth.inbox_key]
 
 
 def test_signed_sender_cannot_target_a_different_local_instance(tmp_path):
