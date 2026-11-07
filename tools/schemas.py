@@ -2250,7 +2250,10 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_delete",
             "description": (
                 "Delete one cron, heartbeat, or nudge owned by the current Agent. "
-                "Call only after the user explicitly requests deleting that task."
+                "Call only after the user explicitly requests deleting that task. "
+                "Deletion also requires an exact PAO owner decision and a currently active Run. "
+                "If approval_required is returned, keep the pending approval ID for the trusted "
+                "owner decision flow; do not approve it yourself or treat clarification text as approval."
             ),
             "parameters": {
                 "type": "object",
@@ -2260,7 +2263,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                     "authorization": {
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
-                        "description": "Required when the current user explicitly authorized this deletion.",
+                        "description": "Intent marker only; never substitutes for the trusted PAO owner decision.",
                     },
                 },
                 "required": ["kind", "job_id", "authorization"],

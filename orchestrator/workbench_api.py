@@ -10748,7 +10748,7 @@ class WorkbenchApiServer:
             return self._v1_error(exc)
 
     async def handle_v1_approval_decide(self, request):
-        owner = self._v1_owner_id(request)
+        owner = self._strict_authenticated_owner(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
@@ -14207,18 +14207,43 @@ class WorkbenchApiServer:
             "her_v2_effort_policy": effort_policy,
         }
 
-    def _scheduler_tool_authenticated(self, request, agent_name: str, tool: str) -> bool:
-        from orchestrator.workbench_auth import verify_scheduler_tool_token
+    def _scheduler_tool_run(self, request, agent_name: str, tool: str):
+        from orchestrator.workbench_auth import scheduler_tool_token_claims
+        from orchestrator.session_store import StaleFencingToken
 
         if self._is_governed_profile():
-            return False
-        headers = getattr(request, "headers", {})
-        return verify_scheduler_tool_token(
-            self.admin_token, headers.get("X-Hashi-Scheduler-Token", ""),
+            return None
+        token = getattr(request, "headers", {}).get("X-Hashi-Scheduler-Token", "")
+        if not token:
+            return None
+        claims = scheduler_tool_token_claims(
+            self.admin_token, token,
             instance_id=str(getattr(self.global_config, "instance_id", "")),
-            agent_id=agent_name, audience=f"{request.scheme}://{request.host}",
-            tool=tool,
-        ) if headers.get("X-Hashi-Scheduler-Token") else False
+            agent_id=agent_name, audience=f"{request.scheme}://{request.host}", tool=tool,
+        )
+        if not claims or type(claims.get("fencing_token")) is not int:
+            return None
+        try:
+            owner = SessionStore.owner_id_for(self.global_config)
+            run = self.session_store.get_run_by_request(
+                claims["request"], owner_id=owner, agent_id=agent_name,
+            )
+            if (run["run_id"] != claims.get("run_id")
+                    or run["fencing_token"] != claims["fencing_token"]):
+                return None
+            binding = dict(
+                run_id=run["run_id"], request_id=run["request_id"],
+                session_id=run["session_id"], agent_id=agent_name, owner_id=owner,
+                context_generation=run["context_generation"],
+                fencing_token=claims["fencing_token"], worker_id=run["worker_id"],
+            )
+            with self.session_store.hold_active_run(**binding):
+                return binding
+        except (SessionNotFound, StaleFencingToken, TypeError, ValueError):
+            return None
+
+    def _scheduler_tool_authenticated(self, request, agent_name: str, tool: str) -> bool:
+        return self._scheduler_tool_run(request, agent_name, tool) is not None
 
     async def handle_agent_scheduler_jobs(self, request):
         """List this agent's authoritative HASHI Scheduler jobs."""
@@ -14515,10 +14540,17 @@ class WorkbenchApiServer:
 
     async def handle_agent_scheduler_conditional_delete(self, request):
         """Delete exactly one confirmed Scheduler definition, without stale writes."""
-        from orchestrator.skill_manager import SchedulerJobChanged
+        from contextlib import nullcontext
+        from orchestrator.session_store import StaleFencingToken
+        from orchestrator.skill_manager import SchedulerJobChanged, scheduler_job_deletion_revision
 
         agent_name = str(request.match_info.get("name") or "").strip()
-        if not self._scheduler_tool_authenticated(request, agent_name, "hashi_scheduler_delete"):
+        binding = None
+        if getattr(request, "headers", {}).get("X-Hashi-Scheduler-Token"):
+            binding = self._scheduler_tool_run(request, agent_name, "hashi_scheduler_delete")
+            if binding is None:
+                return web.json_response({"ok": False, "error_code": "scheduler_run_not_active"}, status=401)
+        else:
             denied = self._guard_agent_management_access(request, agent_name)
             if denied is not None:
                 return denied
@@ -14542,11 +14574,33 @@ class WorkbenchApiServer:
         manager = getattr(runtime, "skill_manager", None)
         if manager is None:
             return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        if binding is not None:
+            job = manager.get_job(kind, job_id)
+            if not job or str(job.get("agent") or "").casefold() != agent_name.casefold():
+                return web.json_response({"ok": False, "error": "task not found"}, status=404)
+            if scheduler_job_deletion_revision(job) != revision:
+                return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
+        scope = dict(operation="activity.scheduler.delete", agent_id=agent_name, kind=kind,
+                     job_id=job_id, expected_revision=revision, only_disabled=only_disabled)
         try:
-            ok, message = manager.delete_owned_job_if_unchanged(
-                kind, job_id, agent_name=str(getattr(runtime, "name", agent_name)),
-                expected_revision=revision, only_disabled=only_disabled,
+            approval_guard = (
+                self.session_store.hold_operation_approval(binding=binding, scope=scope)
+                if binding is not None else nullcontext()
             )
+            with approval_guard as approval:
+                if binding is not None and not approval["authorized"]:
+                    return web.json_response({
+                        "ok": False, "error_code": "approval_required", "approval": approval,
+                        "message": (f"Owner approval {approval['approval_id']} is {approval['state']}. "
+                                    "Use the existing PAO owner decision endpoint; tool text is not approval."),
+                        "decision_path": f"/api/v1/approvals/{approval['approval_id']}",
+                    }, status=403)
+                ok, message = manager.delete_owned_job_if_unchanged(
+                    kind, job_id, agent_name=str(getattr(runtime, "name", agent_name)),
+                    expected_revision=revision, only_disabled=only_disabled,
+                )
+        except StaleFencingToken:
+            return web.json_response({"ok": False, "error_code": "scheduler_run_not_active"}, status=401)
         except (SchedulerJobChanged, ConfigConflictError):
             return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
         except ConfigDurabilityError:

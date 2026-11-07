@@ -714,14 +714,44 @@ The administrative key stays inside the trusted runtime and is never written
 to a CLI/MCP context. The capability cannot authenticate owner, lifecycle or
 other Agent APIs; Governed deletion retains its management-authority checks.
 The delete tool reads the authenticated definition immediately before calling
-the same conditional-delete writer with its opaque revision and exact-task
-user authorization. A concurrent edit returns conflict without replay.
-Focused coverage: authenticated HTTP ToolRegistry and serialized gateway
-deletion, foreign Agent/instance/audience, expiry, tampering, stale revision,
-missing confirmation, and absence of administrative credentials in MCP.
-The user authorized a small HASHI Function change for Workbench on 2026-10-28.
-Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
-running adoption and external-frontend verification remain separate and pending.
+the same conditional-delete writer with its opaque revision. A concurrent edit
+returns conflict without replay.
+
+**Run-bound tool approval (2026-11-07).** The Agent-supplied
+`explicit_user_authorization` string is only a request/intent marker. It is
+never proof of a human decision. A scoped tool deletion first creates an
+idempotent PAO `run_approvals` request for the exact
+`activity.scheduler.delete` operation: Agent, task kind, job ID, full deletion
+revision and optional disabled-only condition. It returns
+`403 approval_required`, the approval ID and the existing decision path;
+`approval.requested` is published through the normal PAO event/outbox stream.
+The authenticated owner decides through the existing
+`POST /api/v1/approvals/{approval_id}` endpoint. Neither a scoped Scheduler token,
+an anonymous request, model text, nor an ordinary clarification answer can
+decide an approval. A denied or consumed decision cannot be changed into a
+fresh authorization by retrying the tool. A pending exact request reuses its ID.
+
+A later tool call may consume only the approved, exact-scope record from the
+same Run attempt. Consumption is durable before dispatch and is not refunded
+after a conflict, failure or unknown outcome. The existing `hold_active_run`
+fence is then reacquired and held through the short compare-and-delete effect.
+Stop between reservation and dispatch prevents deletion; stop concurrent with
+an admitted effect serializes behind that effect. Signed tokens bind the Run
+ID and fencing token as well as the request ID; the server checks the live PAO
+Run, worker, owner, active Session and context generation. Cancelled, stopped,
+completed, interrupted/revoked or superseded Runs cannot use an unexpired token
+to delete. Legacy request-only tokens cannot perform a scoped deletion.
+
+This reuses the existing PAO decision API/events, not a second approval UI or
+the L1/L2 permission service. Personal L0 listing, creation and editing remain
+unchanged. Authenticated frontend settings retain their explicit confirmation
+and revision-safe deletion; Governed management checks remain in force.
+Focused coverage includes real HTTP ToolRegistry and serialized gateway
+approved deletion, forged approval, owner-only decisions, stopped-Run replay,
+attempt/generation revocation, one-use decisions, concurrent stop, foreign
+Agent/instance/audience, expiry, tampering, stale revision and absence of
+administrative credentials in MCP. Source verification and running adoption
+remain separate.
 
 #### Scheduler recovery conversation contract (2026-09-30)
 

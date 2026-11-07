@@ -243,6 +243,15 @@ jobs:
           --basetemp="${{ runner.temp }}/hashi-qualified-linux-roles"
           --junitxml="${{ runner.temp }}/hashi-linux-runtime-roles.xml"
           --durations=20
+      - name: Verify Scheduler trusted approval and Run lifecycle on Linux
+        run: >-
+          python -m pytest -q
+          tests/test_scheduler_run_authorization.py
+          tests/test_workbench_scheduler_api.py
+          tests/test_session_store.py
+          tests/test_frontend_settings_api.py
+          tests/test_permission_pao_fence.py
+          --junitxml="${{ runner.temp }}/hashi-linux-scheduler-authorization.xml"
       - name: Verify existing curated Core contracts on Linux
         run: python -m pytest -q --junitxml="${{ runner.temp }}/hashi-linux-core.xml"
       - name: Retain Linux qualification receipts
@@ -253,6 +262,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/hashi-linux-runtime-roles.xml
+            ${{ runner.temp }}/hashi-linux-scheduler-authorization.xml
             ${{ runner.temp }}/hashi-linux-core.xml
             ${{ runner.temp }}/hashi-qualified-linux-roles/**/runtime-role-qualification.json
             ${{ runner.temp }}/hashi-qualified-linux-roles/**/functions-dependency-handoff.json

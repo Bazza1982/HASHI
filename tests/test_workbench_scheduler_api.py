@@ -68,20 +68,39 @@ async def test_scheduler_transport_timeout_is_safe_and_never_replays(tool_name, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("via_gateway", [False, True])
 async def test_authenticated_scheduler_tool_deletes_only_owned_confirmed_job(tmp_path, via_gateway):
+    import aiohttp
     from tools.registry import ToolRegistry
     from tools.gateway.context import write_gateway_context, load_gateway_context
+    from tests.test_scheduler_run_authorization import active_run, credential, deletion_scope, setup_personal
 
-    server, runtime = _server(tmp_path)
-    server.admin_token = "fixture-private-admin-key"
-    server.global_config.instance_id = "HASHI1"
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    scope = deletion_scope(runtime)
     async with TestServer(server.app) as upstream:
         url = str(upstream.make_url("")).rstrip("/")
+        async with aiohttp.ClientSession() as client:
+            async with client.delete(
+                url + "/api/agents/momo/scheduler/jobs/daily-report",
+                json={**scope, "authorization": "explicit_user_authorization"},
+                headers={"X-Hashi-Scheduler-Token": credential(server, url, binding)},
+            ) as response:
+                assert response.status == 403
+                pending = await response.json()
+                assert pending["error_code"] == "approval_required"
+                assert pending["approval"]["scope"] == scope
+            # Only a genuine owner decision through the existing PAO endpoint grants approval.
+            async with client.post(url + pending["decision_path"], json={"decision": "approved"},
+                                   headers={"X-Workbench-Token": server.admin_token}) as response:
+                assert response.status == 200, await response.text()
         registry = ToolRegistry(
             allowed_tools=["hashi_scheduler_status", "hashi_scheduler_delete"],
             access_root=tmp_path, workspace_dir=runtime.workspace_dir,
             secrets={"workbench_admin_token": server.admin_token},
-            audit_context={"agent_name": "momo", "instance_id": "HASHI1",
-                           "request_id": "fixture-request", "global_config": server.global_config,
+            audit_context={"agent_name": "momo", "instance_id": server.global_config.instance_id,
+                           "request_id": binding["request_id"], "global_config": server.global_config,
+                           "hashi_run_id": binding["run_id"],
+                           "hashi_fencing_token": binding["fencing_token"],
                            "workbench_api_base_url": url},
         )
         if via_gateway:
@@ -105,16 +124,19 @@ async def test_scheduler_scoped_credential_never_grants_owner_or_other_agent(tmp
     from orchestrator.workbench_auth import issue_scheduler_tool_token
     from orchestrator.skill_manager import scheduler_job_deletion_revision
 
+    from tests.test_scheduler_run_authorization import active_run, setup_personal
     server, runtime = _server(tmp_path)
-    server.admin_token = "fixture-private-key"
-    server.global_config.instance_id = "HASHI1"
+    setup_personal(server, runtime)
+    binding = active_run(server)
     job = runtime.skill_manager.get_job("cron", "daily-report")
     payload = {"kind": "cron", "expected_revision": scheduler_job_deletion_revision(job),
                "authorization": "explicit_user_authorization"}
     async with TestServer(server.app) as upstream:
         base = str(upstream.make_url("")).rstrip("/")
         def credential(**overrides):
-            args = dict(instance_id="HASHI1", agent_id="momo", request_id="fixture-run",
+            args = dict(instance_id=server.global_config.instance_id, agent_id="momo",
+                        request_id=binding["request_id"], run_id=binding["run_id"],
+                        fencing_token=binding["fencing_token"],
                         audience=base, tools=["hashi_scheduler_delete"])
             args.update(overrides)
             return issue_scheduler_tool_token(server.admin_token, **args)
@@ -164,7 +186,7 @@ class _FakeRuntime:
         return True, f"Queued cron task [{job['id']}]"
 
 
-def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
+def _server(tmp_path: Path, *, persistent_session_v1=False) -> tuple[WorkbenchApiServer, _FakeRuntime]:
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -243,6 +265,7 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
         bridge_home=tmp_path,
         project_root=tmp_path,
         deployment_profile="personal",
+        persistent_session_v1=persistent_session_v1,
     )
     orchestrator = SimpleNamespace(runtimes=[runtime], scheduler=scheduler)
     return (

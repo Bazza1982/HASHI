@@ -40,6 +40,8 @@ def scheduler_tool_credential(secrets, audit_context, allowed_tools):
     base_url, _ = _scheduler_endpoint(audit_context)
     return issue_scheduler_tool_token(secret, instance_id=str(instance), agent_id=str(agent),
                                      request_id=str(request), audience=base_url,
+                                     run_id=(audit_context or {}).get("hashi_run_id"),
+                                     fencing_token=(audit_context or {}).get("hashi_fencing_token"),
                                      tools=[tool for tool in allowed_tools if tool.startswith("hashi_scheduler_")])
 
 def _render_result(status: int, payload: dict[str, Any]) -> str:

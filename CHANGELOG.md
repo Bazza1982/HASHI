@@ -54,6 +54,10 @@ included since the v4 Beta, migration steps and publication limits.
   background work, including Backend API transport registration.
 - Retain scoped Scheduler write authority through tools and the frontend
   settings adapter without forwarding management credentials to Agents.
+- Require a trusted, exact-operation PAO decision for Agent Scheduler deletion;
+  model-supplied approval text cannot authorize it. Bind destructive scoped
+  calls to a live Run attempt, consume approval once, and fence stop/revocation
+  through the revision-safe deletion without changing protected Core.
 - Restore local Remote availability after shared Functions handoff while
   continuing to reject untrusted foreign peers.
 - Keep native MCP/Remote/hook children from writing bytecode into sealed
