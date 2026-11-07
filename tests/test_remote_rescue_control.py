@@ -404,7 +404,7 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     assert record["restart_id"] == body["restart_id"]
 
 
-def test_restart_evidence_accepts_dependency_and_generation_adoption_with_local_services_ready(
+def test_legacy_restart_evidence_accepts_dependency_and_generation_adoption_with_local_services_ready(
     monkeypatch,
 ):
     expected_runtime = {
@@ -577,7 +577,7 @@ def test_hashi_rescue_restart_keeps_remote_health_responsive(
     assert response_holder["response"].status_code == 200
 
 
-def test_windows_restart_uses_only_explicit_configured_service_target(
+def test_windows_restart_does_not_route_from_protected_service_targets(
     tmp_path,
     monkeypatch,
 ):
@@ -585,6 +585,7 @@ def test_windows_restart_uses_only_explicit_configured_service_target(
     bin_dir.mkdir()
     (bin_dir / "bridge_ctl.ps1").write_text("# fallback\n", encoding="utf-8")
     (bin_dir / "hashi_service_ctl.ps1").write_text("# service\n", encoding="utf-8")
+    (bin_dir / "hashi_restart_ctl.ps1").write_text("# actuator\n", encoding="utf-8")
     policy = tmp_path / "state" / "platform" / "live-runtime-protection.json"
     policy.parent.mkdir(parents=True)
     policy.write_text(
@@ -596,8 +597,8 @@ def test_windows_restart_uses_only_explicit_configured_service_target(
 
     command = remote_server._hashi_restart_command()
 
-    assert "hashi_service_ctl.ps1" in " ".join(command)
-    assert command[-2:] == ["-ServiceName", "HASHI_TEST"]
+    assert "hashi_service_ctl.ps1" not in " ".join(command)
+    assert "hashi_restart_ctl.ps1" in " ".join(command)
 
 
 def test_windows_restart_uses_fixed_actuator_without_service_target(
@@ -633,6 +634,7 @@ def test_windows_restart_keeps_bridge_controller_as_legacy_fallback(
     command = remote_server._hashi_restart_command()
 
     assert "bridge_ctl.ps1" in " ".join(command)
+    assert "-ApiGateway" in command
 
 
 def test_windows_service_restart_launcher_avoids_detached_process(
@@ -1196,3 +1198,102 @@ def test_protocol_status_reports_rescue_start_disabled_at_l2(tmp_path):
     assert body["rescue_start_enabled"] is False
     assert body["rescue_start_requirement"] == "L3_RESTART"
     assert "rescue_start" not in body["capabilities"]
+
+@pytest.mark.parametrize("system", ["Windows", "Linux"])
+def test_restart_launch_fences_inherited_instance_and_closes_stdin(tmp_path, monkeypatch, system):
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server.platform, "system", lambda: system)
+    monkeypatch.setenv("BRIDGE_HOME", "/another-instance")
+    monkeypatch.setenv("BRIDGE_CODE_ROOT", "/another-program")
+    monkeypatch.setenv("PYTHONPATH", "/another-runtime")
+    captured = {}
+
+    def launch(command, **kwargs):
+        captured.update(kwargs)
+        return type("Process", (), {"pid": 123})()
+
+    monkeypatch.setattr(remote_server.subprocess, "Popen", launch)
+    remote_server._launch_hashi_process(["fixed-launcher"], log_name="restart.log")
+    assert captured["env"]["BRIDGE_HOME"] == str(tmp_path)
+    assert captured["env"]["BRIDGE_CODE_ROOT"] == str(tmp_path)
+    assert captured["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert "PYTHONPATH" not in captured["env"]
+    assert captured["stdin"] == remote_server.subprocess.DEVNULL
+    assert captured["close_fds"] is True
+    if system == "Linux":
+        assert captured["start_new_session"] is True
+
+
+@pytest.mark.parametrize(
+    "qualified,observed_digest,observe_in_poll",
+    [(True, digest, polling) for digest in
+     ("sha256:new-dependencies", "sha256:unexpected-dependencies", None)
+     for polling in (False, True)] + [(False, None, False)],
+)
+def test_restart_qualifies_target_before_cutover_and_verifies_that_contract(tmp_path, monkeypatch, qualified, observed_digest, observe_in_poll):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    target = {
+        "python": "3.12.13", "platform_abi": ".cp312-test",
+        "core_api": 3, "function_api": 3, "worker_model": "per-agent-process",
+        "worker_protocol": 1, "generation_schema": 2,
+        "dependency_digest": "sha256:new-dependencies", "core_source_digest": "sha256:qualified-core",
+    }
+    before = {
+        "hashi_running": True, "pid": 4141, "pid_alive": True,
+        "workbench_health": {"ok": True, "ready": True, "instance_id": "HASHI_TEST",
+                            "runtime": {**target, "core_source_digest": "sha256:old-core",
+                                        "dependency_digest": "sha256:old-dependencies"},
+                            "shared_functions": {"generation_id": "sha256:old"}},
+    }
+    actual = {**target, "dependency_digest": observed_digest}
+    if observed_digest is None:
+        actual.pop("dependency_digest")
+    after = {
+        **before, "pid": 6161,
+        "workbench_health": {**before["workbench_health"], "runtime": actual,
+                            "shared_functions": {"generation_id": "sha256:new"}},
+    }
+    launches = []
+    def qualify():
+        if not qualified:
+            raise ValueError("Selected runtime failed qualification")
+        return target
+    def launch():
+        # Expectation must already be durable before any stop/start action.
+        receipts = list((tmp_path / "state" / "restarts").glob("*.json"))
+        record = json.loads(receipts[0].read_text(encoding="utf-8"))
+        launches.append(record["expected"]["runtime_version"])
+        return {"pid": 5252, "command": ["fixed-launcher"], "log_path": "restart.log"}
+    states = iter([before, before, after] if observe_in_poll else [before, after])
+    monkeypatch.setattr(remote_server, "_hashi_control_status", lambda: next(states, after))
+    monkeypatch.setattr(remote_server, "_qualified_restart_runtime", qualify, raising=False)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process", launch)
+    monkeypatch.setattr(remote_server, "_process_exists", lambda pid: pid == 6161)
+    monkeypatch.setattr(remote_server, "RESTART_VERIFICATION_TIMEOUT_SECONDS", 1 if observe_in_poll else 0)
+    response = client.post("/control/hashi/restart", json={"target_instance": "HASHI_TEST"})
+    body = response.json()
+    if qualified:
+        matches = observed_digest == target["dependency_digest"]
+        assert response.status_code == (200 if matches else 503)
+        assert launches == [target]
+        assert body["expected"]["runtime_version"] == target
+        evidence = body["evidence"]
+        assert evidence["runtime_version_verified"] is matches
+        assert body["state"] == ("completed" if matches else "failed")
+        assert evidence["runtime_contract_mismatches"] == ([] if matches else ["dependency_digest"])
+        assert all(evidence[key] is True for key in [
+            "old_pid_exited", "new_pid_alive", "new_pid_differs", "backend_health_ok",
+            "instance_matches", "generation_verified",
+        ])
+        durable = client.get(f"/control/hashi/restarts/{body['restart_id']}").json()
+        assert durable["state"] == body["state"]
+        assert durable["expected"]["runtime_version"] == target
+        assert durable["evidence"] == evidence
+        assert body["evidence"]["runtime_version_changed"] is True
+        assert body["status_before"]["workbench_health"]["runtime"]["core_source_digest"] == "sha256:old-core"
+    else:
+        assert response.status_code == 500
+        assert launches == []
+        assert body["phase"] == "runtime_qualification"
+        assert body["state"] == "failed"
+# HASHI-Fingerprint: hfp_7dd00655d44449dcbb5b515413342b48

@@ -33,7 +33,8 @@ param(
     
     [switch]$Quiet,
     [switch]$Force,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$ApiGateway
 )
 
 $ErrorActionPreference = "Stop"
@@ -565,13 +566,13 @@ switch ($Action) {
         exit $(if ($success) { 0 } else { 1 })
     }
     "start" {
-        $success = Start-Bridge -ResumeMode:$Resume
+        $success = Start-Bridge -ResumeMode:$Resume -ApiGateway:$ApiGateway
         exit $(if ($success) { 0 } else { 1 })
     }
     "restart" {
         Write-Log "=== Restarting bridge-u-f ==="
         $RestartProcesses = Get-BridgeProcesses
-        $RestartApiGateway = Test-ApiGatewayWasEnabled -Processes $RestartProcesses
+        $RestartApiGateway = $ApiGateway -or (Test-ApiGatewayWasEnabled -Processes $RestartProcesses)
         $stopOk = Stop-BridgeProcesses -ForceImmediate:$Force
         if ($stopOk) {
             Remove-StaleFiles

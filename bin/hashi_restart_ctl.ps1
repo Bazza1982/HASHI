@@ -27,7 +27,7 @@ $IdentityScript = Join-Path $HashiRoot "remote\supervisor_identity.py"
 if (-not (Test-Path -LiteralPath $IdentityScript -PathType Leaf)) {
     throw "Missing supervisor identity helper: $IdentityScript"
 }
-$IdentityArgs = @($IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
+$IdentityArgs = @("-B", $IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
 if ($InstanceId) {
     $IdentityArgs += @("--instance-id", $InstanceId)
 }
@@ -72,7 +72,8 @@ $RuntimeArgs = @(
     "-WindowStyle", "Hidden",
     "-File", "`"$RuntimeController`"",
     "-Action", "start",
-    "-Resume"
+    "-Resume",
+    "-ApiGateway"
 )
 $RuntimeArgumentString = $RuntimeArgs -join " "
 
@@ -213,7 +214,8 @@ switch ($Action) {
                 -ExecutionPolicy Bypass `
                 -File $RuntimeController `
                 -Action restart `
-                -Resume
+                -Resume `
+                -ApiGateway
             exit $LASTEXITCODE
         }
         if (-not (Test-FixedRestartTask -Task $Task)) {
