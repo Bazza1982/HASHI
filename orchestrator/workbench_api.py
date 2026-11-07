@@ -185,6 +185,7 @@ from orchestrator.multimodal_contract import (
 )
 from orchestrator.pathing import BridgePaths, resolve_instance_id, resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
+from orchestrator.agent_mutation import mutation_authority, invoke_mutation, invoke_async_mutation
 from orchestrator.session_store import (
     MAX_SESSION_ATTACHMENT_BYTES,
     MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
@@ -14304,6 +14305,7 @@ class WorkbenchApiServer:
         """Resolve one exact recovery batch through the Agent tool gateway."""
 
         agent_name = str(request.match_info.get("name") or "").strip()
+        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_recovery_resolve")
         batch_id = str(request.match_info.get("batch_id") or "").strip()
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
@@ -14337,13 +14339,13 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            result = await resolver(
+            result = await invoke_async_mutation(self, binding, lambda: resolver(
                 agent_name=agent_name,
                 batch_id=batch_id,
                 action=str(payload.get("action") or ""),
                 counts=payload.get("counts"),
                 runtime_map={agent_name: runtime},
-            )
+            ))
         except KeyError as exc:
             return web.json_response(
                 {"ok": False, "error": str(exc)}, status=404
@@ -14364,6 +14366,7 @@ class WorkbenchApiServer:
         """Create one Agent-owned scheduler task through the typed API."""
 
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_create")
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -14407,7 +14410,7 @@ class WorkbenchApiServer:
                 loop_meta = None
                 if loop_max is not None:
                     loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
-                job = skill_manager.upsert_cron_job(
+                job = invoke_mutation(self, binding, lambda: skill_manager.upsert_cron_job(
                     task_id=task_id,
                     agent_name=agent_name,
                     schedule=schedule,
@@ -14417,7 +14420,7 @@ class WorkbenchApiServer:
                     prompt=prompt,
                     timezone_name=timezone_name,
                     loop_meta=loop_meta,
-                )
+                ))
             elif kind == "heartbeat":
                 prompt = str(payload.get("prompt") or "").strip()
                 if not prompt:
@@ -14435,7 +14438,7 @@ class WorkbenchApiServer:
                 loop_meta = None
                 if loop_max is not None:
                     loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
-                job = skill_manager.upsert_heartbeat_job(
+                job = invoke_mutation(self, binding, lambda: skill_manager.upsert_heartbeat_job(
                     task_id=task_id,
                     agent_name=agent_name,
                     interval_seconds=interval_seconds,
@@ -14444,7 +14447,7 @@ class WorkbenchApiServer:
                     action=action,
                     note=note,
                     loop_meta=loop_meta,
-                )
+                ))
             else:
                 exit_condition = str(payload.get("exit_condition") or "").strip()
                 if not exit_condition:
@@ -14461,7 +14464,7 @@ class WorkbenchApiServer:
                         raise ValueError("interval_seconds must be at least 1")
                 max_nudges = max(0, int(payload.get("max_nudges", 0) or 0))
                 task_id = task_id or f"{agent_name}-nudge-{uuid4().hex[:8]}"
-                job = skill_manager.create_nudge_job(
+                job = invoke_mutation(self, binding, lambda: skill_manager.create_nudge_job(
                     agent_name=agent_name,
                     interval_minutes=max(1, int(interval_minutes)),
                     exit_condition=exit_condition,
@@ -14469,7 +14472,7 @@ class WorkbenchApiServer:
                     task_id=task_id,
                     enabled=enabled,
                     interval_seconds=interval_seconds,
-                )
+                ))
         except (TypeError, ValueError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except (ConfigConflictError, ConfigDurabilityError) as exc:
@@ -14489,6 +14492,7 @@ class WorkbenchApiServer:
         """Update one owned scheduler task without trusting a model-supplied agent."""
 
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_update")
         job_id = str(request.match_info.get("job_id") or "").strip()
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
@@ -14519,9 +14523,9 @@ class WorkbenchApiServer:
             if not valid:
                 return web.json_response({"ok": False, "error": error or "invalid cron schedule"}, status=400)
         try:
-            ok, message, job = skill_manager.update_owned_job(
+            ok, message, job = invoke_mutation(self, binding, lambda: skill_manager.update_owned_job(
                 kind, job_id, agent_name=agent_name, updates=payload
-            )
+            ))
         except (ConfigConflictError, ConfigDurabilityError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
         except (TypeError, ValueError) as exc:
@@ -14729,6 +14733,7 @@ class WorkbenchApiServer:
     async def handle_agent_run_job(self, request):
         """Run one cron/heartbeat job immediately for a specific agent."""
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_rerun")
         payload = await request.json()
         kind = str(payload.get("kind") or "cron").strip().lower()
         job_id = str(payload.get("job_id") or payload.get("id") or "").strip()
@@ -14767,7 +14772,14 @@ class WorkbenchApiServer:
             )
 
         try:
-            ok, message = await runtime._run_job_now(job, kind=kind)
+            from orchestrator.skill_manager import scheduler_job_deletion_revision
+            scope = {"operation": "activity.scheduler.run", "agent_id": agent_name,
+                     "kind": kind, "job_id": job_id,
+                     "expected_revision": scheduler_job_deletion_revision(job)}
+            ok, message = await invoke_async_mutation(
+                self, binding, lambda: runtime._run_job_now(job, kind=kind), scope=scope)
+        except web.HTTPException:
+            raise
         except Exception as e:
             return web.json_response(
                 {"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500
@@ -14812,6 +14824,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_create(self, request):
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_superloop_create")
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         try:
@@ -14821,10 +14834,10 @@ class WorkbenchApiServer:
         if not isinstance(payload, dict):
             return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
         try:
-            result = self._superloop_service(agent_name).create_quickstart(
+            result = invoke_mutation(self, binding, lambda: self._superloop_service(agent_name).create_quickstart(
                 str(payload.get("goal") or ""),
                 task_title=str(payload.get("task_title") or "").strip() or None,
-            )
+            ))
         except (TypeError, ValueError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except OSError as exc:
@@ -14851,6 +14864,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_update(self, request):
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_superloop_update")
         loop_id = str(request.match_info.get("loop_id") or "").strip()
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -14863,9 +14877,9 @@ class WorkbenchApiServer:
         action = str(payload.pop("action") or "").strip().lower()
         payload.pop("requested_by", None)
         try:
-            result = self._superloop_service(agent_name).update_loop(
+            result = invoke_mutation(self, binding, lambda: self._superloop_service(agent_name).update_loop(
                 loop_id, action=action, arguments=payload
-            )
+            ))
         except (FileNotFoundError, PermissionError):
             return web.json_response({"ok": False, "error": "loop not found for agent"}, status=404)
         except (TypeError, ValueError) as exc:
@@ -14879,6 +14893,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_delete(self, request):
         agent_name = request.match_info.get("name")
+        binding = mutation_authority(self, request, agent_name, "hashi_superloop_delete")
         loop_id = str(request.match_info.get("loop_id") or "").strip()
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -14891,7 +14906,11 @@ class WorkbenchApiServer:
         if payload.get("authorization") != "explicit_user_authorization":
             return web.json_response({"ok": False, "error": "explicit loop deletion authorization is required"}, status=403)
         try:
-            result = self._superloop_service(agent_name).delete_loop(loop_id)
+            service = self._superloop_service(agent_name)
+            service.get_loop(loop_id)  # Preserve ownership denial before requesting approval.
+            result = invoke_mutation(self, binding, lambda: service.delete_loop(loop_id),
+                                     scope={"operation": "activity.superloop.delete",
+                                            "agent_id": agent_name, "loop_id": loop_id})
         except (FileNotFoundError, PermissionError):
             return web.json_response({"ok": False, "error": "loop not found for agent"}, status=404)
         except (TypeError, ValueError) as exc:

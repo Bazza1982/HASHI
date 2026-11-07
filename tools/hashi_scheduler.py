@@ -42,7 +42,7 @@ def scheduler_tool_credential(secrets, audit_context, allowed_tools):
                                      request_id=str(request), audience=base_url,
                                      run_id=(audit_context or {}).get("hashi_run_id"),
                                      fencing_token=(audit_context or {}).get("hashi_fencing_token"),
-                                     tools=[tool for tool in allowed_tools if tool.startswith("hashi_scheduler_")])
+                                     tools=[tool for tool in allowed_tools if tool.startswith(("hashi_scheduler_", "hashi_superloop_"))])
 
 def _render_result(status: int, payload: dict[str, Any]) -> str:
     if status >= 400 or payload.get("ok") is False:

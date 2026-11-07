@@ -161,7 +161,9 @@ async def test_scheduler_scoped_credential_never_grants_owner_or_other_agent(tmp
                 assert runtime.skill_manager.get_job("cron", "daily-report") == job
 
 class _FakeRequest:
+    """Authenticated owner request fixture; unauthenticated cases use real HTTP."""
     def __init__(self, *, name="momo", batch_id=None, query=None, payload=None):
+        self.headers = {"X-Workbench-Token": "fixture-owner-key"}
         self.match_info = {"name": name}
         if batch_id is not None:
             self.match_info["batch_id"] = batch_id
@@ -265,17 +267,15 @@ def _server(tmp_path: Path, *, persistent_session_v1=False) -> tuple[WorkbenchAp
         bridge_home=tmp_path,
         project_root=tmp_path,
         deployment_profile="personal",
+        instance_id="HASHI1",
         persistent_session_v1=persistent_session_v1,
     )
     orchestrator = SimpleNamespace(runtimes=[runtime], scheduler=scheduler)
-    return (
-        WorkbenchApiServer(
-            config_path=config_path,
-            global_config=global_config,
-            orchestrator=orchestrator,
-        ),
-        runtime,
+    server = WorkbenchApiServer(
+        config_path=config_path, global_config=global_config, orchestrator=orchestrator,
     )
+    server.admin_token = "fixture-owner-key"
+    return server, runtime
 
 
 @pytest.mark.asyncio
@@ -492,7 +492,7 @@ async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path
         )
         manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
         manager.current_backend = SimpleNamespace(tool_registry=None)
-        manager.secrets = {}
+        manager.secrets = {"workbench_admin_token": server.admin_token}
         manager.global_config = SimpleNamespace(
             instance_id="HASHI1",
             authorized_id=None,
@@ -519,6 +519,11 @@ async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path
             adapter_config,
         )
         registry = manager.current_backend.tool_registry
+        from tests.test_scheduler_run_authorization import active_run
+        binding = active_run(server)
+        registry.audit_context.update(request_id=binding["request_id"],
+                                      hashi_run_id=binding["run_id"],
+                                      hashi_fencing_token=binding["fencing_token"])
         registry.audit_context["workbench_api_base_url"] = "http://127.0.0.1:9"
 
         result = await registry.execute(
@@ -531,7 +536,8 @@ async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path
     payload = json.loads(result.output)
     assert payload["batch_id"] == "batch-1"
     assert payload["resolution"]["skipped_total"] == 2
-    assert resolutions == [("workbench", "HASHI1")]
+    # Credential audience and HTTP transport both resolve the same trusted endpoint.
+    assert resolutions == [("workbench", "HASHI1"), ("workbench", "HASHI1")]
     assert runtime.recovery_resolutions == [
         {
             "agent_name": "momo",
@@ -544,7 +550,7 @@ async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_scheduler_agent_can_create_update_but_unauthenticated_delete_is_rejected(tmp_path):
+async def test_scheduler_owner_can_create_update_but_unauthenticated_delete_is_rejected(tmp_path):
     server, _runtime = _server(tmp_path)
 
     created = await server.handle_agent_scheduler_create(
@@ -568,6 +574,7 @@ async def test_scheduler_agent_can_create_update_but_unauthenticated_delete_is_r
             (),
             {
                 "match_info": {"name": "momo", "job_id": "momo-loop-1"},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
                     payload={
                         "kind": "heartbeat",
@@ -590,6 +597,7 @@ async def test_scheduler_agent_can_create_update_but_unauthenticated_delete_is_r
             (),
             {
                 "match_info": {"name": "momo", "job_id": "momo-loop-1"},
+                "headers": {},
                 "json": _FakeRequest(
                     payload={
                         "kind": "heartbeat",
@@ -613,6 +621,7 @@ async def test_scheduler_mutation_rejects_other_agent_job(tmp_path):
             (),
             {
                 "match_info": {"name": "momo", "job_id": "other-agent"},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(payload={"kind": "cron", "enabled": False}).json,
             },
         )()
@@ -646,6 +655,7 @@ async def test_scheduler_nudge_create_update_and_unauthenticated_delete(tmp_path
             (),
             {
                 "match_info": {"name": "momo", "job_id": "momo-nudge-1"},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
                     payload={
                         "kind": "nudge",
@@ -670,6 +680,7 @@ async def test_scheduler_nudge_create_update_and_unauthenticated_delete(tmp_path
             (),
             {
                 "match_info": {"name": "momo", "job_id": "momo-nudge-1"},
+                "headers": {},
                 "json": _FakeRequest(
                     payload={
                         "kind": "nudge",
@@ -717,6 +728,7 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
             (),
             {
                 "match_info": {"name": "momo", "loop_id": loop_id},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
                     payload={
                         "action": "task_add",
@@ -736,6 +748,7 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
             (),
             {
                 "match_info": {"name": "momo", "loop_id": loop_id},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
                     payload={"requested_by": "hashi_tool_gateway"}
                 ).json,
@@ -750,6 +763,7 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
             (),
             {
                 "match_info": {"name": "momo", "loop_id": loop_id},
+                "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
                     payload={
                         "requested_by": "hashi_tool_gateway",

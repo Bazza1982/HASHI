@@ -753,6 +753,36 @@ Agent/instance/audience, expiry, tampering, stale revision and absence of
 administrative credentials in MCP. Source verification and running adoption
 remain separate.
 
+#### Backend mutation authentication (2026-11-07)
+
+Scheduler create/update, immediate run/recovery and Superloop create/update/delete
+authenticate before reading the body. A body-supplied gateway or authorization
+marker never grants access. Workbench owners retain the existing strict
+credentials, Agent visibility and Governed management checks. Personal-profile
+Agent tools use the existing signed capability, bounded to instance, Agent,
+API audience, allowed tools and the exact live PAO Run attempt. CLI/MCP delegates
+that scoped capability; it never receives the administrative signing key.
+A supplied invalid capability cannot fall back to owner authentication.
+
+Ordinary creation, editing, Superloop control and recovery do not acquire a new
+approval requirement. The existing explicit-authorization policies for an
+immediate single-job rerun and Superloop deletion use PAO's existing owner
+decision endpoint and one-use Run approval. Their exact scopes are respectively
+`activity.scheduler.run` (Agent, kind, job ID and current definition revision)
+and `activity.superloop.delete` (Agent and loop ID). Model strings cannot approve
+either action. Confirmed Scheduler deletion above retains its existing writer,
+ownership and revision checks unchanged.
+
+Short local effects reacquire and hold the Run fence through the write, including
+after body parsing. Async queue/Worker operations validate admission without
+holding a SQLite transaction across an await. An accepted scheduled child has
+its own lifecycle. Recovery additionally checks after its lock wait and before
+each additional dispatch. If the source Run stops midway, no further occurrences
+start; accepted effects are durably accounted and the unstarted remainder is
+skipped in a terminal resolution. Retrying that batch cannot duplicate work.
+Stopped, cancelled, completed, revoked or superseded Run credentials cannot
+initiate further mutations.
+
 #### Scheduler recovery conversation contract (2026-09-30)
 
 When persisted missed triggers require a decision, HASHI Scheduler creates one

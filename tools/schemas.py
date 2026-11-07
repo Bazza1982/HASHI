@@ -2134,8 +2134,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
                         "description": (
-                            "Required assertion that the current user request explicitly "
-                            "authorized this exact single-job rerun."
+                            "Intent marker for this exact rerun; not proof of approval. "
+                            "Scoped Agent execution also requires the existing trusted PAO owner decision."
                         ),
                     },
                 },
@@ -2353,7 +2353,9 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
             "name": "hashi_superloop_delete",
             "description": (
                 "Delete an owned Superloop. The loop is retained as a deleted audit record "
-                "and will no longer advance. Call only after explicit user authorization."
+                "and will no longer advance. Call only after explicit user authorization. "
+                "The authorization string is an intent marker; scoped Agent execution "
+                "also requires the existing trusted PAO owner decision."
             ),
             "parameters": {
                 "type": "object",

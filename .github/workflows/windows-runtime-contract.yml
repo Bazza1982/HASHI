@@ -243,9 +243,12 @@ jobs:
           --basetemp="${{ runner.temp }}/hashi-qualified-linux-roles"
           --junitxml="${{ runner.temp }}/hashi-linux-runtime-roles.xml"
           --durations=20
-      - name: Verify Scheduler trusted approval and Run lifecycle on Linux
+      - name: Verify Backend mutation authentication and Run lifecycle on Linux
         run: >-
           python -m pytest -q
+          tests/test_backend_mutation_authorization.py
+          tests/test_scheduler_missed_recovery.py
+          tests/test_superloop_commands.py
           tests/test_scheduler_run_authorization.py
           tests/test_workbench_scheduler_api.py
           tests/test_session_store.py

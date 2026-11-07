@@ -32,11 +32,17 @@ async def execute_hashi_superloop_tool(
     arguments: Mapping[str, Any],
     *,
     audit_context: Mapping[str, Any] | None,
+    credential: str = "",
 ) -> str:
     try:
         base_url, agent = workbench_endpoint(audit_context, require_agent=True)
     except ValueError as exc:
         return f"Error: {exc}"
+
+    async def request_json(method, url, **kwargs):
+        if credential:
+            kwargs["headers"] = {"X-Hashi-Scheduler-Token": credential}
+        return await _request_json(method, url, **kwargs)
 
     encoded_agent = quote(agent, safe="")
     args = dict(arguments or {})
@@ -46,19 +52,19 @@ async def execute_hashi_superloop_tool(
             if bool(args.get("include_deleted", False)):
                 query["include_deleted"] = "true"
             suffix = f"?{urlencode(query)}" if query else ""
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "GET", f"{base_url}/api/agents/{encoded_agent}/superloops{suffix}"
             )
         elif tool_name == "hashi_superloop_get":
             loop_id = str(args.get("loop_id") or "").strip()
             if not loop_id:
                 return "Error: hashi_superloop_get requires loop_id"
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "GET",
                 f"{base_url}/api/agents/{encoded_agent}/superloops/{quote(loop_id, safe='')}"
             )
         elif tool_name == "hashi_superloop_create":
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "POST",
                 f"{base_url}/api/agents/{encoded_agent}/superloops",
                 payload={
@@ -74,7 +80,7 @@ async def execute_hashi_superloop_tool(
             payload = dict(args)
             payload.pop("loop_id", None)
             payload["requested_by"] = "hashi_tool_gateway"
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "PATCH",
                 f"{base_url}/api/agents/{encoded_agent}/superloops/{quote(loop_id, safe='')}",
                 payload=payload,
@@ -88,7 +94,7 @@ async def execute_hashi_superloop_tool(
             loop_id = str(args.get("loop_id") or "").strip()
             if not loop_id:
                 return "Error: hashi_superloop_delete requires loop_id"
-            status, payload = await _request_json(
+            status, payload = await request_json(
                 "DELETE",
                 f"{base_url}/api/agents/{encoded_agent}/superloops/{quote(loop_id, safe='')}",
                 payload={
@@ -107,3 +113,4 @@ async def execute_hashi_superloop_tool(
 
 
 __all__ = ["execute_hashi_superloop_tool"]
+# HASHI-Fingerprint: hfp_0cdea6dde8574037bc3c17ab63dbfd12
