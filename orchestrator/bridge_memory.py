@@ -1705,7 +1705,9 @@ class BridgeContextAssembler:
         )["final_prompt"]
 
     @classmethod
-    def _history_excerpt(cls, value: Any) -> str:
+    def _history_excerpt(
+        cls, value: Any, *, max_chars: int | None = None,
+    ) -> str:
         """Return a bounded semantic cue without treating it as a full summary.
 
         Handoff and cross-session messages can contain an entire typed envelope.
@@ -1728,6 +1730,8 @@ class BridgeContextAssembler:
                 text = text.split("\nAssistant result:\n", 1)[0]
         text = re.sub(r"\s+", " ", text).strip()
         limit = cls.HISTORY_CAPSULE_EXCERPT_CHARS
+        if max_chars is not None:
+            limit = min(limit, max_chars)
         if len(text) <= limit:
             return text
         head = max(1, (limit * 2) // 3)
@@ -1737,14 +1741,26 @@ class BridgeContextAssembler:
     @classmethod
     def _history_capsule_row(
         cls,
-        exchange: dict[str, Any],
+        exchange: dict[str, Any] | None,
         *,
         sequence: int,
         source_text: str,
+        excerpt_chars: int | None = None,
     ) -> str:
-        user_excerpt = cls._history_excerpt(exchange.get("user_text"))
-        assistant_excerpt = cls._history_excerpt(exchange.get("assistant_text"))
         source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        if exchange is None:
+            excerpt = cls._history_excerpt(source_text, max_chars=excerpt_chars)
+            return (
+                f"Exchange sequence={sequence}; user_ts=unknown-time; "
+                f"assistant_ts=unknown-time; source_sha256={source_hash}\n"
+                f"HISTORY_EXCERPT: {excerpt or '(empty)'}"
+            )
+        user_excerpt = cls._history_excerpt(
+            exchange.get("user_text"), max_chars=excerpt_chars,
+        )
+        assistant_excerpt = cls._history_excerpt(
+            exchange.get("assistant_text"), max_chars=excerpt_chars,
+        )
         lines = [
             f"Exchange sequence={sequence}; user_ts={exchange.get('user_ts') or 'unknown-time'}; "
             f"assistant_ts={exchange.get('assistant_ts') or 'unknown-time'}; "
@@ -1981,6 +1997,9 @@ class BridgeContextAssembler:
                     pass
                 exchanges = getter(**kwargs)
         capsule_rows: dict[str, str] = {}
+        capsule_sources: dict[
+            str, tuple[dict[str, Any] | None, int, str]
+        ] = {}
         for exchange in exchanges:
             sequence = int(exchange.get("sequence") or exchange.get("exchange_id") or 0)
             user_ts = str(exchange.get("user_ts") or "unknown-time")
@@ -2026,8 +2045,12 @@ class BridgeContextAssembler:
                     ),
                 },
             )
+            capsule_exchange = dict(exchange)
+            capsule_sources[exchange_key] = (
+                capsule_exchange, sequence, exchange_text,
+            )
             capsule_rows[exchange_key] = self._history_capsule_row(
-                exchange,
+                capsule_exchange,
                 sequence=sequence,
                 source_text=exchange_text,
             )
@@ -2132,11 +2155,9 @@ class BridgeContextAssembler:
             ):
                 source_text = str(body).strip()
                 sequence = int(options.get("sequence") or 0)
-                source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-                capsule_rows[section_key] = (
-                    f"Exchange sequence={sequence}; user_ts=unknown-time; "
-                    f"assistant_ts=unknown-time; source_sha256={source_hash}\n"
-                    f"HISTORY_EXCERPT: {self._history_excerpt(source_text) or '(empty)'}"
+                capsule_sources[section_key] = (None, sequence, source_text)
+                capsule_rows[section_key] = self._history_capsule_row(
+                    None, sequence=sequence, source_text=source_text,
                 )
 
             if isinstance(raw_section, CallMessageContextSection):
@@ -2257,6 +2278,27 @@ class BridgeContextAssembler:
                         ).hexdigest(),
                     }
                 )
+                install_capsule()
+            # The excerpts can themselves exceed a small budget after all raw
+            # exchanges have been removed. Keep every source receipt and the
+            # protected layers; reduce only these derived continuity cues.
+            excerpt_chars = self.HISTORY_CAPSULE_EXCERPT_CHARS
+            minimum_excerpt_chars = 24
+            while (
+                omitted
+                and _estimate_tokens(self._render_pcm_prompt(sections)) > limit
+                and excerpt_chars > minimum_excerpt_chars
+            ):
+                excerpt_chars = max(minimum_excerpt_chars, excerpt_chars // 2)
+                for item in omitted:
+                    key = str(item["key"])
+                    exchange, sequence, source_text = capsule_sources[key]
+                    capsule_rows[key] = self._history_capsule_row(
+                        exchange,
+                        sequence=sequence,
+                        source_text=source_text,
+                        excerpt_chars=excerpt_chars,
+                    )
                 install_capsule()
         final_prompt = self._render_pcm_prompt(sections)
         final_prompt_tokens = _estimate_tokens(final_prompt)
@@ -2397,3 +2439,4 @@ class BridgeContextAssembler:
                 ],
             },
         }
+# HASHI-Fingerprint: hfp_124d2add17274ec0af428f4a79ec93b9
