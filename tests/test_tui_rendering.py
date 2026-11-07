@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import wave
@@ -223,7 +224,15 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
     }
 
 
-async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):
+async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path, monkeypatch):
+    input_changes = asyncio.Queue()
+    original_input_changed = HASHITuiApp.on_input_changed
+
+    def input_changed(app, event):
+        original_input_changed(app, event)
+        input_changes.put_nowait((app, event.value))
+
+    monkeypatch.setattr(HASHITuiApp, "on_input_changed", input_changed)
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     app._schedule_startup_sequence = lambda: None
 
@@ -249,9 +258,17 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
         input_box = app.query_one("#chat-input", ChatInput)
         input_box.focus()
 
+        async def change_input_value(value):
+            input_box.value = value
+            # Pilot.pause drains messages queued at its start. A Changed
+            # message may still be bubbling from the input to the App.
+            async with asyncio.timeout(5):
+                while await input_changes.get() != (app, value):
+                    pass
+            await pilot.pause()
+
         app._handle_tui_cmd("/tui language zh")
-        input_box.value = "/eff"
-        await pilot.pause()
+        await change_input_value("/eff")
         preview = app.query_one("#command-preview", CommandPreview)
         rendered = _render_plain(preview.render())
         assert "/effort [level]" in rendered
@@ -260,8 +277,7 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
         assert "示例" in rendered
         assert "/effort high" in rendered
 
-        input_box.value = "/effort "
-        await pilot.pause()
+        await change_input_value("/effort ")
         assert app._command_matches == [
             "/effort low",
             "/effort medium",
@@ -274,16 +290,14 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
         assert "当前选择" in rendered
 
         app._handle_tui_cmd("/tui language en")
-        input_box.value = "/mode "
-        await pilot.pause()
+        await change_input_value("/mode ")
         assert app._command_matches == ["/mode fixed", "/mode flex"]
         rendered = _render_plain(preview.render())
         assert "Persistent engine session" in rendered
         assert "Options" in rendered
         assert "Example" in rendered
 
-        input_box.value = "/sidepanel "
-        await pilot.pause()
+        await change_input_value("/sidepanel ")
         assert app._command_matches == [
             "/sidepanel on",
             "/sidepanel off",
@@ -295,8 +309,7 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
         assert "Current selection" in rendered
         assert "/sidepanel on" in rendered
 
-        input_box.value = "/sidepanel auto "
-        await pilot.pause()
+        await change_input_value("/sidepanel auto ")
         assert app._command_matches == [
             "/sidepanel auto on",
             "/sidepanel auto off",
@@ -1175,3 +1188,4 @@ def test_command_card_keeps_title_fields_and_slots_on_separate_lines():
     assert any("当前" in line and "2/5" in line for line in lines)
     assert any("main" in line and "主目录" in line for line in lines)
     assert any("/workzone" in line for line in lines)
+# HASHI-Fingerprint: hfp_6d8649eebc3949e6af75f98d2515b405
