@@ -235,7 +235,8 @@ def test_installed_hook_checks_main_merge_against_approved_upstream(
     monkeypatch.setenv("HASHI_CHECK_PYTHON", sys.executable)
     monkeypatch.delenv("HASHI_CORE_EDIT_AUTHORIZED", raising=False)
     monkeypatch.delenv("HASHI_CORE_MAJOR_VERSION_CHANGE", raising=False)
-    git(repository, "merge", "--no-commit", "--no-ff", "upstream")
+    git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "merge", "--no-commit", "--no-ff", "upstream")
     if alter_core:
         (repository / "main.py").write_text("unapproved merge resolution\n")
         git(repository, "add", "main.py")
