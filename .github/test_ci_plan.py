@@ -160,6 +160,44 @@ class GitAndConsumerTests(unittest.TestCase):
         self.write("package.json", json.dumps({"version": "1.0.0", "dependencies": {"x": "2"}}))
         self.assertFalse(ci.semantic_metadata_only("package.json", base, self.root))
 
+    def test_additive_leaf_test_registration_does_not_force_global_qualification(self):
+        self.write("tests/a.test.js", "// existing")
+        before = {"version": "1.0.0", "scripts": {"test:ui": "node --test tests/a.test.js"}}
+        self.write("package.json", json.dumps(before))
+        base = self.commit()
+        self.write("tests/b.test.js", "// new owning regression")
+        after = {"version": "1.0.0", "scripts": {
+            "test:ui": "node --test tests/a.test.js tests/b.test.js",
+            "test:leaf": "node --test tests/b.test.js"}}
+        self.write("package.json", json.dumps(after))
+        self.assertTrue(ci.semantic_metadata_only("package.json", base, self.root))
+        after["scripts"]["test:ui"] = "node --test tests/b.test.js"
+        self.write("package.json", json.dumps(after))
+        self.assertFalse(ci.semantic_metadata_only("package.json", base, self.root))
+        after["scripts"]["test:ui"] = before["scripts"]["test:ui"]
+        after["scripts"]["test:leaf"] = "node --test tests/missing.test.js"
+        self.write("package.json", json.dumps(after))
+        with self.assertRaises(RuntimeError):
+            ci.semantic_metadata_only("package.json", base, self.root)
+
+    def test_changed_node_entrypoint_remains_a_runtime_change(self):
+        self.write("package.json", json.dumps({"version": "1.0.0", "bin": {"tool": "old.js"}}))
+        base = self.commit()
+        self.write("package.json", json.dumps({"version": "1.0.0", "bin": {"tool": "new.js"}}))
+        self.assertFalse(ci.semantic_metadata_only("package.json", base, self.root))
+
+    def test_patch_version_metadata_does_not_force_python_abi_qualification(self):
+        source = '[project]\nname = "fixture"\nversion = "1.0.0"\ndependencies = ["lib==1"]\nrequires-python = ">=3.11"\n'
+        self.write("pyproject.toml", source)
+        base = self.commit()
+        self.write("pyproject.toml", source.replace("1.0.0", "1.0.1"))
+        self.assertTrue(ci.semantic_metadata_only("pyproject.toml", base, self.root))
+        for changed in (source.replace("1.0.0", "2.0.0"),
+                        source.replace("lib==1", "lib==2"),
+                        source.replace(">=3.11", ">=3.12")):
+            self.write("pyproject.toml", changed)
+            self.assertFalse(ci.semantic_metadata_only("pyproject.toml", base, self.root))
+
     def test_python_transitive_consumer_keeps_related_test_only(self):
         self.write("app/a.py", "VALUE = 1")
         self.write("app/b.py", "from .a import VALUE")
