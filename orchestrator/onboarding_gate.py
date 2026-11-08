@@ -29,7 +29,7 @@ def run_onboarding_gate(paths: BridgePaths, code_root: Path, *, terminal: str | 
     if not needs_onboarding(paths):
         return False
     print("\033[38;5;180mOnboarding required. Starting onboarding program...\033[0m")
-    command = [sys.executable, str(code_root / "onboarding" / "onboarding_main.py")]
+    command = [sys.executable, "-B", str(code_root / "onboarding" / "onboarding_main.py")]
     if terminal is not None:
         # Multiprocessing closes stdin. Reopen only the terminal supplied by
         # the supervising process, never the RPC pipe or a guessed device.
@@ -40,3 +40,4 @@ def run_onboarding_gate(paths: BridgePaths, code_root: Path, *, terminal: str | 
     else:
         raise RuntimeError("First-run setup requires an interactive terminal; run onboarding/onboarding_main.py")
     return True
+# HASHI-Fingerprint: hfp_752e1378c99d4b168dc109cd12235a7d

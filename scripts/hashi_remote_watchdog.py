@@ -138,6 +138,7 @@ def _start_remote() -> bool:
     python_bin = ROOT / ".venv" / "bin" / "python3"
     cmd = [
         str(python_bin if python_bin.exists() else "python3"),
+        "-B",
         "-m",
         "remote",
         "--hashi-root",

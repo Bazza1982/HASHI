@@ -308,7 +308,7 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
             continue
         try:
             _validate_environment_path(Path(executable))
-            args = [*command, str(check), "--code-root", str(code_root)]
+            args = [*command, "-B", str(check), "--code-root", str(code_root)]
             if not full:
                 args.append("--runtime-only")
             checked = subprocess.run(
@@ -668,7 +668,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, "-m", "tui.connection"],
+        [*runtime, "-B", "-m", "tui.connection"],
         cwd=code_root,
         env=environment,
         check=False,
@@ -1002,7 +1002,7 @@ def _run_tui(registry: InstanceRegistry, record: dict[str, Any], *, attach_only=
     environment = _launch_environment(record, code_root)
     environment["HASHI_TUI_ATTACH_ONLY"] = "1"
     return subprocess.run(
-        [*runtime, str(code_root / "tui.py")],
+        [*runtime, "-B", str(code_root / "tui.py")],
         cwd=code_root,
         env=environment,
         check=False,

@@ -31,8 +31,9 @@ def main():
     ensure_config()
     os.chdir(EXE_DIR)
     # 调用真正的 Bridge-U-F
-    subprocess.run([sys.executable, '-m', 'main'])
+    subprocess.run([sys.executable, '-B', '-m', 'main'])
 
 
 if __name__ == '__main__':
     main()
+# HASHI-Fingerprint: hfp_08ffa00b11844a0e921f262fc7c0a7b5
