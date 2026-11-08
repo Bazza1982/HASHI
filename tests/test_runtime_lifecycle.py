@@ -9,6 +9,142 @@ from orchestrator import runtime_lifecycle
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "warning", "incident"])
+async def test_loaded_identity_placeholder_limit_preserves_execution_and_terminal(
+    tmp_path, monkeypatch, failure
+):
+    import json
+    from datetime import timedelta
+    from types import MethodType
+    from unittest.mock import AsyncMock
+
+    from telegram.error import RetryAfter
+    from adapters.base import BackendResponse
+    from orchestrator import telegram_delivery_failover as failover, ui_language
+    from orchestrator.config import ConfigManager
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.request_activity import RequestActivityStore
+    from orchestrator.session_store import SessionStore
+    from orchestrator.telegram_delivery_state import DeliveryStateError
+    from tests.test_config import _minimal_flex_agent, _write_base_files
+    from tests.test_runtime_pipeline import _Bot, _item, _runtime, _set_stream_policy
+
+    row = _minimal_flex_agent()
+    row.update(name="source", workspace_dir="workspaces/source",
+               system_md="workspaces/source/agent.md",
+               allowed_backends=["codex-cli"], active_backend="codex-cli",
+               agent_lifecycle_id="a" * 32,
+               extra={"telegram_stream_enabled": True})
+    config_path, secrets_path = _write_base_files(tmp_path, row)
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"].update(instance_id="HASHI1", authorized_id=123)
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    secrets_path.write_text(json.dumps({"authorized_telegram_id": 123}), encoding="utf-8")
+    global_config, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path, code_root=tmp_path
+    ).load()
+    runtime = _runtime()
+    runtime.name = "source"
+    runtime.backend_manager.response = BackendResponse(is_success=True, text="completed once", duration_ms=0)
+    runtime.config = agents[0]
+    runtime.global_config = global_config
+    runtime.workspace_dir = agents[0].workspace_dir
+    runtime.token = "synthetic-source-token"
+    runtime.startup_success = True
+    runtime.app.bot = _Bot(send_error=RetryAfter(timedelta(seconds=5)))
+    _set_stream_policy(runtime, placeholder=True, typing=True)
+
+    alternate = SimpleNamespace(
+        name="lin_yueru", workspace_dir=tmp_path/"workspaces"/"lin_yueru",
+        config=SimpleNamespace(extra={"agent_lifecycle_id": "b" * 32},
+                               telegram_token_key="lin_yueru"),
+        global_config=global_config, token="synthetic-alternate-token",
+        telegram_connected=True, startup_success=True, app=SimpleNamespace(bot=_Bot()),
+    )
+    alternate.workspace_dir.mkdir(parents=True)
+    async def send_warning(chat_id, text, **kwargs):
+        return await alternate.app.bot.send_message(chat_id=chat_id, text=text)
+    alternate._send_text = send_warning
+    kernel = SimpleNamespace(runtimes=[runtime, alternate], raw_config={})
+    runtime.orchestrator = alternate.orchestrator = kernel
+    if failure == "warning":
+        async def fail_warning(*args, **kwargs):
+            raise OSError("isolated notification state unavailable")
+        monkeypatch.setattr(failover, "_prepare_warning", fail_warning)
+    elif failure == "incident":
+        def fail_incident(*args, **kwargs):
+            raise DeliveryStateError("isolated private owner detail")
+        monkeypatch.setattr(failover, "_agent_record", fail_incident)
+
+    runtime.session_store = SessionStore(tmp_path/"sessions.sqlite3", instance_id="HASHI1")
+    session = runtime.session_store.create_session(owner_id="123", agent_id=runtime.name,
+                                                   title="limit recovery")
+    accepted = runtime.session_store.accept_run(
+        session_id=session["session_id"], owner_id="123", agent_id=runtime.name,
+        request_id=f"req-rate-limit-{failure or 'healthy'}", text="One task", source="text",
+        idempotency_key="rate-limit-once",
+    )
+    item = _item(request_id=accepted.request_id, session_id=session["session_id"],
+                 run_id=accepted.run_id, context_generation=1, owner_id="123",
+                 source="text", session_surface="telegram", session_channel_key="default")
+    runtime.queue = asyncio.Queue()
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start(item.request_id)
+    runtime._request_listeners = {}
+    runtime._pending_request_results = {}
+    runtime._notify_request_listeners = MethodType(FlexibleAgentRuntime._notify_request_listeners, runtime)
+    runtime._remote_backend_block_reason = lambda source: None
+    runtime._audit_enabled = lambda: False
+    runtime._notify_right_brain_started = lambda *a, **k: None
+    runtime._notify_right_brain_completed = lambda *a, **k: None
+    runtime._notify_right_brain_interrupted = lambda *a, **k: None
+    runtime.error_logger.exception = lambda *a, **k: None
+    monkeypatch.setattr(runtime_lifecycle.runtime_workzone, "activate_backend_state", AsyncMock())
+    monkeypatch.setattr("orchestrator.runtime_media.finish_native_voice_transcript_path", AsyncMock())
+    monkeypatch.setattr("orchestrator.frontend_whatsapp_mirror.deliver_whatsapp_mirror", AsyncMock())
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_terminal_diagnostic", lambda *a, **k: None)
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_failure_report", lambda *a, **k: None)
+    monkeypatch.setattr(ui_language, "preferred_locale", lambda *a, **k: "en")
+    delivered = []
+    async def deliver_final(**kwargs):
+        delivered.append(kwargs["text"])
+        assert await failover.handle_blocked_send(
+            runtime, chat_id=item.chat_id, request_id=item.request_id,
+            purpose="response", text=kwargs["text"]
+        )
+        return 0.0, 0
+    runtime.send_long_message = deliver_final
+
+    await runtime.queue.put(item)
+    await runtime_lifecycle._process_single_item(runtime, await runtime.queue.get())
+    await runtime.queue.join()
+    result = runtime._pending_request_results[item.request_id]
+    reopened = SessionStore(tmp_path/"sessions.sqlite3", instance_id="HASHI1")
+    terminal = reopened.get_run(accepted.run_id)
+    if failure == "incident":
+        assert result.get("error_code") == "TELEGRAM_RATE_LIMIT_RECOVERY_FAILED", result
+        assert result["error_retryable"] is False
+        assert runtime.backend_manager.calls == []
+        assert terminal["state"] == "failed"
+        public = result["public_failure"]["text"]
+        assert "5" in public and result["error_code"] in public
+        assert "Backend error" not in public
+        assert "isolated private owner detail" not in public
+        assert not delivered
+    else:
+        assert terminal["state"] == "completed", result.get("error")
+        assert result["success"] is True
+        assert len(runtime.backend_manager.calls) == 1
+        assert len(delivered) == 1
+        record = failover.load_health_state(runtime)["agents"][runtime.name]
+        assert record["owner"]["agent_lifecycle_id"] == "a" * 32
+        assert record["status"] == "blocked" and record["retry_after_s"] == 5
+        assert list((runtime.workspace_dir/"undelivered").glob("*.json"))
+        assert len(alternate.app.bot.sent) == (0 if failure else 1)
+        assert not getattr(runtime, "retry_scheduled", False)
+
+
+@pytest.mark.asyncio
 async def test_prompt_failure_finishes_durable_run_and_visible_activity(tmp_path,monkeypatch):
     from types import MethodType
     from unittest.mock import AsyncMock

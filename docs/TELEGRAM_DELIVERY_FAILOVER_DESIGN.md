@@ -5,6 +5,54 @@
 > The rules below supersede the historical schema-1 example and broad retry
 > language retained later in this document.
 
+## Configuration and RetryAfter failure boundary (2026-11-05)
+
+The canonical outer lifecycle ID must survive loading even when an Agent has a
+nonempty explicit `extra` object. PAO projects only that identity into the
+effective configuration; it does not merge unrelated outer settings. A valid
+legacy nested ID is preserved when Worker preparation publishes the canonical
+field. Malformed or conflicting identities reject loading/preparation before
+migration writes, rather than inventing an owner or rebinding existing state.
+
+A placeholder RetryAfter records the server window before notification. Once
+that record commits, notification preparation, sending, or result-recording
+failure is secondary: log it and keep the block, run the model once, and preserve
+any undelivered answer. Notifications never replay business work.
+
+If the incident itself cannot be published, stop that path with
+`TELEGRAM_RATE_LIMIT_RECOVERY_FAILED`, preserving the original exception chain
+and retry interval. Frontends show a localized Telegram delivery notice, not a
+model/backend failure or private owner details. This outcome does not authorize
+an automatic task retry, claim a notification was delivered, or overwrite an
+uncertain committed state. Owner isolation, quarantine and bounded recovery
+claims remain unchanged.
+
+This is source/offline behavior. PR publication does not adopt it into running
+Functions; no deployment, restart or live Telegram flood test is implied.
+
+## Notification receipt reliability (2026-11-08)
+
+Warnings, as well as recovery notices, persist a unique attempt before sending.
+The frozen instance/incarnation/Bot owner, incident, chat and attempt must all
+match before publishing a result. A late result cannot quarantine or update a
+replacement owner. An acknowledged send whose result cannot be recorded remains
+unconfirmed and is not sent again after process restart. A new incident clears
+the old warning claim; an explicit Telegram rejection can select another sender.
+
+Claim lists are returned from the successful atomic mutation. Work prepared by a
+failed compare-and-swap attempt is discarded and never reaches transport.
+
+Only a typed, proven pre-write connection failure may use bounded transport
+retry. Read/write timeouts and missing acknowledgements stop as an unknown
+outcome, without claiming delivery or resending a potentially accepted message.
+A Telegram RetryAfter retains its explicit server window. The unsent business
+answer remains available under its original request identity; notification
+failure never re-executes that business request.
+
+The Worker JSON error contract carries the pre-write proof. Public error
+projection recognizes the transported error code rather than a Python subclass,
+preserving the original wait interval and localized Telegram meaning across IPC.
+
 ## Schema 2 ownership and recovery contract
 
 Every active Agent delivery record is bound to all three of:
@@ -30,7 +78,7 @@ is unknown stops instead of risking a duplicate notice.
 
 Telegram Worker RPC returns a typed safe result. `RetryAfter` restores the exact
 server window. `BadRequest`/`Forbidden` destination failures stop that chat;
-transient transport failures use bounded backoff and stop after three failures.
+proven pre-write transport failures use bounded backoff and stop after three failures.
 Other chats remain independent. `recovery_stopped` means the operational notice
 was not delivered; it never blocks ordinary traffic after the RetryAfter window.
 

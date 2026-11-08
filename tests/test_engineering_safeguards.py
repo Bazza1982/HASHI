@@ -202,3 +202,55 @@ def test_installed_hook_blocks_core_commit_without_authorization(repository, mon
     assert result.returncode != 0
     assert "main.py" in result.stderr
     assert git(repository, "log", "-1", "--format=%s").stdout.strip() == "baseline"
+
+
+@pytest.mark.parametrize(
+    ("upstream_is_main", "alter_core", "allowed"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+)
+def test_installed_hook_checks_main_merge_against_approved_upstream(
+    repository, monkeypatch, upstream_is_main, alter_core, allowed
+):
+    import shutil
+
+    baseline = git(repository, "rev-parse", "HEAD").stdout.strip()
+    git(repository, "checkout", "-qb", "upstream")
+    (repository / "main.py").write_text("approved upstream Core\n")
+    git(repository, "add", "main.py")
+    git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "reviewed upstream")
+    upstream = git(repository, "rev-parse", "HEAD").stdout.strip()
+    git(repository, "update-ref", "refs/remotes/origin/main",
+        upstream if upstream_is_main else baseline)
+    git(repository, "checkout", "-qb", "feature", baseline)
+    (repository / "feature.py").write_text("feature\n")
+    git(repository, "add", "feature.py")
+    git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "feature")
+    before = git(repository, "rev-parse", "HEAD").stdout.strip()
+    (repository / "scripts").mkdir()
+    shutil.copy2(CHECKER, repository / "scripts" / CHECKER.name)
+    shutil.copytree(CHECKER.parents[1] / ".githooks", repository / ".githooks")
+    git(repository, "config", "core.hooksPath", ".githooks")
+    monkeypatch.setenv("HASHI_CHECK_PYTHON", sys.executable)
+    monkeypatch.delenv("HASHI_CORE_EDIT_AUTHORIZED", raising=False)
+    monkeypatch.delenv("HASHI_CORE_MAJOR_VERSION_CHANGE", raising=False)
+    git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "merge", "--no-commit", "--no-ff", "upstream")
+    if alter_core:
+        (repository / "main.py").write_text("unapproved merge resolution\n")
+        git(repository, "add", "main.py")
+    result = subprocess.run(
+        ["git", "-C", str(repository), "-c", "user.name=Test", "-c",
+         "user.email=test@example.invalid", "commit", "-qm", "integrate main"],
+        capture_output=True, text=True,
+    )
+    if allowed:
+        assert result.returncode == 0, result.stderr
+        assert git(repository, "show", "HEAD:main.py").stdout == "approved upstream Core\n"
+        assert git(repository, "rev-parse", "HEAD^2").stdout.strip() == upstream
+    else:
+        assert result.returncode != 0
+        assert "main.py" in result.stderr
+        assert git(repository, "rev-parse", "HEAD").stdout.strip() == before
+# HASHI-Fingerprint: hfp_eb03b914e0aa49ed8ff65d5466335ec0

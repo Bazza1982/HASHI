@@ -7,6 +7,7 @@ from typing import Any
 from orchestrator import (
     frontend_incremental_delivery,
     runtime_background_status,
+    runtime_delivery,
     runtime_delivery_order,
     runtime_pipeline,
     runtime_session,
@@ -761,8 +762,7 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                     "success": False,
                     "text": None,
                     "error": str(exc),
-                    "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
-                    "error_retryable": False,
+                    **runtime_delivery.runtime_exception_fields(runtime, item, exc),
                     "source": item.source,
                     "summary": item.summary,
                 })

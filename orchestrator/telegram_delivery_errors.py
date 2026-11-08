@@ -46,6 +46,7 @@ class TelegramDeliveryError(RuntimeError):
         retry_after_s: int | None = None,
         error_type: str = "TelegramError",
         reason: str | None = None,
+        request_not_submitted: bool = False,
     ) -> None:
         self.code = str(code or "delivery_failed")
         self.retryable = bool(retryable)
@@ -55,6 +56,7 @@ class TelegramDeliveryError(RuntimeError):
         )
         self.error_type = str(error_type or "TelegramError")
         self.reason = str(reason or self.code)
+        self.request_not_submitted = request_not_submitted is True
         super().__init__(f"{self.code}: {self.reason}")
 
     def to_mapping(self) -> dict[str, Any]:
@@ -65,6 +67,7 @@ class TelegramDeliveryError(RuntimeError):
             "retry_after_s": self.retry_after_s,
             "error_type": self.error_type,
             "reason": self.reason,
+            "request_not_submitted": self.request_not_submitted,
         }
 
     @classmethod
@@ -76,6 +79,25 @@ class TelegramDeliveryError(RuntimeError):
             retry_after_s=value.get("retry_after_s"),
             error_type=str(value.get("error_type") or "TelegramError"),
             reason=str(value.get("reason") or value.get("code") or "delivery_failed"),
+            request_not_submitted=value.get("request_not_submitted") is True,
+        )
+
+
+class TelegramRateLimitRecoveryError(TelegramDeliveryError):
+    """Telegram rejected a send; its recovery state could not be published.
+
+    This is not a provider failure or permission to replay the business Run.
+    The original RetryAfter remains in the exception chain and safe wait field.
+    """
+
+    def __init__(self, *, retry_after_s: int) -> None:
+        super().__init__(
+            "TELEGRAM_RATE_LIMIT_RECOVERY_FAILED",
+            retryable=False,
+            permanent=False,
+            retry_after_s=retry_after_s,
+            error_type="RetryAfter",
+            reason="telegram_rate_limit_recovery_unavailable",
         )
 
 
@@ -123,6 +145,7 @@ def classify_telegram_delivery_error(exc: BaseException) -> TelegramDeliveryErro
             permanent=False,
             error_type=error_type,
             reason="telegram_transport_temporarily_unavailable",
+            request_not_submitted=telegram_request_not_submitted(exc),
         )
     return TelegramDeliveryError(
         "transient_unknown",
@@ -131,3 +154,4 @@ def classify_telegram_delivery_error(exc: BaseException) -> TelegramDeliveryErro
         error_type=error_type,
         reason="unclassified_delivery_failure",
     )
+# HASHI-Fingerprint: hfp_6f4f6d35f42f4432872644d6b73e1718
