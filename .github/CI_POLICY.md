@@ -21,3 +21,9 @@ Updated 2026-11-09. Optimize confidence per minute, retaining security and failu
   never fabricates a provider-bound required status.
 - No schedules, paid upgrades, new approval counts, visibility changes or
   runtime/service deployment are introduced by this policy.
+
+Additive leaf Node test aliases and append-only component test registrations
+are checked statically and do not imply a global runtime upgrade. Owning tests
+remain selected from actual source changes; missing registered test files fail.
+Changes to dependencies, entry points, runtime versions or test options retain
+their qualification requirements.
