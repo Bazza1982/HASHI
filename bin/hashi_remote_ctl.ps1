@@ -42,7 +42,7 @@ $IdentityScript = Join-Path $CodeRoot "remote\supervisor_identity.py"
 if (-not (Test-Path $IdentityScript)) {
     throw "Missing supervisor identity helper: $IdentityScript"
 }
-$IdentityArgs = @($IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
+$IdentityArgs = @("-B", $IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
 if ($InstanceId) {
     $IdentityArgs += @("--instance-id", $InstanceId)
 }
@@ -61,7 +61,7 @@ if ($TaskName -match '[\\/]') {
 $LogDir = Join-Path $HashiRoot "logs"
 $LogPath = Join-Path $LogDir "hashi-remote-supervisor.log"
 $ArgsList = @(
-    "-m", "remote",
+    "-B", "-m", "remote",
     "--hashi-root", [string]$HashiRoot,
     "--supervised",
     "--instance-id", [string]$SupervisorIdentity.instance_id
@@ -152,7 +152,7 @@ function Protect-RemoteCredentialAccess {
     if (-not (Test-Path -LiteralPath $PrivateFileTool -PathType Leaf)) {
         throw "Missing private-file ACL helper: $PrivateFileTool"
     }
-    $ToolOutput = & $Python $PrivateFileTool `
+    $ToolOutput = & $Python -B $PrivateFileTool `
         --allow-full-control-sid $Principal.Sid `
         $SecretsPath 2>&1
     if ($LASTEXITCODE -ne 0) {
