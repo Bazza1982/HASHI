@@ -1000,7 +1000,16 @@ def test_restart_result_notification_sends_user_facing_message_key(
     }
 
 
-def test_restart_result_notification_explains_nonblocking_degraded_success(monkeypatch):
+@pytest.mark.parametrize("issue", [
+    {"code": "agent_telegram_unavailable",
+     "summary": "22 agent(s) have no active Telegram connection.",
+     "details": {"agents": ["temp"]}},
+    {"code": "remote_already_running_degraded",
+     "summary": "Remote/HChat is unavailable; local startup will continue."},
+])
+def test_restart_success_notice_keeps_connector_warnings_in_diagnostics(
+    monkeypatch, issue
+):
     captured = {}
 
     def forward(**kwargs):
@@ -1008,35 +1017,22 @@ def test_restart_result_notification_explains_nonblocking_degraded_success(monke
         return 200, b'{"ok":true}', {}
 
     monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+    record = {
+        "state": "completed",
+        "target_instance": "HASHI4",
+        "status": {"workbench_health": {"degraded": True, "issues": [issue]}},
+    }
+    before = json.loads(json.dumps(record))
 
-    result = remote_server._notify_restart_result(
-        agent="agent1",
-        record={
-            "state": "completed",
-            "target_instance": "HASHI4",
-            "status": {
-                "workbench_health": {
-                    "degraded": True,
-                    "issues": [
-                        {
-                            "code": "remote_already_running_degraded",
-                            "summary": "Remote/HChat is unavailable; local startup will continue.",
-                        }
-                    ],
-                }
-            },
-        },
-    )
+    result = remote_server._notify_restart_result(agent="agent1", record=record)
 
     assert result["state"] == "delivered"
     assert captured == {
         "agent": "agent1",
-        "message_key": "api.restart.completed_degraded",
-        "message_args": {
-            "instance": "HASHI4",
-            "warning": "Remote/HChat is unavailable; local startup will continue.",
-        },
+        "message_key": "api.restart.completed",
+        "message_args": {"instance": "HASHI4"},
     }
+    assert record == before, "connection diagnostics must remain available in the receipt"
 
 
 def test_restart_result_notification_preserves_frozen_session_and_locale(monkeypatch):

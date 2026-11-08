@@ -2489,26 +2489,12 @@ def _restart_failure_notice(record: dict[str, Any]) -> tuple[str, str]:
     return phase, "restart verification did not confirm the new process"
 
 
-def _restart_warning_notice(record: dict[str, Any]) -> str:
-    health = ((record.get("status") or {}).get("workbench_health") or {})
-    for issue in health.get("issues") or ():
-        if not isinstance(issue, dict):
-            continue
-        summary = str(issue.get("summary") or "").strip()
-        if summary:
-            return summary[:500]
-    return "The restart completed with a non-blocking service warning."
-
-
 def _restart_notice_fallback_text(
     message_key: str, message_args: dict[str, str]
 ) -> str:
     instance = message_args.get("instance") or "HASHI"
     if message_key == "api.restart.completed":
         return f"✅ {instance} restarted and is back online."
-    if message_key == "api.restart.completed_degraded":
-        warning = message_args.get("warning") or "A non-blocking warning remains."
-        return f"✅ {instance} restarted. Local services are online. ⚠️ {warning}"
     stage = message_args.get("stage") or "unknown stage"
     reason = message_args.get("reason") or "restart verification failed"
     return f"❌ {instance} restart failed during {stage}: {reason}"
@@ -2528,12 +2514,9 @@ def _notify_restart_result(
         "instance": str(record.get("target_instance") or "HASHI"),
     }
     if record.get("state") == "completed":
-        health = ((record.get("status") or {}).get("workbench_health") or {})
-        if health.get("degraded") is True:
-            message_key = "api.restart.completed_degraded"
-            message_args["warning"] = _restart_warning_notice(record)
-        else:
-            message_key = "api.restart.completed"
+        # Report the verified Core restart. Optional connector snapshots remain
+        # in the receipt and health diagnostics, not in the completion notice.
+        message_key = "api.restart.completed"
     else:
         message_key = "api.restart.failed_detail"
         stage, reason = _restart_failure_notice(record)

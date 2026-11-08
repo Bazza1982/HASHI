@@ -15871,11 +15871,10 @@ class WorkbenchApiServer:
             instance = str(message_args.get("instance") or "HASHI").strip()
             render_args = {"instance": instance}
             if message_key == "api.restart.completed_degraded":
-                render_args["warning"] = str(
-                    message_args.get("warning")
-                    or "The restart completed with a non-blocking service warning."
-                ).strip()[:500]
-            elif message_key == "api.restart.failed_detail":
+                # Older Remotes may still attach a startup connector snapshot.
+                # Keep protocol compatibility while reporting only the restart.
+                message_key = "api.restart.completed"
+            if message_key == "api.restart.failed_detail":
                 render_args["stage"] = str(
                     message_args.get("stage") or "unknown stage"
                 ).strip()[:100]
