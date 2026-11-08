@@ -153,7 +153,7 @@ jobs:
       - name: Verify Protected Core against the event baseline
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || (github.ref != 'refs/heads/main' && 'origin/main') || github.event.before }}
           CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
         run: |
           core_args=()
