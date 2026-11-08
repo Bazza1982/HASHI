@@ -1,0 +1,43 @@
+[
+  {
+    "paths": [
+      "README.md"
+    ],
+    "false": [
+      "architecture",
+      "frontend",
+      "telegram",
+      "voice",
+      "native"
+    ],
+    "full": false
+  },
+  {
+    "paths": [
+      "orchestrator/config.py"
+    ],
+    "true": [
+      "architecture",
+      "telegram"
+    ],
+    "false": [
+      "native"
+    ],
+    "full": false
+  },
+  {
+    "paths": [
+      "constraints/standard-py312.lock"
+    ],
+    "full": true
+  },
+  {
+    "paths": [
+      "packaging/portable_windows/bootstrap.py"
+    ],
+    "true": [
+      "native"
+    ],
+    "full": false
+  }
+]
