@@ -51,10 +51,12 @@ Apply these rules to the reviewed release scope, not to every commit:
    is a `Z` change; a new PCM capability or HER execution policy may be a `Y`
    change. The release record states the functional owner and the observable
    change that justifies the classification, rather than counting files/lines.
-3. Core scope derives solely from
-   `orchestrator.runtime_contract.CORE_SOURCE_PATHS`, not a copied list or a
-   permanent assumption that Core always contains nine files. An implementation
-   change in protected Core belongs to `X`, even if described as a small fix.
+3. Protected Core source scope derives solely from
+   `orchestrator.runtime_contract.CORE_SOURCE_PATHS`, not a copied path list.
+   Its versioned API/Worker/schema declarations in the runtime policy are Core
+   wire contracts too. Actual source or wire-contract changes belong to
+   `X`. Independently qualified Core-host, Functions or helper dependency and
+   interpreter revisions do not by themselves change the Core code generation.
 4. Pure Core comments/formatting with no implementation or contract change do
    not alone increase `X`. They still require Core-edit authorization and may
    change the exact source fingerprint. A version label never bypasses the
@@ -69,12 +71,14 @@ Apply these rules to the reviewed release scope, not to every commit:
 7. Ordinary commits do not each consume a release number. Once a release or
    pre-release is published, its tag and artifacts are immutable. Changed
    product code needs a new release/pre-release identifier, never an overwrite.
-8. Every pull request that changes a path in the authoritative Core manifest is
-   one reviewed Core-generation release scope. It raises `X` relative to its
+8. Every pull request that changes protected Core implementation or a Core wire
+   contract is one reviewed Core-generation release scope. It raises `X` relative to its
    base and resets `Y` and `Z` to zero. Batch one planned generation into that
    pull request; a later Core-changing pull request starts another generation.
-   The required label and independent review record are authorization evidence,
-   not substitutes for the version change.
+   The required label and matching independent-human or owner-approved review
+   record are authorization evidence, not substitutes for the version change.
+   The sole repository owner may use the documented owner-approved mode without
+   appointing a second human reviewer.
 
 Changing a number is descriptive, not authorization to edit Core, publish,
 restart, or broaden an adoption operation.

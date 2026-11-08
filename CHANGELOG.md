@@ -42,6 +42,11 @@ included since the v4 Beta, migration steps and publication limits.
 
 ### Changed
 
+- Retain the security floors for Functions HTTP/image dependencies and separate
+  dependency qualification from Core code approval. Actual Core wire-contract
+  changes still need matching owner or independent review; independent runtime
+  updates do not require another Core generation. See
+  [dependency maintenance](docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md).
 - Reduce model-facing Ollama reference overhead while retaining complete private
   sources; page new tool results and close tool use near capacity without
   replaying completed actions, dropping the task or reducing the output reserve.

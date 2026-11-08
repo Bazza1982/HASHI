@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "change_id": "core-5-hcc-approved-migration-route-addendum",
+  "authorization_reference": "The 2026-11-05 owner-approved Core major-version preparation and independent PR review, including the narrow CI approval-route regression found during PR137 closeout; deployment remains separately authorized.",
+  "implementer": "hashiko_1_1@MSI",
+  "reviewer": "/root/core_dependency_review@MSI",
+  "reviewed_at": "2026-11-05T17:05:51+11:00",
+  "verdict": "approved",
+  "product_version": "5.0.0a1",
+  "core_digest": "sha256:d244be3267fd2098aeea13ec8bbef037c4b0b3dd176d37dcf1c3ffb4cf8cc689",
+  "summary": "Approved for source preparation and PR review only. The HCC workflow now accepts a fully reviewed Core migration only through the trusted PR approval label, reruns on label addition/removal, and retains its guard, whitespace, lint and component-test checks. No protected Core or product implementation is changed by this addendum; no merge, release, adoption or restart is approved.",
+  "functional_owner": "PAO release governance",
+  "engineering_layer": "Functions/platform engineering CI approval routing",
+  "comparison_base": "6f78ac7f45b25111e68a737a5e6588152341b6a2",
+  "candidate_head_at_review": "8633650181de3064d0f7e836f7f3a17f4e2fb152",
+  "reviewed_revision_scope": "The working candidate against comparison_base, including only the HCC workflow and migration narrative changes after candidate_head_at_review, sealed below before adding this record. The publisher must confirm the eventual final commit reproduces these seals.",
+  "previous_review": "docs/core-reviews/2026-11-05-v5-integrated-closeout-review.json",
+  "previous_review_canonical_sha256": "sha256:ed40b02fb0dece3cf1ecc8f250d1dae518b387991a5b3003f7093cd2cf539840",
+  "source_integrity": {
+    "canonical_manifest": "orchestrator.runtime_contract.CORE_SOURCE_PATHS",
+    "protected_paths_count": 9,
+    "protected_sources_match_comparison_base": true,
+    "prior_two_review_records_preserved": true,
+    "file_hash_convention": "sha256 of the UTF-8 LF source view; this addendum itself is excluded",
+    "sealed_candidate_file_count": 22,
+    "runtime_versions_and_standard_portable_locks_unchanged_from_previous_review": true,
+    "upstream_program_files_preserved": 17
+  },
+  "reviewed_files_sha256": {
+    ".github/workflows/architecture-boundaries.yml": "sha256:d9ae53e6c0e9c9a1cf6ce51134d479e11753c86c27c939d05c4bf67ebcaf8813",
+    ".github/workflows/hcc-contract.yml": "sha256:b1c301ed1e9438c772153e258ca7be4d132612f40a5c73a548782dca2cd5e188",
+    "CHANGELOG.md": "sha256:fa0f285b694b1123d6766f15e5174bd7b2cb0df0fd8bc01dc57c2571c8eb7b2c",
+    "README.md": "sha256:10b41e355dececeb5053bfdc203fe759ff12653e93e0a0dcd46a949c5bfc764f",
+    "constraints/standard-py312.lock": "sha256:d1fd91284c04ae42ac0f1d053930967ddcd500ffe8bdaf73d6209582e78166d8",
+    "deploy/helm/hashi-enterprise/Chart.yaml": "sha256:c1d856380c33df8c6e534eba5807ad548ff7a24380d2e4af73aae49b30b4fecc",
+    "docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md": "sha256:5f9ecf1182515e1a2099ba56b73ae4d71a2c75334de3b30b86e68f0f973a434b",
+    "docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md": "sha256:944456bdfac7ce6c5e8d8b85630c7aeeccd5764f27f9f7add1a3d366e26d1b5f",
+    "docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md": "sha256:17dff88447c7b1bc33b59e67849c4004ebd33e7febb496f54cc0802e9aa144b1",
+    "docs/RELEASE_CHECKLIST.md": "sha256:073558a15a83770a4487eb69e9c8e7758f257e4f9e14beff434c5e7704ceed83",
+    "docs/agent-guide/engineering.md": "sha256:0f5ca62d3a4e5edf1166965ee1d3dc177754079c768049d28d62e37fb49dcd8e",
+    "docs/core-reviews/2026-11-05-v5-core-dependency-review.json": "sha256:6e2ee85518c17c7015b1cc44b84223e39cc138a81833a58ac27287544c024d5d",
+    "docs/core-reviews/2026-11-05-v5-integrated-closeout-review.json": "sha256:ed40b02fb0dece3cf1ecc8f250d1dae518b387991a5b3003f7093cd2cf539840",
+    "docs/core-reviews/README.md": "sha256:c76eb90892e28b5b386c8776deb3dda9ef786e0b03b7f0424730885bb4b4da9f",
+    "package.json": "sha256:097bc6569a95a0c60f628323c5df210f3ca49849880677c4e13fb7694db24940",
+    "packaging/portable_windows/requirements.lock": "sha256:f9da5d1a55a9a2f0b3db9c9afd7bd95f63c6a53869400b29874eee903f11a5b0",
+    "pyproject.toml": "sha256:00a7627444fe34c0c60f56c02fbc5e4231047bed049095b64c5b70ae6beb1508",
+    "requirements.txt": "sha256:05a0050455ead47c8cdeef8c2b08e2ab0db5044f2cf7bf40441b640df00a91c4",
+    "scripts/check_protected_core_changes.py": "sha256:88c924514efd674938a17471bea270e049d581e26471db6bb7d9b36802b14b76",
+    "tests/contract/test_npm_package_contract.py": "sha256:6e5fb09566e61cc7de7e95be94b4f1b705e6210f755c9203afca37f5da48cc0a",
+    "tests/test_dependency_profiles.py": "sha256:4b9695f6d9516c45249deeef0d1d0be3e8309d7d005ad131cd186b59658f1dfe",
+    "tests/test_engineering_safeguards.py": "sha256:cb427f2819c4c445c3951e78ae660956a3d46aa2544e6c8dc1ba960e1f43af6f"
+  },
+  "observed_regression": {
+    "head": "8633650181de3064d0f7e836f7f3a17f4e2fb152",
+    "job_url": "https://github.com/Bazza1982/HASHI/actions/runs/41976876583/job/127077667865",
+    "step": "Protected Core and whitespace guards",
+    "actual_exit_code": 2,
+    "assessment": "The previous HCC caller always invoked the branch guard without authorization/major flags. Merely adding the PR approval label could not select an authorized route in that workflow."
+  },
+  "reviewed_changes": [
+    "HCC pull_request activities include opened, synchronize, reopened, labeled and unlabeled.",
+    "The authorization input derives only from a pull_request event containing the real core-change-approved GitHub label.",
+    "Only that trusted true branch supplies --authorized and --major-version-change together with the comparison base; false-label and ordinary push routes do not gain authorization.",
+    "Existing path filters, feature-hcc push scope, fail-fast setting, whitespace guard, lint selection, component selection and artifact handling are preserved.",
+    "The owning migration decision records the observed failure, narrow fix and offline evidence without changing the two historical review records."
+  ],
+  "validation": {
+    "independent_actual_workflow_replay": {
+      "old_script_simulated_label_true_exit_code": 2,
+      "new_script_simulated_label_false_exit_code": 2,
+      "new_script_simulated_label_true_exit_code": 0,
+      "real_github_label_applied": false
+    },
+    "workflow_canonical_sha256": "sha256:b1c301ed1e9438c772153e258ca7be4d132612f40a5c73a548782dca2cd5e188",
+    "non_guard_steps_push_paths_and_strategy_unchanged": true,
+    "hcc_component_selectors": 18,
+    "hcc_selector_order_matches_actual_workflow": true,
+    "hcc_components": {
+      "passed": 506,
+      "skipped": 11,
+      "failed": 0
+    },
+    "hcc_lint": {
+      "tool": "Ruff 0.17.3",
+      "main_exit_code": 0,
+      "candidate_exit_code": 0
+    },
+    "scope": "Local isolated Windows verification. These overlapping selections are not a unique-test sum; remote jobs at the eventual new commit remain separately observed."
+  },
+  "release_and_adoption_boundaries": {
+    "approved_scope": "Source preparation and independent PR review only",
+    "maintainer_label": "core-change-approved remains required before merge. Both Architecture and HCC deliberately reject its absence; local simulation does not apply that label.",
+    "final_commit_qualification": "The publisher will recheck exact final commit, artifacts and GitHub jobs after committing this addendum; no final new-commit CI or artifact success is claimed at signing.",
+    "baseline_failures": "The 32 historical baseline nodes remain unclosed: the integrated grouped candidate run had 31 failures and one gateway pass, followed by three isolated gateway failures in each environment. No baseline repair is included.",
+    "live_operations": "No merge, registry publication, production interpreter change, runtime adoption, service switch or restart is authorized by this record."
+  }
+}
