@@ -106,6 +106,14 @@ principal is not expected to read protected `agents.json`; failure to do so
 must never silently advertise the generic `HASHI` identity or default Backend
 API port.
 
+Both fixed tasks explicitly delegate read access to their runtime principal.
+Elevated registration and `ensure` repair this delegation even when the
+existing task definitions already match, preserving the owner and other
+access entries without granting task-edit rights. An administrator seeing a
+task does not prove that Limited Remote can see or invoke it. Deployment
+acceptance must run the actual `/restart` command through that Remote and
+verify the terminal receipt and replacement processes.
+
 Linux/WSL supervised Remote:
 
 ```bash
