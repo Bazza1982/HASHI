@@ -8,6 +8,7 @@ from orchestrator.fingerprint.models import FingerprintPolicy
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_incarnation import project_lifecycle_identity
 from orchestrator.agent_delivery_policy import (
     TELEGRAM_MIRROR_INHERIT,
     normalize_telegram_mirror_policy,
@@ -346,6 +347,7 @@ class ConfigManager:
             if not isinstance(row, dict):
                 raise ValueError(f"Agent row {index} must be an object.")
             name = str(row.get("name") or f"agent-{index}")
+            project_lifecycle_identity(name, row, row.get("extra"))
             agent_type = row.get("type")
             if agent_type is None:
                 raise ValueError(
@@ -845,6 +847,7 @@ class ConfigManager:
                     permission_settings_present = True
                     permission_settings = nested_settings
                 extra = extra or None
+            extra = project_lifecycle_identity(name, a_raw, extra)
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
                 telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,

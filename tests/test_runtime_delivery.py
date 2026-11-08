@@ -13,6 +13,30 @@ from orchestrator import runtime_delivery
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_rate_limit_recovery_failure_keeps_connector_meaning_and_wait(monkeypatch, locale):
+    from orchestrator import ui_language
+    from orchestrator.telegram_delivery_errors import TelegramRateLimitRecoveryError
+
+    runtime = SimpleNamespace(config=SimpleNamespace(active_backend="codex-cli"))
+    item = SimpleNamespace(chat_id=123, owner_id="123")
+    monkeypatch.setattr(ui_language, "preferred_locale", lambda *a, **k: locale)
+    failure = TelegramRateLimitRecoveryError(retry_after_s=5)
+    fields = runtime_delivery.runtime_exception_fields(runtime, item, failure)
+    public = fields["public_failure"]
+    assert fields["error_retryable"] is False
+    assert fields["retry_after_s"] == 5
+    assert public["retry_action"] == "inspect_failure"
+    assert public["error_code"] == failure.code
+    assert public["text"].startswith(
+        "⚠️ " + ui_language.tr("error.telegram_delivery_header", locale=locale)
+    )
+    assert "5" in public["text"] and failure.code in public["text"]
+    assert ui_language.tr(
+        "error.backend_header", locale=locale, backend="codex-cli"
+    ) not in public["text"]
+
+
 class _Logger:
     def __init__(self):
         self.messages = []

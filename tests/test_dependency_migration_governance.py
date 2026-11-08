@@ -158,4 +158,26 @@ def test_trimmed_lock_path_retains_identity_without_core_approval(repository):
     git(repository, "add", "pyproject.toml")
     result = check(repository, "--cached")
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("field", ["standard-lock", "core-host-lock"])
+@pytest.mark.parametrize(
+    "relative", ["constraints/nested/profile.lock", r"constraints\nested\profile.lock",
+                 r"constraints\nested/profile.lock"],
+)
+def test_relative_lock_revision_needs_no_core_approval(repository, field, relative):
+    from pathlib import PureWindowsPath
+
+    metadata, standard = _runtime_baseline(repository)
+    previous = standard if field == "standard-lock" else standard.parent / "core.lock"
+    original = previous.relative_to(repository).as_posix()
+    metadata.write_text(metadata.read_text().replace(json.dumps(original), json.dumps(relative)))
+    target = repository.joinpath(*PureWindowsPath(relative).parts)
+    target.parent.mkdir(parents=True)
+    target.write_text(previous.read_text())
+    git(repository, "add", ".")
+
+    result = check(repository, "--cached", "--base", "HEAD")
+
+    assert result.returncode == 0, result.stdout + result.stderr
 # HASHI-Fingerprint: hfp_c06d07c478e74e33a0916e01bba959f9

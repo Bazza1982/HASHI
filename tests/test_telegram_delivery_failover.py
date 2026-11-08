@@ -7,12 +7,18 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from orchestrator import telegram_delivery_failover as failover
 from orchestrator import runtime_status, telegram_stream_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+def _prewrite_network_error():
+    error = NetworkError("synthetic connection failure")
+    error.__cause__ = httpx.ConnectError("connection never established")
+    return error
 
 
 class _Bot:
@@ -96,6 +102,24 @@ def _write_delivery_state(tmp_path: Path, agent: str, record: dict) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+@pytest.mark.asyncio
+async def test_incomplete_owner_keeps_retry_after_cause_and_never_publishes_state(tmp_path):
+    from orchestrator.telegram_delivery_errors import TelegramRateLimitRecoveryError
+
+    runtime = _runtime(tmp_path, "source")
+    runtime.config.extra.pop("agent_lifecycle_id")
+    original = RetryAfter(5)
+    with pytest.raises(TelegramRateLimitRecoveryError) as caught:
+        await failover.handle_retry_after(
+            runtime, exc=original, chat_id=123,
+            request_id="isolated-missing-owner", purpose="placeholder",
+        )
+    assert caught.value.__cause__ is original
+    assert caught.value.retry_after_s == 5
+    assert caught.value.retryable is False
+    assert failover.load_health_state(runtime)["agents"] == {}
 
 
 def test_only_unexpired_retry_after_window_blocks_delivery(tmp_path):
@@ -290,7 +314,7 @@ async def test_tick_recovery_retry_after_reextends_block(tmp_path):
 @pytest.mark.asyncio
 async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path):
     source = _runtime(tmp_path, "zelda")
-    source.app.bot = _Bot(send_error=RuntimeError("temporary gateway failure"))
+    source.app.bot = _Bot(send_error=_prewrite_network_error())
     orchestrator = SimpleNamespace(
         runtimes=[source],
         raw_config={},
@@ -315,7 +339,7 @@ async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path
 
     failed = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
     assert failed["status"] == "recovery_due"
-    assert failed["last_recovery_error"] == "transient_unknown"
+    assert failed["last_recovery_error"] == "transient_transport"
 
     source.app.bot.send_error = None
     failed["per_chat"]["321"]["next_recovery_at"] = "2000-01-01T00:00:00+00:00"
@@ -597,7 +621,7 @@ async def test_transient_recovery_is_bounded_and_never_marks_delivered(tmp_path)
 
         async def send_message(self, **kwargs):
             self.attempts += 1
-            raise OSError("temporary outage")
+            raise _prewrite_network_error()
 
     source.app.bot = CountingFailureBot()
     orchestrator = SimpleNamespace(
@@ -1079,3 +1103,4 @@ async def test_runtime_notice_reuses_initialized_source_ingress_bot(
             "parse_mode": "HTML",
         }
     ]
+# HASHI-Fingerprint: hfp_76c7ee9016f84b31b040b370e339ab96

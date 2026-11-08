@@ -160,7 +160,8 @@ def _runtime_declarations(source: str) -> dict:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"[tool.hashi.runtime] {field} must be a relative path")
         value = value.strip()
-        path = Path(value.replace("\\\\", "/"))
+        # A single Windows separator is a component boundary on POSIX hosts too.
+        path = Path(value.replace("\\", "/"))
         if path.anchor or PureWindowsPath(value).anchor or ".." in path.parts:
             raise ValueError(f"{field} must remain inside the repository")
     return runtime

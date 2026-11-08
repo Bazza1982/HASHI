@@ -36,6 +36,31 @@ def lifecycle_id_from_config(config: object) -> str | None:
     return normalized if valid_agent_lifecycle_id(normalized) else None
 
 
+def project_lifecycle_identity(
+    agent_name: str, raw: dict, extra: dict | None
+) -> dict | None:
+    """Keep the canonical persisted identity in the effective Function config.
+
+    Nested legacy identity is accepted only when valid and consistent. Never
+    mint an identity or merge unrelated residual settings while loading.
+    """
+    values = [raw[AGENT_LIFECYCLE_FIELD]] if AGENT_LIFECYCLE_FIELD in raw else []
+    if isinstance(extra, dict) and AGENT_LIFECYCLE_FIELD in extra:
+        values.append(extra[AGENT_LIFECYCLE_FIELD])
+    if not values:
+        return extra
+    if any(not valid_agent_lifecycle_id(value) for value in values):
+        raise ValueError(f"Agent {agent_name!r} has a malformed lifecycle identity")
+    normalized = {str(value).strip().casefold() for value in values}
+    if len(normalized) != 1:
+        raise ValueError(f"Agent {agent_name!r} has a conflicting lifecycle identity")
+    if extra is not None and not isinstance(extra, dict):
+        raise ValueError(f"Agent {agent_name!r} extra must be an object for lifecycle identity")
+    projected = dict(extra or {})
+    projected[AGENT_LIFECYCLE_FIELD] = normalized.pop()
+    return projected
+
+
 def ensure_agent_lifecycle_id(
     config_path: str | Path,
     agent_name: str,
@@ -64,17 +89,16 @@ def ensure_agent_lifecycle_id(
             raise ValueError(
                 f"Agent {wanted_name!r} must have exactly one configuration row"
             )
-        current = rows[0].get(AGENT_LIFECYCLE_FIELD)
-        if current is not None:
-            if not valid_agent_lifecycle_id(current):
-                raise ValueError(
-                    f"Agent {wanted_name!r} has a malformed lifecycle identity"
-                )
-            return str(current).strip().casefold()
-        rows[0][AGENT_LIFECYCLE_FIELD] = candidate
+        row = rows[0]
+        projected = project_lifecycle_identity(wanted_name, row, row.get("extra"))
+        current = (projected or {}).get(AGENT_LIFECYCLE_FIELD)
+        if AGENT_LIFECYCLE_FIELD in row:
+            return current
+        # Promote a valid legacy nested identity without changing incarnation.
+        row[AGENT_LIFECYCLE_FIELD] = current or candidate
         try:
             write_config_json(target, document)
-            return candidate
+            return current or candidate
         except ConfigConflictError:
             if attempt >= max_conflicts:
                 raise
