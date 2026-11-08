@@ -85,7 +85,7 @@ def test_v6_runtime_metadata_migration_preserves_requests_and_never_invents_clai
         with pytest.raises(PermissionDenied):
             reopened.get_request_runtime_binding(subject, request.request_id)
     with sqlite3.connect(authority.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == (6 if conflict else 8)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (6 if conflict else 9)
         if conflict:
             assert connection.execute("SELECT keep FROM execution_runtime_metadata").fetchone() == ("preserve",)
 
@@ -116,3 +116,4 @@ def test_parked_request_rebind_preserves_scope_and_invalidates_old_actions(bound
     with pytest.raises((InvalidDecision, PermissionDenied)):
         authority.get_decision_action(context, action.action_id)
     assert authority.rebind_parked_requests(successor, run_guard=next_guard) == ()
+# HASHI-Fingerprint: hfp_2cf1c95f52204742abdf85c97fcd2e66

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import time
 
 import pytest
 
@@ -31,3 +32,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             and item.get_closest_marker("asyncio") is None
         ):
             item.add_marker(anyio_marker)
+
+
+@pytest.fixture
+def permission_clock() -> float:
+    """Shared approval fixtures inject the same stable trusted time."""
+    return time.time()
+# HASHI-Fingerprint: hfp_94702ec91de742a1937e7aafc4a3aa25

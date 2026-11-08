@@ -13,6 +13,8 @@ A Git checkout, qualified artifact, running process and live acceptance are diff
 - [Architecture](../../ARCHITECTURE.md) and [engineering rules](../../AGENTS.md).
 - [Layered runtime boundaries](../HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 - [Core protection](../HASHI_CORE_PROTECTION_HARDENING_2026-09-13.md).
+- [Core/Functions runtime contract](../HASHI_PYTHON_RUNTIME_COMPATIBILITY.md), including the approved v5 separation candidate, original-dependency hold point and separate adoption gates.
+- [v5 upgrade overview](../RELEASE_NOTES_v5.0.0-alpha.1.md), [versioning](../HASHI_VERSIONING_POLICY.md) and [release checklist](../RELEASE_CHECKLIST.md). The overview summarizes changes; owning contracts and exact-candidate evidence retain authority.
 - [Configuration persistence](../HASHI_CONFIGURATION_PERSISTENCE.md).
 - [Testing policy](../TESTING_POLICY.md) and [Fingerprint](../HASHI_FINGERPRINT.md).
 

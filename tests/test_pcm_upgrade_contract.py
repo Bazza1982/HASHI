@@ -40,9 +40,9 @@ def _write_pcm(path, *, persona="Persona", system="System", memory="Memory"):
     )
 
 
-def _assembler(tmp_path, **kwargs):
+def _assembler(tmp_path, *, system="System", **kwargs):
     pcm = tmp_path / "agent.md"
-    _write_pcm(pcm)
+    _write_pcm(pcm, system=system)
     store = BridgeMemoryStore(tmp_path)
     return store, BridgeContextAssembler(store, pcm, **kwargs)
 
@@ -442,11 +442,14 @@ def test_fixed_transport_order_survives_initial_only_section_omissions(tmp_path)
     )
 
 
+@pytest.mark.parametrize("system_chars", [0, 1_000])
 def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
     tmp_path,
     monkeypatch,
+    system_chars,
 ):
-    store, assembler = _assembler(tmp_path)
+    system_text = "System" + ("S" * system_chars)
+    store, assembler = _assembler(tmp_path, system=system_text)
     for index in range(5):
         store.record_completed_exchange(
             f"USER-{index}-" + (str(index) * 450),
@@ -463,6 +466,7 @@ def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
 
     assert payload["audit"]["history_omitted"]
     assert "PROTECTED CURRENT" in payload["final_prompt"]
+    assert system_text in payload["final_prompt"]
     assert "USER-4-" in payload["final_prompt"]
     assert "COMPACTED HISTORY CONTINUITY CAPSULE" in payload["final_prompt"]
     assert "USER_EXCERPT: USER-0-" in payload["final_prompt"]
@@ -793,3 +797,4 @@ async def test_handoff_command_uses_bridge_history_across_sessions(tmp_path):
         "This is a bridge-managed handoff restore. Review AGENT FYI, then use the recent transcript as continuity context.",
         session_id=current["session_id"],
     )
+# HASHI-Fingerprint: hfp_148319a45cfd4d4dbc1ca1f5f4981010

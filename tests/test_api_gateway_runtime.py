@@ -44,6 +44,7 @@ async def test_api_gateway_uses_default_model_when_request_omits_model(tmp_path:
     cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1", project_root=tmp_path)
     server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path, default_model="gpt-5.5")
     server._pool = _FakePool()
+    server._engine_status["codex-cli"] = {"available": True, "reason": "in-process fixture"}
 
     response = await server.handle_chat_completions(
         _FakeRequest({"messages": [{"role": "user", "content": "hello"}]})
@@ -195,6 +196,22 @@ async def test_gateway_engine_and_total_quotas_bound_different_models_without_lo
         await asyncio.wait_for(entered['D'].wait(),1)
         assert not tasks[0].done()
     finally:
-        for event in release.values():event.set()
+        for event in release.values():
+            event.set()
         await asyncio.gather(*tasks,return_exceptions=True)
     assert not pool._busy
+
+@pytest.mark.asyncio
+async def test_missing_cli_is_rejected_before_even_a_fake_adapter_is_called(tmp_path):
+    cfg = SimpleNamespace(
+        api_gateway_port=18801, api_host="127.0.0.1", project_root=tmp_path,
+        codex_cmd=str(tmp_path / "absent-codex-executable"),
+    )
+    server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path, default_model="gpt-5.5")
+    server._pool = _FakePool()
+    response = await server.handle_chat_completions(
+        _FakeRequest({"messages": [{"role": "user", "content": "hello"}]})
+    )
+    assert response.status == 503
+    assert server._pool.calls == []
+# HASHI-Fingerprint: hfp_2f0da7dc5c2d4bcdba0319487ff649d9

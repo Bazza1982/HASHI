@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from adapters.timeout_policy import IDLE_TIMEOUT_KEY, apply_timeout_layers
 
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.flexible_backend_registry import is_cli_backend
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.ipc_rpc import emit_private_event
@@ -30,7 +31,9 @@ class ConfiguredModelFactory:
         self.config_manager, self.authority = config_manager, authority
         self.private_workspace, self.receipt_store = private_workspace, receipt_store
 
-    async def create(self, binding, config, run_guard):
+    async def create(self, binding, config, run_guard, *, require_brokered_transport=False):
+        if type(require_brokered_transport) is not bool:
+            raise ValueError("model transport enforcement must be explicit")
         if not isinstance(config, HERv2Config):
             raise PermissionDenied("a frozen HERV3 model configuration is required")
         global_config, agents, secrets = self.config_manager.load()
@@ -43,6 +46,8 @@ class ConfiguredModelFactory:
         try:
             for profile in config.all_provider_profiles():
                 target = (profile.engine, profile.model)
+                if require_brokered_transport and is_cli_backend(profile.engine):
+                    raise PermissionDenied("L2 cannot run an unisolated native CLI model transport")
                 if target in drivers:
                     continue
                 options = dict(profile.options or {})
@@ -71,3 +76,4 @@ class ConfiguredModelFactory:
             event_sink=emit_private_event, receipt_store=self.receipt_store,
         )
         return broker, {"profiles": public, "privacy_level": int(manager.privacy_level)}
+# HASHI-Fingerprint: hfp_0dca7b90bd154800b1df3cf5ac88a8fc

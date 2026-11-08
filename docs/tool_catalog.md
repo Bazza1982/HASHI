@@ -56,11 +56,13 @@ List files and directories.
 ## System Tools
 
 ### apply_patch
-Apply a unified diff patch to a file.
-| Param | Required | Description |
-|-------|----------|-------------|
-| `path` | Yes | Target file path |
-| `patch` | Yes | Unified diff content |
+Apply a unified diff patch to a file. A rejected dry run leaves the file
+unchanged. Uniform CRLF files use the strict in-process adapter, selected
+before native tools, to preserve Windows line endings. LF files use native
+patch when available (binary mode on Windows); diff separators are normalized
+to LF. Mixed target line endings are never normalized. Native rejections remain
+authoritative and do not fall through to another adapter. Context mismatches
+are rejected without writing the target.
 
 ### process_list
 List running processes with PID, name, CPU%, MEM%.

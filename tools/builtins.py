@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import signal
-from itertools import islice
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1009,36 +1008,34 @@ def _format_patch_outcome(outcome: tuple[str, str], path: Path) -> str:
 def _apply_patch_with_patch_command(
     patch_cmd: str, path: Path, patch_str: str
 ) -> tuple[str, str] | None:
-    """Run ``patch`` with the existing dry-run-then-apply contract.
-
-    Returns ``None`` only when the resolved binary cannot be executed, so the
-    caller can fall back; a real rejection is returned verbatim.
-    """
-
+    """Honour a native patch verdict; never retry a rejected patch elsewhere."""
     import subprocess
 
     payload = patch_str.encode("utf-8", "surrogateescape")
+    original = path.read_bytes()
+    if b"\r\n" not in original and b"\n" in original:
+        # Record separators in a diff need not match the tool's transport.
+        # Only a uniformly LF target uses this normalization.
+        payload = payload.replace(b"\r\n", b"\n")
+    binary_args = ["--binary"] if os.name == "nt" else []
     try:
         dry_run = subprocess.run(
-            [patch_cmd, "--dry-run", "-u", str(path)],
-            input=payload,
-            capture_output=True,
+            [patch_cmd, *binary_args, "--dry-run", "-u", str(path)],
+            input=payload, capture_output=True,
         )
     except OSError:
         return None
     if dry_run.returncode != 0:
-        return ("rejected", _decode_patch_output(dry_run.stderr))
-
+        return ("rejected", _decode_patch_output(dry_run.stderr + dry_run.stdout))
     try:
         applied = subprocess.run(
-            [patch_cmd, "-u", str(path)],
-            input=payload,
-            capture_output=True,
+            [patch_cmd, *binary_args, "-u", str(path)],
+            input=payload, capture_output=True,
         )
     except OSError:
         return None
     if applied.returncode != 0:
-        return ("failed", _decode_patch_output(applied.stderr))
+        return ("failed", _decode_patch_output(applied.stderr + applied.stdout))
     return ("ok", _decode_patch_output(applied.stdout).strip())
 
 
@@ -1266,6 +1263,13 @@ async def execute_apply_patch(
 
     if not path.exists():
         return f"Error: file not found: {path}"
+
+    original = path.read_bytes()
+    if b"\r\n" in original and b"\n" not in original.replace(b"\r\n", b""):
+        # Some GNU ports strip CR even with --binary. Select the existing
+        # strict, byte-preserving engine before invoking any external tool.
+        # This is not a fallback after a native rejection.
+        return _format_patch_outcome(_apply_patch_with_python(path, patch_str), path)
 
     try:
         patch_cmd = _find_patch_command()
@@ -2501,3 +2505,4 @@ async def execute_xai_imagine(args: dict, secrets: dict, global_config: Any = No
     lines = [f"Generated {len(result.urls)} image(s) with {result.model}:"]
     lines.extend(result.urls)
     return "\n".join(lines)
+# HASHI-Fingerprint: hfp_4e678c6c984d41ca8a16f1d42d23ab7e

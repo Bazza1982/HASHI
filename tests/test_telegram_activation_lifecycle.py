@@ -147,8 +147,13 @@ async def test_wait_expires_with_explicit_retry_and_shutdown_cancels_wait(activa
     server, runtime, state, calls, responses, accepted = activation
     server.telegram_activation.wait_seconds = 0.04
     assert (await save(server))["activation_waiting"] is True
-    await asyncio.sleep(0.09)
-    expired = await status(server)
+    # Observe the durable expiry within a bounded scheduler window.
+    async with asyncio.timeout(2):
+        while True:
+            expired = await status(server)
+            if expired.get("activation_error_code") == "telegram_activation_wait_expired":
+                break
+            await asyncio.sleep(0.005)
     assert expired["activation_error_code"] == "telegram_activation_wait_expired"
     assert expired["activation_retry_allowed"] is True
     assert calls == []
@@ -283,3 +288,4 @@ async def test_unknown_response_and_status_reads_never_replay_an_activation(acti
     await asyncio.sleep(0.05)
     assert len(calls) == 1
     assert NEW_TOKEN not in repr(saved)
+# HASHI-Fingerprint: hfp_796e570be426497cb631bb1c98bd1689

@@ -346,3 +346,101 @@ def test_instance_resolver_rejects_unknown_and_ambiguous_names() -> None:
             assert exc.code == expected
         else:
             raise AssertionError(f"{expected} was accepted")
+
+
+def _role_fixture(role, prefix, digit):
+    return {
+        "role": role, "runtime_id": prefix + ":sha256:" + digit * 64,
+        "core_source_digest": "sha256:" + "c" * 64, "python": "3.12.13",
+        "platform_abi": "test-abi", "dependency_digest": "sha256:" + digit * 64,
+        "runtime_policy_digest": "sha256:" + "d" * 64,
+        "executable": "private-runtime-location/python.exe",
+        "environment_prefix": "private-runtime-location",
+    }
+
+
+def test_version_roles_keep_core_fixed_through_functions_observation_changes(tmp_path, monkeypatch):
+    source = _checkout(tmp_path)
+    owner = _owner(source, tmp_path / "data", "sha256:" + "e" * 64)
+    owner.kernel_pid = 101
+    owner.core_runtime_fingerprint = _role_fixture("core-host", "cr", "a")
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: None)
+    observations = []
+    for digit in ("1", "2", "1"):
+        owner.runtime_fingerprint = _role_fixture("functions", "fr", digit)
+        payload = collect_version_payload(owner, agent_name="akane")
+        roles = payload["runtime_roles"]
+        assert roles["core_host"]["pid"] == 101
+        assert roles["core_host"]["runtime_id"] == "cr:sha256:" + "a" * 64
+        assert roles["core_host"]["core_source_digest"] == "sha256:" + "c" * 64
+        assert roles["functions"]["runtime_id"] == "fr:sha256:" + digit * 64
+        assert payload["running"]["functions"]["generation_id"] == "sha256:" + "e" * 64
+        assert "private-runtime-location" not in json.dumps(roles)
+        card = render_version_card(payload, locale="en", full=True)
+        assert roles["core_host"]["runtime_id"] in card
+        assert roles["functions"]["runtime_id"] in card
+        assert "Core runtime" in card and "Functions runtime" in card
+        observations.append(roles)
+    assert observations[0]["core_host"] == observations[1]["core_host"] == observations[2]["core_host"]
+    assert observations[0]["functions"]["runtime_id"] == observations[2]["functions"]["runtime_id"]
+    assert observations[0]["functions"]["runtime_id"] != observations[1]["functions"]["runtime_id"]
+
+
+def test_version_roles_never_infer_missing_core_from_functions_or_current_checkout(tmp_path, monkeypatch):
+    owner = _owner(_checkout(tmp_path), tmp_path / "data", "sha256:" + "e" * 64)
+    owner.runtime_fingerprint = _role_fixture("functions", "fr", "1")
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: None)
+    for claimed_core in (None, {}, owner.runtime_fingerprint):
+        owner.core_runtime_fingerprint = claimed_core
+        roles = collect_version_payload(owner)["runtime_roles"]
+        assert roles["core_host"] is None
+        assert roles["functions"]["runtime_id"].startswith("fr:")
+
+
+def test_agent_version_uses_private_topology_core_and_its_own_functions_runtime(tmp_path, monkeypatch):
+    owner = _owner(_checkout(tmp_path), tmp_path / "data", "sha256:" + "e" * 64)
+    del owner.runtime_fingerprint
+    owner._topology = {
+        "kernel_pid": 101,
+        "core_runtime": _role_fixture("core-host", "cr", "a"),
+        "runtime": _role_fixture("functions", "fr", "1"),
+    }
+    agent = SimpleNamespace(
+        orchestrator=owner, name="akane",
+        _runtime_fingerprint=_role_fixture("functions", "fr", "2"),
+    )
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: None)
+    roles = collect_version_payload(agent)["runtime_roles"]
+    assert roles["core_host"]["pid"] == 101
+    assert roles["core_host"]["runtime_id"].startswith("cr:")
+    assert roles["functions"]["pid"] == 202
+    assert roles["functions"]["runtime_id"] == "fr:sha256:" + "2" * 64
+# HASHI-Fingerprint: hfp_41d651eeacfd48d49e7dbb2882a29b18
+
+
+def test_version_roles_derive_ids_from_canonical_objects_and_serialized_topology(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from orchestrator.runtime_contract import CORE_HOST_ROLE, enforce_runtime_contract
+
+    functions = enforce_runtime_contract(Path(__file__).resolve().parents[1])
+    core = replace(functions, role=CORE_HOST_ROLE, installation_digest="sha256:" + "a" * 64)
+    owner = _owner(_checkout(tmp_path), tmp_path / "data", "sha256:" + "e" * 64)
+    owner.kernel_pid = 101
+    owner.runtime_fingerprint = functions
+    owner.core_runtime_fingerprint = core
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: None)
+    direct = collect_version_payload(owner)
+    assert direct["runtime_roles"]["core_host"]["runtime_id"] == core.runtime_id
+    assert direct["runtime_roles"]["functions"]["runtime_id"] == functions.runtime_id
+    assert direct["compatibility"]["runtime_id"] == functions.runtime_id
+
+    del owner.kernel_pid
+    del owner.core_runtime_fingerprint
+    del owner.runtime_fingerprint
+    owner._topology = {
+        "kernel_pid": 101, "core_runtime": core.to_dict(), "runtime": functions.to_dict(),
+    }
+    serialized = collect_version_payload(owner)
+    assert serialized["runtime_roles"]["core_host"] == direct["runtime_roles"]["core_host"]
+    assert serialized["runtime_roles"]["functions"] == direct["runtime_roles"]["functions"]
+    assert serialized["compatibility"]["runtime_id"] == functions.runtime_id

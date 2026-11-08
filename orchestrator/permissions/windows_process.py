@@ -18,6 +18,7 @@ from ctypes import wintypes
 from orchestrator.permissions.windows_capabilities import PYTHON_RUNTIME_CAPABILITIES
 from orchestrator.permissions.windows_jobs import WindowsJob
 from orchestrator.permissions.windows_token import token_is_lpac
+from orchestrator.permissions.windows_desktop import DesktopCleanupFailed, open_runtime_desktop
 
 _DWORD, _HANDLE, _PTR, _SIZE = wintypes.DWORD, wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t
 
@@ -201,8 +202,9 @@ def _observe(process, kernel, security, job, digest, parent_jobs=()):
 
 
 class OwnedWindowsProcess:
-    def __init__(self, process, job, observation, kernel):
+    def __init__(self, process, job, observation, kernel, *, desktop=None):
         self._process, self._job, self.observation, self._kernel = process, job, observation, kernel
+        self._desktop = desktop
         self._started, self._stopped = False, False
         self._stop_lock = threading.RLock()
 
@@ -255,6 +257,9 @@ class OwnedWindowsProcess:
                         errors.append(ctypes.WinError(ctypes.get_last_error()))
             if errors:
                 raise OSError("owned process handle cleanup is unverified") from errors[0]
+            if self._desktop is not None:
+                self._desktop.close()
+                self._desktop = None
             self._stopped = True
 
 
@@ -350,9 +355,17 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         assignees=job_assignees, memory_bytes=memory_bytes,
     ), _PTR(), None
     attributes, initialized, transferred = None, False, False
+    desktop = None
     cleanup_failure, cleanup_cause = None, None
     capability_pointers = []
     try:
+        if python_runtime:
+            try:
+                desktop = open_runtime_desktop(expected_user_sid=expected_user_sid,
+                                               appcontainer_sid=appcontainer_sid)
+            except DesktopCleanupFailed as error:
+                desktop = error.desktop
+                raise
         count = 2 + (1 if appcontainer_sid else 0) + (1 if require_lpac else 0)
         size = _SIZE()
         kernel.InitializeProcThreadAttributeList(None, count, 0, ctypes.byref(size))
@@ -398,6 +411,8 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
         attribute(0x00020002, handles)
         startup = _StartupEx()
         startup.startup.cb = ctypes.sizeof(startup)
+        if desktop is not None:
+            startup.startup.desktop = desktop.name
         startup.startup.flags = 0x00000100
         startup.startup.stdin = startup.startup.stdout = startup.startup.stderr = null_handle
         startup.attributes = ctypes.cast(attributes, _PTR)
@@ -427,7 +442,7 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
             verification_error = PermissionError("suspended child differs from the qualified execution identity")
             verification_error.observation = observation
             raise verification_error
-        owned = OwnedWindowsProcess(process, job, observation, kernel)
+        owned = OwnedWindowsProcess(process, job, observation, kernel, desktop=desktop)
         transferred = True
         return owned
     finally:
@@ -469,7 +484,14 @@ def launch_suspended(*, executable: Path, arguments: list[str], cwd: Path,
                 cleanup_failure = cleanup_failure or WindowsProcessCleanupFailed(process, job, kernel)
                 cleanup_failure._null_handle = null_handle
                 cleanup_cause = ctypes.WinError(ctypes.get_last_error())
+        if desktop is not None and not transferred and cleanup_failure is None:
+            try:
+                desktop.close()
+            except BaseException as error:
+                cleanup_failure = WindowsProcessCleanupFailed(process, job, kernel)
+                cleanup_cause = error
         if cleanup_failure is not None:
+            cleanup_failure._desktop = desktop
             raise cleanup_failure from cleanup_cause
 
 
@@ -480,6 +502,7 @@ class WindowsProcessCleanupFailed(OSError):
         self._process, self._job, self._kernel = process, job, kernel
         self._cleanup_lock = threading.RLock()
         self._null_handle = None
+        self._desktop = None
         super().__init__("created process cleanup is unverified")
 
     def retry_cleanup(self):
@@ -498,3 +521,6 @@ class WindowsProcessCleanupFailed(OSError):
             if self._null_handle:
                 _checked(self._kernel.CloseHandle(self._null_handle))
                 self._null_handle = None
+            if self._desktop is not None:
+                self._desktop.close()
+                self._desktop = None

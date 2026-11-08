@@ -305,6 +305,8 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
 
     async def fake_request(method, url, *, payload=None):
         calls.append((method, url, payload))
+        if method == "GET" and "/scheduler/status?" in url:
+            return 200, {"ok": True, "status": {"deletion_revision": "a" * 64}}
         return 200, {"ok": True, "state_changed": True}
 
     monkeypatch.setattr("tools.hashi_scheduler._request_json", fake_request)
@@ -383,6 +385,11 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
         "delete-1",
     )
     assert deleted["isError"] is False
+    assert calls[-2] == (
+        "GET",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/status?kind=heartbeat&job_id=momo-loop-1",
+        None,
+    )
     assert calls[-1] == (
         "DELETE",
         "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs/momo-loop-1",
@@ -390,6 +397,7 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
             "kind": "heartbeat",
             "requested_by": "hashi_tool_gateway",
             "authorization": "explicit_user_authorization",
+            "expected_revision": "a" * 64,
         },
     )
 
@@ -705,3 +713,4 @@ async def test_gateway_allows_repeated_browser_side_effect_when_state_changes(tm
     for number in range(gateway.context.max_identical_calls + 2):
         result = await gateway.call("browser_click", arguments, str(number))
         assert result["isError"] is False
+# HASHI-Fingerprint: hfp_cf66b29779af41f99a82f150ae5ef628

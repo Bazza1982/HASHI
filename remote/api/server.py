@@ -32,6 +32,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -332,7 +333,9 @@ TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 # Covers normal service stop/start and product readiness, not Agent turn work.
-RESTART_VERIFICATION_TIMEOUT_SECONDS = 240.0
+# Independent Core/Functions qualification and all Workers can exceed four
+# minutes on Windows. Keep a bounded cold-start window and all terminal checks.
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 600.0
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -1663,23 +1666,20 @@ def _status_kernel_pid(status: dict[str, Any]) -> int | None:
 
 
 def _restart_runtime_contract_mismatches(
-    expected: dict[str, Any], actual: dict[str, Any]
+    expected: dict[str, Any], actual: dict[str, Any], *, qualified_target: bool = False
 ) -> list[str]:
-    """Compare the stable Core contract while allowing cold adoption changes.
+    """Match a qualified destination exactly; retain legacy baseline tolerance.
 
-    A cold restart may intentionally adopt the approved dependency lock and a
-    newly qualified Function generation. The restarted Core has already
-    enforced its dependency contract before publishing health, so the complete
-    installed-set digest is diagnostic rather than an equality gate here.
+    A qualified target is the admitted destination B, not the old runtime A.
+    Its dependency digest must match too. Only a legacy pre-restart baseline
+    may tolerate a dependency change during cold adoption.
     """
-
-    if not expected:
-        return []
+    fields = _RUNTIME_VERSION_FIELDS if qualified_target else _RESTART_STABLE_RUNTIME_FIELDS
     return [
         field
-        for field in _RESTART_STABLE_RUNTIME_FIELDS
-        if expected.get(field) not in (None, "")
-        and actual.get(field) != expected.get(field)
+        for field in fields
+        if (qualified_target or expected.get(field) not in (None, ""))
+        and (expected.get(field) in (None, "") or actual.get(field) != expected.get(field))
     ]
 
 
@@ -1705,15 +1705,18 @@ def _restart_evidence(
     target_instance: str,
     expected_runtime: dict[str, Any],
     expected_generation: str,
+    previous_runtime: dict[str, Any] | None = None,
+    qualified_target: bool = False,
 ) -> dict[str, Any]:
     health = status.get("workbench_health") or {}
     new_pid = _status_kernel_pid(status)
     actual_instance = str(health.get("instance_id") or "").strip().upper()
     runtime_version = _runtime_version(status)
+    previous = expected_runtime if previous_runtime is None else previous_runtime
     generation_id = _function_generation_id(status)
     backend_health_ok, backend_health_state = _restart_backend_health(status)
     runtime_contract_mismatches = _restart_runtime_contract_mismatches(
-        expected_runtime, runtime_version
+        expected_runtime, runtime_version, qualified_target=qualified_target
     )
     issues = (
         list(
@@ -1745,7 +1748,7 @@ def _restart_evidence(
             runtime_version and not runtime_contract_mismatches
         ),
         "runtime_version_changed": bool(
-            expected_runtime and runtime_version != expected_runtime
+            previous and runtime_version != previous
         ),
         "runtime_contract_mismatches": runtime_contract_mismatches,
         "generation_id": generation_id or None,
@@ -1812,15 +1815,24 @@ def _launch_hashi_process(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
     log_handle = log_path.open("ab")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.update(
+        BRIDGE_HOME=str(root),
+        BRIDGE_CODE_ROOT=str(root),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
     kwargs: dict[str, Any] = {
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
         "cwd": str(root),
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
     }
     if platform.system().lower() == "windows":
-        env = os.environ.copy()
         env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
-        kwargs["env"] = env
         if detach_on_windows:
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
                 subprocess,
@@ -1858,20 +1870,6 @@ def _hashi_restart_command() -> list[str]:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
     if platform.system().lower() == "windows":
-        service_target = _configured_windows_service_target()
-        service_ctl = root / "bin" / "hashi_service_ctl.ps1"
-        if service_target and service_ctl.exists():
-            return [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(service_ctl),
-                "-ServiceName",
-                service_target,
-            ]
         restart_ctl = root / "bin" / "hashi_restart_ctl.ps1"
         if restart_ctl.exists():
             return [
@@ -1883,6 +1881,8 @@ def _hashi_restart_command() -> list[str]:
                 "-File",
                 str(restart_ctl),
                 "trigger",
+                "-Python",
+                sys.executable,
                 "-HashiRoot",
                 str(root),
             ]
@@ -1898,6 +1898,7 @@ def _hashi_restart_command() -> list[str]:
                 "-Action",
                 "restart",
                 "-Resume",
+                "-ApiGateway",
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
@@ -1910,34 +1911,10 @@ def _hashi_restart_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
 
 
-def _configured_windows_service_target() -> str | None:
-    """Return only an exact service target published by platform policy."""
+def _qualified_restart_runtime() -> dict[str, Any] | None:
+    from remote.restart_runtime import qualified_restart_runtime
 
-    if not _control_hashi_root:
-        return None
-    path = (
-        Path(_control_hashi_root)
-        / "state"
-        / "platform"
-        / "live-runtime-protection.json"
-    )
-    try:
-        if path.stat().st_size > 64 * 1024:
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    values = payload.get("service_targets") if isinstance(payload, dict) else None
-    if not isinstance(values, list):
-        return None
-    controlled = _controlled_instance_id({})
-    matches = {
-        str(value).strip()
-        for value in values
-        if str(value).strip().upper() == controlled
-        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(value).strip())
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+    return qualified_restart_runtime(Path(_control_hashi_root))
 
 
 def _restart_hashi_process() -> dict[str, Any]:
@@ -2512,26 +2489,12 @@ def _restart_failure_notice(record: dict[str, Any]) -> tuple[str, str]:
     return phase, "restart verification did not confirm the new process"
 
 
-def _restart_warning_notice(record: dict[str, Any]) -> str:
-    health = ((record.get("status") or {}).get("workbench_health") or {})
-    for issue in health.get("issues") or ():
-        if not isinstance(issue, dict):
-            continue
-        summary = str(issue.get("summary") or "").strip()
-        if summary:
-            return summary[:500]
-    return "The restart completed with a non-blocking service warning."
-
-
 def _restart_notice_fallback_text(
     message_key: str, message_args: dict[str, str]
 ) -> str:
     instance = message_args.get("instance") or "HASHI"
     if message_key == "api.restart.completed":
         return f"✅ {instance} restarted and is back online."
-    if message_key == "api.restart.completed_degraded":
-        warning = message_args.get("warning") or "A non-blocking warning remains."
-        return f"✅ {instance} restarted. Local services are online. ⚠️ {warning}"
     stage = message_args.get("stage") or "unknown stage"
     reason = message_args.get("reason") or "restart verification failed"
     return f"❌ {instance} restart failed during {stage}: {reason}"
@@ -2551,12 +2514,9 @@ def _notify_restart_result(
         "instance": str(record.get("target_instance") or "HASHI"),
     }
     if record.get("state") == "completed":
-        health = ((record.get("status") or {}).get("workbench_health") or {})
-        if health.get("degraded") is True:
-            message_key = "api.restart.completed_degraded"
-            message_args["warning"] = _restart_warning_notice(record)
-        else:
-            message_key = "api.restart.completed"
+        # Report the verified Core restart. Optional connector snapshots remain
+        # in the receipt and health diagnostics, not in the completion notice.
+        message_key = "api.restart.completed"
     else:
         message_key = "api.restart.failed_detail"
         stage, reason = _restart_failure_notice(record)
@@ -2904,7 +2864,10 @@ def create_app(
         discovery_status = dict(protocol_status_view.get("discovery") or {})
         health_state = (
             "ready"
-            if not discovery_status or discovery_status.get("state") in {"ready", "ready_empty", "disabled"}
+            # Foreign advertisements can fail authentication without disabling
+            # this local service. Keep peer trust failures in discovery.state;
+            # readiness still requires every configured discovery backend.
+            if not discovery_status or discovery_status.get("readiness") in {"ready", "disabled"}
             else "degraded"
         )
         if not authenticated:
@@ -4515,14 +4478,29 @@ def create_app(
                 failure_stage="target_validation",
             )
             return JSONResponse(status_code=409, content=record)
+        phase = "runtime_qualification"
+        record["phase"] = phase
+        record = _write_restart_record(record)
         try:
+            # Freeze the installer-qualified destination before any destructive
+            # action. A cold restart can adopt an approved new Core generation;
+            # comparing it to the still-running old generation is incorrect.
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+            if qualified is not None:
+                record["expected"]["runtime_version"] = {
+                    key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
+                }
+                record["expected"]["runtime_source"] = "installer-qualified-target"
+            record["phase"] = "launch"
+            record = _write_restart_record(record)
+            phase = "launch"
             started = _restart_hashi_process()
         except Exception as exc:
             logger.exception("HASHI rescue restart failed")
             record.update(
                 {
                     "state": "failed",
-                    "phase": "launch",
+                    "phase": phase,
                     "completed_at": _utc_timestamp(),
                     "error": str(exc),
                 }
@@ -4542,7 +4520,7 @@ def create_app(
                 requester_agent=record["requester_agent"],
                 request_source=record["request_source"],
                 old_pid=old_pid,
-                failure_stage="launch",
+                failure_stage=phase,
             )
             return JSONResponse(
                 status_code=500,
@@ -4570,6 +4548,8 @@ def create_app(
             target_instance=target_instance,
             expected_runtime=record["expected"]["runtime_version"] or {},
             expected_generation=record["expected"]["generation_id"] or "",
+            previous_runtime=_runtime_version(before),
+            qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
         )
         while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
@@ -4580,6 +4560,8 @@ def create_app(
                 target_instance=target_instance,
                 expected_runtime=record["expected"]["runtime_version"] or {},
                 expected_generation=record["expected"]["generation_id"] or "",
+                previous_runtime=_runtime_version(before),
+                qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
             )
         completed = _restart_evidence_complete(evidence)
         record.update(
@@ -5350,3 +5332,4 @@ def create_app(
         return _agent_move_response(request, result)
 
     return app
+# HASHI-Fingerprint: hfp_2147e26bcc4b4ed6b4d22f8ab591809b

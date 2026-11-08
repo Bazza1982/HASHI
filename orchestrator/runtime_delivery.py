@@ -753,13 +753,14 @@ def format_backend_error_for_user(
 
 def runtime_exception_fields(runtime: Any, item: Any, exc: Exception) -> dict[str, Any]:
     """Project known connector failures without calling them provider failures."""
-    from orchestrator.telegram_delivery_errors import TelegramRateLimitRecoveryError
+    from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 
     context = {
         "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
         "error_retryable": False,
     }
-    if isinstance(exc, TelegramRateLimitRecoveryError):
+    if (isinstance(exc, TelegramDeliveryError)
+            and exc.code == "TELEGRAM_RATE_LIMIT_RECOVERY_FAILED"):
         context["retry_after_s"] = exc.retry_after_s
         context["public_failure"] = build_public_failure(
             runtime.config.active_backend, str(exc),

@@ -20,7 +20,8 @@ from orchestrator.voice_transcription_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TRANSCRIPTION_RESULT_PREFIX,
 )
-from orchestrator.config_json import read_config_json, new_config_json, write_config_json
+from orchestrator.agent_config_json import write_agent_config_json  # noqa: E402
+from orchestrator.config_json import new_config_json, read_config_json  # noqa: E402
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -140,7 +141,7 @@ def _parse_lock_versions(lock_path: Path) -> dict[str, str]:
 
 def probe_runtime(python: Path, *, lock_path: Path) -> dict[str, Any]:
     completed = _run_command(
-        [str(python), "-I", str(WORKER_PATH), "--probe"],
+        [str(python), "-I", "-B", str(WORKER_PATH), "--probe"],
         timeout=60.0,
     )
     result_line = next(
@@ -206,7 +207,7 @@ def _write_platform_config(
     except FileNotFoundError:
         document = new_config_json(config_path)
     document.update(payload)
-    write_config_json(config_path, document)
+    write_agent_config_json(config_path, document)
     return config_path
 
 
@@ -339,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
                     base_python=args.base_python, lock_path=lock_path)
         if args.prepare_model:
             completed = _run_command(
-                [str(runtime_python_path(runtime_dir)), "-I", str(WORKER_PATH),
+                [str(runtime_python_path(runtime_dir)), "-I", "-B", str(WORKER_PATH),
                  "--check-model" if args.check else "--prepare-model"], timeout=1200.0)
             _require_success(completed, action="default model preparation")
     except (OSError, ValueError, ProvisioningError, json.JSONDecodeError) as exc:
@@ -351,3 +352,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_d6c25b5d5fc8466f80a77595102a9876

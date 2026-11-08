@@ -182,6 +182,27 @@ runtime-compatibility specification even when the product label is unchanged.
 Sharing `X` or a release string never authorizes hot adoption across a rejected
 fingerprint or substitutes for a configuration/data migration check.
 
+Protected code C, Core runtime CR, Functions runtime FR and Function code FG
+have independent identities. A qualified Python/stdlib security patch in CR
+with unchanged protected code does not by itself consume X, but still requires
+separate native qualification and explicit cold-cutover approval. A compatible
+vendor dependency update in FR normally uses a maintenance revision and a new
+FR_ID, with the same Core PID, interpreter, CR_ID and protected-source digest.
+A significant new Function capability still uses Y; a protected implementation
+or contract change still uses X and the independent same-tree review gate.
+Neither an independent role ID nor a package version weakens compatibility,
+file seals, audit, rollback or adoption authority.
+
+Core v5's structured version payload adds `runtime_roles.core_host` and
+`runtime_roles.functions`. They project the admitted Core receipt and the
+observed current Functions process separately, retaining their actual runtime
+IDs, Core source digest and PID. Agent views receive Core facts through the
+existing private shared-Functions topology and report their own Functions
+runtime. Missing/legacy Core receipts stay unknown; checkout metadata and the
+Functions identity never fill that gap. Public data and the full `/version`
+diagnostic view omit interpreter/prefix/manifest paths. Product and FG facts
+remain separate. This additive display does not admit or activate a candidate.
+
 Reports distinguish checked-out source, built/qualified artifact, running Core,
 shared Functions generation, and per-Agent Worker generation. Different
 instances may adopt the same release at different times. A repository version
@@ -196,10 +217,14 @@ edit or a successful offline check is not proof of running-version adoption.
   HASHI1 `main`; the Beta promotion is recorded through the repository release
   metadata, documentation index, release notes, roadmap, and checklist. Each
   checkout still requires separate synchronization evidence.
-- **Current version:** on 2026-09-21 the user approved the first v4 Beta for
-  small-scale public testing. The canonical public label is
-  `v4.0.0-beta.1`, with Python metadata `4.0.0b1`. Historical tags remain
-  unchanged, and registry/artifact publication remains a separate operation.
+- **Current development source:** the authorized Core/environment separation
+  migration uses `v5.0.0-alpha.1`, with Python metadata `5.0.0a1`; see the
+  [v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md). Its Core generation
+  increases from 4 to 5 and resets minor/patch to zero. This source candidate
+  is not a stable-release declaration or proof of package publication.
+  The last published GitHub pre-release observed on 2026-11-07 remains
+  `v4.0.0-beta.1`. Historical tags remain unchanged; publication and live
+  adoption are separate operations.
 - **Validation:** use the documentation-only scope in
   [Testing Policy](TESTING_POLICY.md): local link checks, `git diff --check`,
   and the protected-Core guard. Record actual results with the change; no

@@ -146,7 +146,7 @@ if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
 set "PYTHONPATH=!BRIDGE_CODE_ROOT!"
 call :resolve_wakeup_file
 if defined WAKEUP_FILE call :start_wakeup_injector
-"!PYTHON_EXE!" -c "import colorama, runpy, sys; colorama.just_fix_windows_console(); sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')" main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
+"!CORE_PYTHON_EXE!" -I -B "!BRIDGE_CODE_ROOT!\main.py" --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
 set "PY_RC=!errorlevel!"
 if not "!PY_RC!"=="0" (
     echo.
@@ -275,47 +275,19 @@ echo !C_RAIL!^|!C_RESET!
 exit /b 0
 
 :ensure_env
-if "!USING_PORTABLE!"=="1" (
-    :: USB mode - portable Python has the approved lock installed; skip venv.
-    "!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul
-    if errorlevel 1 (
-        echo !C_WARN!Portable Python violates the HASHI Core runtime contract.!C_RESET!
-        echo !C_MUTED!Rebuild the package with the approved Python and dependency lock.!C_RESET!
-        exit /b 78
-    )
-    exit /b 0
-)
-if not exist .venv (
-    echo !C_MUTED!Creating virtual environment...!C_RESET!
-    py -3.12 "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul 2>&1
-    if errorlevel 1 (
-        python "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul 2>&1
-        if errorlevel 1 (
-            echo !C_WARN!HASHI requires the approved CPython Core version.!C_RESET!
-            exit /b 78
-        )
-        python -m venv .venv || exit /b 1
-    ) else (
-        py -3.12 -m venv .venv || exit /b 1
-    )
-)
-
-call .venv\Scripts\activate.bat || exit /b 1
-set "PYTHON_EXE=!BRIDGE_CODE_ROOT!\.venv\Scripts\python.exe"
-
-"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul
-if errorlevel 1 (
-    echo !C_WARN!Existing .venv violates the HASHI Core runtime contract.!C_RESET!
-    echo !C_MUTED!Rebuild it with the approved CPython version; /reboot cannot replace Python.!C_RESET!
+rem Inspect existing management Python only; never install into .venv.
+if defined HASHI_PYTHON set "PYTHON_EXE=!HASHI_PYTHON!"
+if not defined HASHI_PYTHON if exist "!BRIDGE_CODE_ROOT!\.venv\Scripts\python.exe" set "PYTHON_EXE=!BRIDGE_CODE_ROOT!\.venv\Scripts\python.exe"
+set "CORE_PYTHON_EXE="
+set "FUNCTIONS_PYTHON_EXE="
+for /f "delims=" %%P in ('"!PYTHON_EXE!" -B "!BRIDGE_CODE_ROOT!\scripts\resolve_launch_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --field core-executable') do set "CORE_PYTHON_EXE=%%P"
+for /f "delims=" %%P in ('"!PYTHON_EXE!" -B "!BRIDGE_CODE_ROOT!\scripts\resolve_launch_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --field functions-executable') do set "FUNCTIONS_PYTHON_EXE=%%P"
+if not defined CORE_PYTHON_EXE (
+    echo Runtime setup is incomplete. Install the verified HASHI package before starting.
     exit /b 78
 )
-
-"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul
-if errorlevel 1 (
-    echo !C_MUTED!Installing the approved dependency generation...!C_RESET!
-    "!PYTHON_EXE!" -m pip install -r "!BRIDGE_CODE_ROOT!\constraints\standard-py312.lock" || exit /b 1
-    "!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul || exit /b 78
-)
+if not defined FUNCTIONS_PYTHON_EXE exit /b 78
+set "PYTHON_EXE=!FUNCTIONS_PYTHON_EXE!"
 exit /b 0
 
 :load_agents

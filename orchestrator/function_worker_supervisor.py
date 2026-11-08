@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import json
 import logging
-import multiprocessing
 import os
 import shutil
 import stat
@@ -31,7 +30,6 @@ from orchestrator.function_generation import (
     verify_manifest_source_commit,
     verify_qualified_manifest_bytes,
 )
-from orchestrator.function_worker_bootstrap import run_function_worker_process
 from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
@@ -41,6 +39,7 @@ from orchestrator.function_worker_protocol import (
 )
 from orchestrator.runtime_contract import load_runtime_policy
 from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
+from orchestrator.runtime_process import RuntimeProcess, launch_function_process_async
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
@@ -435,7 +434,7 @@ class FunctionWorkerClient:
         generation: VerifiedFunctionGeneration,
         generation_root: Path,
         nonce: str,
-        process: multiprocessing.Process,
+        process: RuntimeProcess,
         connection: Any,
     ) -> None:
         self.supervisor = supervisor
@@ -586,6 +585,10 @@ class FunctionWorkerClient:
         if monitor is not None and monitor is not asyncio.current_task():
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
+
+        close_process = getattr(self.process, "close", None)
+        if callable(close_process) and not self.process.is_alive():
+            close_process()
 
 
 class AgentRuntimeHandle:
@@ -1624,6 +1627,11 @@ class FunctionWorkerSupervisor:
                 if isinstance(handle, AgentRuntimeHandle)
             ],
             "runtime": self.kernel.runtime_fingerprint.to_dict(),
+            "kernel_pid": getattr(self.kernel, "kernel_pid", None),
+            "core_runtime": (
+                self.kernel.core_runtime_fingerprint.to_dict()
+                if getattr(self.kernel, "core_runtime_fingerprint", None) is not None else None
+            ),
             "starting": sorted(getattr(self.kernel, "_startup_tasks", {})),
             "whatsapp_connected": bool(getattr(self.kernel, "whatsapp", None)),
             "scheduler": scheduler_snapshot,
@@ -1880,8 +1888,6 @@ class FunctionWorkerSupervisor:
                     "A reused Function Worker artifact requires its generation receipt"
                 )
             artifact = generation_root
-        context = multiprocessing.get_context("spawn")
-        parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
         worker_runtime = self.kernel.runtime_fingerprint.to_dict()
         live_runtime = cached_current_runtime_fingerprint(
@@ -1902,14 +1908,7 @@ class FunctionWorkerSupervisor:
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
-        process = context.Process(
-            target=run_function_worker_process,
-            args=(child_connection, bootstrap),
-            name=f"hashi-function-{agent_name}-{generation.manifest.generation_id[7:19]}",
-            daemon=False,
-        )
-        process.start()
-        child_connection.close()
+        process, parent_connection = await launch_function_process_async(bootstrap)
         client = FunctionWorkerClient(
             supervisor=self,
             agent_name=agent_name,
@@ -2732,3 +2731,4 @@ class FunctionWorkerSupervisor:
             return_exceptions=True,
         )
         self._candidates.clear()
+# HASHI-Fingerprint: hfp_8a9dedbc49894a62b8752f6a72c44f2d

@@ -90,6 +90,16 @@ try {
     return (sid.upper(),)
 
 
+def resolve_remote_runtime_sids(root: Path) -> tuple[str, ...]:
+    """Return the registered Remote consumers for private config publication.
+
+    Credential writers must carry these principals onto atomic candidates;
+    otherwise a writer running under a different account can strand Remote.
+    Resolution failures deliberately propagate before publication.
+    """
+    return _windows_remote_runtime_sids(root)
+
+
 def ensure_local_api_credential(
     document: ConfigDocument,
     *,
@@ -116,7 +126,7 @@ def ensure_local_api_credential(
     runtime_sids = (
         tuple(remote_runtime_sids)
         if remote_runtime_sids is not None
-        else _windows_remote_runtime_sids(document.source.parent)
+        else resolve_remote_runtime_sids(document.source.parent)
     )
     if isinstance(current, str) and current.strip():
         if runtime_sids:
@@ -135,3 +145,67 @@ def ensure_local_api_credential(
         private_full_control_sids=runtime_sids,
     )
     return updated
+
+
+def issue_scheduler_tool_token(secret, *, instance_id, agent_id, request_id, audience, tools,
+                               run_id=None, fencing_token=None, now=None):
+    """Delegate Scheduler calls to one signed Run attempt, never API administration."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not all(isinstance(value, str) and value.strip()
+               for value in (secret, instance_id, agent_id, request_id, audience)):
+        raise ValueError("Scheduler tool credential requires a complete Run identity")
+    claims = {"purpose": "hashi-scheduler-tool-v1", "instance": instance_id,
+              "agent": agent_id, "request": request_id, "audience": audience,
+              "tools": sorted(set(tools)), "expires": int(time.time() if now is None else now) + 3600}
+    if run_id is not None or fencing_token is not None:
+        if not isinstance(run_id, str) or not run_id.strip() or type(fencing_token) is not int or fencing_token <= 0:
+            raise ValueError("Scheduler tool credential requires a valid Run attempt")
+        claims.update(run_id=run_id, fencing_token=fencing_token)
+    body = base64.urlsafe_b64encode(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + signature
+
+
+def scheduler_tool_token_claims(secret, token, *, instance_id, agent_id, audience, tool, now=None):
+    """Return authenticated claims only; PAO must separately fence the live effect."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not secret or not isinstance(token, str) or len(token) > 8192:
+        return None
+    try:
+        body, signature = token.split(".")
+        expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if not isinstance(claims, dict):
+            return None
+        current = time.time() if now is None else now
+        valid = (
+            claims.get("purpose") == "hashi-scheduler-tool-v1"
+            and claims.get("instance") == instance_id
+            and claims.get("agent") == agent_id
+            and claims.get("audience") == audience
+            and isinstance(claims.get("request"), str) and claims["request"]
+            and isinstance(claims.get("tools"), list) and tool in claims["tools"]
+            and type(claims.get("expires")) is int
+            and current < claims["expires"] <= current + 3600
+        )
+        return claims if valid else None
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return None
+
+
+def verify_scheduler_tool_token(secret, token, **bindings):
+    """Compatibility predicate; destructive callers must also validate PAO liveness."""
+    return scheduler_tool_token_claims(secret, token, **bindings) is not None
+# HASHI-Fingerprint: hfp_639484c6271d473aa7a60c75fdeb69b3

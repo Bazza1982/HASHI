@@ -125,7 +125,7 @@ print_banner() {
 
 check_system_info() {
     # Python version
-    PYTHON_VERSION=$(python3 --version 2>/dev/null | cut -d' ' -f2 || echo "unknown")
+    PYTHON_VERSION=$("$FUNCTIONS_PYTHON" -B --version 2>/dev/null | cut -d' ' -f2 || echo "unknown")
     
     # CLI tools
     command -v gemini &>/dev/null && CLI_GEMINI="ok"
@@ -148,7 +148,7 @@ load_agents() {
     
     # Parse all info using Python helper script
     local output
-    output=$(python3 "$helper_script" 2>&1)
+    output=$("$FUNCTIONS_PYTHON" -B "$helper_script" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${C_WARN}Failed to parse agents.json!${C_RESET}"
         echo "$output"
@@ -391,47 +391,30 @@ choose_agents() {
 }
 
 ensure_env() {
-    local venv_dir="${HASHI_VENV_DIR:-.venv}"
-    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
-        venv_dir="${HASHI_VENV_DIR:-.venv-wsl}"
+    local bootstrap_python=""
+    if command -v python3.12 >/dev/null 2>&1; then
+        bootstrap_python="$(command -v python3.12)"
+    elif command -v python3 >/dev/null 2>&1; then
+        bootstrap_python="$(command -v python3)"
     fi
-    if [[ ! -d "$venv_dir" ]]; then
-        local bootstrap_python=""
-        if command -v python3.12 >/dev/null 2>&1; then
-            bootstrap_python="$(command -v python3.12)"
-        elif command -v python3 >/dev/null 2>&1; then
-            bootstrap_python="$(command -v python3)"
-        fi
-        if [[ -z "$bootstrap_python" ]] || ! "$bootstrap_python" \
-            "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-            --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
-            echo -e "${C_ERR}HASHI requires the approved CPython Core version to create its environment.${C_RESET}"
-            exit 78
-        fi
-        echo -e "${C_MUTED}Creating virtual environment...${C_RESET}"
-        "$bootstrap_python" -m venv "$venv_dir"
+    if [[ -z "$bootstrap_python" ]]; then
+        echo -e "${C_ERR}Run node postinstall.js with the approved CPython version before launching.${C_RESET}"
+        exit 78
     fi
-    
-    # Put user-installed CLIs on PATH before activation. Activating last keeps
-    # the Core interpreter first and prevents PATH drift to system Python.
+    if ! FUNCTIONS_PYTHON=$("$bootstrap_python" -B "$SCRIPT_DIR/scripts/resolve_launch_runtime.py" \
+        --code-root "$SCRIPT_DIR" --field functions-executable); then
+        echo -e "${C_ERR}No qualified runtime pair is installed. Run node postinstall.js first.${C_RESET}"
+        exit 78
+    fi
+    if ! CORE_PYTHON=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_launch_runtime.py" \
+        --code-root "$SCRIPT_DIR" --field core-executable); then
+        exit 78
+    fi
     if [[ -d "$HOME/.local/bin" ]]; then
         export PATH="$HOME/.local/bin:$PATH"
     fi
-    source "$venv_dir/bin/activate"
-    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-        --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
-        echo -e "${C_ERR}Existing HASHI environment violates the Core runtime contract.${C_RESET}"
-        echo -e "${C_MUTED}Rebuild $venv_dir with the approved CPython version; /reboot cannot replace Python.${C_RESET}"
-        exit 78
-    fi
-
-    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-        --code-root "$SCRIPT_DIR" >/dev/null; then
-        echo -e "${C_WARN}Installing the approved dependency generation...${C_RESET}"
-        python3 -m pip install --quiet -r "$SCRIPT_DIR/constraints/standard-py312.lock"
-        python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-            --code-root "$SCRIPT_DIR" >/dev/null || exit 78
-    fi
+    export PATH="$(dirname "$FUNCTIONS_PYTHON"):$PATH"
+    export PYTHONDONTWRITEBYTECODE=1
 }
 
 preflight_check() {
@@ -439,9 +422,9 @@ preflight_check() {
     # another HASHI instance on the same computer.
     local pid_file
     local instance_id
-    pid_file=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    pid_file=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
         --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field pid-path)
-    instance_id=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    instance_id=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
         --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field instance-id)
     local existing_pid=""
     
@@ -573,7 +556,7 @@ launch() {
 
     # Browser Bridge (CDP) status probe
     local cdp_status
-    cdp_status=$(python3 -c "
+    cdp_status=$("$FUNCTIONS_PYTHON" -B -c "
 from tools.browser_bridge import probe_cdp, detect_wsl_host_ip, is_wsl
 port = 9222
 if probe_cdp('localhost', port):
@@ -598,7 +581,7 @@ else:
     
     if [[ "$DRY_RUN" == "1" ]]; then
         echo -e "${C_WARN}DRY RUN - would execute:${C_RESET}"
-        echo "  python3 main.py --bridge-home $BRIDGE_HOME $py_args"
+        echo "  $CORE_PYTHON -I -B main.py --bridge-home $BRIDGE_HOME $py_args"
         exit 0
     fi
     
@@ -623,7 +606,7 @@ else:
                 if curl -sf --max-time 2 "$hashi_api/api/health" >/dev/null 2>&1; then
                     sleep 1  # reduced grace: let agent fully register
                     log_launcher_event "wakeup-injector: sending prompt"
-                    json_body=$(python3 -c "
+                    json_body=$("$FUNCTIONS_PYTHON" -B -c "
 import json, sys
 prompt = open(sys.argv[1], encoding='utf-8').read()
 print(json.dumps({'agent': 'hashiko', 'text': prompt}))
@@ -641,8 +624,8 @@ print(json.dumps({'agent': 'hashiko', 'text': prompt}))
     fi
     # ────────────────────────────────────────────────────────────────────────
 
-    log_launcher_event "launching: python3 main.py --bridge-home $BRIDGE_HOME $py_args"
-    python3 main.py --bridge-home "$BRIDGE_HOME" $py_args
+    log_launcher_event "launching: $CORE_PYTHON -I -B main.py --bridge-home $BRIDGE_HOME $py_args"
+    "$CORE_PYTHON" -I -B main.py --bridge-home "$BRIDGE_HOME" $py_args
     local py_exit=$?
     log_launcher_event "main.py exited: code=$py_exit"
 
@@ -674,7 +657,7 @@ _onboarding_complete() {
     if [[ ! -f "$agents_file" ]]; then
         return 1
     fi
-    python3 -c "
+    "$FUNCTIONS_PYTHON" -B -c "
 import json, sys
 try:
     # Windows editors and config updaters may preserve a UTF-8 BOM.  The
@@ -693,7 +676,7 @@ if ! _onboarding_complete; then
     echo -e "${C_WARN}Onboarding not complete. Starting onboarding...${C_RESET}"
     echo ''
     sleep 1
-    HASHI_BRIDGE_PORT=$BRIDGE_PORT python3 onboarding/onboarding_main.py
+    HASHI_BRIDGE_PORT=$BRIDGE_PORT "$FUNCTIONS_PYTHON" -B onboarding/onboarding_main.py
     exit 0
 fi
 # ---------------------------------------------------------------------------

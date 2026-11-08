@@ -212,6 +212,12 @@ class _FakeUpdate:
         self.update_id = metadata.get("frontend_invocation_id") or "local_" + uuid4().hex
 
 
+    def _hashi_bind_session_projection(self, *, session_id: str, context_generation: int) -> None:
+        """Follow a deliberate PAO binding; the original invocation stays immutable."""
+        self._hashi_session_id = session_id
+        self._hashi_session_context_generation = context_generation
+
+
 def _trusted_command_session_metadata(
     session_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -748,3 +754,4 @@ async def execute_local_command(
         return response
     finally:
         session.finish()
+# HASHI-Fingerprint: hfp_ef29a3034853467cbfe8eebf89056efc

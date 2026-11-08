@@ -30,6 +30,29 @@ claims remain unchanged.
 This is source/offline behavior. PR publication does not adopt it into running
 Functions; no deployment, restart or live Telegram flood test is implied.
 
+## Notification receipt reliability (2026-11-08)
+
+Warnings, as well as recovery notices, persist a unique attempt before sending.
+The frozen instance/incarnation/Bot owner, incident, chat and attempt must all
+match before publishing a result. A late result cannot quarantine or update a
+replacement owner. An acknowledged send whose result cannot be recorded remains
+unconfirmed and is not sent again after process restart. A new incident clears
+the old warning claim; an explicit Telegram rejection can select another sender.
+
+Claim lists are returned from the successful atomic mutation. Work prepared by a
+failed compare-and-swap attempt is discarded and never reaches transport.
+
+Only a typed, proven pre-write connection failure may use bounded transport
+retry. Read/write timeouts and missing acknowledgements stop as an unknown
+outcome, without claiming delivery or resending a potentially accepted message.
+A Telegram RetryAfter retains its explicit server window. The unsent business
+answer remains available under its original request identity; notification
+failure never re-executes that business request.
+
+The Worker JSON error contract carries the pre-write proof. Public error
+projection recognizes the transported error code rather than a Python subclass,
+preserving the original wait interval and localized Telegram meaning across IPC.
+
 ## Schema 2 ownership and recovery contract
 
 Every active Agent delivery record is bound to all three of:
@@ -55,7 +78,7 @@ is unknown stops instead of risking a duplicate notice.
 
 Telegram Worker RPC returns a typed safe result. `RetryAfter` restores the exact
 server window. `BadRequest`/`Forbidden` destination failures stop that chat;
-transient transport failures use bounded backoff and stop after three failures.
+proven pre-write transport failures use bounded backoff and stop after three failures.
 Other chats remain independent. `recovery_stopped` means the operational notice
 was not delivered; it never blocks ordinary traffic after the RetryAfter window.
 

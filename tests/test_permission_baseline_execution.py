@@ -18,9 +18,14 @@ from orchestrator.permissions.execution_gate import GateResult, SupervisedResult
 from orchestrator.permissions.installation import InstancePolicies
 from orchestrator.permissions.models import RuntimeExecutionBinding
 from orchestrator.permissions.native_factory import InstalledExecutorFactory
-from tests.test_permission_execution_gate import Issuer
+from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer
 from tests.test_permission_pao_fence import setup_run
 from tools.registry import ToolResult
+
+
+# A deadlock watchdog, not a preparation SLA. The stage events establish the
+# security ordering; Windows durable I/O can legitimately queue for over 1s.
+_STAGE_WATCHDOG_SECONDS = CONTRACT_WATCHDOG_SECONDS
 
 
 class Installation(dict):
@@ -33,6 +38,7 @@ class FileEffects:
     """In-process physical effect; uses the real prepare/start authority fence."""
 
     credential_names = ()
+    TOOL_NAMES = frozenset({"file_write"})
 
     def __init__(self, authority, *, cwd, validate_resource, **kwargs):
         self.authority, self.cwd, self.validate_resource = authority, cwd, validate_resource
@@ -74,16 +80,24 @@ class FileEffects:
 
 @pytest.fixture
 def installed(tmp_path, monkeypatch):
-    async def build(baseline, requestable):
+    async def build(baseline, requestable, *, level="L1", workzone=False, broad=False):
         store, _, accepted, fence, original = setup_run(tmp_path)
         business = tmp_path / "business"
         business.mkdir()
+        if workzone:
+            zone = business if workzone is True else tmp_path / str(workzone)
+            if workzone == "attached":
+                zone.mkdir()
+            store.set_agent_workzone_slot(
+                owner_id="owner", agent_id="agent", slot_id="1" if workzone == "attached" else "main",
+                path=str(zone), expected_revision=0,
+            )
         config_path = tmp_path / "agents.json"
         config_path.write_text(json.dumps({"agents": [
-            {"name": "agent", "permission_settings": {"requested_level": "L1"}},
+            {"name": "agent", "permission_settings": {"requested_level": level}},
         ]}), encoding="utf-8")
         def declared(actions):
-            return ([{"kind": "file", "resource": str(business), "actions": list(actions)}]
+            return ([{"kind": "file", "resource": str(tmp_path if broad else business), "actions": list(actions)}]
                     if actions else [])
         installation = Installation({
             "agents": {"agent": {"owner_id": "owner", "baseline_scopes": declared(baseline),
@@ -133,18 +147,30 @@ def installed(tmp_path, monkeypatch):
                                  entry=tmp_path / "runtime/file_worker.py", executable_digest="a" * 64,
                                  entry_digest="b" * 64, private_root=tmp_path / "private",
                                  environment={})
+        class Runner:
+            def qualified_for(self, *args):
+                return True
+            def scripts_qualified(self):
+                return False
+            async def prepare(self, binding):
+                return None
+            async def stop(self, binding):
+                return True
         factory = InstalledExecutorFactory(
             authority, store, helper=helper, results=None,
             stop_issuer=SimpleNamespace(key_id=context.executor_id, issue_stop=lambda *a: "unused"),
             signing_key=Ed25519PrivateKey.generate(), worker_sid="S-1-5-21-2",
             validate_resource=policies.validate, checkpoint_writer=lambda *a: None,
             audit_writer=lambda *a: None, policy_observer=policies.freeze,
+            runner=Runner() if level == "L2" else None,
+            parent_job=object() if level == "L2" else None,
         )
         executor = await factory.create(binding, policy)
         registry = executor.channel.registry
         return SimpleNamespace(authority=authority, issuer=issuer, context=context, registry=registry,
                                supervisor=registry._permission_gate._supervisor, policy=policy,
-                               policies=policies, installation=installation, root=business, executor=executor)
+                               policies=policies, installation=installation, root=business, executor=executor,
+                               store=store, config_path=config_path)
     return build
 
 
@@ -236,12 +262,15 @@ async def test_policy_change_before_execution_cannot_use_frozen_eligibility(inst
             task = asyncio.create_task(execute(
                 env, "file_write", {"path": "changed.txt", "content": "must not write"}, "changed-policy"))
             try:
-                await asyncio.wait_for((env.supervisor.queued if stage == "queued" else env.supervisor.prepared).wait(), 1)
+                await asyncio.wait_for(
+                    (env.supervisor.queued if stage == "queued" else env.supervisor.prepared).wait(),
+                    _STAGE_WATCHDOG_SECONDS,
+                )
             finally:
                 env.installation["agents"]["agent"][source + "_scopes"] = []
                 env.supervisor.queue_release.set()
                 env.supervisor.start_release.set()
-            result = await asyncio.wait_for(task, 1)
+            result = await asyncio.wait_for(task, _STAGE_WATCHDOG_SECONDS)
         else:
             env.installation["agents"]["agent"][source + "_scopes"] = []
             result = await execute(env, "file_write", {"path": "changed.txt", "content": "must not write"}, "changed-policy")
@@ -266,11 +295,11 @@ async def test_revocation_at_final_start_cannot_be_masked_by_partial_baseline(in
         env.supervisor.start_release.clear()
         task = asyncio.create_task(execute(env, "file_write", args, "revoke-at-start"))
         try:
-            await asyncio.wait_for(env.supervisor.prepared.wait(), 1)
+            await asyncio.wait_for(env.supervisor.prepared.wait(), _STAGE_WATCHDOG_SECONDS)
             env.authority.revoke(env.context, lease.lease_id)
         finally:
             env.supervisor.start_release.set()
-        result = await asyncio.wait_for(task, 1)
+        result = await asyncio.wait_for(task, _STAGE_WATCHDOG_SECONDS)
         assert isinstance(result, GateResult) and result.state in {"permission_changed", "unknown"}
         assert not env.supervisor.writes and not (env.root / "revoked.txt").exists()
         assert env.authority.get_lease_for_task(env.context, lease.lease_id).status == "revoked"
@@ -298,3 +327,4 @@ async def test_declared_baseline_is_not_a_grant_or_an_expanded_approval_ceiling(
         assert env.authority.list_requests(env.context) == ()
     finally:
         await env.executor.close()
+# HASHI-Fingerprint: hfp_1d3492d4ac4a4f22a659bb966d7e898c

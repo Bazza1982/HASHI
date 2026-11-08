@@ -23,6 +23,8 @@ if (-not (Test-Path -LiteralPath $AgentsPath -PathType Leaf)) {
     throw "Missing HASHI instance configuration: $AgentsPath"
 }
 $AgentsConfig = Get-Content -LiteralPath $AgentsPath -Raw | ConvertFrom-Json
+$ExpectedInstance = [string]$AgentsConfig.global.instance_id
+if (-not $ExpectedInstance) { throw "Missing HASHI instance identity" }
 $WorkbenchPort = [int]$AgentsConfig.global.workbench_port
 if ($WorkbenchPort -lt 1 -or $WorkbenchPort -gt 65535) {
     throw "Invalid HASHI Backend port: $WorkbenchPort"
@@ -72,11 +74,21 @@ Start-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Triggered fixed HASHI runtime task $RuntimeTaskName"
 
 $HealthUri = "http://127.0.0.1:$WorkbenchPort/api/health"
-for ($Attempt = 0; $Attempt -lt 90; $Attempt++) {
+# Full independent-runtime preparation and multi-Agent startup can outlast
+# the old window. The registered task still has a ten-minute execution limit.
+for ($Attempt = 0; $Attempt -lt 300; $Attempt++) {
     Start-Sleep -Seconds 1
     try {
         $Health = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 1
-        if ($Health.ready -eq $true -and [string]$Health.status -eq "ready") {
+        $LocalReady = (
+            $Health.startup.services_ready -eq $true -and
+            [int]$Health.startup.failed_agents -eq 0
+        )
+        if (
+            $Health.ok -eq $true -and
+            $ExpectedInstance.Equals([string]$Health.instance_id, [System.StringComparison]::OrdinalIgnoreCase) -and
+            ($Health.ready -eq $true -or $LocalReady)
+        ) {
             Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI restart completed; Backend ready on port $WorkbenchPort"
             exit 0
         }

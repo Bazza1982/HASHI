@@ -210,7 +210,7 @@ async def test_encrypted_result_is_reused_after_a_service_restart_without_rewrit
     from orchestrator.permissions.execution_gate import PermissionExecutionGate
     from orchestrator.permissions.models import normalize_scope
     from orchestrator.permissions.waiting import PermissionWaiter
-    from tests.test_permission_execution_gate import Issuer, TestFileSupervisor, find_pending
+    from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer, TestFileSupervisor, find_pending
 
     store, path, key, context, _ = example
     issuer = Issuer()
@@ -250,7 +250,7 @@ async def test_encrypted_result_is_reused_after_a_service_restart_without_rewrit
     facts = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, facts.arguments_digest)
     waiter.notify()
-    assert (await asyncio.wait_for(task, 1)).state == "succeeded"
+    assert (await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)).state == "succeeded"
     assert supervisor.executions == 1
     (tmp_path / "report.txt").write_text("changed later", encoding="utf-8")
 
@@ -276,3 +276,4 @@ async def test_encrypted_result_is_reused_after_a_service_restart_without_rewrit
     assert damaged.state == "result_unavailable"
     assert new_supervisor.executions == 0 and new_supervisor.recoveries == 2
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "changed later"
+# HASHI-Fingerprint: hfp_58d8e359a3dd42f193889cad45812fed

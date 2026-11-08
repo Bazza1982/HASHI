@@ -2361,9 +2361,17 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
             channel_key=channel_key,
             session_id=session_id,
         )
-    # Telegram Update objects are slotted and cannot carry arbitrary HASHI
-    # attributes. The durable channel binding is canonical; callers already
-    # hold the selected Session for any remaining work in the same command.
+    # The durable, owner-checked binding remains canonical. Local frontend
+    # adapters pin an explicit Session/generation and must follow this deliberate
+    # selection before publishing the same command's completion. Telegram Update
+    # objects are slotted and continue to resolve the durable channel binding.
+    project_binding = getattr(update, "_hashi_bind_session_projection", None)
+    if callable(project_binding):
+        selected = store.get_session(session_id, owner_id=resolved_owner)
+        project_binding(
+            session_id=str(selected["session_id"]),
+            context_generation=int(selected["context_generation"]),
+        )
 
 
 def _log_session_failure(runtime: Any, error: Exception, *, operation: str, phase: str):

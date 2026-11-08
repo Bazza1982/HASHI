@@ -162,7 +162,7 @@ def test_native_windows_and_wsl_entry_points_keep_their_platform_contracts():
     assert "-RedirectStandardOutput $stdout" in portable
     assert "-RedirectStandardError $stderr" in portable
     assert "set -euo pipefail" in bridge_u
-    assert 'python3 main.py --bridge-home "$BRIDGE_HOME" $py_args' in bridge_u
+    assert '"$CORE_PYTHON" -I -B main.py --bridge-home "$BRIDGE_HOME" $py_args' in bridge_u
 
 
 def test_native_windows_remote_supervisor_has_no_task_time_limit():
@@ -325,3 +325,4 @@ def test_native_windows_launcher_tolerates_stderr_and_propagates_exit_code(
     else:
         assert f"exited with code {expected_exit}" in lifecycle
         assert "fake main failure" in stderr
+# HASHI-Fingerprint: hfp_0f163da79d9e457c9fa3cded8fac72a4

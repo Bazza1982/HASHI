@@ -224,8 +224,24 @@ def _review_record_errors(
 
     implementer = str(record.get("implementer") or "").strip().casefold()
     reviewer = str(record.get("reviewer") or "").strip().casefold()
-    if implementer and reviewer and implementer == reviewer:
-        errors.append("reviewer must be independent from implementer")
+    mode = str(record.get("approval_mode") or "independent_human").strip()
+    if mode == "owner_approved":
+        # Solo-owner projects may use documented AI technical review and the
+        # owner's explicit release decision; no fictional second human.
+        owner = str(record.get("owner") or "").strip()
+        if not owner:
+            errors.append("owner must identify the approving human for owner_approved")
+        if not str(record.get("technical_review_reference") or "").strip():
+            errors.append("technical_review_reference is required for owner_approved")
+        if not str(record.get("owner_decision_reference") or "").strip():
+            errors.append("owner_decision_reference is required for owner_approved")
+        if not str(record.get("owner_decision") or "").strip().casefold() == "approved":
+            errors.append("owner_decision must be approved for owner_approved")
+    elif mode == "independent_human":
+        if implementer and reviewer and implementer == reviewer:
+            errors.append("reviewer must be independent from implementer")
+    else:
+        errors.append("approval_mode must be independent_human or owner_approved")
 
     reviewed_at = str(record.get("reviewed_at") or "").strip()
     if reviewed_at:
@@ -276,7 +292,7 @@ def _major_version_policy_errors(
         return errors
     if not review_paths:
         errors.append(
-            f"add an independent review record under {CORE_REVIEW_DIRECTORY}/"
+            f"add a truthful independent-human or owner-approved review record under {CORE_REVIEW_DIRECTORY}/"
         )
         return errors
 

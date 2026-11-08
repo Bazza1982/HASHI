@@ -33,6 +33,7 @@ from orchestrator.config import (
     VALID_ACCESS_SCOPES,
     default_agent_mode_for_backend,
 )
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigDocument,
     ConfigList,
@@ -2826,7 +2827,8 @@ def _atomic_json(path: Path, value: Any, *, mode: int | None = None) -> None:
         if not isinstance(value, dict):
             raise AgentMoveError("new managed JSON documents must be objects")
         value = new_config_json(path, value)
-    write_config_json(path, value, **_credential_publication_options(path))
+    publisher = write_agent_config_json if path.name == "agents.json" else write_config_json
+    publisher(path, value, **_credential_publication_options(path))
 
 
 def _restore_json_snapshot(
@@ -2845,7 +2847,8 @@ def _restore_json_snapshot(
     except Exception as exc:
         raise AgentMoveError(f"invalid recovery JSON file: {path.name}") from exc
     if isinstance(value, dict):
-        write_config_json(
+        publisher = write_agent_config_json if path.name == "agents.json" else write_config_json
+        publisher(
             path, value, expected_revision=published_revision,
             **_credential_publication_options(path),
         )

@@ -12,6 +12,7 @@ These owners differ from deployment layers: Core, replaceable Functions, platfor
 ## Universal principles
 - Choose one authoritative owner and derive views from it.
 - Product changes belong in Functions or configuration. Protected Core needs explicit authorization for a major migration and independent review.
+- Keep Core code, Core-host runtime, Functions runtime and Function artifact identities distinct; follow the engineering guide for qualification and adoption.
 - Preserve identities, revisions, existing work and secrets. Unknown writes are not safe to replay.
 - Verify behavior and the actual deployed owner. Documentation grants no permission.
 

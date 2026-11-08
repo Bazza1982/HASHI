@@ -9,7 +9,7 @@ try {
         -English 'HASHI is ready. Opening the terminal interface...' `
         -Chinese 'HASHI 已就绪。正在打开终端界面……' `
         -ForegroundColor Green
-    & (Join-Path $script:PythonRoot 'python.exe') (Join-Path $script:HashiRoot 'tui.py')
+    & (Join-Path $script:PythonRoot 'python.exe') -B (Join-Path $script:HashiRoot 'tui.py')
     # Once the backend was verified and the interactive TUI opened, a later
     # exit (including Stop HASHI closing it) is not a startup failure.
     $tuiExitCode = $LASTEXITCODE

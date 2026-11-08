@@ -17,10 +17,10 @@ from orchestrator.enterprise.profile import (
     parse_profile_context,
     validate_profile_context,
 )
+from orchestrator.agent_config_json import write_agent_config_json as write_config_json
 from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
-    write_config_json,
 )
 from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_path_value
 from orchestrator.pcm import (
@@ -865,3 +865,4 @@ class ConfigManager:
             from orchestrator.workbench_auth import ensure_local_api_credential
             secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
         return global_cfg, agents, secrets
+# HASHI-Fingerprint: hfp_0c64bda3dc654ffabe8cf0faabcaf9fb

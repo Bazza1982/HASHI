@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDocument,
@@ -280,7 +281,7 @@ class TelegramAccessService:
                     extra[AGENT_USERS_KEY] = [user for user in target if user not in legacy]
                     if nested_mode:
                         row["extra"] = extra
-                write_config_json(self.config_path, config)
+                write_agent_config_json(self.config_path, config)
         except TelegramAccessError:
             raise
         except ConfigConflictError as exc:

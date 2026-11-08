@@ -834,6 +834,33 @@ class RebootManager:
                 )
                 continue
 
+            startup = dict(getattr(self.kernel, "startup_status", {}) or {})
+            remote = dict(startup.get("remote") or {})
+            shared_ready = (
+                startup.get("ready") is True
+                and not startup.get("degraded")
+                and not getattr(self.kernel, "_connector_activation_pending", False)
+                and (remote.get("enabled") is False or not remote or remote.get("available") is True)
+            )
+            if not shared_ready:
+                # Workers alone cannot confirm a broad handoff. Give the
+                # existing connector retry loop its bounded recovery window.
+                requested_at = float(shared.get("requested_at") or 0.0)
+                if requested_at and moment - requested_at <= SHARED_REPLACEMENT_TIMEOUT_SECONDS:
+                    self.receipts.update(
+                        record["id"], phase="verifying", lifecycle_state="committed",
+                        committed=True, reason="shared_services_unready",
+                    )
+                else:
+                    await self._release_reboot_fences(record)
+                    self._finish(
+                        record, "unconfirmed", committed=True,
+                        lifecycle_state="committed", reason="shared_services_unready",
+                        shared_replacement={**shared, "status": "unconfirmed",
+                                            "generation_id": generation_id},
+                    )
+                continue
+
             shared_result = {
                 **shared,
                 "status": "committed",
@@ -1999,3 +2026,4 @@ class RebootManager:
             reason="" if online_count == len(states) else "readiness",
         )
         return True
+# HASHI-Fingerprint: hfp_deb15dd9a31148b8b6fe122cb48e95bd

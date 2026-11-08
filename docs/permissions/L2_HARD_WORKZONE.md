@@ -1,0 +1,88 @@
+# L2 硬 Workzone 与 Compute 边界
+
+日期：2026-11-04。主责 PAO；工程层为 Functions、独立权限服务与受限 Runner。
+本决定由用户本轮明确批准：保留 L1，清楚披露保障范围；L2 先完成本地部分，主要保证 HERV3 受控执行链，Compute 的执行端控制另行接入与验收。
+
+## 1. 已批准的产品边界
+
+| 路径 | 承诺及边界 |
+| --- | --- |
+| L1 受管理动作 | 保持既有统一授权、范围、期限、幂等、原 Run 续跑和终态撤权。Workzone 继续是位置/搜索配置；实际权限由基础策略和租约决定，不自动成为不可扩展的目录围栏。L1 不抵御 HASHI 控制代码自身被篡改。 |
+| L2 受控 HERV3 | 在合格的服务、平台和执行链上，当前可信 Workzone 是用户业务文件访问的外层上限；已有基础权限和临时批准都不能越过它。 |
+| Codex 等独立 Engine Provider | 当前不纳入 HASHI 的完整 L2 保证；它们自己的限制单独报告。引擎名称、用户设置 L2、同一个模型供应商都不是隔离证明。 |
+| 未验收的远端执行、设备、浏览器或扩展工具 | 不继承 L2 保证。严格 L2 步骤拒绝委托给这些通道；用户明确选择兼容工作时先 fence 旧执行并显示实际覆盖，不能把拒绝当成自动降级许可。 |
+
+L1 已验证的 NP 四按钮、续跑和回收结果不重写为未开发，也不作为 L2 的全链路证明。L0 的原执行路径不改变。
+
+## 2. Workzone 是权限上限，不是新授权
+
+1. 根集合只由 PAO 现有 owner/Agent Workzone writer 管理。Agent 参数、提示词、普通问题答案、临时批准、安装文件中更宽的权限均不能扩展根集合。需要额外用户目录时，由可信用户明确修改 Workzone，再建立当前有效执行绑定；修改 Workzone 本身也不自动授予读写动作。
+2. L2 必须有明确启用且当前可用的 Workzone。缺失、不可用或重定向时拒绝建立该执行路径，不回退到宽泛 access_root 或 Agent home。只有附加根时，以首个有效根作为 cwd，不把 home 额外加入访问集合。
+3. 安装基础范围和可申请范围分别与各个精确根求交，保持原动作集合。不提升到共同父目录；落在根内的较窄文件/子目录授权保持较窄；不因收窄文件范围增删已有网络授权。process.unrestricted 不能进入 L2 的有效范围。
+4. 普通文件、搜索、补丁、脚本输入、结果正式保存都必须受同一服务端范围约束。任意 shell、直接 argv、内部 IPC、子进程和远端委派不能成为旁路；不支持的执行器拒绝调用，不能交回旧工具执行。离线脚本只接收获批输入副本，结果保存仍经文件代理。
+5. Workzone revision、精确根和本边界协议版本进入 L2 policy digest。移除后再加回相同目录也不能复活旧 epoch。准入、排队后、最终 start 和存活资源检查复用现有当前策略检查；权限失效与实际资源关闭确认分别记录。
+6. 路径归一化不是 OS 隔离。声明的根被 link/junction 重定向时拒绝；实际文件对象仍由原生绑定器检查链接、硬链接、父目录及持有 handle 的竞态。平台无法验证时不报告完整 L2。
+7. 受限运行环境只允许经过资格验证的最小只读运行包/平台依赖，以及任务私有暂存和专用 broker 端点。这些不成为通用文件工具可读的额外用户目录；审批密钥、业务秘密及其它 Agent 的数据仍隔离。
+8. 保证针对新的资源访问和执行。已由可信 PCM/附件入口提供的上下文、历史输出不会因撤权自动从模型记忆中消失；内容生命周期继续由原 owner 和 /privacy 管理。网络 grant 不等于对远端服务本身具备隔离证明。
+
+## 3. 本地实现与现有强制点
+
+- InstancePolicies 读取现有 PAO Workzone 状态；L2 才收窄两个独立权限来源。切级 review 按目标等级预览相同的有效范围和 workzone_boundary，不用切换前的等级代替目标；未配置可用根时，在停 Worker/写配置之前拒绝 L2 review。根版本变化也改变 review revision，不维护第二份根配置。
+- 原 PermissionExecutionGate 和 ManagedToolRegistry 拒绝范围外描述及主动 request_access；不生成可扩围的普通审批。
+- 原 WindowsFileProcessSupervisor 在对象准备、最终 start 和运行检查调用同一当前策略验证；根版本变化后旧绑定失效。原生 helper、LPAC host、离线脚本和 Runner 继续承担实际隔离与清理。
+- HERV3 仍只获得窄 execution 通道。审批、策略管理和 Runner 管理接口不交给模型；未知工具不回退。
+- Windows 服务态 LPAC 的最小运行对象也须独立拥有：仅在当前 Session 0 的非交互 service station 上临时授予 READ_CONTROL／ACCESSGLOBALATOMS，每个任务创建单独桌面，仅授予 READOBJECTS／WRITEOBJECTS。拒绝交互 station；不开放用户桌面、剪贴板、创建窗口、hook、切换桌面或改 ACL/owner。并发租约各自回收；Job 确认空且进程 handle 关闭后，才关闭本任务桌面并移除其 station ACE；外部 ACL 变化保留并报告待核对，不盲目恢复旧快照。
+- LPAC 的 LOCAL 管道在服务端按当前 Windows session 与实际 AppContainer SID 建立物理名字；逻辑端点和签名挑战不变。端点 DACL 同时满足普通账户与 lowbox 两次检查，仅该执行端点使用 low integrity；继续核验原生 PID、账户、AppContainer、LPAC 和非管理员身份。身份检查中的保留属性解码使用内置 UTF-16 decoder，不在 identification impersonation 期间临时加载文件。
+- 模型 wire 和无效工具响应的私密诊断经原 Run-bound runtime port 回原 Worker canonical audit owner；不要求 LPAC 修改私密日志 ACL。端口只有两种固定记录类型，不接受目标文件或任意 audit namespace；绑定原 Run/Turn/epoch，缓冲 owner 必须 flush 后回执。失败即停止，不回退到 host 本地写入或重放模型请求；L1 普通 Adapter 沿用原记录路径。
+- 固定 host 的 runtime audit 复用既有 execution-epoch scoping。epoch 由 Runner 从已拥有的 binding 注入继承管道，外部 bootstrap 不能自报该字段；原 Run/Turn/operation 保留，同一 epoch 的冲突仍拒绝。原恢复 owner 不可用即停止，不能以临时 host 本地 spool 替代必需回执；普通 L1 记录合同保持原样。
+- 保证还包括 HERV3 内部选择的模型传输。L2 在模型 Driver 创建/初始化之前拒绝未隔离的本机 CLI 传输，名单从现有 backend registry 的 CLI 分类派生；不能因顶层选择 HERV3 就把 CLI 当成纯模型 API。L1 保留原兼容行为，API 模型传输继续经原 broker。
+- Windows 的固定 HERV3 LPAC 入口使用 windows-lpac-offline-v1 异步循环：保留标准 Task、计时器、线程执行器和私有管道，将线程唤醒改为进程内事件。原生无网络 profile 会拒绝 CPython Windows 异步组件初始化时的 Winsock 探测；不为启动宿主增加网络 capability，也不换成普通进程。替代 provider 仅在核实 LPAC token 后、asyncio 导入前装入该一次性进程；不影响服务、L1、Core 或共享 Worker。此 profile 不提供 socket/subprocess transport，模型和工具 I/O 继续通过原 broker。
+- L1 不采用新的硬根求交或 Workzone revision 栅栏；原安装策略及批准语义保留。该限定以 L1/L2 对照集成回归验证。
+
+以上是本地源码合同。合格的组件不等于完整服务安装或全链路运行已通过。
+
+## 4. HASHI Compute 的配合范围
+
+先区分 Compute 实际承担的工作：
+
+- **仅提供模型推理**：接收经既有 /privacy 允许发送的上下文，返回文本或工具调用。工具调用仍在本地权限链检查，模型响应本身不获得主机权限。不能仅因使用 Compute 模型就宣称需要把本地授权权威搬到远端。
+- **在服务器实际执行文件、命令、浏览器或子任务**：本地 Workzone 无法约束服务器文件系统。必须先有服务端执行权限管制、受限运行器和远端资格证据，才能纳入端到端 L2。未就绪时，该远端执行能力保持 unavailable/partial，不能凭 HTTP 成功或远端自报安全继续执行。
+
+服务器端后续实现必须满足以下对接合同：
+
+| 合同 | 服务端必须独立落实 |
+| --- | --- |
+| 可信身份 | 认证 HASHI 实例/owner/Agent 与服务角色；模型自报身份、正文中的 approved 或共享普通 API token 不能批准。执行端不能调用审批/策略管理端。 |
+| 根与版本 | 本地 Workzone 仅作为经登记的逻辑根标识映射到服务端根；不把客户端 Windows 路径直接解释为服务器路径，不取共同父目录。绑定根 revision、policy digest、服务/执行器代次和期限。 |
+| 单次操作 | 绑定 Task/Run/Turn/epoch、operation_id、动作、输入和参数摘要、最早失效时间；服务端原子 claim/start、幂等回执。超时未知先对账，不自动重新执行。 |
+| 最小权限 | 只向指定 Task 下放已批准子集；限制服务器文件、网络、凭证、进程树和 IPC。不得转借整个服务账户或跨任务合并权限。 |
+| 撤回与断联 | 本地撤权、任务结束、根变更和父票据失效能阻止新的远端动作；短执行许可离线也有期限。关闭子进程/handle/连接须有实际确认；清理未知保持可见。 |
+| 可核验结果 | 返回认证的操作/资源/执行器版本、结果摘要和清理状态；过期、被替换、跨身份或重放证明拒绝。只记录必要元数据，不泄漏正文和秘密。 |
+| 能力报告 | 按实际本地及远端依赖组合报告，缺一段不能显示全链路 enforced。服务端资格未验证不能由本地回归替代。 |
+
+本轮没有假定 Compute 的现有部署、身份或接口，也没有新增远端服务、传递密钥或部署服务器代码。远端执行点和平台确定后，复用既有 PAO Task/Operation 权威与版本合同对接；不再建立平行授权账本。每个执行主机的强制边界仍是 L2 组合；PRD 预留 L3 的“远端最终授权权威”不是本次服务器执行代理的同义词。
+
+## 5. 验收与交付门
+
+本地聚焦用例覆盖宽基础/申请范围、L1 对照、根缺失/不可用、附加根、独立多根和窄动作、越界脚本输入、无约束进程、路径重定向，以及 admission/queued/prepared 后停用再启用根。测试通过现有安装策略、factory、registry、真实权威账本和临时文件效果；原生 launcher/IPC 为注入边界，不能据此宣称完整 OS 隔离。
+
+发布前仍须完成 [ACCEPTANCE](ACCEPTANCE.md) 的完整实体 CASE-L2/WAC。2026-11-05 同版的受限 HERV3、真实普通 Worker、公开批准续跑、OS拒绝、网络、到期、Workzone变更、故障和任务资源回收已通过[本轮关键链原生验收](L2_INTEL_LOCAL_QUALIFICATION_20261105.md)，不以部分覆盖代替完整表项。Compute 若有实际远端执行，还须独立完成上节服务和端到端验收。
+
+独立 Intel 的两份安装身份 profile 经正常 Windows 维护后完整回收，原即时清理失败不改写。共享 A9_MAX 上的旧 profile 仍是另一个环境的事项；不能用 Intel 结果宣称已清理，也不在共享主机制造新账户或强行操作系统服务。
+
+源码实现、离线验证、Windows 组件资格、完整本地安装验收、Compute 端到端验收、运行采用、GitHub/生产发布分别记录；任何一项的完成不能替代其余项。当前证据见 [实施状态](IMPLEMENTATION_STATUS.md)。
+
+## 2026-11-05：普通 Worker 的恢复上下文归属
+
+L2 主循环的私有 checkpoint 只归受限 host。普通 Worker 的呈现及伴随模型
+适配器按其原合同同时清空 observer 和 recovery；经过 PAO 采用的原任务恢复
+快照仍单独交给 host，不被清空或改成新任务。L1 继续保留自己的恢复绑定。
+真实普通 Worker 入口发现旧调用缺少必填 recovery 参数，任务明确失败；
+真实 StageProvider 的新任务、续跑两红及 L1 对照保留，修复后相关22项通过。
+新完整版本的原生普通 Worker、完整 WAC 和实例采用仍分别核实。
+
+原 Worker 的审计回调复用真正 DurableAuditLog 的具名字段接口，原 owner
+重新生成接收信封，保留 host 的 epoch、事件身份及事实。不能把 AuditWriter
+的整条 mapping 接口混用为 DurableAuditLog 接口；格式未知、别的 Turn/请求、
+事实冲突或原 canonical owner 失败均拒绝，不能改用 host 本地 spool。
+真实原 owner 与 canonical store 的失败到通过证据保留，原生复验另记。

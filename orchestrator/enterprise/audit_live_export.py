@@ -130,11 +130,9 @@ class AuditLiveExporter:
         if self.transport is None:
             raise ValueError("audit live export transport is required")
         batch_size = max(1, min(int(endpoint.batch_size), 1000))
-        events = [
-            event
-            for event in self.ledger.query(limit=1000)
-            if int(event.chain_index or 0) > int(checkpoint_chain_index or 0)
-        ][:batch_size]
+        events = self.ledger.query(
+            after_chain_index=max(0, int(checkpoint_chain_index or 0)),
+            limit=batch_size)
         if not events:
             return AuditLiveExportResult(
                 attempted=0,
@@ -228,3 +226,4 @@ def _redact_response(text: str) -> str:
     if len(compact) > 160:
         return compact[:157] + "..."
     return compact
+# HASHI-Fingerprint: hfp_63aa61ba730d43cbb7f0fa5b63822d0e

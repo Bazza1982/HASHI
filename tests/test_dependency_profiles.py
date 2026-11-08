@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import gc
+from http.cookies import SimpleCookie
+import io
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -206,3 +211,62 @@ def test_transcription_native_packages_have_a_separate_pinned_runtime():
     assert required <= helper_lock
     assert not {key[0] for key in required} & {key[0] for key in standard_input}
     assert not {key[0] for key in required} & {key[0] for key in standard_lock}
+
+
+def test_secure_shared_cookie_is_excluded_from_plain_http():
+    async def check():
+        import aiohttp
+        from yarl import URL
+
+        jar = aiohttp.CookieJar()
+        cookie = SimpleCookie()
+        cookie["session"] = "synthetic-cookie"
+        cookie["session"]["secure"] = True
+        jar.update_cookies(cookie)
+
+        assert "session" not in jar.filter_cookies(URL("http://example.invalid/"))
+        assert "session" in jar.filter_cookies(URL("https://example.invalid/"))
+
+    asyncio.run(check())
+
+
+def test_items_view_operations_release_operand_references():
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict({"seed": "value"})
+    sentinel = object()
+    operand = [(f"header-{index}", sentinel) for index in range(16)]
+    gc.collect()
+    before = sys.getrefcount(sentinel)
+
+    for _ in range(40):
+        result = operand | headers.items()
+        del result
+        result = headers.items() - operand
+        del result
+
+    gc.collect()
+    assert sys.getrefcount(sentinel) == before
+
+
+def test_functions_image_and_certificate_runtime_remains_usable():
+    import certifi
+    from PIL import Image
+    from importlib.metadata import version
+
+    assert version("pillow") == "13.0.0"
+    assert version("certifi") == "2026.10.19"
+    image = Image.new("RGBA", (3, 2), (17, 43, 89, 127))
+    payload = io.BytesIO()
+    image.save(payload, format="PNG")
+    payload.seek(0)
+    with Image.open(payload) as recovered:
+        recovered.load()
+        assert recovered.mode == image.mode
+        assert recovered.size == image.size
+        assert recovered.tobytes() == image.tobytes()
+    context = ssl.create_default_context(cafile=certifi.where())
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.cert_store_stats()["x509_ca"] > 0
+# HASHI-Fingerprint: hfp_4e3a471303264ff59b75096e8a2e70af

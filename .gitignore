@@ -15,7 +15,9 @@ __pycache__/
 
 # Runtime state
 *.lock
+!constraints/core-host-py312.lock
 !constraints/standard-py312.lock
+!constraints/functions-py312.hashes.lock
 !constraints/transcription-py312.lock
 !constraints/ocr-py312.lock
 !constraints/tts-py312.lock
@@ -245,3 +247,5 @@ call_profiles.json
 voice_catalog.json
 # Instance-only local/LAN/internet compute nodes and credential references.
 compute_services.json
+# Generated committed-source publication included by artifact builders.
+/FUNCTION_SOURCE.json

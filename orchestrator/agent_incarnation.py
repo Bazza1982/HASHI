@@ -10,10 +10,11 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
+from orchestrator.agent_config_json import write_agent_config_json as write_config_json
+
 from orchestrator.config_json import (
     ConfigConflictError,
     read_config_json,
-    write_config_json,
 )
 
 AGENT_LIFECYCLE_FIELD = "agent_lifecycle_id"
@@ -102,3 +103,4 @@ def ensure_agent_lifecycle_id(
             if attempt >= max_conflicts:
                 raise
     raise AssertionError("unreachable")
+# HASHI-Fingerprint: hfp_8f7eae193490494aa20bc75b58c7bff4
