@@ -142,9 +142,9 @@ python -m pytest -q tests -m "not contract and not live and not platform and not
 
 Run it only for:
 
-- a release candidate;
-- changes to `pyproject.toml`, `tests/conftest.py`, or shared test
-  infrastructure;
+- a stable cross-domain or major release candidate (not every routine small release);
+- changes to global dependencies, interpreter/ABI, test collection or shared
+  fixtures; pure project-description/URL edits do not qualify;
 - a broad refactor whose affected owners cannot be bounded reliably;
 - an explicit user or release-gate request.
 
@@ -209,3 +209,12 @@ suite`, `contract`, or `live canary`.
 Do not call a run "authoritative" merely because every collected test passed.
 Authority comes from choosing the correct scope and recording what was not
 exercised.
+
+## Hosted execution selection
+
+See [CI policy](../.github/CI_POLICY.md). Fast Core/authority protections remain
+required. A local focused result is valid evidence for its actual inputs; it
+does not manufacture a required GitHub status. Ordinary labels recheck approval
+only. Full regression is explicit for major/unbounded candidates, not a side
+effect of broad path names. Keep final combined-tree verification and cancel
+obsolete candidates; do not repeat feature push and PR product checks.

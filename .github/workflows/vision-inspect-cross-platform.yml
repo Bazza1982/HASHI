@@ -1,52 +1,50 @@
 name: vision-inspect-cross-platform
-
-on:
+'on':
   push:
     paths:
-      - "agents.json.sample"
-      - "orchestrator/flexible_backend_manager.py"
-      - "tools/registry.py"
-      - "tools/vision_inspect.py"
-      - "tests/test_vision_inspect.py"
-      - ".github/workflows/vision-inspect-cross-platform.yml"
+    - agents.json.sample
+    - orchestrator/flexible_backend_manager.py
+    - tools/registry.py
+    - tools/vision_inspect.py
+    - tests/test_vision_inspect.py
+    branches:
+    - main
   pull_request:
     paths:
-      - "agents.json.sample"
-      - "orchestrator/flexible_backend_manager.py"
-      - "tools/registry.py"
-      - "tools/vision_inspect.py"
-      - "tests/test_vision_inspect.py"
-      - ".github/workflows/vision-inspect-cross-platform.yml"
-
+    - agents.json.sample
+    - orchestrator/flexible_backend_manager.py
+    - tools/registry.py
+    - tools/vision_inspect.py
+    - tests/test_vision_inspect.py
 permissions:
   contents: read
-
 jobs:
   vision-inspect:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.12.13"]
+        os:
+        - ubuntu-latest
+        - windows-latest
+        python-version:
+        - 3.12.13
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      # Managed CPython also supplies Windows security-only patch releases
-      # that are absent from actions/python-versions.
-      - uses: astral-sh/setup-uv@v6
-      - name: Prepare the declared Python runtime
-        shell: bash
-        run: |
-          uv venv --seed --python "${{ matrix.python-version }}" .venv
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-          fi
-      - name: Install package and test dependencies
-        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
-      - name: Run vision and configuration regression tests
-        run: >-
-          python -m pytest -q
-          tests/test_vision_inspect.py
-          tests/test_her_v2_runtime_configuration.py
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v6
+    - name: Prepare the declared Python runtime
+      shell: bash
+      run: |
+        uv venv --seed --python "${{ matrix.python-version }}" .venv
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+        else
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+        fi
+    - name: Install package and test dependencies
+      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+    - name: Run vision and configuration regression tests
+      run: python -m pytest -q tests/test_vision_inspect.py tests/test_her_v2_runtime_configuration.py
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
