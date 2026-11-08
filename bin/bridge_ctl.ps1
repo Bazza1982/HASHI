@@ -62,9 +62,9 @@ $PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
 }
 $PathResolver = Join-Path $ProjectDir "scripts\resolve_instance_runtime.py"
 try {
-    $LockFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
-    $PidFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
-    $InstanceId = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
+    $LockFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
+    $PidFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
+    $InstanceId = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
     if (-not $LockFile -or -not $PidFile) {
         throw "empty instance runtime path"
     }
