@@ -1,63 +1,64 @@
 name: Demo Connector
-
-on:
+'on':
   push:
-    branches: [feature/demo-mode-20260920]
+    branches:
+    - main
     paths:
-      - 'orchestrator/demo/**'
-      - 'orchestrator/session_store.py'
-      - 'orchestrator/workbench_api.py'
-      - 'tests/test_demo_connector.py'
-      - 'docs/demo-mode/**'
-      - '.github/workflows/demo-source-preparation.yml'
+    - orchestrator/demo/**
+    - orchestrator/session_store.py
+    - orchestrator/workbench_api.py
+    - tests/test_demo_connector.py
+    - docs/demo-mode/**
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - labeled
+    - unlabeled
     paths:
-      - 'orchestrator/demo/**'
-      - 'orchestrator/session_store.py'
-      - 'orchestrator/workbench_api.py'
-      - 'tests/test_demo_connector.py'
-      - '.github/workflows/demo-source-preparation.yml'
-
+    - orchestrator/demo/**
+    - orchestrator/session_store.py
+    - orchestrator/workbench_api.py
+    - tests/test_demo_connector.py
 permissions:
   contents: read
-
 concurrency:
   group: demo-connector-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.13"
-      - name: Install isolated test dependencies
-        run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
-      - name: Protected Core guard
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
-        run: |
-          python scripts/check_protected_core_changes.py --validate-manifest
-          core_args=()
-          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-            core_args+=(--authorized --major-version-change)
-          fi
-          core_base_ref="${BASE_SHA:-origin/main}"
-          if [ "$core_base_ref" = 0000000000000000000000000000000000000000 ]; then
-            core_base_ref=origin/main
-          fi
-          python scripts/check_protected_core_changes.py --base "$core_base_ref" "${core_args[@]}"
-          git diff --check "$core_base_ref" HEAD
-      - name: Lint Demo Connector
-        run: python -m ruff check orchestrator/demo tests/test_demo_connector.py
-      - name: Focused Demo tests
-        run: python -m pytest -q tests/test_demo_connector.py tests/test_session_api.py
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: 'false'
+    - uses: actions/setup-python@v5
+      with:
+        python-version: 3.12.13
+    - name: Install isolated test dependencies
+      run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+    - name: Protected Core guard
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name,
+          'core-change-approved') }}
+      run: |
+        python scripts/check_protected_core_changes.py --validate-manifest
+        core_args=()
+        if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+          core_args+=(--authorized --major-version-change)
+        fi
+        core_base_ref="${BASE_SHA:-origin/main}"
+        if [ "$core_base_ref" = 0000000000000000000000000000000000000000 ]; then
+          core_base_ref=origin/main
+        fi
+        python scripts/check_protected_core_changes.py --base "$core_base_ref" "${core_args[@]}"
+        git diff --check "$core_base_ref" HEAD
+    - name: Lint Demo Connector
+      run: python -m ruff check orchestrator/demo tests/test_demo_connector.py
+    - name: Focused Demo tests
+      run: python -m pytest -q tests/test_demo_connector.py tests/test_session_api.py
