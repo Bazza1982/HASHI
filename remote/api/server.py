@@ -333,7 +333,9 @@ TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 # Covers normal service stop/start and product readiness, not Agent turn work.
-RESTART_VERIFICATION_TIMEOUT_SECONDS = 240.0
+# Independent Core/Functions qualification and all Workers can exceed four
+# minutes on Windows. Keep a bounded cold-start window and all terminal checks.
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 600.0
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:

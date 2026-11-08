@@ -74,7 +74,9 @@ Start-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Triggered fixed HASHI runtime task $RuntimeTaskName"
 
 $HealthUri = "http://127.0.0.1:$WorkbenchPort/api/health"
-for ($Attempt = 0; $Attempt -lt 90; $Attempt++) {
+# Full independent-runtime preparation and multi-Agent startup can outlast
+# the old window. The registered task still has a ten-minute execution limit.
+for ($Attempt = 0; $Attempt -lt 300; $Attempt++) {
     Start-Sleep -Seconds 1
     try {
         $Health = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 1

@@ -106,6 +106,14 @@ principal is not expected to read protected `agents.json`; failure to do so
 must never silently advertise the generic `HASHI` identity or default Backend
 API port.
 
+Both fixed tasks explicitly delegate read access to their runtime principal.
+Elevated registration and `ensure` repair this delegation even when the
+existing task definitions already match, preserving the owner and other
+access entries without granting task-edit rights. An administrator seeing a
+task does not prove that Limited Remote can see or invoke it. Deployment
+acceptance must run the actual `/restart` command through that Remote and
+verify the terminal receipt and replacement processes.
+
 Linux/WSL supervised Remote:
 
 ```bash
@@ -147,6 +155,12 @@ Launch acceptance is not restart success. The durable terminal receipt must
 show that the old PID exited, a different live Core PID appeared, the instance
 identity matches, the stable Core runtime contract still matches, and the new
 process published a Function generation.
+
+The bounded cold-start verification window is ten minutes. Independent-runtime
+preparation plus multi-Agent startup can exceed four minutes even when the
+replacement is healthy. Windows registration/ensure also upgrades an existing
+restart task's execution limit without replacing its principal. A longer wait
+never substitutes for the required PID, readiness and frozen-runtime evidence.
 
 Cold restart is also an adoption boundary. For an independent-Core installation,
 Remote qualifies the installer-selected destination before stopping the live

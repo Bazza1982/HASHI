@@ -21,14 +21,58 @@ pytestmark = [
 def _powershell(script: str):
     # A newly consulted task cmdlet must not autoload a module over scenario
     # doubles and accidentally mutate the real scheduler.
-    isolation = """
+    isolation = r"""
 Import-Module ScheduledTasks -ErrorAction Stop
 function Get-ScheduledTask { param($TaskName, $ErrorAction) $null }
 function Register-ScheduledTask { throw 'Unmocked task registration' }
+function Set-ScheduledTask { throw 'Unmocked task update' }
 function Start-ScheduledTask { throw 'Unmocked task start' }
 function Stop-ScheduledTask { }
 function Enable-ScheduledTask { throw 'Unmocked task enable' }
 function Disable-ScheduledTask { throw 'Unmocked task disable' }
+$global:TaskSecurity = @{}
+$global:TaskSecurityWrites = @()
+function New-Object {
+    [CmdletBinding(DefaultParameterSetName='Net')]
+    param(
+        [Parameter(Position=0, ParameterSetName='Net')][string]$TypeName,
+        [Parameter(Position=1, ParameterSetName='Net')][object[]]$ArgumentList,
+        [Parameter(ParameterSetName='Net')][System.Collections.IDictionary]$Property,
+        [Parameter(Mandatory=$true, ParameterSetName='Com')][string]$ComObject
+    )
+    if ($PSCmdlet.ParameterSetName -eq 'Net') {
+        return Microsoft.PowerShell.Utility\New-Object @PSBoundParameters
+    }
+    if ($ComObject -ne 'Schedule.Service') { throw 'Unmocked COM activation' }
+    $Folder = [pscustomobject]@{}
+    $Folder | Add-Member ScriptMethod GetTask {
+        param($Name)
+        if (-not $global:TaskSecurity.ContainsKey($Name)) {
+            $global:TaskSecurity[$Name] = 'O:BAG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)'
+        }
+        $Task = [pscustomobject]@{Name=$Name}
+        $Task | Add-Member ScriptMethod GetSecurityDescriptor {
+            param($Sections)
+            $global:TaskSecurity[$this.Name]
+        }
+        $Task | Add-Member ScriptMethod SetSecurityDescriptor {
+            param($Sddl, $Flags)
+            $Before = [Security.AccessControl.RawSecurityDescriptor]::new($global:TaskSecurity[$this.Name])
+            $Before.DiscretionaryAcl = [Security.AccessControl.RawSecurityDescriptor]::new($Sddl).DiscretionaryAcl
+            $global:TaskSecurity[$this.Name] = $Before.GetSddlForm([Security.AccessControl.AccessControlSections]::All)
+            $global:TaskSecurityWrites += [pscustomobject]@{Name=$this.Name;Flags=$Flags}
+        }
+        $Task
+    }
+    $Scheduler = [pscustomobject]@{Folder=$Folder}
+    $Scheduler | Add-Member ScriptMethod Connect {}
+    $Scheduler | Add-Member ScriptMethod GetFolder {
+        param($Path)
+        if ($Path -ne '\') { throw 'Unexpected task folder' }
+        $this.Folder
+    }
+    $Scheduler
+}
 function Unregister-ScheduledTask { throw 'Unmocked task deletion' }
 """
     encoded = base64.b64encode((isolation + script).encode("utf-16-le")).decode("ascii")
@@ -135,7 +179,10 @@ $global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -
     assert str(root) in restart["Action"]["Arguments"]
 
 
-def test_fixed_restart_actuator_triggers_only_its_registered_definition(tmp_path):
+@pytest.mark.parametrize("configure", ["register", "ensure"])
+def test_fixed_restart_actuator_triggers_only_its_registered_definition(
+    tmp_path, configure,
+):
     root = tmp_path / "hashi exact restart"
     remote = root / "remote"
     remote.mkdir(parents=True)
@@ -148,25 +195,36 @@ def test_fixed_restart_actuator_triggers_only_its_registered_definition(tmp_path
         remote / "supervisor_identity.py",
     )
     started = tmp_path / "started-task.txt"
+    security = tmp_path / "task-security.json"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
 $global:RegisteredTasks = @{{}}
+$global:DurationWrites = 0
 function New-ScheduledTaskAction {{
     param($Execute, $Argument, $WorkingDirectory)
     [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
 }}
-function New-ScheduledTaskSettingsSet {{ [pscustomobject]@{{}} }}
+function New-ScheduledTaskSettingsSet {{
+    param($ExecutionTimeLimit)
+    [pscustomobject]@{{ExecutionTimeLimit=[Xml.XmlConvert]::ToString([TimeSpan]$ExecutionTimeLimit)}}
+}}
 function New-ScheduledTaskPrincipal {{
     param($UserId, $LogonType, $RunLevel)
     [pscustomobject]@{{UserId=$UserId; LogonType=$LogonType; RunLevel=[string]$RunLevel}}
 }}
 function New-ScheduledTask {{
     param($Action, $Settings, $Principal)
-    [pscustomobject]@{{Actions=@($Action); Principal=$Principal}}
+    [pscustomobject]@{{Actions=@($Action); Principal=$Principal; Settings=$Settings}}
 }}
 function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
     $global:RegisteredTasks[$TaskName] = $InputObject
+}}
+function Set-ScheduledTask {{
+    param($TaskName, $Settings, $ErrorAction)
+    if ($TaskName -ne 'HashiRestart-restart-exact') {{ throw 'Unexpected task settings update' }}
+    $global:RegisteredTasks[$TaskName].Settings = $Settings
+    $global:DurationWrites++
 }}
 function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredTasks[$TaskName] }}
 function Start-ScheduledTask {{
@@ -174,11 +232,49 @@ function Start-ScheduledTask {{
     Set-Content -Encoding UTF8 -LiteralPath {_ps_string(started)} -Value $TaskName
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+if ('{configure}' -eq 'ensure') {{
+    # Existing valid tasks created elevated may lack the Limited user's ACE.
+    $global:TaskSecurity = @{{}}
+    $global:TaskSecurityWrites = @()
+    $global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit = 'PT5M'
+    & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} ensure -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+}}
+$FirstWrites = $global:TaskSecurityWrites.Count
+& {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} ensure -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+[pscustomobject]@{{
+    Sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Tasks=@($global:RegisteredTasks.Keys | ForEach-Object {{
+        $Name = $_
+        $Descriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $(if ($global:TaskSecurity.ContainsKey($Name)) {{ $global:TaskSecurity[$Name] }} else {{ 'O:BAG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)' }})
+        )
+        [pscustomobject]@{{Name=$Name;Owner=$Descriptor.Owner.Value;Group=$Descriptor.Group.Value;Aces=@($Descriptor.DiscretionaryAcl | ForEach-Object {{ [pscustomobject]@{{Sid=$_.SecurityIdentifier.Value;Mask=$_.AccessMask}} }})}}
+    }})
+    FirstWrites=$FirstWrites
+    Writes=@($global:TaskSecurityWrites)
+    RestartLimit=$global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit
+    DurationWrites=$global:DurationWrites
+}} | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(security)}
 & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} trigger -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 """)
 
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
+    access = json.loads(security.read_text(encoding="utf-8-sig"))
+    assert access["RestartLimit"] == "PT10M"
+    assert access["DurationWrites"] == (1 if configure == "ensure" else 0)
+    assert access["FirstWrites"] == 2
+    assert len(access["Writes"]) == 2  # A second ensure must not rewrite the ACL.
+    assert {w["Name"] for w in access["Writes"]} == {
+        "HashiRestart-restart-exact", "HashiRuntime-restart-exact",
+    }
+    assert all(w["Flags"] == 16 for w in access["Writes"])
+    for task in access["Tasks"]:
+        assert task["Owner"] == "S-1-5-32-544" and task["Group"] == "S-1-5-18"
+        aces = {a["Sid"]: a["Mask"] for a in task["Aces"]}
+        assert aces[access["Sid"]] == 0x120089  # Read delegation, no task editing.
+        assert aces["S-1-5-18"] == 0x1F01FF
+        assert aces["S-1-5-32-544"] == 0x1F01FF
 
 
 @pytest.mark.parametrize("health_mode", ["ready", "local-ready", "foreign", "failed-agent"])
