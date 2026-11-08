@@ -335,6 +335,16 @@ function Get-RemoteHealthAcceptance {
             Reason = "$TrustedPeerCount trusted peer handshake(s) accepted"
         }
     }
+    if ($PeerCount -gt 0 -and $TrustedPeerCount -eq 0 -and $TrustState -eq "rejected") {
+        # Rejecting foreign advertisements does not disable this local service.
+        # The ready listener, instance identity and discovery backends above are
+        # still required. Peer authentication remains rejected and visible.
+        return [PSCustomObject]@{
+            Accepted = $true
+            Mode = "local_ready_untrusted_peers"
+            Reason = "0 trusted peers accepted; untrusted peers remain rejected; local service is ready"
+        }
+    }
     return [PSCustomObject]@{
         Accepted = $false
         Mode = if ($TrustState) { $TrustState } else { "trust_unknown" }

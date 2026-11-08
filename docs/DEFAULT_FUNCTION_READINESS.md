@@ -10,6 +10,7 @@ truthfully. An owner's explicit opt-out is retained.
 | Area | Defect | Result |
 | --- | --- | --- |
 | Instance restart | Fixed lifecycle controls inherited the generic terminal L3 restriction. | Authenticated fixed start/restart/reboot are available under the normal terminal policy. Authentication, target identity and peer trust remain enforced. |
+| Local Remote readiness | A healthy independent instance was reported as a startup failure solely because nearby advertisements failed peer authentication. | Local readiness still verifies the instance and every discovery backend; rejected peers remain rejected and visible, without disabling local lifecycle control. |
 | Split installations | Restart selected scripts, runtime qualification and fixed tasks from the private data home. | Program CodeRoot and private home are explicit through Remote, installation, tasks and native controllers. |
 | Windows deployment | Split-home fixed tasks could be omitted; setup failures were treated as a warning. | Remote installation prepares the fixed actuator; setup failures are surfaced. Task upgrades retain the principal, logon type and task DACL, and reject a foreign home. |
 | POSIX restart | The launcher stopped Core alone after a five-second grace period. Detached shared Functions could survive. | Capture Core descendants before shutdown, allow graceful cleanup, then verify the captured identities are gone. Signals are fenced against PID reuse. Other instances and the exact-home child Remote provider are preserved. |
