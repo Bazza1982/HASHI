@@ -1586,7 +1586,12 @@ class WorkbenchApiServer:
                 interface_language=preferred_locale(runtime or self, actor_id=owner_id),
                 frozen_selection=frozen_selection,
             )
-        if manager.get_state()["provider"] not in dict(manager.provider_options()):
+        provider = (
+            frozen_selection.get("provider")
+            if frozen_selection is not None
+            else manager.get_state()["provider"]
+        )
+        if provider not in dict(manager.provider_options()):
             raise PhoneConfigError("phone_translation_moved", "Simultaneous interpretation is now available through /translate. Choose a conversational /phone provider.")
         if assembler is None:
             assembler = BridgeContextAssembler(

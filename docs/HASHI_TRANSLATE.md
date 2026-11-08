@@ -59,7 +59,9 @@ including foreground exclusion, idempotency and provider close confirmation.
 The route derives `entrypoint=translate`; the client cannot override it. Frozen
 public/selection snapshots retain this entry identity, and cross-entry call or
 attempt access is rejected. The compatibility `phone` snapshot field and
-`phone_revision` request field retain their existing wire names.
+`phone_revision` request field retain their existing wire names. Recovery validates
+its saved provider and direction without consulting next-call preferences, even
+when those preferences now select another product.
 
 WebRTC audio, `oai-events`, media heartbeat, mute and close semantics are shared.
 The Compute transport and discovery remain governed by
