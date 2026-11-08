@@ -505,16 +505,17 @@ The default scheduled-task name is also per instance (for example,
 `HashiRemote-hashi1`). Pass `-TaskName` only when an explicit override is
 required.
 
-Keep the default `security.max_terminal_level: "L2_WRITE"` unless you
-intentionally want remote HASHI rescue start. To enable rescue start before a
-core outage, set:
+Keep the default `security.max_terminal_level: "L2_WRITE"`. The authenticated
+fixed start/restart/reboot endpoints are installed with normal lifecycle
+support; they require no extra feature enablement. Windows setup verifies the
+exact-instance restart and runtime tasks while the network Remote stays
+Limited. Split installations pass `-HashiRoot <private-home>` and
+`-CodeRoot <program-root>`. Existing credentials and task principals are retained.
 
-```yaml
-security:
-  max_terminal_level: "L3_RESTART"
-```
-
-Only use `L3_RESTART` on trusted LAN/Tailscale machines.
+New personal installations prepare separate private Remote and local API keys.
+The API gateway and authenticated desktop interface are available by default.
+An explicit owner opt-out remains effective. See
+[default function readiness](DEFAULT_FUNCTION_READINESS.md).
 
 ### Opt out
 

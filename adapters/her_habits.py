@@ -151,10 +151,10 @@ class HabitMeditationConfig:
     """Resolved HER Habit–Meditation controls.
 
     Resolution order is global HER config, backend config, then the optional
-    process environment override for the enabled flag. The default is off.
+    process environment override for the enabled flag. Shipped learning is ready by default.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     max_actions: int = 3
     max_trace_chars: int = 24_000
     max_catalog_habits: int = 200
@@ -186,7 +186,7 @@ class HabitMeditationConfig:
             merged["enabled"] = extra["habit_meditation_enabled"]
 
         env = os.environ if environ is None else environ
-        enabled = _parse_bool(merged.get("enabled"), default=False)
+        enabled = _parse_bool(merged.get("enabled"), default=True)
         if HABIT_MEDITATION_ENV in env:
             enabled = _parse_bool(env.get(HABIT_MEDITATION_ENV), default=enabled)
         if extra.get("habit_learning_eligible") is False:

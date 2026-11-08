@@ -341,14 +341,15 @@ async def activate_remote_supervisor(
 
 
 async def ensure_remote_restart_actuator(
-    root: Path | str | None = None,
+    root: Path | str | None = None, *, code_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Refresh the exact-instance Windows privilege bridge for `/restart`."""
 
     resolved_root = resolve_hashi_root(root)
     if sys.platform != "win32":
         return {"ok": True, "action": "not_required"}
-    helper = resolved_root / "bin" / "hashi_restart_ctl.ps1"
+    source_root = resolve_hashi_root(code_root if code_root is not None else resolved_root)
+    helper = source_root / "bin" / "hashi_restart_ctl.ps1"
     if not helper.is_file():
         return {
             "ok": False,
@@ -366,14 +367,16 @@ async def ensure_remote_restart_actuator(
         "ensure",
         "-HashiRoot",
         str(resolved_root),
+        "-CodeRoot",
+        str(source_root),
     ]
-    python = find_python(resolved_root)
+    python = find_python(source_root)
     if python is not None:
         command.extend(["-Python", str(python)])
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
-            cwd=str(resolved_root),
+            cwd=str(source_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -706,7 +709,7 @@ async def ensure_remote_started(
         return {"ok": False, "action": "skipped", "reason": "remote_enabled=false", "settings": settings}
     if disabled:
         return {"ok": False, "action": "skipped", "reason": "remote explicitly disabled", "disabled": disabled, "settings": settings}
-    actuator = await ensure_remote_restart_actuator(settings.root)
+    actuator = await ensure_remote_restart_actuator(settings.root, **source_options)
     if not actuator.get("ok") and actuator.get("action") != "restart_actuator_unavailable":
         bridge_logger.warning(
             "Fixed HASHI restart actuator could not be refreshed: %s",
@@ -1012,3 +1015,4 @@ async def _is_port_open(host: str, port: int) -> bool:
     except Exception:
         pass
     return True
+# HASHI-Fingerprint: hfp_c8333dab05fd432aaa6fe8d4e57c4293

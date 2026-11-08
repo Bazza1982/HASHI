@@ -132,14 +132,15 @@ def test_hashi_rescue_status_distinguishes_stale_pid(tmp_path):
     assert body["pid_alive"] is False
 
 
-def test_hashi_rescue_start_requires_l3_restart(tmp_path):
+def test_fixed_start_works_with_default_terminal_policy(tmp_path):
     client = _client(tmp_path, max_level=AuthLevel.L2_WRITE)
+    _write_hashi_pid(tmp_path, str(os.getpid()))
 
     response = client.post("/control/hashi/start", json={"reason": "test"})
 
-    assert response.status_code == 403
-    assert response.json()["ok"] is False
-    assert "L3_RESTART" in response.json()["error"]
+    assert response.status_code == 200
+    assert response.json()["already_running"] is True
+    assert remote_server._terminal_executor.is_allowed("kill 99999999")[0] is False
 
 
 def test_hashi_rescue_logs_returns_bounded_fixed_log_tail(tmp_path):
@@ -311,19 +312,25 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
     assert sleep_calls["count"] == 1
 
 
-def test_rescue_capabilities_advertise_start_only_when_l3_enabled():
+def test_fixed_lifecycle_capabilities_are_available_without_terminal_opt_in(tmp_path, monkeypatch):
     assert "rescue_control" in build_default_capabilities(rescue_start_enabled=False)
     assert "rescue_start" not in build_default_capabilities(rescue_start_enabled=False)
-    enabled = build_default_capabilities(rescue_start_enabled=True)
+    enabled = build_default_capabilities()
     assert "rescue_start" in enabled
     assert "rescue_restart" in enabled
     assert "rescue_reboot" in enabled
+    from types import SimpleNamespace
+    client = _client(tmp_path)
+    monkeypatch.setattr(remote_server, "_protocol_manager",
+                        SimpleNamespace(get_protocol_status=lambda: {"capabilities": enabled}))
+    body = client.get("/protocol/status").json()
+    assert body["rescue_restart_enabled"] is True
 
 
 def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     tmp_path, monkeypatch
 ):
-    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    client = _client(tmp_path, max_level=AuthLevel.L2_WRITE)
     states = iter(
         (
             {
@@ -617,7 +624,8 @@ def test_windows_restart_uses_fixed_actuator_without_service_target(
 
     assert "hashi_restart_ctl.ps1" in " ".join(command)
     assert "trigger" in command
-    assert command[-2:] == ["-HashiRoot", str(tmp_path)]
+    assert command[command.index("-HashiRoot") + 1] == str(tmp_path)
+    assert command[command.index("-CodeRoot") + 1] == str(tmp_path)
     assert "hashi_service_ctl.ps1" not in " ".join(command)
 
 
@@ -1250,7 +1258,7 @@ def test_protocol_status_reports_dynamic_rescue_capabilities(tmp_path):
     assert body["remote_supervisor"]["mode"] == "supervised"
 
 
-def test_protocol_status_reports_rescue_start_disabled_at_l2(tmp_path):
+def test_protocol_status_reports_fixed_lifecycle_available_at_l2(tmp_path):
     protocol = ProtocolManager(
         hashi_root=tmp_path,
         instance_info={"instance_id": "HASHI_TEST"},
@@ -1272,8 +1280,8 @@ def test_protocol_status_reports_rescue_start_disabled_at_l2(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["rescue_start_enabled"] is False
-    assert body["rescue_start_requirement"] == "L3_RESTART"
+    assert body["rescue_start_enabled"] is True
+    assert body["rescue_start_requirement"] == "authenticated_instance_control"
     assert "rescue_start" not in body["capabilities"]
 
 @pytest.mark.parametrize("system", ["Windows", "Linux"])

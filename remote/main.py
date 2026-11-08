@@ -245,10 +245,16 @@ class HashiRemoteApplication:
         display_name: str | None = None,
         workbench_port: int | None = None,
         control_hashi_root: Optional[Path] = None,
+        control_code_root: Optional[Path] = None,
         verbose: bool = False,
     ):
         self._hashi_root = hashi_root or Path(__file__).resolve().parent.parent
         self._control_hashi_root = control_hashi_root or self._hashi_root
+        self._control_code_root = control_code_root or (
+            Path(control_hashi_root)
+            if control_hashi_root and Path(control_hashi_root).resolve() != Path(self._hashi_root).resolve()
+            else Path(__file__).resolve().parent.parent
+        )
         self._host = host
         self._port = port
         self._use_tls = use_tls
@@ -462,7 +468,7 @@ class HashiRemoteApplication:
             max_allowed_level=self._max_terminal_level,
         )
         local_capabilities = _build_local_capabilities(
-            rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
+            rescue_start_enabled=True
         )
         instance_info["remote_supervisor"] = {
             "mode": "supervised" if self._supervised else "child",
@@ -565,6 +571,7 @@ class HashiRemoteApplication:
             workbench_port=workbench_port,
             hashi_root=str(self._hashi_root),
             control_hashi_root=str(self._control_hashi_root),
+            control_code_root=str(self._control_code_root),
         )
 
         # TLS
@@ -810,6 +817,8 @@ def parse_args() -> argparse.Namespace:
                         help="HASHI root directory (auto-detected if omitted)")
     parser.add_argument("--control-hashi-root", type=Path, default=None,
                         help="HASHI root controlled by rescue endpoints; defaults to --hashi-root")
+    parser.add_argument("--control-code-root", type=Path, default=None,
+                        help="Program assets for the controlled HASHI; defaults to its code root")
     parser.add_argument("--instance-id", default=None,
                         help="Advertised Remote instance id, for standalone sidecars such as WATCHTOWER")
     parser.add_argument("--display-name", default=None,
@@ -920,6 +929,7 @@ def main() -> int:
         display_name=args.display_name,
         workbench_port=args.workbench_port,
         control_hashi_root=args.control_hashi_root.expanduser().resolve() if args.control_hashi_root else None,
+        control_code_root=args.control_code_root.expanduser().resolve() if args.control_code_root else None,
         verbose=args.verbose,
     )
     return app.run()

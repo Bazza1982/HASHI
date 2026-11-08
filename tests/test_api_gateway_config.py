@@ -31,7 +31,7 @@ def _saved(path):
 
 def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert gateway.load_api_gateway_config(cfg) == {
-        "enabled": False, "default_model": gateway.default_api_model(),
+        "enabled": True, "default_model": gateway.default_api_model(),
         "max_parallel_per_model": 2,
         "updated_at": "", "updated_by": "",
     }
@@ -42,6 +42,15 @@ def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert _saved(gateway.config_path_for(cfg)) == saved
     assert gateway.load_api_gateway_config(cfg) == saved
     assert not cfg.project_root.exists()
+
+
+def test_first_model_selection_keeps_fresh_gateway_available(cfg):
+    result = gateway.save_api_gateway_config(cfg, default_model="gpt-5.5")
+    assert result["enabled"] is True
+    assert gateway.load_api_gateway_config(cfg)["enabled"] is True
+    gateway.save_api_gateway_config(cfg, enabled=False)
+    gateway.save_api_gateway_config(cfg, default_model="grok-4.5")
+    assert gateway.load_api_gateway_config(cfg)["enabled"] is False
 
 
 def test_bom_read_is_non_mutating_and_save_preserves_unowned_fields(cfg):

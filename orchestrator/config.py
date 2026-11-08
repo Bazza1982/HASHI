@@ -182,7 +182,7 @@ class GlobalConfig:
     # still determine which input/output path can actually run.
     persistent_session_v1: bool = True
     native_audio_chat_v1: bool = True
-    desktop_enabled: bool = False
+    desktop_enabled: bool = True
     live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
     # Stable PAO owner scope.  Telegram account replacement must not fork the
@@ -758,7 +758,7 @@ class ConfigManager:
             persistent_session_v1=_truthy(
                 g_raw.get("persistent_session_v1", True)
             ),
-            desktop_enabled=_truthy(g_raw.get("desktop_enabled", False)),
+            desktop_enabled=_truthy(g_raw.get("desktop_enabled", True)),
             native_audio_chat_v1=_truthy(
                 g_raw.get("native_audio_chat_v1", True)
             ),

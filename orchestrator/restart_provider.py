@@ -237,7 +237,7 @@ def _live_restart_capabilities(
     capabilities = payload.get("capabilities") or {}
     if not bool(capabilities.get("rescue_restart")):
         raise RestartProviderError(
-            f"{target} Remote is reachable but rescue_restart is not enabled; enable L3_RESTART"
+            f"{target} Remote is reachable but its fixed instance restart provider is unavailable; repair the instance lifecycle installation"
         )
 
     return payload
@@ -383,3 +383,4 @@ __all__ = [
     "peer_restart_provider",
     "restart_via_provider",
 ]
+# HASHI-Fingerprint: hfp_1ef89b0339874390b22467ab991f3af5

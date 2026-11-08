@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$HashiRoot,
 
+    [string]$CodeRoot,
+
     [Parameter(Mandatory = $true)]
     [string]$LogPath,
 
@@ -11,7 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ResolvedRoot = ([System.IO.Path]::GetFullPath($HashiRoot)).TrimEnd('\')
-$Controller = Join-Path $ResolvedRoot "bin\bridge_ctl.ps1"
+$ResolvedCodeRoot = if ($CodeRoot) { [System.IO.Path]::GetFullPath($CodeRoot) } else { Join-Path $PSScriptRoot ".." }
+$Controller = Join-Path $ResolvedCodeRoot "bin\bridge_ctl.ps1"
 if (-not (Test-Path -LiteralPath $Controller -PathType Leaf)) {
     throw "Missing fixed HASHI restart controller: $Controller"
 }
@@ -36,12 +39,14 @@ $Timestamp = [DateTimeOffset]::Now.ToString("o")
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "$Timestamp fixed restart task started for $ResolvedRoot"
 
 $env:BRIDGE_HOME = $ResolvedRoot
+$env:BRIDGE_CODE_ROOT = $ResolvedCodeRoot
 $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
 $ControllerOutput = @(& powershell.exe `
     -NoProfile `
     -NonInteractive `
     -ExecutionPolicy Bypass `
     -File $Controller `
+    -BridgeHome $ResolvedRoot `
     -Action stop *>&1)
 $Result = $LASTEXITCODE
 $ControllerOutput | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
