@@ -564,6 +564,10 @@ class WorkbenchApiServer:
             self._authorize_live_voice,
             qualified=True,
         )
+        register_live_voice_routes(
+            self.app, self.live_voice_manager, self._authorize_live_voice,
+            qualified=True, root="/api/v1/translate", entrypoint="translate",
+        )
         from orchestrator.frontend_call.routes import register_call_api
         register_call_api(self)
         from orchestrator.standby.routes import register_standby_api
@@ -1515,6 +1519,7 @@ class WorkbenchApiServer:
         session_id: str | None = None,
         context_generation: int | None = None,
         frozen_selection: Mapping[str, Any] | None = None,
+        entrypoint: str = "phone",
     ) -> dict:
         """Resolve Agent PCM and same-Session history at the trusted API edge."""
 
@@ -1538,10 +1543,12 @@ class WorkbenchApiServer:
             build_phone_result_index,
         )
         from orchestrator.phone_manager import PhoneConfigError, PhoneManager
+        from orchestrator.translate_manager import TranslateManager
 
         target = str(agent_id or "").strip().casefold()
         runtime = self._runtime_map().get(target)
-        manager = getattr(runtime, "phone_manager", None)
+        translation = entrypoint == "translate"
+        manager = getattr(runtime, "translate_manager" if translation else "phone_manager", None)
         display_name = None
         workspace: Path | None = None
         assembler = getattr(runtime, "context_assembler", None)
@@ -1569,11 +1576,18 @@ class WorkbenchApiServer:
             if not workspace.is_absolute():
                 workspace = self.config_path.parent / workspace
             workspace = workspace.resolve()
-            manager = PhoneManager(workspace)
+            manager = (TranslateManager if translation else PhoneManager)(workspace)
             display_name = str(agent.get("display_name") or agent.get("name") or target)
 
         if workspace is None:
             raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+        if translation:
+            return manager.resolve_live_session(
+                interface_language=preferred_locale(runtime or self, actor_id=owner_id),
+                frozen_selection=frozen_selection,
+            )
+        if manager.get_state()["provider"] not in dict(manager.provider_options()):
+            raise PhoneConfigError("phone_translation_moved", "Simultaneous interpretation is now available through /translate. Choose a conversational /phone provider.")
         if assembler is None:
             assembler = BridgeContextAssembler(
                 BridgeMemoryStore(workspace),
