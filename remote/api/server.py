@@ -4313,6 +4313,20 @@ def create_app(
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
+    @app.get("/control/hashi/qualification")
+    async def hashi_control_qualification(request: Request):
+        """Inspect the fixed restart destination without stopping or starting Core."""
+        _authenticate_rescue_control(request)
+        root = str(_control_code_root or _control_hashi_root or "")
+        try:
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={
+                "ok": False, "phase": "runtime_qualification", "code_root": root,
+                "error": str(exc),
+            })
+        return {"ok": True, "code_root": root, "runtime": qualified}
+
     @app.post("/control/hashi/start")
     async def hashi_control_start(request: Request, payload: HashiStartPayload):
         """

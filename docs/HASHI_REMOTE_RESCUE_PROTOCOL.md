@@ -246,6 +246,13 @@ primary chat. It is not a general command execution endpoint. Notification
 success or failure is stored in the restart record but never changes the
 already verified restart result.
 
+## Readonly restart qualification
+
+`GET /control/hashi/qualification` uses the same authenticated control admission.
+It returns the exact program root and qualified destination without stopping or
+starting Core. Qualification failures retain the underlying installer failure
+rather than collapsing every cause into an unavailable-provider message.
+
 ## Capability Advertisement
 
 Upgraded Remotes advertise rescue support through protocol capabilities:

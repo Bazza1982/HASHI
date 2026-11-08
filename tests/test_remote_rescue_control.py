@@ -34,7 +34,8 @@ def _client(tmp_path, *, max_level=AuthLevel.L2_WRITE):
     return TestClient(app)
 
 
-def test_hashi_rescue_status_requires_auth_when_lan_mode_off(tmp_path):
+@pytest.mark.parametrize("endpoint", ["/control/hashi/status", "/control/hashi/qualification"])
+def test_hashi_rescue_status_requires_auth_when_lan_mode_off(tmp_path, endpoint):
     app = create_app(
         {"instance_id": "HASHI_TEST"},
         PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
@@ -44,7 +45,7 @@ def test_hashi_rescue_status_requires_auth_when_lan_mode_off(tmp_path):
     )
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.get("/control/hashi/status")
+    response = client.get(endpoint)
 
     assert response.status_code == 401
 
