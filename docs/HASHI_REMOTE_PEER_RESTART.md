@@ -114,6 +114,10 @@ task does not prove that Limited Remote can see or invoke it. Deployment
 acceptance must run the actual `/restart` command through that Remote and
 verify the terminal receipt and replacement processes.
 
+Remote's Windows controller helpers, new task registrations and legacy task
+runner all disable Python bytecode writes. Starting or refreshing Remote must
+preserve the qualified interpreter's sealed file closure.
+
 Linux/WSL supervised Remote:
 
 ```bash

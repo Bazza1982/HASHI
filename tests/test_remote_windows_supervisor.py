@@ -457,7 +457,12 @@ def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, ro
         ),
         encoding="utf-8",
     )
-    shutil.copyfile(ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py")
+    (remote / "identity_cache_probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (remote / "supervisor_identity.py").write_text(
+        "import identity_cache_probe, runpy\n"
+        f"runpy.run_path({str(ROOT / 'remote/supervisor_identity.py')!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
     (remote / "__init__.py").write_text("", encoding="utf-8")
     (remote / "__main__.py").write_text(
         "import ctypes, json, os, sys\nfrom pathlib import Path\n"
@@ -466,6 +471,7 @@ def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, ro
         "kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]\n"
         "Path('received.json').write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
         "print('REMOTE_STDOUT_OK', flush=True)\n"
+        "print(f'REMOTE_BYTECODE_DISABLED={sys.dont_write_bytecode}', flush=True)\n"
         "print('REMOTE_STDERR_OK', file=sys.stderr, flush=True)\n"
         "print('REMOTE_AFTER_STDERR_OK', flush=True)\n"
         "print('REMOTE_UTF8_🌸_测试', flush=True)\n"
@@ -503,6 +509,7 @@ function Register-ScheduledTask {{
 & {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE' -Port 18999 -NoTls
 """)
     assert register.returncode == 0, register.stderr
+    assert not (remote / "__pycache__").exists()  # Identity preflight must preserve a sealed base too.
     action = json.loads(action_path.read_text(encoding="utf-8-sig"))
     result = subprocess.run(
         subprocess.list2cmdline([action["Execute"]]) + " " + action["Arguments"],
@@ -527,22 +534,30 @@ function Register-ScheduledTask {{
         "REMOTE_AFTER_STDERR_OK",
         "REMOTE_UTF8_🌸_测试",
         "REMOTE_PRIORITY=32",
+        "REMOTE_BYTECODE_DISABLED=True",
     ):
         assert marker in text
+    assert not (remote / "__pycache__").exists()
     settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
     assert settings["Priority"] == 4
 
 
 def test_legacy_task_runner_keeps_python_module_switch(tmp_path):
+    (tmp_path / "legacy_probe.py").write_text(
+        "import sys, json\n"
+        "print(json.dumps({'args': sys.argv[1:], 'bytecode_disabled': sys.dont_write_bytecode}))\n",
+        encoding="utf-8",
+    )
     log = tmp_path / "legacy.log"
     result = _powershell(f"""
-& {_ps_string(ROOT / 'bin/hashi_remote_task_runner.ps1')} -Python {_ps_string(sys.executable)} -HashiRoot {_ps_string(tmp_path)} -LogPath {_ps_string(log)} -PythonArgs '-m json.tool --help'
+& {_ps_string(ROOT / 'bin/hashi_remote_task_runner.ps1')} -Python {_ps_string(sys.executable)} -HashiRoot {_ps_string(tmp_path)} -LogPath {_ps_string(log)} -PythonArgs '-m legacy_probe --help'
 exit $LASTEXITCODE
 """)
     assert result.returncode == 0, result.stderr
     data = log.read_bytes()
     text = data.decode("utf-16") if data.startswith(b"\xff\xfe") else data.decode("utf-8-sig")
-    assert "usage:" in text
+    assert json.loads(text.strip()) == {"args": ["--help"], "bytecode_disabled": True}
+    assert not (tmp_path / "__pycache__").exists()
 
 
 def test_register_propagates_task_registration_failure(tmp_path):
