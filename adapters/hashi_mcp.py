@@ -145,6 +145,7 @@ def prepare_hashi_mcp(
                 "name": SERVER_NAME,
                 "command": sys.executable,
                 "args": [
+                    "-B",
                     "-m",
                     "tools.gateway.mcp_stdio",
                     "--context",
@@ -226,3 +227,4 @@ __all__ = [
     "prepare_hashi_mcp",
     "write_claude_mcp_config",
 ]
+# HASHI-Fingerprint: hfp_0313e7726fc74118817eb4bf1ca8c245

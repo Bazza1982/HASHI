@@ -43,6 +43,24 @@ const fault = process.argv[3];
 const calls = [];
 cp.spawnSync = (command, args, options) => {
   calls.push({command, args});
+  // Build-process fixtures create only their declared outputs; no interpreter
+  // or dependency code is executed by these orchestration unit tests.
+  if (args.some(x => String(x).endsWith('prepare_runtime_bootstrap.py'))) {
+    const buildRoot = args[args.indexOf('--output') + 1];
+    const python = path.join(buildRoot, 'bootstrap',
+      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    fs.mkdirSync(path.dirname(python), {recursive:true});
+    fs.writeFileSync(python, 'fixture build interpreter');
+    return {status:0};
+  }
+  if (args.some(x => String(x).endsWith('prepare_runtime_roles.py'))) {
+    const release = args[args.indexOf('--output') + 1];
+    const python = path.join(release, 'runtimes/functions',
+      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    fs.mkdirSync(path.dirname(python), {recursive:true});
+    fs.writeFileSync(python, 'fixture qualified FR');
+    return {status:0};
+  }
   const script = args.find(x => /provision_(transcription|tts)_runtime\.py$/.test(String(x)));
   if (!script) {
     return {status: 0};
@@ -388,7 +406,13 @@ console.log('RESULT=' + JSON.stringify({output,calls,
     assert data["core"]["python"] != data["pointer"]["python"]
     native_installs = [c for c in data["calls"] if "pip" in c["args"]]
     assert len(native_installs) == 1
-    assert native_installs[0]["args"][-1].endswith("standard-py312.lock")
+    assert native_installs[0]["args"][-1].endswith("functions-py312.hashes.lock")
+    assert "--require-hashes" in native_installs[0]["args"]
+    assert "--target" in native_installs[0]["args"]
+    assert "bootstrap" in Path(native_installs[0]["command"]).parts
+    assert any(str(arg).endswith("prepare_runtime_roles.py")
+               for call in data["calls"] for arg in call["args"])
     sidecar = [c for c in data["calls"] if any(
         str(a).endswith("provision_transcription_runtime.py") for a in c["args"])]
     assert len(sidecar) == 2
+# HASHI-Fingerprint: hfp_2ced53f3bedc456eb4871ed9d2ab4a19

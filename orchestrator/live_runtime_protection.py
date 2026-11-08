@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from orchestrator.runtime_contract import CORE_SOURCE_PATHS
+from orchestrator.runtime_protection_targets import (
+    admitted_protection_targets, protection_context_key,
+)
 
 
 POLICY_SCHEMA = 1
@@ -137,7 +140,7 @@ def policy_path_for(global_config: Any) -> Path | None:
     return bridge_home / POLICY_RELATIVE_PATH
 
 
-def policy_cache_key(global_config: Any, runtime_prefix: str | Path | None) -> tuple:
+def policy_cache_key(global_config: Any, runtime_prefix: str | Path | None, *, core_runtime=None) -> tuple:
     """Return a cheap cache key that notices an atomically replaced policy."""
 
     policy_path = policy_path_for(global_config)
@@ -155,6 +158,7 @@ def policy_cache_key(global_config: Any, runtime_prefix: str | Path | None) -> t
         str(runtime_prefix or ""),
         str(getattr(global_config, "instance_id", "") or ""),
         policy_stat,
+        protection_context_key(core_runtime),
     )
 
 
@@ -162,6 +166,7 @@ def load_live_runtime_policy(
     global_config: Any,
     *,
     runtime_prefix: str | Path | None,
+    core_runtime=None,
 ) -> LiveRuntimePolicy | None:
     """Build the narrow live policy from authoritative runtime facts.
 
@@ -180,6 +185,10 @@ def load_live_runtime_policy(
         runtime_roots.append(_absolute_path(runtime_prefix))
     protected_write = [code_root / relative for relative in CORE_SOURCE_PATHS]
     protected_write.append(policy_path)
+    admitted_roots, admitted_files = admitted_protection_targets(
+        code_root, core_runtime=core_runtime)
+    runtime_roots.extend(admitted_roots)
+    protected_write.extend(admitted_files)
     protected_read: list[Path] = []
     secrets_path = _config_path(global_config, "secrets_path")
     if secrets_path is not None:
@@ -522,3 +531,4 @@ def _decision(operation: str, target: str | Path) -> ProtectionDecision:
             "workzone/development environment or the supported HASHI lifecycle command."
         ),
     )
+# HASHI-Fingerprint: hfp_ec079b7bb5294247902dd0fe66f6fd22

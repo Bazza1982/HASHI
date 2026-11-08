@@ -1347,15 +1347,19 @@ class TaskScheduler:
     ) -> dict[str, Any]:
         if batch.get("status") not in {"pending", "running"}:
             return dict(batch.get("resolution") or {})
+        from orchestrator.agent_mutation import current_mutation_guard, check_current_mutation
+        from orchestrator.session_store import StaleFencingToken
         tasks = self._load_tasks()
-        batch["status"] = "running"
-        batch["resolution_requested_at"] = time.time()
-        batch["requested_action"] = action
-        self._save_state()
+        with current_mutation_guard():
+            batch["status"] = "running"
+            batch["resolution_requested_at"] = time.time()
+            batch["requested_action"] = action
+            self._save_state()
 
         resolution_items: dict[str, dict[str, Any]] = {}
         executed_total = 0
         failed_total = 0
+        origin_stopped = False
         missed_total = sum(int(item.get("missed_count", 1) or 1) for item in batch.get("items") or [])
         for item in batch.get("items") or []:
             task_id = str(item.get("task_id"))
@@ -1370,7 +1374,9 @@ class TaskScheduler:
             executed = 0
             failed = 0
             job = self._find_job(tasks, item) if requested else None
-            if requested and (
+            if origin_stopped:
+                pass  # No further starts; final accounting retains accepted effects.
+            elif requested and (
                 job is None
                 or not job.get("enabled", False)
                 or self._job_owner_mismatch(
@@ -1386,6 +1392,11 @@ class TaskScheduler:
                 if not due_at:
                     due_at = [float(item.get("last_due_at") or time.time())] * requested
                 for due_ts in due_at:
+                    try:
+                        check_current_mutation()
+                    except StaleFencingToken:
+                        origin_stopped = True
+                        break
                     scheduled_for = utc_datetime_from_epoch(float(due_ts))
                     if item.get("kind") == "heartbeat":
                         ok = await self._fire_heartbeat_job(
@@ -1425,10 +1436,16 @@ class TaskScheduler:
             "skipped_total": max(0, missed_total - executed_total),
             "items": resolution_items,
         }
+        if origin_stopped:
+            resolution["reason"] = "originating_run_stopped"
         batch["resolution"] = resolution
         batch["status"] = "resolved" if not failed_total else "resolved_with_errors"
         batch["resolved_at"] = time.time()
         self._save_state()
+        if origin_stopped:
+            # Completion accounting must remain durable: a later caller must
+            # not replay already accepted occurrences from this partial batch.
+            raise StaleFencingToken("Recovery stopped with its originating Run")
         return resolution
 
     async def resolve_recovery_batch(
@@ -1453,6 +1470,8 @@ class TaskScheduler:
             raise ValueError("batch_id is required")
 
         async with self._recovery_lock:
+            from orchestrator.agent_mutation import check_current_mutation
+            check_current_mutation()  # The caller may have stopped while waiting for this lock.
             batch = (self.state.get("recovery_batches") or {}).get(
                 normalized_batch_id
             )
@@ -2120,3 +2139,4 @@ class TaskScheduler:
                     self._release_enterprise_scheduler_lease()
 
             await asyncio.sleep(15)
+# HASHI-Fingerprint: hfp_26c20bac63b84b01901791e953cd04fe

@@ -34,11 +34,13 @@ class WindowsProfiles:
     def loaded(self, sid: str) -> bool:
         import winreg
 
-        try:
-            with winreg.OpenKey(winreg.HKEY_USERS, sid):
-                return True
-        except FileNotFoundError:
-            return False
+        for hive in (sid, sid + "_Classes"):
+            try:
+                with winreg.OpenKey(winreg.HKEY_USERS, hive):
+                    return True
+            except FileNotFoundError:
+                pass
+        return False
 
     def delete(self, sid: str) -> None:
         if not self._userenv.DeleteProfileW(sid, None, None):
@@ -100,3 +102,57 @@ class DisposableWindowsProfile:
         finally:
             self._active = False
         return False
+
+def recover_profile(accounts, profiles, identity_manifest: Path, profile_manifest: Path) -> None:
+    """Resume only recorded cleanup after Windows has released the owned hive.
+
+    This never unloads a hive, closes another process's handles, restarts a
+    service, or removes an account. The SCM caller must first verify that all
+    recorded services are absent and the temporary logon right is gone.
+    """
+    from orchestrator.config_json import read_config_json, write_config_json
+    from scripts.permissions.windows_test_identity import _validate_manifest
+
+    identity = _validate_manifest(dict(read_config_json(identity_manifest)))
+    value = read_config_json(profile_manifest)
+    if (set(value) != {"version", "type", "sid", "name", "marker", "path", "state"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or value["type"] != "hashi.disposable-user-profile"
+            or value["state"] not in {"intent", "created", "cleaned"}
+            or any(value[field] != identity[field] for field in ("sid", "name", "marker"))
+            or identity["sid"] is None or identity["state"] not in {"created", "cleaned"}):
+        raise CleanupUnverified("invalid retained profile ownership")
+    recorded = value["path"]
+    if recorded is not None and (not isinstance(recorded, str) or not Path(recorded).is_absolute()):
+        raise CleanupUnverified("invalid retained profile path")
+    info = accounts.info(identity["name"])
+    if info is None:
+        if identity["state"] != "cleaned" or value["state"] != "cleaned":
+            raise CleanupUnverified("the retained profile owner is unavailable")
+    elif (identity["state"] != "created" or info.get("sid") != identity["sid"]
+          or info.get("comment") != identity["marker"]):
+        raise CleanupUnverified("the retained profile owner changed")
+    sid = identity["sid"]
+    if profiles.loaded(sid):
+        raise CleanupUnverified("the owned profile is still loaded")
+    current = profiles.path(sid)
+    if current is not None and (value["state"] != "created" or current != recorded):
+        raise CleanupUnverified("the retained profile path changed or was not recorded")
+    if current is None:
+        if recorded is not None and Path(recorded).exists():
+            raise CleanupUnverified("unregistered profile files remain; reconciliation required")
+        if value["state"] == "cleaned":
+            return
+    else:
+        if any(part.is_symlink() or getattr(part, "is_junction", lambda: False)()
+               for part in (Path(recorded), *Path(recorded).parents)):
+            raise CleanupUnverified("the retained profile path was redirected")
+        # Windows owns deletion by SID; never recursively remove a path taken
+        # from the journal. A durability/conflict error propagates without retry.
+        profiles.delete(sid)
+        if profiles.loaded(sid) or profiles.path(sid) is not None or Path(recorded).exists():
+            raise CleanupUnverified("owned Windows profile cleanup is unverified")
+    value["state"] = "cleaned"
+    write_config_json(profile_manifest, value)
+
+# HASHI-Fingerprint: hfp_308817e97d1a40df8e5e6c994aa77e36

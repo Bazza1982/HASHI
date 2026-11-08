@@ -274,14 +274,42 @@ def test_pure_python_without_trailing_newline() -> None:
     assert out == "one\nTWO\nthree"
 
 
-# --- end-to-end with the real ``patch`` binary (when present) -------------
+# --- actual adapters and byte-preserving rejection -----------------------
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_with_real_patch_when_available(tmp_path) -> None:
-    if builtins._find_patch_command() is None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["LF", "CRLF"])
+@pytest.mark.parametrize("patch_newline", ["\n", "\r\n"], ids=["diff-LF", "diff-CRLF"])
+async def test_end_to_end_preserves_target_bytes(tmp_path, newline, patch_newline, monkeypatch):
+    if newline == "\n" and builtins._find_patch_command() is None:
         pytest.skip("no patch executable located")
-    target = _write(tmp_path)
-    result = await _apply(tmp_path)
+    target = _write(tmp_path, text=BASE_TEXT.replace("\n", newline))
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("The selected adapter must be authoritative")
+    if newline == "\n":
+        monkeypatch.setattr(builtins, "_apply_patch_with_python", forbidden)
+    else:
+        monkeypatch.setattr(builtins, "_find_patch_command", forbidden)
+        monkeypatch.setattr(builtins, "_apply_patch_with_patch_command", forbidden)
+    monkeypatch.setattr(builtins, "_apply_patch_with_git", forbidden)
+    result = await _apply(tmp_path, patch=SIMPLE_DIFF.replace("\n", patch_newline))
     assert result.startswith("OK: patch applied to")
-    assert _read(target) == "one\nTWO\nthree\n"
+    assert target.read_bytes() == "one\nTWO\nthree\n".replace("\n", newline).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("patch_newline", ["\n", "\r\n"], ids=["diff-LF", "diff-CRLF"])
+async def test_crlf_context_rejection_preserves_bytes_without_external_tools(tmp_path, monkeypatch, patch_newline):
+    target = _write(tmp_path, text=BASE_TEXT.replace("\n", "\r\n"))
+    original = target.read_bytes()
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("A CRLF patch must not invoke an external adapter")
+    monkeypatch.setattr(builtins, "_find_patch_command", forbidden)
+    monkeypatch.setattr(builtins, "_apply_patch_with_patch_command", forbidden)
+    monkeypatch.setattr(builtins, "_apply_patch_with_git", forbidden)
+    result = await _apply(tmp_path, patch=SIMPLE_DIFF.replace("-two", "-MISSING").replace("\n", patch_newline))
+    assert result.startswith("Error: patch rejected (dry-run):")
+    assert "does not match" in result
+    assert target.read_bytes() == original
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["notes.txt"]
+# HASHI-Fingerprint: hfp_f446b257335c400c99ade201ce2c82cb

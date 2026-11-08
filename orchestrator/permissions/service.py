@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import datetime
+from hashlib import sha256
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from orchestrator.permissions.authority import PermissionDenied
+from orchestrator.permissions.async_work import settled_thread
+from orchestrator.permissions.ipc_server import MAX_ENDPOINT_CONNECTIONS
 from orchestrator.permissions.clients import PAO_METHODS, CONTROL_METHODS
 from orchestrator.permissions.control_plane import PermissionControlPlane
 from orchestrator.permissions.run_service import PermissionRunService, binding_from_route
@@ -26,6 +33,10 @@ class PermissionServiceApplication:
             raise ValueError("qualified installed service levels are required")
         self.authority, self.store = authority, run_store
         self.identity, self.owners = identity_service, dict(owner_bindings)
+        # Governed password login and explicitly linked original native-human
+        # authentication retain their existing decision paths. Cooperative L1
+        # tokens and surviving old sessions cannot be promoted by bearer format.
+        self._governed_sessions, self._human_sessions_lock = {}, threading.Lock()
 
         self.native_identities = {}
         for entry in native_identities or ():
@@ -53,8 +64,13 @@ class PermissionServiceApplication:
         self._maintenance_stop, self._maintenance_task = asyncio.Event(), None
         self._recovery_error = None
         self._closed = False
-        self.pao_router = PermissionServiceRouter(self, methods=PAO_METHODS)
-        self.control_router = PermissionServiceRouter(self, methods=CONTROL_METHODS)
+        # Match the two existing endpoint capacities; blocking ledger work must
+        # not occupy the default executor used by pipe I/O and disconnect probes.
+        self._method_executor = ThreadPoolExecutor(
+            max_workers=2 * MAX_ENDPOINT_CONNECTIONS, thread_name_prefix="permission-method",
+        )
+        self.pao_router = PermissionServiceRouter(self, methods=PAO_METHODS, executor=self._method_executor)
+        self.control_router = PermissionServiceRouter(self, methods=CONTROL_METHODS, executor=self._method_executor)
 
     async def start(self, endpoints):
         if self._closed or self._started or not isinstance(endpoints, tuple) or len(endpoints) != 2:
@@ -124,6 +140,7 @@ class PermissionServiceApplication:
         self._endpoints = list(reversed(retained_endpoints))
         if failures:
             raise OSError("permission service cleanup is unverified") from failures[0]
+        await asyncio.to_thread(self._method_executor.shutdown, wait=True)
         lock = getattr(self, "_installation_lock", None)
         if lock is not None:
             lock.close()
@@ -148,7 +165,9 @@ class PermissionServiceApplication:
         if callbacks is None and getattr(self._factory, "requires_callbacks", False):
             from orchestrator.permissions.models import PermissionLevel
 
-            policy = self.runs._policy(arguments["agent_id"], arguments["owner_id"], arguments["session_id"])
+            policy = await settled_thread(
+                self.runs._policy, arguments["agent_id"], arguments["owner_id"], arguments["session_id"],
+            )
             if policy.settings.requested_level is PermissionLevel.L2:
                 raise PermissionDenied("restricted HER requires its actual Worker callback owner")
         binding = await self.runs.open_execution(**arguments)
@@ -241,15 +260,31 @@ class PermissionServiceApplication:
     def withdraw_session_request(self, subject, request_id, expected_revision):
         return self.control.withdraw_session_request(subject, request_id, expected_revision)
 
+    def _require_human(self, subject, session_token, *, target_level=None):
+        policy = self._policy_resolver(subject.agent_id, subject.owner_id, subject.session_id)
+        if policy.settings.requested_level.value == "L2" or target_level == "L2":
+            from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
+
+            if not isinstance(session_token, str):
+                raise SessionDecisionDenied("a governed human login is required for L2")
+            digest = sha256(session_token.encode()).hexdigest()
+            with self._human_sessions_lock:
+                expiry = self._governed_sessions.get(digest, 0)
+            if expiry <= time.time():
+                raise SessionDecisionDenied("a governed human login is required for L2")
+
     def issue_session_actions(self, subject, request_id, revision, *, session_token, presentation_id):
+        self._require_human(subject, session_token)
         return self.control.issue_session_actions(
             subject, request_id, revision, session_token=session_token, presentation_id=presentation_id,
         )
 
     def submit_session_action(self, subject, action_id, *, session_token):
+        self._require_human(subject, session_token)
         return self.control.submit_session_action(subject, action_id, session_token=session_token)
 
     def submit_session_decision(self, subject, arguments, *, session_token, invocation_id, connection_binding):
+        self._require_human(subject, session_token)
         return self.control.submit_session_decision(
             subject, arguments, session_token=session_token,
             invocation_id=invocation_id, connection_binding=connection_binding,
@@ -304,7 +339,15 @@ class PermissionServiceApplication:
                 or str(session["context_generation"]) != subject.context_generation):
             raise PermissionDenied("original command Session changed")
         login = self.identity.create_session(user_id=user.id, ttl_seconds=60)
+        self._remember_governed_session(login)
         return {"session_token": login.token, "expires_at": login.expires_at}
+
+    def _remember_governed_session(self, session):
+        expiry = datetime.fromisoformat(session.expires_at).timestamp()
+        with self._human_sessions_lock:
+            self._governed_sessions = {key: value for key, value in self._governed_sessions.items()
+                                       if value > time.time()}
+            self._governed_sessions[sha256(session.token.encode()).hexdigest()] = expiry
 
     def login(self, *, org_id, email, password):
         # API keys, shared instance bearers and ordinary question answers never
@@ -316,6 +359,7 @@ class PermissionServiceApplication:
         if user is None or user.id not in self.owners:
             raise PermissionDenied("invalid human login")
         session = self.identity.create_session(user_id=user.id)
+        self._remember_governed_session(session)
         return {"ok": True, "session": {"token": session.token, "expires_at": session.expires_at},
                 "user": {"id": user.id, "org_id": user.org_id, "email": user.email,
                          "display_name": user.display_name}}
@@ -323,7 +367,10 @@ class PermissionServiceApplication:
     def logout(self, *, session_token):
         if not isinstance(session_token, str) or not session_token:
             return {"ok": True, "revoked": False}
-        return {"ok": True, "revoked": self.identity.revoke_session(session_token)}
+        revoked = self.identity.revoke_session(session_token)
+        with self._human_sessions_lock:
+            self._governed_sessions.pop(sha256(session_token.encode()).hexdigest(), None)
+        return {"ok": True, "revoked": revoked}
 
     def session_user(self, *, session_token):
         user = self.identity.get_session_user(session_token)
@@ -334,6 +381,8 @@ class PermissionServiceApplication:
     async def manage_session(self, *, subject, arguments, session_token, invocation_id):
         if self._management is None:
             raise PermissionDenied("permission management is unavailable")
+        target = arguments[1] if len(arguments) >= 2 and arguments[0] == "set-level" else None
+        await settled_thread(self._require_human, subject, session_token, target_level=target)
         return await self._management.manage(
             subject, arguments, session_token=session_token, invocation_id=invocation_id,
         )

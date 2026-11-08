@@ -33,7 +33,8 @@ param(
     
     [switch]$Quiet,
     [switch]$Force,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$ApiGateway
 )
 
 $ErrorActionPreference = "Stop"
@@ -422,7 +423,14 @@ function Start-Bridge {
     # Clean up any stale files
     Remove-StaleFiles
     
+    $RoleResolver = Join-Path $ProjectDir "scripts\resolve_launch_runtime.py"
+    $CorePythonExe = (& $PythonExe -B $RoleResolver --code-root $ProjectDir --field core-executable)
+    if ($LASTEXITCODE -ne 0 -or -not $CorePythonExe) {
+        throw "Runtime setup is incomplete; install the verified release before starting."
+    }
+    $CorePythonExe = ([string]$CorePythonExe).Trim()
     $LaunchArguments = @(
+        "-I", "-B",
         $MainScript,
         "--bridge-home", $BridgeHome
     )
@@ -454,7 +462,7 @@ function Start-Bridge {
         $env:PYTHONPATH = $ProjectDir
         $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
         $Launcher = Start-Process `
-            -FilePath $PythonExe `
+            -FilePath $CorePythonExe `
             -ArgumentList $ArgumentString `
             -WorkingDirectory $ProjectDir `
             -WindowStyle Hidden `
@@ -558,13 +566,13 @@ switch ($Action) {
         exit $(if ($success) { 0 } else { 1 })
     }
     "start" {
-        $success = Start-Bridge -ResumeMode:$Resume
+        $success = Start-Bridge -ResumeMode:$Resume -ApiGateway:$ApiGateway
         exit $(if ($success) { 0 } else { 1 })
     }
     "restart" {
         Write-Log "=== Restarting bridge-u-f ==="
         $RestartProcesses = Get-BridgeProcesses
-        $RestartApiGateway = Test-ApiGatewayWasEnabled -Processes $RestartProcesses
+        $RestartApiGateway = $ApiGateway -or (Test-ApiGatewayWasEnabled -Processes $RestartProcesses)
         $stopOk = Stop-BridgeProcesses -ForceImmediate:$Force
         if ($stopOk) {
             Remove-StaleFiles

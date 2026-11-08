@@ -6,11 +6,12 @@ The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
 defines the two orthogonal dimensions—four functional modules and four
 engineering layers—and governs every lower-level design in this directory.
 
-> **Status:** HASHI `v4.0.0-beta.1` (Python `4.0.0b1`) is the current source
-> Beta for small-scale public testing. It combines HERV3, hardened
-> conversation and delivery paths, external Workbench v2 client integration,
-> Windows/WSL deployment templates, restricted Demo Mode, and the Portable
-> Windows builder. See [the release notes](RELEASE_NOTES_v4.0.0-beta.1.md).
+> **Development source:** HASHI `v5.0.0-alpha.1` (Python `5.0.0a1`) separates
+> protected Core and its Python environment from the replaceable Functions
+> environment. See [the v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md) for
+> why the major changed, other changes since v4, migration and remaining gates.
+> Source availability, published packages and running-instance adoption are
+> separate; [release/distribution status](RELEASES.md) records that distinction.
 >
 > Enterprise AAI `v0.1.0-alpha.1` is a historical tagged milestone, not a
 > parallel current version. Its production-validation limits still apply to

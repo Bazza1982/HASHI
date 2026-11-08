@@ -15,7 +15,7 @@ from orchestrator.permissions.result_store import EncryptedResultStore
 from orchestrator.permissions.waiting import PermissionWaiter
 from orchestrator.permissions.windows_file_supervisor import WindowsFileSupervisor
 from orchestrator.session_store import SessionStore
-from tests.test_permission_execution_gate import Issuer, find_pending
+from tests.test_permission_execution_gate import CONTRACT_WATCHDOG_SECONDS, Issuer, find_pending
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows file handles required")
 
@@ -86,7 +86,7 @@ async def test_create_then_recover_after_service_restart_without_overwriting(env
     arguments = {"path": "report.txt", "content": "created once"}
     operation = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
     request, _ = await approve_pending(authority, issuer, context, waiter)
-    first = await asyncio.wait_for(operation, 3)
+    first = await asyncio.wait_for(operation, CONTRACT_WATCHDOG_SECONDS)
     assert first.state == "succeeded" and not first.replayed
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "created once"
     assert authority.operation_status_for_task(context, "operation").resource_state == "stopped"
@@ -125,7 +125,7 @@ async def test_authorized_read_uses_the_bound_file_and_requested_lines(environme
         "operation", "file_read", {"path": "report.txt", "offset": 2, "limit": 1}, reason="report",
     ))
     await approve_pending(authority, issuer, context, waiter)
-    result = await asyncio.wait_for(task, 3)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "succeeded"
     assert "second" in result.payload and "first" not in result.payload and "third" not in result.payload
     assert authority.operation_status_for_task(context, "operation").resource_state == "stopped"
@@ -140,7 +140,7 @@ async def test_existing_file_is_never_overwritten_and_outcome_is_not_retried(env
     arguments = {"path": "report.txt", "content": "replacement"}
     task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
     await approve_pending(authority, issuer, context, waiter)
-    result = await asyncio.wait_for(task, 3)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert target.read_text(encoding="utf-8") == "existing"
     assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "unknown"
@@ -164,7 +164,7 @@ async def test_revocation_between_start_and_dispatch_prevents_create(environment
     ))
     _, approved = await approve_pending(authority, issuer, context, waiter)
     lease.append(approved)
-    result = await asyncio.wait_for(task, 3)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert authority.get_lease(approved.lease_id).status == "revoked"
     assert not (tmp_path / "blocked.txt").exists()
@@ -178,7 +178,7 @@ async def test_unverified_cleanup_never_becomes_a_replayable_success(environment
     arguments = {"path": "report.txt", "content": "written once"}
     task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
     await approve_pending(authority, issuer, context, waiter)
-    result = await asyncio.wait_for(task, 3)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "written once"
     assert authority.operation_status_for_task(context, "operation").resource_state == "unknown"
@@ -225,7 +225,7 @@ async def test_cancel_waits_for_the_inflight_file_operation_to_settle(environmen
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 3)
+        await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     status = authority.operation_status_for_task(context, "operation")
     assert status.state == "succeeded" and status.resource_state == "stopped"
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "written once"
@@ -243,7 +243,7 @@ async def test_failure_saving_result_cannot_repeat_a_completed_file_effect(envir
     arguments = {"path": "report.txt", "content": "written once"}
     task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
     await approve_pending(authority, issuer, context, waiter)
-    assert (await asyncio.wait_for(task, 3)).state == "unknown"
+    assert (await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)).state == "unknown"
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "written once"
     assert authority.operation_status_for_task(context, "operation").state == "started"
     assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "unknown"
@@ -305,11 +305,11 @@ async def test_replaced_directory_cannot_redirect_the_approved_operation(environ
         os.replace(original, project)
         authority.revoke(context, lease.lease_id)
         release.set()
-        await asyncio.wait_for(task, 3)
+        await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
         pytest.skip("Windows account cannot create a disposable test symlink")
     finally:
         release.set()
-    result = await asyncio.wait_for(task, 3)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert not (outside / "report.txt").exists()
     assert not (original / "report.txt").exists()
@@ -379,7 +379,7 @@ async def test_cancel_before_file_start_prevents_the_effect(environment, tmp_pat
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 3)
+        await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert not (tmp_path / "cancelled.txt").exists()
     assert authority.operation_status_for_task(context, "operation").state == "waiting"
 
@@ -417,7 +417,7 @@ async def test_cancel_after_prepare_releases_once_only_after_verified_cleanup(en
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 3)
+        await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert not (tmp_path / "cancelled.txt").exists()
     status = authority.operation_status_for_task(context, "operation")
     if cleanup == "unverified":
@@ -438,3 +438,4 @@ def test_supervisor_rejects_missing_or_unverified_pao_run_guard(environment, tmp
                 authority, cwd=tmp_path, read_roots=(tmp_path,), result_store=results,
                 issue_stop=issue_stop, run_guard=guard,
             )
+# HASHI-Fingerprint: hfp_791fb018a03a4a72b7e638bb003827aa

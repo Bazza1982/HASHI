@@ -21,13 +21,18 @@
 - Runtime contract:
   - `python scripts/check_runtime_contract.py --json`
   - CPython is the approved 3.12.13 patch and packaging, container, CI and portable builders agree
-  - standard dependencies install from `constraints/standard-py312.lock`
+  - Core uses its own empty lock; Functions wheels install into a fresh directory with --require-hashes from constraints/functions-py312.hashes.lock
+  - standard npm/source, Windows controllers, Portable relocation and enterprise image probe the exact separate role pair
+  - Portable lossless payloads pass archive and complete expanded-file verification; native Core expansion verifies every file before executing Python; qualification before full expansion, path aliases, corruption, startup hooks and overwriting an installed runtime are rejected; role IDs remain unchanged after relocation
+  - retain the unchanged 957 MB transfer/allocation limit, full speech model and expanded destination-space/whole-release rollback checks
+  - Git-less packages require installer-owned source publication; local self-asserted manifests never authorize a Function generation
   - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
 - Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"`
 - Python source distribution and wheel:
   `python scripts/build_python_release.py`. It builds committed `HEAD` in a
   temporary export; never run the packaging backend in a live runtime checkout.
+- Enterprise image: `python scripts/build_enterprise_image.py --tag hashi-qualification`; retain actual image/role identities and probe without real services/accounts.
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
   - the user guides and their local navigation targets are present in the
@@ -97,8 +102,10 @@
     agents or changing the active generation ID
   - change a disposable source after probe and verify the commit-time digest
     check restores the previous generation
-  - verify the staging receipt uses another PID and exactly matches Core's
-    executable, platform ABI, dependency digest, protected-Core digest and API levels
+  - verify the staging receipt uses another PID and exactly matches the selected
+    qualified Functions runtime; validate its protected-Core/API/protocol binding
+    against the admitted Core. CR and FR have separate executable, package and
+    runtime identities; do not require cross-role fingerprint equality
   - perform two successful `/reboot min` operations under the same Core PID
   - scan bridge logs for post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, and `LOCAL MODE`
 - Slim core docs:
@@ -106,9 +113,8 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HERV3 gates:
-  - source candidate scope uses HASHI `v5.0.0-alpha.1` (Python `5.0.0a1`)
-    consistently across root Node and Helm application metadata; source preparation
-    does not publish packages or promote the earlier v4 Beta;
+  - release scope uses HASHI `v5.0.0-alpha.1` as the single source candidate,
+    Python package (`5.0.0a1`), root Node package, and Helm application line;
     Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HERV3 changes run the touched compatibility module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation

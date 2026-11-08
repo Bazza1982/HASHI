@@ -130,3 +130,93 @@ async def test_request_discovery_is_scoped_read_only_and_survives_reentry(enviro
     assert changed.status == 409
     server._strict_authenticated_owner = lambda req: None
     assert (await read(server, _Request({}, match_info={"session_id": subject.session_id}))).status == 401
+
+
+@pytest.mark.asyncio
+async def test_saved_service_without_loaded_frontend_is_unavailable_not_an_empty_authority(environment, tmp_path):
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from orchestrator.config_json import read_config_json, write_config_json
+    from orchestrator.permissions.clients import service_clients
+    from orchestrator.permissions.frontend_requests import read
+
+    service, authority, _, arguments, subject = environment
+    binding = await service.open_execution(**arguments)
+    request = authority.request_access(
+        binding.context, [normalize_scope("file", str(tmp_path / "pending.txt"), ("write",), cwd=tmp_path)],
+        purpose="Write the pending test file",
+    )
+    server = api(service, subject, tmp_path)
+    server.permission_control = None  # The shared frontend booted before installation.
+    descriptor = {
+        "version": 1, "instance_id": subject.instance_id,
+        "pao_endpoint": r"\\.\pipe\LOCAL\HASHI.Permissions.TestsPao",
+        "control_endpoint": r"\\.\pipe\LOCAL\HASHI.Permissions.TestsControl",
+        "public_key": base64.b64encode(
+            Ed25519PrivateKey.generate().public_key().public_bytes_raw(),
+        ).decode(),
+    }
+    # This is a qualified public descriptor; construction does not connect or
+    # start an installed service. Only the persisted configuration changes.
+    assert len(service_clients(SimpleNamespace(
+        instance_id=subject.instance_id, permission_service=descriptor,
+    ))) == 2
+    document = read_config_json(server.config_path)
+    document["global"]["permission_service"] = descriptor
+    write_config_json(server.config_path, document)
+    before = server.config_path.read_bytes()
+    response = await read(server, _Request({}, match_info={"session_id": subject.session_id},
+        query={"agent_id": subject.agent_id, "context_generation": "1"}))
+    assert response.status == 503
+    assert json.loads(response.text) == {"ok": False, "error_code": "permission_requests_unavailable"}
+    assert server.permission_control is None
+    assert server.config_path.read_bytes() == before
+    assert authority.get_request(binding.context, request.request_id).state == "pending"
+    assert authority.decision_count(request.request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_frontend_stays_a_read_only_empty_view(environment, tmp_path):
+    from orchestrator.permissions.frontend_requests import read
+
+    service, _, _, _, subject = environment
+    server = api(service, subject, tmp_path)
+    server.permission_control = None
+    before = server.config_path.read_bytes()
+    response = await read(server, _Request({}, match_info={"session_id": subject.session_id},
+        query={"agent_id": subject.agent_id, "context_generation": "1"}))
+    assert response.status == 200
+    assert json.loads(response.text) == {"ok": True, "requests": [], "next_before": None}
+    assert server.config_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["{invalid", '{"global":[]}'])
+async def test_unknown_configuration_cannot_be_presented_as_no_pending_requests(environment, tmp_path, raw):
+    from orchestrator.permissions.frontend_requests import read
+
+    service, _, _, _, subject = environment
+    server = api(service, subject, tmp_path)
+    server.permission_control = None
+    server.config_path.write_text(raw, encoding="utf-8")
+    response = await read(server, _Request({}, match_info={"session_id": subject.session_id},
+        query={"agent_id": subject.agent_id, "context_generation": "1"}))
+    assert response.status == 503
+    assert server.config_path.read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.asyncio
+async def test_unloaded_frontend_checks_authentication_before_reading_installation(environment, tmp_path):
+    from orchestrator.permissions.frontend_requests import read
+
+    service, _, _, _, subject = environment
+    server = api(service, subject, tmp_path)
+    server.permission_control = None
+    server._load_raw_agent_config = lambda: pytest.fail("configuration read before session authorization")
+    server._strict_authenticated_owner = lambda request: None
+    request = _Request({}, match_info={"session_id": subject.session_id},
+        query={"agent_id": subject.agent_id, "context_generation": "1"})
+    assert (await read(server, request)).status == 401
+    server._strict_authenticated_owner = lambda request: subject.owner_id
+    request.query["context_generation"] = "2"
+    assert (await read(server, request)).status == 409

@@ -78,9 +78,12 @@ def _remove_matching(api, name: str, marker: str, sid: str) -> None:
 
 def recover_identity(api, manifest: Path) -> None:
     """Remove only a successfully recorded account whose identity still matches."""
+    from orchestrator.config_json import read_config_json, write_config_json
+
     path = Path(manifest)
     try:
-        value = _validate_manifest(json.loads(path.read_text(encoding="utf-8")))
+        document = read_config_json(path)
+        value = _validate_manifest(dict(document))
     except (OSError, ValueError, UnicodeError) as exc:
         raise CleanupUnverified("test identity manifest is unavailable") from exc
     info = api.info(value["name"])
@@ -90,13 +93,28 @@ def recover_identity(api, manifest: Path) -> None:
         return
     if info is None:
         value["state"] = "cleaned"
-        _write_manifest(path, value)
+        document.update(value)
+        write_config_json(path, document)
         return
     if value["state"] != "created" or value["sid"] is None:
         raise CleanupUnverified("test account identity is not proven")
     _remove_matching(api, value["name"], value["marker"], value["sid"])
     value["state"] = "cleaned"
-    _write_manifest(path, value)
+    document.update(value)
+    write_config_json(path, document)
+
+
+def quarantine_identity(api, manifest: Path) -> dict:
+    """Disable only a still-owned test account when profile cleanup is blocked."""
+    value = _validate_manifest(json.loads(Path(manifest).read_text(encoding="utf-8")))
+    info = api.info(value["name"])
+    if (value["state"] != "created" or value["sid"] is None or info is None
+            or info.get("sid") != value["sid"] or info.get("comment") != value["marker"]):
+        raise CleanupUnverified("test account quarantine ownership is not proven")
+    api.disable(value["name"])
+    if not api.disabled(value["name"]):
+        raise CleanupUnverified("test account disable is unconfirmed")
+    return {"name": value["name"], "sid": value["sid"], "disabled": True}
 
 
 class DisposableTestIdentity:
@@ -298,6 +316,37 @@ class WindowsAccounts:
             if buffer:
                 self.net.NetApiBufferFree(buffer)
 
+    def _flags(self, name: str) -> int:
+        if not _NAME.fullmatch(name):
+            raise ValueError("a disposable test account name is required")
+        buffer = ctypes.c_void_p()
+        status = self.net.NetUserGetInfo(None, name, 1, ctypes.byref(buffer))
+        if status:
+            raise OSError(status, "cannot inspect disposable account flags")
+        try:
+            user = ctypes.cast(buffer, ctypes.POINTER(_UserInfo1)).contents
+            if user.name.casefold() != name.casefold():
+                raise CleanupUnverified("account name changed")
+            return int(user.flags)
+        finally:
+            self.net.NetApiBufferFree(buffer)
+
+    def disable(self, name: str) -> None:
+        flags = wintypes.DWORD(self._flags(name) | 0x2)  # UF_ACCOUNTDISABLE
+        error = wintypes.DWORD()
+        operation = self.net.NetUserSetInfo
+        operation.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+        ]
+        operation.restype = wintypes.DWORD
+        status = operation(None, name, 1008, ctypes.byref(flags), ctypes.byref(error))
+        if status:
+            raise OSError(status, "cannot disable disposable account")
+
+    def disabled(self, name: str) -> bool:
+        return bool(self._flags(name) & 0x2)
+
     def delete(self, name: str) -> None:
         status = self.net.NetUserDel(None, name)
         if status:
@@ -326,3 +375,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# HASHI-Fingerprint: hfp_b10edcfe48ed4893bf9e8db34320fab6

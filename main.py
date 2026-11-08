@@ -12,13 +12,13 @@ from pathlib import Path
 from uuid import uuid4
 
 CODE_ROOT = Path(__file__).resolve().parent
-from orchestrator.runtime_contract import RuntimeContractError, enforce_runtime_contract
+# Isolated script execution omits its directory; admit only this entry's root.
+sys.path.insert(0, str(CODE_ROOT))
 
-try:
-    RUNTIME_FINGERPRINT = enforce_runtime_contract(CODE_ROOT)
-except RuntimeContractError as exc:
-    print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
-    raise SystemExit(78) from exc
+from orchestrator.runtime_contract import (
+    CORE_HOST_ROLE, RuntimeContractError, bind_process_runtime,
+    enforce_runtime_contract, load_core_runtime_selection,
+)
 
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.kernel_process import (
@@ -30,6 +30,14 @@ from orchestrator.kernel_process import (
 
 
 def main(argv=None) -> int:
+    try:
+        enforce_runtime_contract(CODE_ROOT, role=CORE_HOST_ROLE)
+        selection = load_core_runtime_selection(CODE_ROOT)
+        bind_process_runtime(selection.core, code_root=CODE_ROOT)
+        runtime = enforce_runtime_contract(CODE_ROOT, role=CORE_HOST_ROLE)
+    except RuntimeContractError as exc:
+        print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
+        return 78
     parser = argparse.ArgumentParser()
     parser.add_argument("--bridge-home")
     parser.add_argument(
@@ -61,7 +69,8 @@ def main(argv=None) -> int:
             kernel = KernelRuntime(
                 CODE_ROOT,
                 bridge_home,
-                RUNTIME_FINGERPRINT,
+                runtime,
+                functions_runtime=selection.functions,
                 arguments={"argv": function_args},
             )
             loop = asyncio.get_running_loop()
@@ -82,3 +91,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_6ff292b0ac43480fa8a69f0a8ee2629a

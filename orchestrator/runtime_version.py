@@ -129,6 +129,16 @@ def render_version_card(
     if not full:
         return "\n".join(lines)
 
+    roles = payload.get("runtime_roles") or {}
+    core_role = roles.get("core_host") or {}
+    for key, translation in (("core_host", "version.core_runtime"), ("functions", "version.functions_runtime")):
+        role = roles.get(key) or {}
+        lines.append(
+            f"{html.escape(_tr(translation, locale))} · PID <code>{html.escape(str(role.get('pid') or _tr('version.unavailable', locale)))}</code> · <code>{html.escape(str(role.get('runtime_id') or _tr('version.unavailable', locale)))}</code>"
+        )
+    lines.append(
+        f"{html.escape(_tr('version.core_source', locale))} · <code>{html.escape(str(core_role.get('core_source_digest') or _tr('version.unavailable', locale)))}</code>"
+    )
     remote = running.get("remote") or {}
     lines.extend(
         [
@@ -388,3 +398,4 @@ async def command(runtime: Any, update: Any, context: Any) -> None:
         update,
         render_version_all(rows, locale=locale, current_instance=local_id),
     )
+# HASHI-Fingerprint: hfp_a25e32e6804f410aac7af2966923a67a

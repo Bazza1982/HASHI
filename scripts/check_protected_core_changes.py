@@ -141,62 +141,66 @@ def _candidate_text(root: Path, path: str, args: argparse.Namespace) -> str:
         raise ValueError(f"cannot read candidate {path}: {exc}") from exc
 
 
-def _standard_lock_path(source: str) -> str | None:
-    runtime = tomllib.loads(source).get("tool", {}).get("hashi", {}).get("runtime")
-    if runtime is None:
-        return None
-    value = runtime.get("standard-lock")
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("[tool.hashi.runtime] standard-lock must be a relative path")
-    value = value.strip()
-    path = Path(value.replace("\\", "/"))
-    if path.anchor or PureWindowsPath(value).anchor or ".." in path.parts:
-        raise ValueError("standard-lock must remain inside the repository")
-    return value.strip()
+# These metadata fields define the Core/Function wire contract. Interpreter,
+# build and dependency revisions remain owned by their independently qualified role.
+_CORE_CONTRACT_FIELDS = (
+    "core-api", "function-api", "worker-model", "worker-protocol", "generation-schema",
+)
 
 
-def _runtime_generation_changes(
+def _runtime_declarations(source: str) -> dict:
+    runtime = tomllib.loads(source).get("tool", {}).get("hashi", {}).get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("[tool.hashi.runtime] must be a table")
+    # Validate declared paths without treating a role's lock revision as Core code.
+    for field in ("standard-lock", "core-host-lock"):
+        if field not in runtime:
+            continue
+        value = runtime[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"[tool.hashi.runtime] {field} must be a relative path")
+        value = value.strip()
+        path = Path(value.replace("\\\\", "/"))
+        if path.anchor or PureWindowsPath(value).anchor or ".." in path.parts:
+            raise ValueError(f"{field} must remain inside the repository")
+    return runtime
+
+
+def _contract_signature(source: str) -> str:
+    runtime = _runtime_declarations(source)
+    # JSON retains types: boolean true must never compare equal to integer 1.
+    return json.dumps({key: runtime.get(key) for key in _CORE_CONTRACT_FIELDS},
+                      sort_keys=True, separators=(",", ":"))
+
+
+def _core_contract_changes(
     root: Path, args: argparse.Namespace, changed: set[str],
 ) -> set[str]:
-    if not changed:
+    if PROJECT_METADATA_PATH not in changed:
         return set()
-    baseline = _git_text(f"{args.base or 'HEAD'}:{PROJECT_METADATA_PATH}")
-    sources = [baseline, _git_text(f"HEAD:{PROJECT_METADATA_PATH}"),
-               _candidate_text(root, PROJECT_METADATA_PATH, args)]
+    baseline = _contract_signature(
+        _git_text(f"{args.base or 'HEAD'}:{PROJECT_METADATA_PATH}")
+    )
+    sources = [_candidate_text(root, PROJECT_METADATA_PATH, args)]
     if not args.cached and not args.base:
-        # Default preflight covers the index even when the working file hides it.
+        # A working copy cannot hide a staged contract change.
         sources.append(_git_text(f":{PROJECT_METADATA_PATH}"))
-    baseline_major = _project_release(baseline)[1][0]
-    # The raw owner string participates in the runtime fingerprint, even when
-    # multiple spellings resolve to the same physical lock on this platform.
-    owners = {_standard_lock_path(source) for source in sources}
-    lock_paths = {
-        Path(owner.replace("\\", "/")).as_posix()
-        for owner in owners if owner is not None
-    }
-    changes = changed & lock_paths
-    if len(owners) > 1 or any(
-        _project_release(source)[1][0] != baseline_major for source in sources
-    ):
-        changes.add(PROJECT_METADATA_PATH)
-    return changes
+    if any(_contract_signature(source) != baseline for source in sources):
+        return {PROJECT_METADATA_PATH}
+    return set()
 
 
-def _runtime_review_file_digests(
+def _contract_review_file_digests(
     root: Path, args: argparse.Namespace,
 ) -> dict[str, str]:
-    metadata = _candidate_text(root, PROJECT_METADATA_PATH, args)
-    paths = {PROJECT_METADATA_PATH}
-    lock = _standard_lock_path(metadata)
-    if lock is not None:
-        paths.add(Path(lock.replace("\\", "/")).as_posix())
-    # Match the canonical UTF-8 LF source view, including --cached's index.
-    return {
-        path: "sha256:" + hashlib.sha256(
-            _candidate_text(root, path, args).encode("utf-8")
-        ).hexdigest()
-        for path in sorted(paths)
-    }
+    if not _core_contract_changes(root, args, {PROJECT_METADATA_PATH}):
+        return {}
+    # Core metadata contracts need an exact review seal. Independent role locks
+    # are qualified by runtime admission, not by a fictitious Core code migration.
+    source = _candidate_text(root, PROJECT_METADATA_PATH, args)
+    return {PROJECT_METADATA_PATH: "sha256:" + hashlib.sha256(
+        source.encode("utf-8")
+    ).hexdigest()}
 
 
 def _project_release(source: str) -> tuple[str, tuple[int, int, int]]:
@@ -285,8 +289,24 @@ def _review_record_errors(
 
     implementer = str(record.get("implementer") or "").strip().casefold()
     reviewer = str(record.get("reviewer") or "").strip().casefold()
-    if implementer and reviewer and implementer == reviewer:
-        errors.append("reviewer must be independent from implementer")
+    mode = str(record.get("approval_mode") or "independent_human").strip()
+    if mode == "owner_approved":
+        # Solo-owner projects may use documented AI technical review and the
+        # owner's explicit release decision; no fictional second human.
+        owner = str(record.get("owner") or "").strip()
+        if not owner:
+            errors.append("owner must identify the approving human for owner_approved")
+        if not str(record.get("technical_review_reference") or "").strip():
+            errors.append("technical_review_reference is required for owner_approved")
+        if not str(record.get("owner_decision_reference") or "").strip():
+            errors.append("owner_decision_reference is required for owner_approved")
+        if not str(record.get("owner_decision") or "").strip().casefold() == "approved":
+            errors.append("owner_decision must be approved for owner_approved")
+    elif mode == "independent_human":
+        if implementer and reviewer and implementer == reviewer:
+            errors.append("reviewer must be independent from implementer")
+    else:
+        errors.append("approval_mode must be independent_human or owner_approved")
 
     reviewed_at = str(record.get("reviewed_at") or "").strip()
     if reviewed_at:
@@ -335,9 +355,9 @@ def _major_version_policy_errors(
 
     core_digest = _core_review_digest(root, protected_paths, args)
     try:
-        required_file_digests = _runtime_review_file_digests(root, args)
+        required_file_digests = _contract_review_file_digests(root, args)
     except (ValueError, OSError) as exc:
-        return errors + [f"cannot seal the candidate runtime generation: {exc}"]
+        return errors + [f"cannot seal the candidate Core contract: {exc}"]
     try:
         review_paths = _added_review_paths(args)
     except subprocess.CalledProcessError as exc:
@@ -345,7 +365,7 @@ def _major_version_policy_errors(
         return errors
     if not review_paths:
         errors.append(
-            f"add an independent review record under {CORE_REVIEW_DIRECTORY}/"
+            f"add a truthful independent-human or owner-approved review record under {CORE_REVIEW_DIRECTORY}/"
         )
         return errors
 
@@ -418,14 +438,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"protected core manifest: invalid: {exc}", file=sys.stderr)
         return 3
 
-    runtime_changes: set[str] = set()
-    if not protected:
-        try:
-            runtime_changes = _runtime_generation_changes(root, args, changed)
-        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-            print(f"Core runtime generation is unavailable: {exc}", file=sys.stderr)
-            return 3
-    approval_scope = sorted(set(protected) | runtime_changes)
+    try:
+        contract_changes = _core_contract_changes(root, args, changed)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"Runtime declarations are invalid: {exc}", file=sys.stderr)
+        return 3
+    approval_scope = sorted(set(protected) | contract_changes)
     if not approval_scope:
         print("protected core check: ok")
         return 0
@@ -433,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     if not _is_authorized(args):
         print("protected core check: blocked", file=sys.stderr)
         print(
-            "Core source or runtime generation changed without explicit authorization; "
+            "Core source or wire contract changed without explicit authorization; "
             "CI requires the core-change-approved label:",
             file=sys.stderr,
         )
@@ -475,3 +493,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_2e511d504f6e415587a155aef937b926

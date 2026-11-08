@@ -240,7 +240,7 @@ Windows test marker、环境前置和证据收集要求由 [L2_WINDOWS](L2_WINDO
 
 ## 10. L2：实体平台与真实覆盖
 
-本节只定义产品级验收，Windows 身份、ACL、进程、IPC、网络和安装细节遵循 [L2_WINDOWS](L2_WINDOWS.md)。每一项必须记录实际 OS build、服务/runner 身份、包版本和可核查证据；对应 CASE 的 mock/unit 测试只作先行证据，**不能完成本节**。
+本节只定义产品级验收，Windows 身份、ACL、进程、IPC、网络和安装细节遵循 [L2_WINDOWS](L2_WINDOWS.md)，2026-11-04 新增的精确根及 Compute 边界遵循 [L2 硬 Workzone](L2_HARD_WORKZONE.md)。每一项必须记录实际 OS build、服务/runner 身份、包版本和可核查证据；对应 CASE 的 mock/unit 测试只作先行证据，**不能完成本节**。严格 L2 的目标文件必须位于可信 Workzone 内，普通访问批准不能改变 Workzone 上限；L1 用例保留原语义。
 
 | CASE / 状态 | 准备 | 动作 | 可观察结果 | 失败条件 |
 |---|---|---|---|---|
@@ -253,6 +253,12 @@ Windows test marker、环境前置和证据收集要求由 [L2_WINDOWS](L2_WINDO
 | **CASE-L2-07** / 待执行 | 真实 alias/link/reparse、UNC/网络路径、子进程、继承 handle 场景，使用非敏感测试资源 | 尝试把已批准路径/进程边界重定向到未批准资源 | 实际访问对象仍受限制，不能通过继承或别名扩大；对不支持情形诚实声明 | 字符串前缀比较可绕过、已验证路径被替换后越界、未测能力宣称安全 |
 | **CASE-L2-08** / 待执行 | 生产等价但仅测试用凭据；可观察 runner 环境、文件、命令行和 IPC payload | 在 runner 中枚举可见资源、打印环境到受控日志、尝试获取批准/服务密钥 | 不能获取批准权威或高权限服务密钥；执行仅拿短期最小凭据；日志不泄漏 | 继承整包 secrets/admin token、在 argv/env 暴露密钥、假定加密文件等于无法使用 |
 | **CASE-L2-09** / 待执行 | 一条验证过的受控通道和一个不支持完整 L2 的 backend/browser/connector | 用户按已授权流程切换、再切回受控通道 | 实际 coverage 按通道显示；普通工作保持；切回需有效 epoch/服务证明；无静默降级或冒称全覆盖 | unsupported 导致所有任务锁死、自动替用户切 L0、任一未验证通道被标 L2 enforced |
+| **CASE-L2-10** / 待实体执行 | 已登记多个分离 Workzone；安装策略更宽；声明只读/写入各组；另有 home、共同父目录、相邻前缀目录及无效根 | 从 HERV3 文件/搜索/补丁/脚本输入/正式保存尝试越界，并主动申请及提交临时批准；使主根不可用、仅保留附加根 | 根外无读取/写入/claim；审批不能扩根；各根内仍需独立动作权限；无效根拒绝，不增 home/父目录 | 用已有宽 grant、换工具或普通批准越过根；只因目录选择就授予动作 |
+| **CASE-L2-11** / 待实体执行 | 旧 L2 epoch，操作处于 admission/排队/prepare/运行；记录 Workzone 与 policy revision、原生对象及资源 | 停用再启用相同根、替换为 link/junction、修改根；晚到批准/结果和恢复旧 epoch | 旧执行不复活，新动作拒绝；持有资源按既有撤权合同停止或报告待确认；重新绑定需当前根与身份，结果不重复执行 | 仅比较路径字符串使旧票据复活，根被重定向后仍启动，未确认回收即报成功 |
+| **CASE-L2-12** / 待端到端执行 | 区分只推理 Compute 和实际远端执行；后者须有已验收的服务、根映射和受限 Runner | 请求远端越界、伪造/重放/跨 Task 许可；本地撤权、根变更、服务断联；严格 L2 尝试转交独立 backend | 工具请求仍按执行端独立验权，短许可不延长，unknown 先对账；无远端资格不纳入保证；严格路径拒绝无管制委托 | 本地绿测冒充服务器资格，服务可绕 broker 代执行，旧 epoch/共享 token 批准，静默保留完整 L2 标签 |
+| **CASE-L2-13** / 待实体执行 | HERV3 顶层引擎、内部 API 模型及本机 CLI 模型路径；记录服务/Driver/子进程身份 | L2 请求初始化原生 CLI 模型，再用 API 模型执行；L1 作兼容对照 | L2 在创建/初始化 CLI Driver 前拒绝，无 CLI 子进程；API 模型经 broker 正常调用；L1 行为保留 | 只检查顶层 HERV3 名称，原生模型 CLI 在服务身份下运行，或为堵 L2 改坏 L1 |
+
+本地先行证据：`tests/test_permission_l2_workzones.py`、`tests/test_permission_configured_models.py` 和既有安装策略集成组。原生 launcher/IPC 在该组合中为注入边界，临时目录和路径重定向确有实际文件效果；通过该组不将上述实体/远端 CASE 改成已完成。
 
 ## 11. 操作、采用、回滚与交付
 

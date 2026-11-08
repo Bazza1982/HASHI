@@ -51,6 +51,39 @@ def _terminal_kinds(store, session_id, owner):
     ]
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface,connector", [("workbench", "backend_api"), ("tui", "tui")])
+async def test_bg_command_crosses_full_pao_enqueue_without_losing_activity_identity(tmp_path, monkeypatch, surface, connector):
+    from orchestrator.commands.bg import bg_command
+    runtime = _admission_runtime(tmp_path)
+    runtime.workspace_dir = tmp_path / "agent"
+    runtime.workspace_dir.mkdir()
+    runtime._is_authorized_user = lambda user: user == 42
+    runtime._reply_text = AsyncMock()
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *_a, **_k: {})
+    origin = runtime.session_store.ensure_default_session(owner_id="user:42", agent_id=runtime.name)
+    update = SimpleNamespace(update_id=125, effective_chat=SimpleNamespace(id=77),
+        effective_user=SimpleNamespace(id=42), effective_message=SimpleNamespace(text="/bg preserve exact task"),
+        _hashi_session_surface=surface, _hashi_session_channel_key="trusted-client",
+        _hashi_session_id=origin["session_id"], _hashi_session_owner_id="user:42",
+        _hashi_session_context_generation=origin["context_generation"])
+    context = SimpleNamespace(args=["preserve", "exact", "task"], frontend_connector_id=connector)
+    await bg_command(runtime, update, context)
+    item = runtime.queue.get_nowait()
+    run = runtime.session_store.get_run(item.run_id, owner_id="user:42")
+    activity = runtime.session_store.get_session(run["session_id"], owner_id="user:42")
+    assert activity["session_kind"] == "agent_activity"
+    assert activity["session_id"] != origin["session_id"]
+    assert item.request_metadata["agent_activity_context"]["origin_session_id"] == origin["session_id"]
+    assert item.request_metadata["agent_activity_context"]["origin_context_generation"] == origin["context_generation"]
+    assert run["source"] == "background:prompt"
+    assert item.request_metadata["ingress_transport"] == connector
+    assert run["message_context"]["message_source"]["id"] == "hashi.internal"
+    # A replay from the same trusted command never queues a second execution.
+    await bg_command(runtime, update, context)
+    assert runtime.queue.empty()
+
 @pytest.mark.asyncio
 async def test_real_enqueue_binds_workspace_metadata_and_queue_to_receipt_generation(
     tmp_path, monkeypatch
@@ -787,3 +820,4 @@ async def test_lost_execution_claim_never_starts_provider(tmp_path):
     assert runtime.session_store.get_run(accepted.run_id)["state"] == "running"
     assert runtime.backend_manager.calls == []
     assert runtime_delivery_order.pending_sequences(runtime, item.chat_id) == []
+# HASHI-Fingerprint: hfp_4cea3da49c5c4451ab01a7fe270c1bd1

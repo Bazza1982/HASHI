@@ -546,7 +546,10 @@ def build_child_command(settings: RemoteLifecycleSettings) -> list[str]:
     python = find_python(settings.root)
     if python is None:
         raise FileNotFoundError("No Python interpreter found for Hashi Remote")
-    cmd = [str(python), "-m", "remote", "--hashi-root", str(settings.root), "--port", str(settings.port)]
+    # A bundled Remote may run from the sealed Functions runtime.  Keep that
+    # installation immutable: runtime-created bytecode would invalidate its
+    # qualified file closure before another Agent Worker can start.
+    cmd = [str(python), "-B", "-m", "remote", "--hashi-root", str(settings.root), "--port", str(settings.port)]
     control_root = str(os.environ.get("HASHI_REMOTE_CONTROL_ROOT") or "").strip()
     if control_root:
         cmd.extend(["--control-hashi-root", str(Path(control_root).expanduser().resolve())])

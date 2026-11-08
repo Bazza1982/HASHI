@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from http.cookies import SimpleCookie
+import io
+import ssl
 import subprocess
 import sys
 import tarfile
 import tomllib
-from http.cookies import SimpleCookie
 from pathlib import Path
 
 from packaging.requirements import Requirement
@@ -245,3 +247,26 @@ def test_items_view_operations_release_operand_references():
 
     gc.collect()
     assert sys.getrefcount(sentinel) == before
+
+
+def test_functions_image_and_certificate_runtime_remains_usable():
+    import certifi
+    from PIL import Image
+    from importlib.metadata import version
+
+    assert version("pillow") == "13.0.0"
+    assert version("certifi") == "2026.10.19"
+    image = Image.new("RGBA", (3, 2), (17, 43, 89, 127))
+    payload = io.BytesIO()
+    image.save(payload, format="PNG")
+    payload.seek(0)
+    with Image.open(payload) as recovered:
+        recovered.load()
+        assert recovered.mode == image.mode
+        assert recovered.size == image.size
+        assert recovered.tobytes() == image.tobytes()
+    context = ssl.create_default_context(cafile=certifi.where())
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.cert_store_stats()["x509_ca"] > 0
+# HASHI-Fingerprint: hfp_4e3a471303264ff59b75096e8a2e70af

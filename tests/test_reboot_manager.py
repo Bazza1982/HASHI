@@ -1358,9 +1358,12 @@ async def test_max_reboot_rejects_busy_worker_before_shared_handoff(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("remote_available,recover", [(True, False), (False, True), (False, False)])
 async def test_successor_reconciles_shared_function_without_touching_remote(
     tmp_path,
     monkeypatch,
+    remote_available,
+    recover,
 ):
     old_kernel = _Kernel()
     old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
@@ -1373,6 +1376,8 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     new_kernel._shared_replacement_continuity = True
     new_kernel.shared_generation_id = generation.manifest.generation_id
+    new_kernel.startup_status = {"ready": remote_available, "degraded": not remote_available,
+                                 "remote": {"enabled": True, "available": remote_available}}
     new_kernel.function_release_adoption = {
         "status": "fallback",
         "reason_code": "source_uncommitted",
@@ -1403,9 +1408,27 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
 
     successor = RebootManager(new_kernel, None)
     successor.receipts.recover()
-    await successor.reconcile_shared_replacements()
+    await successor.reconcile_shared_replacements(now=pending["shared_replacement"]["requested_at"] + 1)
 
     record = successor.receipts.get(pending["id"])
+    if not remote_available:
+        assert record["status"] not in {"succeeded", "unconfirmed", "failed"}
+        assert record["phase"] == "verifying"
+        assert record["reason"] == "shared_services_unready"
+        if not recover:
+            from orchestrator.reboot_manager import SHARED_REPLACEMENT_TIMEOUT_SECONDS
+            await successor.reconcile_shared_replacements(
+                now=pending["shared_replacement"]["requested_at"] + SHARED_REPLACEMENT_TIMEOUT_SECONDS + 1)
+            failed = successor.receipts.get(pending["id"])
+            assert failed["status"] == "unconfirmed"
+            assert failed["committed"] is True
+            assert failed["reason"] == "shared_services_unready"
+            return
+        # A connector retry can recover before the existing handoff deadline.
+        new_kernel.startup_status.update(ready=True, degraded=False)
+        new_kernel.startup_status["remote"]["available"] = True
+        await successor.reconcile_shared_replacements(now=pending["shared_replacement"]["requested_at"] + 2)
+        record = successor.receipts.get(pending["id"])
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
     assert record["shared_replacement"]["adoption"] == new_kernel.function_release_adoption
@@ -1538,6 +1561,7 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     new_kernel.shared_generation_id = shared_generation_id
+    new_kernel.startup_status = {"ready": True, "degraded": False}
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
         client = _Client(name, 200 + index, shared_generation, new_kernel.events)
@@ -2373,3 +2397,4 @@ async def test_unreadable_activity_retains_worker_and_actionable_receipt(tmp_pat
     rendered = render_status(record, locale="en")
     assert "Agent activity is unavailable; retry later." in rendered
     assert "/reboot status" not in rendered
+# HASHI-Fingerprint: hfp_a74a4a95ffee457da410f5e4af23a34c

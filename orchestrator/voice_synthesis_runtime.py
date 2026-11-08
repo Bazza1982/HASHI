@@ -139,6 +139,7 @@ def isolated_tts_supports(distribution: str) -> bool:
             [
                 str(python),
                 "-I",
+                "-B",
                 "-c",
                 (
                     "import importlib.metadata, sys; "
@@ -209,6 +210,7 @@ def synthesize_edge_to_mp3(
             [
                 str(python),
                 "-I",
+                "-B",
                 str(worker_path),
                 "--output",
                 str(output_path),
@@ -246,3 +248,4 @@ def synthesize_edge_to_mp3(
     if not output_path.is_file() or output_path.stat().st_size < 100:
         output_path.unlink(missing_ok=True)
         raise TTSRuntimeError("Isolated TTS worker produced no valid audio")
+# HASHI-Fingerprint: hfp_4bd21f11f0f3410a801685b8c55e2049

@@ -70,7 +70,8 @@ def run(plan, handles):
                 raise ValueError("script snapshots exceed their aggregate bound")
             snapshots.append({"name": item["name"], "data": base64.b64encode(data).decode("ascii"),
                               "sha256": sha256(data).hexdigest()})
-        staged = {"arguments": arguments, "snapshots": snapshots, "cwd": plan["cwd"],
+        # Preserve the reviewed JSON for its digest; defaults are execution views.
+        staged = {"arguments": dict(plan["arguments"]), "snapshots": snapshots, "cwd": plan["cwd"],
                   "descriptor": plan["descriptor"]}
         observation = client.call("prepare_script", {
             "binding": binding, "operation_id": operation_id, "parent_job_name": plan["parent_job_name"],

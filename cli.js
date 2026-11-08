@@ -81,7 +81,7 @@ function selectManagementPython() {
     try {
       const result = spawnSync(
         candidate.command,
-        [...candidate.prefix, RUNTIME_CHECK, '--code-root', HASHI_ROOT, '--runtime-only'],
+        [...candidate.prefix, '-B', RUNTIME_CHECK, '--code-root', HASHI_ROOT, '--runtime-only'],
         { stdio: 'ignore', windowsHide: true },
       );
       if (result.status === 0) return candidate;
@@ -156,7 +156,7 @@ function run(argv = process.argv.slice(2)) {
   );
   const child = spawn(
     python.command,
-    [...python.prefix, INSTANCE_CLI, ...normalizeGlobalArguments(argv)],
+    [...python.prefix, '-B', INSTANCE_CLI, ...normalizeGlobalArguments(argv)],
     {
       cwd: process.cwd(),
       stdio: 'inherit',
@@ -172,6 +172,7 @@ function run(argv = process.argv.slice(2)) {
         HASHI_PROGRAM_ROOT: HASHI_ROOT,
         HASHI_PROGRAM_VERSION: PACKAGE.version,
         HASHI_INVOCATION_CWD: process.cwd(),
+        PYTHONDONTWRITEBYTECODE: '1',
         PYTHONUNBUFFERED: '1',
         PYTHONUTF8: '1',
       },

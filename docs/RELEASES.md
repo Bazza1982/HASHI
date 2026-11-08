@@ -5,14 +5,17 @@
 
 ## Current development and published releases
 
-The current source Beta is **v4.0.0-beta.1**, encoded as **4.0.0b1** in Python
-metadata. It is intended for small-scale public testing, not general production.
+The current development source is the **v5.0.0-alpha.1** Core/environment
+separation candidate, encoded as **5.0.0a1** in Python metadata. See
+[the v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md) for why the Core major
+changed, other included changes and migration. It is not a stable production
+release. Merging the candidate to `main` publishes source only.
 
-Publication snapshot checked on **2026-09-21**:
+Publication snapshot checked on **2026-11-07**:
 
 | Surface | Observed state |
 |---|---|
-| Source metadata | v4.0.0-beta.1 / 4.0.0b1 |
+| Development source metadata | v5.0.0-alpha.1 / 5.0.0a1; candidate, not a published distribution |
 | GitHub newest published pre-release | [v4.0.0-beta.1](https://github.com/Bazza1982/HASHI/releases/tag/v4.0.0-beta.1) |
 | GitHub Beta installation package | [hashi-bridge-4.0.0-beta.1.tgz](https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz) |
 | GitHub stable Latest | v2.0.0, a historical release |
@@ -27,8 +30,9 @@ npm view hashi-bridge dist-tags --json
 npm view hashi-bridge versions --json
 ~~~
 
-The Beta installation package is available from the GitHub pre-release while
-publication to the npm registry remains pending:
+The published **v4 Beta** installation package remains available below. It
+contains v4, not the v5 source candidate. No v5 GitHub Release or npm version
+was present in the publication snapshot:
 
 ~~~bash
 npm install --global https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz
@@ -46,8 +50,9 @@ notes. Their tags and original historical notes remain intact. Use the
 [Releases list](https://github.com/Bazza1982/HASHI/releases), rather than
 assuming releases/latest contains current development.
 
-The current Beta has not been declared stable simply to obtain a Latest badge.
-A release should identify the reviewed source commit and its actual maturity.
+Neither the published v4 Beta nor the v5 source candidate is declared stable
+to obtain a Latest badge. A release must identify its exact reviewed source
+commit and actual maturity.
 
 ## Choose an npm version
 
@@ -94,11 +99,11 @@ Full release history lives in
 Milestone descriptions record what existed then; older Workbench, Claw,
 wrapper-mode, model, and hot-reload descriptions are not current instructions.
 
-The current
-[Beta notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md)
-describe scope and limitations. The matching GitHub pre-release and its
-npm-format installation archive are published; npm-registry publication is a
-separate operation and is not implied by the GitHub asset.
+The [v5 notes](RELEASE_NOTES_v5.0.0-alpha.1.md) describe the current source
+candidate and its limits. The historical
+[v4 Beta notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md)
+describe the published GitHub pre-release and npm-format installation archive.
+That GitHub asset does not imply an npm-registry publication or a v5 package.
 
 Maintainers use the
 [versioning policy](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_VERSIONING_POLICY.md)

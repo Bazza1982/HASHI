@@ -406,6 +406,18 @@ class WorkerKernelFacade:
         self.agent_directory: Any | None = None
         self._topology = dict(topology or {})
 
+    @property
+    def core_runtime_fingerprint(self):
+        """Derive the Core receipt from authenticated PAO topology."""
+        from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError
+        raw = self._topology.get("core_runtime")
+        if raw is None:
+            return None
+        observed = RuntimeFingerprint.from_mapping(raw)
+        if observed.role != CORE_HOST_ROLE:
+            raise RuntimeContractError("Topology Core runtime role mismatch")
+        return observed
+
     def attach_runtime(self, runtime: Any) -> None:
         from orchestrator.agent_directory import AgentDirectory
 

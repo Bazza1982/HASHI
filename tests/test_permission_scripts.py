@@ -56,6 +56,66 @@ def test_script_descriptor_and_snapshots_bind_exact_read_only_inputs(tmp_path):
             validate(bad)
 
 
+@pytest.mark.parametrize("optional", [
+    {}, {"inputs": []}, {"outputs": ["result.json"]},
+    {"inputs": [], "outputs": ["result.json"]},
+])
+def test_optional_script_lists_survive_the_fixed_helper_runner_handoff(tmp_path, monkeypatch, optional):
+    """Exercise the real descriptor handoff; native process admission is injected."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from orchestrator.permissions.models import RuntimeExecutionBinding
+    from orchestrator.permissions.authority import PermissionDenied
+    from orchestrator.permissions.script_helper import run
+    from orchestrator.permissions.wire import encode
+    from tests.test_permission_pao_fence import setup_run
+
+    _, _, accepted, fence, context = setup_run(tmp_path)
+    binding = RuntimeExecutionBinding(context, accepted.request_id, fence, "INSTANCE:agent")
+    arguments = {"script": "print('isolated')", **optional}
+    descriptor = describe_tool("run_script", arguments, cwd=tmp_path, read_roots=(tmp_path,))
+    payload = '{"state":"completed","exit_code":0,"outputs":[]}'
+    calls = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, values, **kwargs):
+            calls.append(method)
+            if method == "prepare_script":
+                actual, reviewed, snapshots = unpack_plan(values["plan"])
+                assert actual == validate(arguments) and reviewed == descriptor and snapshots == []
+                assert values["plan"]["arguments"] == arguments
+                return {"user_sid": "S-1-5-21-2", "lpac": True, "elevated": False,
+                        "atomic_job": True, "capability_count": 1,
+                        "capability_sids": PYTHON_RUNTIME_CAPABILITIES, "parent_job_count": 2,
+                        "appcontainer_sid": "S-1-15-2-123"}
+            if method == "run_script":
+                return {"outcome": "succeeded", "payload": payload,
+                        "result_digest": sha256(payload.encode()).hexdigest()}
+            assert method == "stop_script"
+            return {"stopped": True}
+
+    monkeypatch.setattr("orchestrator.permissions.script_helper.PermissionPipeClient", Client)
+    # There are no native input handles in this protocol test.
+    monkeypatch.setattr("orchestrator.permissions.script_helper._Windows", object)
+    public = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    plan = {"arguments": arguments, "cwd": str(tmp_path), "descriptor": asdict(descriptor),
+            "binding": encode(binding), "operation_id": "optional-script", "parent_job_name": "reserved-helper",
+            "runner": {"endpoint": "private-test-endpoint", "public_key": base64.b64encode(public).decode(),
+                       "root_job_name": "reserved-root", "runner_sid": "S-1-5-21-2"},
+            "input_indices": [], "result": str(tmp_path / "result.json")}
+    result = run(plan, [])
+    assert result["outcome"] == "succeeded" and base64.b64decode(result["data"]).decode() == payload
+    assert calls == ["prepare_script", "run_script", "stop_script"]
+
+    # Normalizing omitted defaults must not admit a changed script or output plan.
+    for changed in (dict(arguments, script="print('different')"), dict(arguments, outputs=["other.json"])):
+        with pytest.raises(PermissionDenied, match="script descriptor changed"):
+            unpack_plan({"arguments": changed, "cwd": str(tmp_path), "descriptor": asdict(descriptor),
+                         "snapshots": []})
+
+
 def test_fixed_worker_captures_only_its_script_output_and_restores_process_streams(tmp_path, monkeypatch):
     from orchestrator.permissions.script_worker import main
 

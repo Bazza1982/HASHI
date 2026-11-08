@@ -345,15 +345,16 @@ async def test_admin_local_command_exposes_message_text_to_handlers(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_bg_command_defaults_to_run_and_preserves_task_text(tmp_path):
+@pytest.mark.parametrize("source_channel,expected_chat", [("api", 0), ("telegram", 123)])
+async def test_bg_command_defaults_to_run_and_preserves_task_text(tmp_path, source_channel, expected_chat):
     runtime = _FakeRuntime(tmp_path)
 
-    result = await execute_local_command(runtime, "/bg full citalio service for paper 3", chat_id=123)
+    result = await execute_local_command(runtime, "/bg full citalio service for paper 3", chat_id=123, source_channel=source_channel)
 
     assert result["ok"] is True
     assert result["command"] == "bg"
     assert result["messages"][0]["text"].startswith("Background-capable task queued.")
-    assert runtime.queued[0]["chat_id"] == 123
+    assert runtime.queued[0]["chat_id"] == expected_chat
     assert runtime.queued[0]["source"] == "background:prompt"
     assert runtime.queued[0]["summary"] == "Background task: full citalio service for paper 3"
     activity = runtime.queued[0]["request_metadata"]["agent_activity_context"]
@@ -479,3 +480,4 @@ async def test_admin_local_command_allows_supported_restart(monkeypatch, tmp_pat
     assert result["command"] == "restart"
     assert called == [([], "workbench_api")]
     assert result["messages"][0]["text"] == "restart accepted"
+# HASHI-Fingerprint: hfp_b1137bad272740a89a251115a37593a2

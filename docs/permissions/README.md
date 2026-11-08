@@ -1,14 +1,14 @@
 # HASHI 权限系统：设计与实施包
 
-**版本 1.1 · 2026-10-23 · 文档设计完成，功能待实现。**
+**版本 1.2 · 2026-11-04 · L1 已实现并完成指定 NP 验收；L2 本地组件已实现，完整验收未通过。**
 
 目标是在保留自主工作体验的前提下，为 HASHI 原生 HERV3 增加可申请、可撤销、随任务回收的权限。L1 在 HASHI Functions 中管理；L2 使用同机独立安全服务和受限 HERV3 执行环境。L0 继续现有执行路径。第三方后端按真实控制能力说明并继续用户选择的工作。
 
-本包按用户最新决定更新：**仅 HASHI 改动、复用现有 Frontend Connector（FC）标准、外部 Workbench 与 Telegram 专属适配不改、protected Core 不改。** 当前分支已开始基础实现，但权限功能尚未接入产品，也未安装服务或重启实例。
+本包按用户最新决定更新：**保留 L1 行为并披露保障边界；L2 先完成本地部分，硬 Workzone 只保证已验收的 HERV3 受控执行路径；Compute 实际执行需服务端管制与独立验收。protected Core 不改。** NP 页面证据、独立服务组件及实际采用状态见当前实施记录，不能将设计要求当作已上线能力。
 
 | 项目 | 内容 |
 | --- | --- |
-| 仓库 / 分支 | `Bazza1982/HASHI` / `feature-permission-sys` |
+| 仓库 / 当前施工分支 | `Bazza1982/HASHI` / 既有 `main`；本轮新增提交仅本地，原 feature-permission-sys 见历史 |
 | 源码参考基线 | `d6b6513973bfc8f9f22c40ddd8f72802f907baa0`，2026-10-23 再次核对 main |
 | 功能 owner | PAO；HERV3 负责等待/续跑，FC 负责标准投影与可信入口，PCM 只投影 |
 | 工程层 | Functions、HASHI 内的平台安装单元与独立服务 |
@@ -24,6 +24,7 @@
 | [CODE_MAP.md](CODE_MAP.md) | 固定提交的真实源码落点；已有能力、缺口、Functions/PAO 归属与现有测试 |
 | [FC_CONTRACT.md](FC_CONTRACT.md) | 现有命令/action/文本如何承载批准；可信身份、服务器 receipt、实际 JSON 和通道差异 |
 | [L2_WINDOWS.md](L2_WINDOWS.md) | 独立服务、ACL/身份、受限 host、窄 broker、启动/撤权、W01–W12 平台施工及 WAC 验收 |
+| [L2_HARD_WORKZONE.md](L2_HARD_WORKZONE.md) | 2026-11-04 批准的 L1/L2 保证、精确根上限、本地实现与 Compute 执行端合同 |
 | [ACCEPTANCE.md](ACCEPTANCE.md) | L0/L1/FC/生命周期/L2/运维的可观察用例、失败条件和证据模板 |
 | [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | 文档、实现、测试、运行采用分别记账；开发阶段持续更新 |
 | [LOCAL_AGENT_PROMPT.md](LOCAL_AGENT_PROMPT.md) | 可直接给本地开发 agent 的一次性交接指令 |
@@ -84,7 +85,7 @@ Codex 等后端自己的原生规则由其自身决定。HASHI 管理它确实�
 
 先实施 M00–M06 形成可用 L1，再完成 M07–M09 的独立 L2 边界，按实际发布级别执行 M10。交互、执行拦截和平台 spike 可依据接口并行开展只读研究；实际源码、测试和文档修改保持单一写入者，不能用桩实现跳过最终闭环。
 
-本地 agent 应先读取交接指令与整个设计包，按里程碑持续实现、测试、记录证据；不把“写了计划”当成本地开发任务的完成。当前分支包含部分领域与账本测试；尚未通过端到端权限功能或 Windows L2 验收。
+本地 agent 应先读取交接指令与整个设计包，按里程碑持续实现、测试、记录证据；不把“写了计划”当成本地开发任务的完成。L1 已有真实指定 NP 页面及原操作续跑证据；Windows 完整 L2 验收仍未通过，不能将组件或离线回归当作完整保障。
 
 ## 6. 源码与来源
 

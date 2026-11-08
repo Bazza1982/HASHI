@@ -26,6 +26,14 @@ async def read(api, request):
                                     session["session_id"], str(session["context_generation"]))
         control = getattr(api, "permission_control", None)
         if control is None:
+            # A saved installation still needs adoption by the shared frontend.
+            # An unavailable owner must not look like an empty authority view.
+            configuration = api._load_raw_agent_config()
+            settings = configuration.get("global", {})
+            if not isinstance(settings, dict):
+                raise ValueError("invalid instance permission configuration")
+            if settings.get("permission_service") is not None:
+                raise OSError("configured permission frontend is not loaded")
             return web.json_response({"ok": True, "requests": [], "next_before": None}, headers=headers)
         page = await asyncio.to_thread(
             control.list_session_requests, subject, before=request.query.get("before"), limit=100,

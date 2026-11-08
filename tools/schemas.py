@@ -2134,8 +2134,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
                         "description": (
-                            "Required assertion that the current user request explicitly "
-                            "authorized this exact single-job rerun."
+                            "Intent marker for this exact rerun; not proof of approval. "
+                            "Scoped Agent execution also requires the existing trusted PAO owner decision."
                         ),
                     },
                 },
@@ -2250,7 +2250,10 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_delete",
             "description": (
                 "Delete one cron, heartbeat, or nudge owned by the current Agent. "
-                "Call only after the user explicitly requests deleting that task."
+                "Call only after the user explicitly requests deleting that task. "
+                "Deletion also requires an exact PAO owner decision and a currently active Run. "
+                "If approval_required is returned, keep the pending approval ID for the trusted "
+                "owner decision flow; do not approve it yourself or treat clarification text as approval."
             ),
             "parameters": {
                 "type": "object",
@@ -2260,7 +2263,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                     "authorization": {
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
-                        "description": "Required when the current user explicitly authorized this deletion.",
+                        "description": "Intent marker only; never substitutes for the trusted PAO owner decision.",
                     },
                 },
                 "required": ["kind", "job_id", "authorization"],
@@ -2350,7 +2353,9 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
             "name": "hashi_superloop_delete",
             "description": (
                 "Delete an owned Superloop. The loop is retained as a deleted audit record "
-                "and will no longer advance. Call only after explicit user authorization."
+                "and will no longer advance. Call only after explicit user authorization. "
+                "The authorization string is an intent marker; scoped Agent execution "
+                "also requires the existing trusted PAO owner decision."
             ),
             "parameters": {
                 "type": "object",

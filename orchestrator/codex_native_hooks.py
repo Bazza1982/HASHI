@@ -63,8 +63,8 @@ def termination_reason(command: str) -> str | None:
 def hook_overrides(*, receipt_path: Path) -> list[str]:
     """Supply only owned session hooks; never install a user-wide hook/profile."""
     script = Path(__file__).resolve()
-    command = subprocess.list2cmdline([sys.executable, str(script), "--receipt", str(receipt_path)]) if os.name == "nt" else shlex.join(
-        [sys.executable, str(script), "--receipt", str(receipt_path)]
+    command = subprocess.list2cmdline([sys.executable, "-B", str(script), "--receipt", str(receipt_path)]) if os.name == "nt" else shlex.join(
+        [sys.executable, "-B", str(script), "--receipt", str(receipt_path)]
     )
     values = ["--ignore-user-config", "--enable", "hooks", "--dangerously-bypass-hook-trust"]
     for event in ("SessionStart", "PreToolUse"):
@@ -102,3 +102,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# HASHI-Fingerprint: hfp_8accd8f52bc14ff182b804819be3c442

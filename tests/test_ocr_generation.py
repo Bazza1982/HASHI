@@ -19,7 +19,7 @@ def test_qualified_ocr_artifact_can_launch_its_isolated_worker(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / item.relative_path, target)
     result = subprocess.run(
-        [sys.executable, "-I", str(artifact / "tools" / "ocr_worker.py"), "--help"],
+        [sys.executable, "-I", "-B", str(artifact / "tools" / "ocr_worker.py"), "--help"],
         capture_output=True,
         text=True,
         timeout=20,
@@ -53,3 +53,4 @@ def test_worker_result_preserves_multilingual_text_with_an_ascii_stdout(
         raw = buffer.getvalue().decode("ascii")
     assert result == 0
     assert json.loads(raw.removeprefix(ocr_worker.RESULT_PREFIX))["text"] == text
+# HASHI-Fingerprint: hfp_2fed380b67ee47ad84ab2a4c3a12919c

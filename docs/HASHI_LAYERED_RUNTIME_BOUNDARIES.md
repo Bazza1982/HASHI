@@ -63,7 +63,7 @@ Current authoritative owners include:
 | Instance model/effort opt-ins, explicit restrictions and effective Function-side choices | ignored `allowed_backends` configuration, resolved by `orchestrator/runtime_effort_options.py`; [model availability](HASHI_MODEL_AVAILABILITY.md) |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | shared Function manager construction | `orchestrator/manager_registry.py` |
-| Python, ABI, dependency and protected-Core identity | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
+| Independently qualified Core-host/Functions Python, ABI, dependency and protected-Core identities | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
 | Function generation qualification and manifests | `orchestrator/function_generation.py` |
 | per-Agent Worker lifecycle, IPC routing and crash recovery | `orchestrator/function_worker_supervisor.py` |
 | transactional target switching and rollback | `orchestrator/reboot_manager.py` |
@@ -330,7 +330,8 @@ explicit; malformed or targeted input never widens into a shared handoff:
 1. Resolve the requested lifecycle scope once; targeted modes contain exactly
    one immutable target and malformed input never falls back to all.
 2. Compile and hash the complete functional source/asset closure.
-3. Import and validate it in an isolated probe with the exact Core runtime.
+3. Import and validate it in an isolated probe using the selected qualified
+   Functions runtime, checking its binding to the admitted Core contract.
 4. Materialise a content-addressed immutable artifact.
 5. Spawn one candidate Worker per selected Agent and require a READY receipt.
 6. Fence only selected routes at admission so new messages cannot enter old

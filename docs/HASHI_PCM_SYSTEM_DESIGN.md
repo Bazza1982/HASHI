@@ -203,6 +203,13 @@ must not discard the current user request or higher-authority PCM sections to
 retain older history. HERV3 continues to use its own context-capacity and
 Compact controls.
 
+When omitted exchanges are represented by a continuity capsule, each source
+receipt and its timestamps remain intact. If the capsule still exceeds a
+non-HER budget after raw history is removed, PCM shortens only its bounded
+excerpts. It does not trim the current request, higher-authority text or the
+canonical history. Protected content and minimum continuity metadata can still
+form an irreducible budget floor.
+
 |                                                                                                                                                                                          |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Known issue** The current `/backend +` process rebuilds a handoff file and sets a one-time prompt, but may not send the handoff content to the selected Engine. This remains to be resolved. |

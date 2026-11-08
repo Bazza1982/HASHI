@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 import tomllib
+
+from packaging.version import Version
 from pathlib import Path
 
 import pytest
@@ -46,12 +48,26 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
 
     assert {
         "cli.js",
+        "FUNCTION_SOURCE.json",
+        "scripts/run_qualified_core.py",
+        "specs/compute/v1/manifest.schema.json",
+        "specs/ete/v1/artefact-meta.schema.json",
+        "specs/ete/v1/ete-manifest.schema.json",
+        "specs/ete/v1/project.schema.json",
+        "specs/ete/v1/task.schema.json",
+        "exp/AGENT.md",
+        "exp/schema.md",
+        "exp/training.md",
         "BUILD_INFO.json",
         "main.py",
         "pyproject.toml",
         "runtime-entry.json",
         "THIRD_PARTY_NOTICES.md",
         "constraints/standard-py312.lock",
+        "constraints/core-host-py312.lock",
+        "scripts/build_runtime_roles.py",
+        "orchestrator/runtime_installation_builder.py",
+        "orchestrator/runtime_process.py",
         "constraints/transcription-py312.lock",
         "requirements-transcription.txt",
         "requirements-privacy.txt",
@@ -92,10 +108,11 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
     )
     provenance = build_info["provenance"]
     assert provenance["release_channel"] == "npm"
-    expected_version = tomllib.loads(
+    canonical_version = tomllib.loads(
         (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )["project"]["version"]
-    assert provenance["product_version"] == expected_version
+    assert provenance["product_version"] == canonical_version
+    assert Version(payload[0]["version"]) == Version(canonical_version)
     assert provenance["build_id"].startswith("sha256:")
     assert not any(
         key in provenance for key in ("code_root", "path", "remote_url", "username")
@@ -171,3 +188,4 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
         and any(marker.lower() in source.read_bytes().lower() for marker in operator_markers)
     }
     assert local_path_leaks == set()
+# HASHI-Fingerprint: hfp_11fb99a7ff124c29837cf67cb21f020e

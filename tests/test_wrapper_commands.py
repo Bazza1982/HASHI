@@ -821,7 +821,9 @@ async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path):
+@pytest.mark.parametrize("qualified_rejection", [True, False])
+async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path, qualified_rejection):
+    from orchestrator.hchat_submit_result import record_hchat_failure
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     listener_payloads = []
     runtime.register_request_listener = (
@@ -832,7 +834,15 @@ async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path):
     runtime.register_request_listener(
         "req-001", lambda payload: listener_payloads.append(payload)
     )
-    runtime._hchat_draft_sender = lambda *args, **kwargs: False
+    sender_calls = []
+
+    def sender(*args, **kwargs):
+        sender_calls.append((args, kwargs))
+        if qualified_rejection:
+            return record_hchat_failure(reason="channel_blocked", accepted=False)
+        return False
+
+    runtime._hchat_draft_sender = sender
     item = _queued_request_from("bridge:hchat-draft")
 
     result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
@@ -842,14 +852,27 @@ async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path):
         completion_path="foreground",
     )
 
-    assert result.visible_text == (
-        "❌ Hchat delivery failed for akane.\n\n"
-        "Message:\n"
-        "Please review the plan.\n\n"
-        "Reason: send_hchat returned false"
+    title = (
+        "❌ Hchat delivery failed for akane."
+        if qualified_rejection
+        else "HChat submission to akane could not be confirmed. Check the conversation; do not resend yet."
     )
-    assert listener_payloads[0]["success"] is False
-    assert listener_payloads[0]["hchat_delivery_status"] == "failed"
+    assert result.visible_text.startswith(
+        title + "\n\nMessage:\nPlease review the plan.\n\nReason: "
+    )
+    assert len(listener_payloads) == 1
+    payload = listener_payloads[0]
+    assert payload["success"] is False
+    assert payload["hchat_delivery_status"] == ("failed" if qualified_rejection else "unconfirmed")
+    assert payload["hchat_payload_final"] == "Please review the plan."
+    assert payload["hchat_accepted"] is (False if qualified_rejection else None)
+    assert payload["hchat_retry_count"] == 0
+    failure = payload["hchat_failure"]
+    assert failure["reason"] == ("channel_blocked" if qualified_rejection else "response_invalid")
+    assert failure["error_code"] == "hchat_dispatch_" + failure["reason"]
+    assert failure["unconfirmed"] is (not qualified_rejection)
+    assert failure["reference"] in result.visible_text
+    assert sender_calls == [(("akane", "zelda", "Please review the plan."), {})]
 
 
 @pytest.mark.asyncio
@@ -3228,3 +3251,4 @@ def test_core_transcript_helper_records_foreground_path(tmp_path):
     assert entry["visible_text"] == "wrapped foreground"
     assert entry["completion_path"] == "foreground"
     assert entry["wrapper_used"] is True
+# HASHI-Fingerprint: hfp_ab52130c8be44af5a182a3b15e89cf11

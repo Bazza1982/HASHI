@@ -93,7 +93,7 @@ def test_catalogue_requires_useful_navigation_and_actual_contracts(reference_rep
 
 def test_catalogue_ci_validator_needs_no_optional_runtime_dependencies():
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(ROOT / "scripts/validate_agent_fyi.py")],
+        [sys.executable, "-I", "-B", "-S", str(ROOT / "scripts/validate_agent_fyi.py")],
         cwd=ROOT, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -489,7 +489,7 @@ def test_deployed_artifact_contains_readable_docs_and_excludes_untracked_files(r
         f"global_config=SimpleNamespace(project_root={str(root)!r}))))"
     )
     output = subprocess.check_output(
-        [sys.executable, "-I", "-c", child], cwd=tmp_path,
+        [sys.executable, "-I", "-B", "-c", child], cwd=tmp_path,
         env={**os.environ, "HASHI_FUNCTION_GENERATION_ROOT": str(artifact), "HASHI_SOURCE_ROOT": str(root)},
     )
     installed = json.loads(output)

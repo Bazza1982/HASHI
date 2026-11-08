@@ -10,13 +10,14 @@ import stat
 from typing import Any
 import uuid
 
+from orchestrator.agent_config_json import write_agent_config_json as write_config_json
+
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDocument,
     ConfigDurabilityError,
     file_write_lock,
     read_config_json,
-    write_config_json,
 )
 
 from orchestrator.pathing import BridgePaths

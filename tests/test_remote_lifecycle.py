@@ -265,6 +265,7 @@ def test_build_child_command_pins_hashi_root(monkeypatch, tmp_path):
 
     cmd = remote_lifecycle.build_child_command(settings)
 
+    assert cmd[:3] == [str(python), "-B", "-m"]
     assert "--hashi-root" in cmd
     assert str(tmp_path) in cmd
 

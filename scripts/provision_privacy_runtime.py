@@ -66,7 +66,7 @@ def check(python: Path) -> dict[str, str]:
     )
     try:
         versions = json.loads(run(
-            [str(python), "-I", "-c", version_code], timeout=30,
+            [str(python), "-I", "-B", "-c", version_code], timeout=30,
             action="package inventory",
         ))
     except (ValueError, KeyError) as exc:
@@ -137,3 +137,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_c6da149f8b0b49bda40bc54cbac08e22

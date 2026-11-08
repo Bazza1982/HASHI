@@ -27,7 +27,7 @@ $IdentityScript = Join-Path $HashiRoot "remote\supervisor_identity.py"
 if (-not (Test-Path -LiteralPath $IdentityScript -PathType Leaf)) {
     throw "Missing supervisor identity helper: $IdentityScript"
 }
-$IdentityArgs = @($IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
+$IdentityArgs = @("-B", $IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
 if ($InstanceId) {
     $IdentityArgs += @("--instance-id", $InstanceId)
 }
@@ -54,6 +54,7 @@ if (-not (Test-Path -LiteralPath $RuntimeController -PathType Leaf)) {
     throw "Missing fixed HASHI runtime controller: $RuntimeController"
 }
 $LogPath = Join-Path $HashiRoot "logs\hashi-restart-task.log"
+$RestartTaskLimit = New-TimeSpan -Minutes 10
 $RunnerArgs = @(
     "-NoProfile",
     "-NonInteractive",
@@ -72,7 +73,8 @@ $RuntimeArgs = @(
     "-WindowStyle", "Hidden",
     "-File", "`"$RuntimeController`"",
     "-Action", "start",
-    "-Resume"
+    "-Resume",
+    "-ApiGateway"
 )
 $RuntimeArgumentString = $RuntimeArgs -join " "
 
@@ -133,6 +135,63 @@ function Test-FixedRuntimeTask {
     )
 }
 
+function Grant-FixedTaskReadAccess {
+    param([string]$Name, [string]$UserId)
+
+    if (-not $UserId) { throw "Missing principal for fixed task '$Name'" }
+    $UserSid = if ($UserId -match '^S-1-') {
+        [Security.Principal.SecurityIdentifier]::new($UserId)
+    } else {
+        [Security.Principal.NTAccount]::new($UserId).Translate(
+            [Security.Principal.SecurityIdentifier]
+        )
+    }
+    $Scheduler = New-Object -ComObject 'Schedule.Service'
+    $Scheduler.Connect()
+    $Task = $Scheduler.GetFolder('\').GetTask($Name)
+    $Security = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Task.GetSecurityDescriptor(7)
+    )
+    $ReadMask = 0x120089
+    foreach ($Ace in $Security.DiscretionaryAcl) {
+        if ($Ace -is [Security.AccessControl.CommonAce] -and
+            $Ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+            $Ace.SecurityIdentifier -eq $UserSid -and
+            ($Ace.AccessMask -band $ReadMask) -eq $ReadMask) {
+            return
+        }
+    }
+    if ($null -eq $Security.DiscretionaryAcl) {
+        throw "Missing access control list for fixed task '$Name'"
+    }
+    # The Limited Remote must see the fixed tasks registered by an elevated
+    # installer. Delegate read access only, retaining every existing ACE.
+    $ReadAce = [Security.AccessControl.CommonAce]::new(
+        [Security.AccessControl.AceFlags]::None,
+        [Security.AccessControl.AceQualifier]::AccessAllowed,
+        $ReadMask, $UserSid, $false, $null
+    )
+    $Index = 0
+    while ($Index -lt $Security.DiscretionaryAcl.Count -and
+           -not $Security.DiscretionaryAcl[$Index].IsInherited) { $Index++ }
+    $Security.DiscretionaryAcl.InsertAce($Index, $ReadAce)
+    # TASK_DONT_ADD_PRINCIPAL_ACE prevents an implicit broader principal grant.
+    $Task.SetSecurityDescriptor(
+        $Security.GetSddlForm([Security.AccessControl.AccessControlSections]::Access),
+        16
+    )
+    $Verified = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Task.GetSecurityDescriptor(7)
+    )
+    foreach ($Ace in $Verified.DiscretionaryAcl) {
+        if ($Ace -is [Security.AccessControl.CommonAce] -and
+            $Ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+            $Ace.SecurityIdentifier -eq $UserSid -and
+            ($Ace.AccessMask -band $ReadMask) -eq $ReadMask) { return }
+    }
+    throw "Read delegation verification failed for fixed task '$Name'"
+}
+
 function Register-FixedRuntimeTask {
     $TaskAction = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
@@ -154,6 +213,7 @@ function Register-FixedRuntimeTask {
         -InputObject $Task `
         -Force `
         -ErrorAction Stop | Out-Null
+    Grant-FixedTaskReadAccess -Name $RuntimeTaskName -UserId $Principal.UserId
     Write-Host "Registered fixed HASHI runtime task '$RuntimeTaskName'"
 }
 
@@ -166,7 +226,7 @@ function Register-FixedRestartTask {
     $Settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -ExecutionTimeLimit $RestartTaskLimit `
         -MultipleInstances IgnoreNew `
         -Priority 4
     $Principal = New-ScheduledTaskPrincipal `
@@ -179,6 +239,7 @@ function Register-FixedRestartTask {
         -InputObject $Task `
         -Force `
         -ErrorAction Stop | Out-Null
+    Grant-FixedTaskReadAccess -Name $TaskName -UserId $Principal.UserId
     Write-Host "Registered fixed HASHI restart task '$TaskName'"
 }
 
@@ -193,12 +254,22 @@ switch ($Action) {
             Register-FixedRuntimeTask
         } elseif (-not (Test-FixedRuntimeTask -Task $RuntimeTask)) {
             Register-FixedRuntimeTask
+        } else {
+            Grant-FixedTaskReadAccess -Name $RuntimeTaskName -UserId $RuntimeTask.Principal.UserId
         }
         $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         if ($null -eq $Task) {
             Register-FixedRestartTask
         } elseif (-not (Test-FixedRestartTask -Task $Task)) {
             Register-FixedRestartTask
+        } else {
+            $ExpectedLimit = [Xml.XmlConvert]::ToString($RestartTaskLimit)
+            if ($Task.Settings.ExecutionTimeLimit -ne $ExpectedLimit) {
+                $Task.Settings.ExecutionTimeLimit = $ExpectedLimit
+                Set-ScheduledTask -TaskName $TaskName -Settings $Task.Settings `
+                    -ErrorAction Stop | Out-Null
+            }
+            Grant-FixedTaskReadAccess -Name $TaskName -UserId $Task.Principal.UserId
         }
     }
     "trigger" {
@@ -213,7 +284,8 @@ switch ($Action) {
                 -ExecutionPolicy Bypass `
                 -File $RuntimeController `
                 -Action restart `
-                -Resume
+                -Resume `
+                -ApiGateway
             exit $LASTEXITCODE
         }
         if (-not (Test-FixedRestartTask -Task $Task)) {

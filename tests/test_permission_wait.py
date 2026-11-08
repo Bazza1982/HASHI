@@ -148,16 +148,17 @@ async def test_partial_decision_waits_for_remaining_scope(environment, tmp_path)
 
     async def next_request():
         while True:
-            for candidate in authority.list_requests(context):
+            for candidate in await asyncio.to_thread(authority.list_requests, context):
                 if candidate.operation_id == "op2" and candidate.state == "pending":
                     return candidate
             await asyncio.sleep(0.01)
 
-    remaining = await asyncio.wait_for(next_request(), 1)
+    # A deadlock guard, not a one-second durable-storage latency contract.
+    remaining = await asyncio.wait_for(next_request(), 10)
     assert remaining.scopes == (write,)
     assert not waiting.done()
     issuer.approve(authority, context, remaining, [write], key="remaining")
-    result = await asyncio.wait_for(waiting, 1)
+    result = await asyncio.wait_for(waiting, 10)
     assert result.state == "ready"
     assert result.request_id == remaining.request_id
     assert result.operation_id == "op2"
@@ -253,3 +254,4 @@ async def test_revocation_during_resource_queue_prevents_real_file_write(environ
     with pytest.raises(PermissionDenied):
         await operation
     assert not target.exists()
+# HASHI-Fingerprint: hfp_5cf9054f1df8447f8a09b168eb2c8b54
