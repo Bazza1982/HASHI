@@ -2,10 +2,10 @@ name: Call connector focused checks
 on:
   push:
     branches: [feature-call]
-    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/manager.py', 'tests/frontend_call/**', 'tests/test_desktop_failure_details.py', 'examples/call_profiles.example.json', 'docs/call/**', '.github/workflows/call-checks.yml']
+    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/**', 'orchestrator/translate_manager.py', 'orchestrator/translate_settings.py', 'tests/test_translate_entry.py', 'tests/frontend_call/**', 'tests/test_desktop_failure_details.py', 'examples/call_profiles.example.json', 'docs/call/**', '.github/workflows/call-checks.yml']
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
-    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/manager.py', 'tests/frontend_call/**', 'tests/test_desktop_failure_details.py', '.github/workflows/call-checks.yml']
+    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/**', 'orchestrator/translate_manager.py', 'orchestrator/translate_settings.py', 'tests/test_translate_entry.py', 'tests/frontend_call/**', 'tests/test_desktop_failure_details.py', '.github/workflows/call-checks.yml']
 permissions:
   contents: read
 jobs:
@@ -27,7 +27,7 @@ jobs:
           ruff check orchestrator/frontend_call tests/frontend_call
           ruff format --check orchestrator/frontend_call tests/frontend_call
       - name: Focused connector and phone regression
-        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_phone_interpretation.py tests/test_agent_fyi.py tests/test_architecture_boundaries.py
+        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_phone_interpretation.py tests/test_translate_entry.py tests/test_agent_fyi.py tests/test_architecture_boundaries.py
       - name: Protected Core and source invariants
         shell: bash
         env:
