@@ -175,11 +175,18 @@ before cutover, and an unexpected Core digest still fails verification.
 Dependency and Function generation changes remain recorded, and the restarted
 Core enforces its active dependency contract before publishing health.
 
-Workbench health may be `degraded` when an optional connector such as
-Remote/HChat is unavailable. If local services are ready and no Agent failed to
-start, the cold restart is complete and the user receives a success notice with
-the remaining warning. A genuine terminal failure notice includes the failed
-stage and the first actionable verification reasons instead of a generic retry.
+Backend API health may be `degraded` when an optional connector such as
+Telegram or Remote/HChat is unavailable. If local services are ready and no
+Agent failed to start, the cold restart is complete. Workbench is the primary
+remote frontend; optional Telegram connectivity is not a restart condition.
+
+The completion notice reports only the verified instance restart. Connector
+snapshots remain in the durable receipt and live health diagnostics; they are
+not appended to success notices, including notices from older Remote peers.
+Acceptance wording is channel-neutral and promises a completion notification,
+rather than instructing Telegram users to reconnect Workbench. A genuine
+terminal failure notice still includes the failed stage and actionable
+verification reasons instead of a generic retry.
 
 ## Compatibility
 
