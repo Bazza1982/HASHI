@@ -156,6 +156,12 @@ show that the old PID exited, a different live Core PID appeared, the instance
 identity matches, the stable Core runtime contract still matches, and the new
 process published a Function generation.
 
+The bounded cold-start verification window is ten minutes. Independent-runtime
+preparation plus multi-Agent startup can exceed four minutes even when the
+replacement is healthy. Windows registration/ensure also upgrades an existing
+restart task's execution limit without replacing its principal. A longer wait
+never substitutes for the required PID, readiness and frozen-runtime evidence.
+
 Cold restart is also an adoption boundary. For an independent-Core installation,
 Remote qualifies the installer-selected destination before stopping the live
 process and freezes that contract in the receipt. Terminal verification uses

@@ -54,6 +54,7 @@ if (-not (Test-Path -LiteralPath $RuntimeController -PathType Leaf)) {
     throw "Missing fixed HASHI runtime controller: $RuntimeController"
 }
 $LogPath = Join-Path $HashiRoot "logs\hashi-restart-task.log"
+$RestartTaskLimit = New-TimeSpan -Minutes 10
 $RunnerArgs = @(
     "-NoProfile",
     "-NonInteractive",
@@ -225,7 +226,7 @@ function Register-FixedRestartTask {
     $Settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -ExecutionTimeLimit $RestartTaskLimit `
         -MultipleInstances IgnoreNew `
         -Priority 4
     $Principal = New-ScheduledTaskPrincipal `
@@ -262,6 +263,12 @@ switch ($Action) {
         } elseif (-not (Test-FixedRestartTask -Task $Task)) {
             Register-FixedRestartTask
         } else {
+            $ExpectedLimit = [Xml.XmlConvert]::ToString($RestartTaskLimit)
+            if ($Task.Settings.ExecutionTimeLimit -ne $ExpectedLimit) {
+                $Task.Settings.ExecutionTimeLimit = $ExpectedLimit
+                Set-ScheduledTask -TaskName $TaskName -Settings $Task.Settings `
+                    -ErrorAction Stop | Out-Null
+            }
             Grant-FixedTaskReadAccess -Name $TaskName -UserId $Task.Principal.UserId
         }
     }

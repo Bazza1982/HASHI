@@ -758,6 +758,87 @@ def test_session_restart_origin_is_authenticated_once_and_saved_before_launch(tm
         assert persisted["notify_locale"] == "zh-CN"
 
 
+@pytest.mark.parametrize("outcome", ["ready", "wrong-runtime", "never-ready"])
+def test_cold_restart_allows_slow_qualified_start_but_keeps_terminal_checks(
+    tmp_path, monkeypatch, outcome,
+):
+    import asyncio
+    import time
+
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    elapsed = [0.0]
+    launched = [False]
+
+    class Clock:
+        def monotonic(self):
+            return elapsed[0]
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    class Asyncio:
+        async def sleep(self, delay):
+            elapsed[0] += 30.0
+            await asyncio.sleep(0)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    target = {
+        "python": "3.12.13", "platform_abi": ".cp312-test",
+        "core_api": 3, "function_api": 3, "worker_model": "per-agent-process",
+        "worker_protocol": 1, "generation_schema": 2,
+        "dependency_digest": "sha256:qualified-dependencies",
+        "core_source_digest": "sha256:qualified-core",
+    }
+    before = {
+        "hashi_running": True, "pid": 4141, "pid_alive": True,
+        "workbench_health": {
+            "ok": True, "ready": True, "instance_id": "HASHI_TEST",
+            "runtime": target, "shared_functions": {"generation_id": "sha256:old"},
+        },
+    }
+
+    def status():
+        if not launched[0]:
+            return before
+        after = {"hashi_running": True, "pid": 6161, "pid_alive": True,
+                 "workbench_health": None}
+        if elapsed[0] >= 270.0 and outcome != "never-ready":
+            actual = {**target}
+            if outcome == "wrong-runtime":
+                actual["dependency_digest"] = "sha256:unexpected"
+            after["workbench_health"] = {
+                **before["workbench_health"], "runtime": actual,
+                "shared_functions": {"generation_id": "sha256:new"},
+            }
+        return after
+
+    def launch():
+        launched[0] = True
+        return {"pid": 5252, "command": ["fixed-launcher"], "log_path": "restart.log"}
+
+    monkeypatch.setattr(remote_server, "time", Clock())
+    monkeypatch.setattr(remote_server, "asyncio", Asyncio())
+    monkeypatch.setattr(remote_server, "_hashi_control_status", status)
+    monkeypatch.setattr(remote_server, "_qualified_restart_runtime", lambda: target)
+    monkeypatch.setattr(remote_server, "_restart_hashi_process", launch)
+    monkeypatch.setattr(remote_server, "_process_exists", lambda pid: pid == 6161)
+    response = client.post("/control/hashi/restart", json={"target_instance": "HASHI_TEST"})
+    body = response.json()
+    assert response.status_code == (200 if outcome == "ready" else 503)
+    assert body["state"] == ("completed" if outcome == "ready" else "failed")
+    assert body["evidence"]["old_pid_exited"] is True
+    assert elapsed[0] <= 600.0  # Unready and unexpected targets still have a bound.
+    if outcome == "ready":
+        assert body["evidence"]["runtime_version_verified"] is True
+    elif outcome == "wrong-runtime":
+        assert body["evidence"]["runtime_contract_mismatches"] == ["dependency_digest"]
+    else:
+        assert body["evidence"]["backend_health_ok"] is False
+    assert client.get("/control/hashi/restarts/" + body["restart_id"]).json()["state"] == body["state"]
+
+
 def test_hashi_rescue_restart_fails_when_terminal_evidence_is_incomplete(
     tmp_path, monkeypatch
 ):

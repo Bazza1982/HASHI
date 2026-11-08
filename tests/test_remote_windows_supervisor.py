@@ -25,6 +25,7 @@ def _powershell(script: str):
 Import-Module ScheduledTasks -ErrorAction Stop
 function Get-ScheduledTask { param($TaskName, $ErrorAction) $null }
 function Register-ScheduledTask { throw 'Unmocked task registration' }
+function Set-ScheduledTask { throw 'Unmocked task update' }
 function Start-ScheduledTask { throw 'Unmocked task start' }
 function Stop-ScheduledTask { }
 function Enable-ScheduledTask { throw 'Unmocked task enable' }
@@ -198,22 +199,32 @@ def test_fixed_restart_actuator_triggers_only_its_registered_definition(
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
 $global:RegisteredTasks = @{{}}
+$global:DurationWrites = 0
 function New-ScheduledTaskAction {{
     param($Execute, $Argument, $WorkingDirectory)
     [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
 }}
-function New-ScheduledTaskSettingsSet {{ [pscustomobject]@{{}} }}
+function New-ScheduledTaskSettingsSet {{
+    param($ExecutionTimeLimit)
+    [pscustomobject]@{{ExecutionTimeLimit=[Xml.XmlConvert]::ToString([TimeSpan]$ExecutionTimeLimit)}}
+}}
 function New-ScheduledTaskPrincipal {{
     param($UserId, $LogonType, $RunLevel)
     [pscustomobject]@{{UserId=$UserId; LogonType=$LogonType; RunLevel=[string]$RunLevel}}
 }}
 function New-ScheduledTask {{
     param($Action, $Settings, $Principal)
-    [pscustomobject]@{{Actions=@($Action); Principal=$Principal}}
+    [pscustomobject]@{{Actions=@($Action); Principal=$Principal; Settings=$Settings}}
 }}
 function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
     $global:RegisteredTasks[$TaskName] = $InputObject
+}}
+function Set-ScheduledTask {{
+    param($TaskName, $Settings, $ErrorAction)
+    if ($TaskName -ne 'HashiRestart-restart-exact') {{ throw 'Unexpected task settings update' }}
+    $global:RegisteredTasks[$TaskName].Settings = $Settings
+    $global:DurationWrites++
 }}
 function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredTasks[$TaskName] }}
 function Start-ScheduledTask {{
@@ -225,6 +236,7 @@ if ('{configure}' -eq 'ensure') {{
     # Existing valid tasks created elevated may lack the Limited user's ACE.
     $global:TaskSecurity = @{{}}
     $global:TaskSecurityWrites = @()
+    $global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit = 'PT5M'
     & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} ensure -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 }}
 $FirstWrites = $global:TaskSecurityWrites.Count
@@ -240,6 +252,8 @@ $FirstWrites = $global:TaskSecurityWrites.Count
     }})
     FirstWrites=$FirstWrites
     Writes=@($global:TaskSecurityWrites)
+    RestartLimit=$global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit
+    DurationWrites=$global:DurationWrites
 }} | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(security)}
 & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} trigger -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 """)
@@ -247,6 +261,8 @@ $FirstWrites = $global:TaskSecurityWrites.Count
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
     access = json.loads(security.read_text(encoding="utf-8-sig"))
+    assert access["RestartLimit"] == "PT10M"
+    assert access["DurationWrites"] == (1 if configure == "ensure" else 0)
     assert access["FirstWrites"] == 2
     assert len(access["Writes"]) == 2  # A second ensure must not rewrite the ACL.
     assert {w["Name"] for w in access["Writes"]} == {
