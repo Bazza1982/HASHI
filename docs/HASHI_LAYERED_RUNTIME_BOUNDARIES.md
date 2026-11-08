@@ -112,7 +112,9 @@ Rules:
   migration; ordinary fixes, refactors, reboots, or broad approval do not count.
 - One migration pull request must raise the product major version, reset minor
   and patch to zero, carry the `core-change-approved` label, and add a matching
-  independent review record before merge. Its implementer and reviewer differ.
+  truthful owner-approved or independent-human review record before merge.
+  A sole owner can approve with recorded technical evidence; a second human
+  is not mandatory. See [review records](core-reviews/README.md).
 - Core changes require a focused plan and lightweight tests before review.
 - Core should not know about product ports, terminal rendering, Windows/WSL
   product policy, or instance names. OS process/lock/stdio primitives stay here.
@@ -177,11 +179,13 @@ python scripts/check_protected_core_changes.py \
 The command-scoped `HASHI_CORE_EDIT_AUTHORIZED=1` records the same authorization
 but cannot waive any release gate. CI validates the manifest and requires the
 label, major-version increment, and matching added review record whenever
-protected paths, the product major version, or the standard lock declared by
-`[tool.hashi.runtime]` change. Changing the declared lock owner is also a runtime
-generation change. An unchanged protected-source digest does not waive this gate.
-The review seals project metadata and the active standard lock in addition to
-the protected-source digest. Missing or stale runtime seals fail closed.
+protected source or the versioned Core wire-contract metadata changes.
+Changing a Core contract requires an exact project-metadata review seal as
+well as the protected-source digest; unchanged source cannot hide an ABI change.
+An independent Core-host/Functions interpreter or dependency revision requires
+its owning runtime qualification and adoption, not another Core code major.
+Dependency lock paths remain bounded, but those locks are not Core approval
+inputs. See [dependency maintenance](HASHI_CORE_DEPENDENCY_GENERATION_5.md).
 
 ## Layer 2: HASHI Functions
 

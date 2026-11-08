@@ -50,8 +50,8 @@ A later compatible FR update or rollback changes FR and its admitted Functions
 processes while C, CR and Core PID remain fixed. A CPython/stdlib/ABI change in
 CR requires a separately qualified Core-runtime replacement and approved cold
 cutover; unchanged protected source need not consume a Core-code major. Protected
-source changes still require the authorized major migration and independent
-same-tree review. Existing wire versions do not change merely to name a role.
+source or Core wire-contract changes still require an authorized major migration
+and matching owner-approved or independent-human review. Existing wire versions do not change merely to name a role.
 
 Actual CR/FR IDs are projected separately in topology and detailed `/version`,
 alongside the existing product/source/FG facts. Missing Core receipts remain

@@ -42,10 +42,11 @@ included since the v4 Beta, migration steps and publication limits.
 
 ### Changed
 
-- Prepare Core generation 5.0.0-alpha.1 with fixed standard HTTP, certificate,
-  header-container and image-library dependencies; keep Python/API versions
-  unchanged. Source preparation is separate from registry publication and live
-  adoption. See [the migration candidate](docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md).
+- Retain the security floors for Functions HTTP/image dependencies and separate
+  dependency qualification from Core code approval. Actual Core wire-contract
+  changes still need matching owner or independent review; independent runtime
+  updates do not require another Core generation. See
+  [dependency maintenance](docs/HASHI_CORE_DEPENDENCY_GENERATION_5.md).
 - Reduce model-facing Ollama reference overhead while retaining complete private
   sources; page new tool results and close tool use near capacity without
   replaying completed actions, dropping the task or reducing the output reserve.

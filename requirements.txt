@@ -4,7 +4,7 @@
 # profile additionally keeps the standard media, Remote, and TUI surfaces used
 # by the normal launchers. Optional integrations live in named project extras.
 
-# Core runtime
+# Shared and Agent Functions runtime
 python-telegram-bot>=20.0
 httpx>=0.24.0
 aiohttp>=3.14.4

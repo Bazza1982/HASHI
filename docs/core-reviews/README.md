@@ -62,3 +62,21 @@ version and digest. Historical copied records, missing timezone, unsupported
 approval mode, invalid owner decision, false identities and stale digests must
 not be used. Passing the record gate does **not** waive downstream CI tests or
 authorize production deployment.
+
+## Dependency revisions and Core contract metadata
+
+Independent CR/FR/helper dependency, interpreter and build revisions use their
+own runtime qualification and lifecycle. They do not require a Core major,
+approval label or Core review record merely because a runtime identity changes.
+
+A change to the versioned Core API/Function API/Worker/schema declarations is
+an actual Core contract change even if protected source bytes stay unchanged.
+It retains the existing Core release/approval requirements. Its newly added
+review record also supplies reviewed_files_sha256 for pyproject.toml, hashing
+the exact UTF-8 LF candidate text (the index for --cached). Missing/stale seals
+fail closed. Independent role locks are not added to this Core approval scope.
+
+The three 2026-11-05 PR #137 records describe the earlier coupled-runtime
+candidate and remain immutable historical evidence. They are not approval of
+the later integrated tree. Current PR validation/merge status and runtime
+adoption evidence remain separate from every historical review record.

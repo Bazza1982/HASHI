@@ -24,7 +24,7 @@ jobs:
         run: python scripts/check_protected_core_changes.py --validate-manifest
       - name: Validate FYI navigation and retained knowledge
         run: python scripts/validate_agent_fyi.py
-      - name: Enforce Core source and runtime-generation approval on pull requests
+      - name: Enforce Core source and wire-contract approval on pull requests
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -66,7 +66,7 @@ jobs:
             } else {
               core.info("No associated merged PR; treating this update as a direct push.");
             }
-      - name: Flag unapproved Core source or runtime generations pushed to main
+      - name: Flag unapproved Core source or wire contracts pushed to main
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:
           BASE_SHA: ${{ github.event.before }}
@@ -85,6 +85,7 @@ jobs:
             tests/test_architecture_boundaries.py \
             tests/test_check_protected_core_changes.py \
             tests/test_engineering_safeguards.py \
+            tests/test_dependency_migration_governance.py \
             tests/test_command_ui.py \
             tests/test_ui_language.py \
             tests/test_ui_language_persistence.py \
