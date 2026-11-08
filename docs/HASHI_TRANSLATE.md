@@ -29,7 +29,11 @@ The external client exposes a dedicated top-bar interpretation button and a
 interpretation view, with direction selection, translated subtitles, microphone
 mute, connection status and end action. Conversation and interpretation use the
 same media implementation and controls but keep separate entry identities and
-configuration. Changing direction does not silently change an active call.
+configuration. The Workbench direction dialog uses this same authenticated
+command menu and its opaque revision-bound buttons; it never stores a second
+direction preference or copies the model catalogue. A failed or uncertain
+settings write disables capture until an explicit canonical refresh.
+Changing direction does not silently change an active call.
 
 One owner may have only one foreground media call across Phone and Translate.
 Switching product requires ending the current call and receiving close
