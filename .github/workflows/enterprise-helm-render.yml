@@ -1,59 +1,56 @@
 name: enterprise-helm-render
-
-on:
+'on':
   push:
     paths:
-      - "deploy/helm/hashi-enterprise/**"
-      - ".github/workflows/enterprise-helm-render.yml"
+    - deploy/helm/hashi-enterprise/**
+    branches:
+    - main
   pull_request:
     paths:
-      - "deploy/helm/hashi-enterprise/**"
-      - ".github/workflows/enterprise-helm-render.yml"
-
+    - deploy/helm/hashi-enterprise/**
 jobs:
   render-chart:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: azure/setup-helm@v4
-
-      - name: Lint enterprise Helm chart
-        run: helm lint deploy/helm/hashi-enterprise
-
-      - name: Render lease load rehearsal chart
-        run: |
-          helm template hashi-enterprise deploy/helm/hashi-enterprise \
-            --set externalDatabase.enabled=true \
-            --set leaseLoadRehearsal.enabled=true \
-            --set leaseLoadRehearsal.leaseCount=16 \
-            --set leaseLoadRehearsal.maxWorkers=4 \
-            > rendered-hashi-enterprise.yaml
-
-      - name: Validate rendered lease load rehearsal job
-        run: |
-          grep -q "kind: Job" rendered-hashi-enterprise.yaml
-          grep -q "lease-load-rehearsal" rendered-hashi-enterprise.yaml
-          grep -q "lease-load-rehearse" rendered-hashi-enterprise.yaml
-          grep -q "HASHI_ENTERPRISE_DATABASE_URL" rendered-hashi-enterprise.yaml
-          grep -q -- "--lease-count" rendered-hashi-enterprise.yaml
-          grep -q -- "--max-workers" rendered-hashi-enterprise.yaml
-
-      - name: Render production hardening chart
-        run: |
-          helm template hashi-enterprise deploy/helm/hashi-enterprise \
-            --values deploy/helm/hashi-enterprise/examples/multi-replica-rehearsal.values.yaml \
-            --values deploy/helm/hashi-enterprise/examples/production-hardening.values.yaml \
-            --set image.repository=ghcr.io/example/hashi-enterprise \
-            --set image.tag=production-render \
-            > rendered-hashi-enterprise-production.yaml
-
-      - name: Validate rendered production hardening resources
-        run: |
-          grep -q "kind: Ingress" rendered-hashi-enterprise-production.yaml
-          grep -q "kind: NetworkPolicy" rendered-hashi-enterprise-production.yaml
-          grep -q "kind: HorizontalPodAutoscaler" rendered-hashi-enterprise-production.yaml
-          grep -q "kind: PodDisruptionBudget" rendered-hashi-enterprise-production.yaml
-          grep -q "hashi-enterprise.example.com" rendered-hashi-enterprise-production.yaml
-          grep -q "hashi-enterprise-tls" rendered-hashi-enterprise-production.yaml
-          grep -q "ingress-nginx" rendered-hashi-enterprise-production.yaml
+    - uses: actions/checkout@v4
+    - uses: azure/setup-helm@v4
+    - name: Lint enterprise Helm chart
+      run: helm lint deploy/helm/hashi-enterprise
+    - name: Render lease load rehearsal chart
+      run: |
+        helm template hashi-enterprise deploy/helm/hashi-enterprise \
+          --set externalDatabase.enabled=true \
+          --set leaseLoadRehearsal.enabled=true \
+          --set leaseLoadRehearsal.leaseCount=16 \
+          --set leaseLoadRehearsal.maxWorkers=4 \
+          > rendered-hashi-enterprise.yaml
+    - name: Validate rendered lease load rehearsal job
+      run: |
+        grep -q "kind: Job" rendered-hashi-enterprise.yaml
+        grep -q "lease-load-rehearsal" rendered-hashi-enterprise.yaml
+        grep -q "lease-load-rehearse" rendered-hashi-enterprise.yaml
+        grep -q "HASHI_ENTERPRISE_DATABASE_URL" rendered-hashi-enterprise.yaml
+        grep -q -- "--lease-count" rendered-hashi-enterprise.yaml
+        grep -q -- "--max-workers" rendered-hashi-enterprise.yaml
+    - name: Render production hardening chart
+      run: |
+        helm template hashi-enterprise deploy/helm/hashi-enterprise \
+          --values deploy/helm/hashi-enterprise/examples/multi-replica-rehearsal.values.yaml \
+          --values deploy/helm/hashi-enterprise/examples/production-hardening.values.yaml \
+          --set image.repository=ghcr.io/example/hashi-enterprise \
+          --set image.tag=production-render \
+          > rendered-hashi-enterprise-production.yaml
+    - name: Validate rendered production hardening resources
+      run: |
+        grep -q "kind: Ingress" rendered-hashi-enterprise-production.yaml
+        grep -q "kind: NetworkPolicy" rendered-hashi-enterprise-production.yaml
+        grep -q "kind: HorizontalPodAutoscaler" rendered-hashi-enterprise-production.yaml
+        grep -q "kind: PodDisruptionBudget" rendered-hashi-enterprise-production.yaml
+        grep -q "hashi-enterprise.example.com" rendered-hashi-enterprise-production.yaml
+        grep -q "hashi-enterprise-tls" rendered-hashi-enterprise-production.yaml
+        grep -q "ingress-nginx" rendered-hashi-enterprise-production.yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read

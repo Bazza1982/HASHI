@@ -1,21 +1,19 @@
 name: enterprise-postgres-lease
-
-on:
+'on':
   push:
     paths:
-      - "orchestrator/enterprise/leases.py"
-      - "orchestrator/enterprise/lease_rehearsal.py"
-      - "tests/test_enterprise_postgres_integration.py"
-      - "docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md"
-      - ".github/workflows/enterprise-postgres-lease.yml"
+    - orchestrator/enterprise/leases.py
+    - orchestrator/enterprise/lease_rehearsal.py
+    - tests/test_enterprise_postgres_integration.py
+    - docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md
+    branches:
+    - main
   pull_request:
     paths:
-      - "orchestrator/enterprise/leases.py"
-      - "orchestrator/enterprise/lease_rehearsal.py"
-      - "tests/test_enterprise_postgres_integration.py"
-      - "docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md"
-      - ".github/workflows/enterprise-postgres-lease.yml"
-
+    - orchestrator/enterprise/leases.py
+    - orchestrator/enterprise/lease_rehearsal.py
+    - tests/test_enterprise_postgres_integration.py
+    - docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md
 jobs:
   postgres-lease-rehearsal:
     runs-on: ubuntu-latest
@@ -27,27 +25,26 @@ jobs:
           POSTGRES_PASSWORD: hashi
           POSTGRES_DB: hashi_enterprise
         ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U hashi -d hashi_enterprise"
-          --health-interval 5s
-          --health-timeout 5s
+        - 5432:5432
+        options: --health-cmd "pg_isready -U hashi -d hashi_enterprise" --health-interval 5s --health-timeout 5s
           --health-retries 12
     env:
       HASHI_ENTERPRISE_POSTGRES_TEST_URL: postgresql://hashi:hashi@localhost:5432/hashi_enterprise
       HASHI_ENTERPRISE_POSTGRES_TEST_ORG_ID: ORG-CI
       HASHI_ENTERPRISE_POSTGRES_TEST_LEASE: ci-postgres-lease-rehearsal
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.13"
-
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r constraints/standard-py312.lock ".[test,postgres]"
-
-      - name: Run PostgreSQL lease rehearsal
-        run: pytest -q tests/test_enterprise_postgres_integration.py
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: 3.12.13
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -r constraints/standard-py312.lock ".[test,postgres]"
+    - name: Run PostgreSQL lease rehearsal
+      run: pytest -q tests/test_enterprise_postgres_integration.py
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
