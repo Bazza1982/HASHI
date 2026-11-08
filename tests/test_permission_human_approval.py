@@ -63,7 +63,7 @@ async def browser(environment, tmp_path):
     try:
         yield SimpleNamespace(service=service, authority=authority, identity=identity, subject=subject,
                               binding=binding, target=target, scope=scope, request=request,
-                              manager=manager, client=client, origin=origin, path=path, ledger_offset=ledger_offset)
+                              manager=manager, client=client, api=api, origin=origin, path=path, ledger_offset=ledger_offset)
     finally:
         await client.close()
         await service.close()
@@ -264,6 +264,156 @@ async def test_configured_original_native_human_keeps_l2_approval_support(browse
     with pytest.raises(SessionDecisionDenied):
         b.service.submit_session_action(b.subject, once.action_id, session_token=token)
 
+
+@pytest.mark.parametrize("peers, origin", [
+    ("127.0.0.1", "https://approval.test"),
+    (["localhost"], "https://approval.test"),
+    (["127.0.0.1/8"], "https://approval.test"),
+    (["0.0.0.0"], "https://approval.test"),
+    (["::"], "https://approval.test"),
+    (["239.0.0.1"], "https://approval.test"),
+    (["127.0.0.1"], "http://localhost"),
+])
+def test_approval_proxy_configuration_requires_explicit_https_peers(peers, origin):
+    from orchestrator.permissions.human_approval import approval_proxy_peers
+
+    with pytest.raises(ValueError):
+        approval_proxy_peers(peers, origin)
+
+
+
+@pytest.mark.asyncio
+async def test_https_proxy_requires_explicit_socket_peer_and_preserves_governed_login(browser, tmp_path):
+    """Exercise a real TLS frontend -> HTTP backend, including fail-closed proxy headers."""
+    from datetime import datetime, timedelta, timezone
+    import ipaddress
+    import ssl
+
+    from aiohttp import ClientSession, TCPConnector
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    from multidict import CIMultiDict
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "temporary test proxy")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                       critical=False).sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "proxy.pem", tmp_path / "proxy.key"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                         serialization.PrivateFormat.PKCS8,
+                                         serialization.NoEncryption()))
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(cert_path, key_path)
+    client_tls = ssl.create_default_context(cafile=str(cert_path))
+    original_client = browser.client
+    forwarded = {"proto": "https", "host": None}
+    hop_headers = {"connection", "transfer-encoding", "content-length", "host"}
+
+    async with ClientSession(auto_decompress=False) as upstream:
+        async def proxy(request):
+            headers = CIMultiDict((k, v) for k, v in request.headers.items()
+                                  if k.lower() not in hop_headers
+                                  and not k.lower().startswith("x-forwarded-"))
+            headers["Host"] = forwarded.get("request_host", request.host)
+            if forwarded["proto"] is not None:
+                headers["X-Forwarded-Proto"] = forwarded["proto"]
+            if forwarded.get("duplicate_proto"):
+                headers.add("X-Forwarded-Proto", "http")
+            headers["X-Forwarded-Host"] = forwarded["host"] or request.host
+            headers["X-Forwarded-For"] = "127.0.0.2"
+            async with upstream.request(request.method, original_client.make_url(request.rel_url),
+                                        data=await request.read(), headers=headers,
+                                        allow_redirects=False) as response:
+                return web.Response(status=response.status, body=await response.read(),
+                                    headers=CIMultiDict((k, v) for k, v in response.headers.items()
+                                                       if k.lower() not in hop_headers))
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", proxy)
+        tls_server = TestServer(app, scheme="https")
+        await tls_server.start_server(ssl=server_tls)
+        tls_client = TestClient(tls_server,
+                                connector=TCPConnector(ssl=client_tls),
+                                cookie_jar=CookieJar(unsafe=True))
+        await tls_client.start_server()
+        try:
+            origin = str(tls_client.make_url("/")).rstrip("/")
+            browser.client, browser.origin = tls_client, origin
+
+            def invite(peers=None):
+                descriptor = {"approval_origin": origin}
+                if peers is not None:
+                    descriptor["approval_proxy_peers"] = peers
+                browser.api.global_config.permission_service = descriptor
+                browser.manager = human_approval(browser.api)
+                browser.path = urlsplit(browser.manager.invite(
+                    browser.subject, browser.request.request_id, browser.request.revision,
+                    locale="en", connection_binding="original-workbench",
+                )).path
+
+            invite()
+            response = await tls_client.get(browser.path)
+            assert response.status == 403  # HTTPS proxy use is an explicit operator opt-in.
+            invite(["127.0.0.2"])  # A forwarded client address is never the actual proxy peer.
+            response = await tls_client.get(browser.path)
+            assert response.status == 403
+
+            invite(["127.0.0.1"])
+            for bad_proto in (None, "http", "https,http"):
+                forwarded["proto"] = bad_proto
+                response = await tls_client.get(browser.path)
+                assert response.status == 403
+            forwarded["proto"] = "https"
+            forwarded["duplicate_proto"] = True
+            response = await tls_client.get(browser.path)
+            assert response.status == 403
+            forwarded["duplicate_proto"] = False
+            forwarded["host"] = "foreign.example"
+            response = await tls_client.get(browser.path)
+            assert response.status == 403
+            forwarded["host"] = None
+            forwarded["request_host"] = "foreign.example"
+            response = await tls_client.get(browser.path)
+            assert response.status == 403
+            forwarded.pop("request_host")
+            response, _, forms = await get_forms(browser)
+            assert response.status == 200
+            cookie = response.headers.getall("Set-Cookie")[0]
+            assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+            forged = await tls_client.post(
+                browser.path, data={"operation": "decide", "csrf": forms[0]["csrf"], "action_id": "forged"},
+                headers={"Origin": origin, "Authorization": "Bearer instance-hmac"},
+            )
+            assert forged.status == 401 and browser.authority.decision_count(browser.request.request_id) == 0
+            response, body = await login(browser)
+            assert response.status == 200
+            assert next(cookie for cookie in tls_client.session.cookie_jar
+                        if cookie.key == "hashi_approval_session")["secure"]
+            approve = choice(browser, Forms(body).rows, "task")
+            bad_origin = await tls_client.post(browser.path, data=approve, headers={"Origin": "https://foreign.example"})
+            assert bad_origin.status == 403
+            for _ in range(2):
+                response = await tls_client.post(browser.path, data=approve, headers={"Origin": origin})
+                assert response.status == 200, await response.text()
+            assert browser.authority.decision_count(browser.request.request_id) == 1
+            assert browser.authority.evaluate(browser.binding.context, [browser.scope], operation_id="original-op")
+            forms = Forms(await response.text()).rows
+            revoke = next(form for form in forms if form["operation"] == "revoke")
+            response = await tls_client.post(browser.path, data=revoke, headers={"Origin": origin})
+            assert response.status == 200
+            assert not browser.authority.evaluate(browser.binding.context, [browser.scope], operation_id="original-op")
+        finally:
+            browser.client = original_client
+            await tls_client.close()
 
 @pytest.mark.parametrize("origin", ["http://192.168.0.2:80", "https://good.test/path",
                                    "https://user:pass@good.test", "https://good.test/?secret=x",

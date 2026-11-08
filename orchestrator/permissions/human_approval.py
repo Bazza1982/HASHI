@@ -56,6 +56,27 @@ def approval_origin(value):
     return parsed.scheme + "://" + parsed.netloc.lower()
 
 
+def approval_proxy_peers(value, origin):
+    """Explicit socket peers may attest HTTPS termination, never choose an origin."""
+    configured = approval_origin(origin)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("approval proxy peers must be an explicit IP address list")
+    peers = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("an exact approval proxy IP address is required")
+        try:
+            peer = ipaddress.ip_address(item)
+        except ValueError as error:
+            raise ValueError("an exact approval proxy IP address is required") from error
+        if peer.is_unspecified or peer.is_multicast:
+            raise ValueError("an approval proxy must be a concrete unicast peer")
+        peers.add(str(peer))
+    if peers and not configured.startswith("https://"):
+        raise ValueError("approval proxies require a configured HTTPS origin")
+    return frozenset(peers)
+
+
 @dataclass
 class _Invitation:
     subject: PermissionSubject
@@ -74,9 +95,10 @@ class _Invitation:
 
 
 class HumanApproval:
-    def __init__(self, control, session_store, origin):
+    def __init__(self, control, session_store, origin, *, proxy_peers=()):
         self.control, self.store = control, session_store
         self.origin = approval_origin(origin)
+        self.proxy_peers = approval_proxy_peers(proxy_peers, self.origin)
         self._invitations = {}
         self._lock = threading.RLock()
 
@@ -150,6 +172,27 @@ class HumanApproval:
         value = '<input type="hidden" name="action_id" value="' + escape(action_id, quote=True) + '">' if action_id else ""
         return self._form(invitation, csrf, operation, value + '<button type="submit">' + escape(label) + '</button>')
 
+    def _request_origin_matches(self, request):
+        origin = urlsplit(self.origin)
+        if request.host.lower() != origin.netloc:
+            return False
+        if request.scheme == origin.scheme:
+            return True
+        if request.scheme != "http" or origin.scheme != "https":
+            return False
+        try:
+            peer = str(ipaddress.ip_address(request.remote))
+        except (ValueError, TypeError):
+            return False
+        # Only the actual transport peer is trusted. Never use Forwarded or
+        # X-Forwarded-For to identify a proxy, or headers to select a target.
+        return (
+            peer in self.proxy_peers
+            and tuple(request.headers.getall("X-Forwarded-Proto", ())) == ("https",)
+            and tuple(value.lower() for value in request.headers.getall("X-Forwarded-Host", ()))
+            == (origin.netloc,)
+        )
+
     async def handle(self, request):
         ticket = request.match_info["ticket"]
         with self._lock:
@@ -157,7 +200,7 @@ class HumanApproval:
         if invitation is None or invitation.expires_at <= time.time():
             raise web.HTTPGone(text="This approval link has expired. Open the current request again.")
         # Never trust Host or forwarded headers to choose a credential target.
-        if request.scheme + "://" + request.host.lower() != self.origin:
+        if not self._request_origin_matches(request):
             raise web.HTTPForbidden(text="Approval origin does not match.")
         invitation.path = _PATH + "/" + ticket
         csrf = request.cookies.get(_CSRF, "")
@@ -319,10 +362,11 @@ def human_approval(api):
     if control is None or not isinstance(raw, dict) or "approval_origin" not in raw:
         return None
     origin = approval_origin(raw["approval_origin"])
-    key = (id(control), id(api.session_store), origin)
+    peers = approval_proxy_peers(raw.get("approval_proxy_peers", ()), origin)
+    key = (id(control), id(api.session_store), origin, peers)
     current = getattr(api, "_human_approval", None)
     if current is None or current[0] != key:
-        current = (key, HumanApproval(control, api.session_store, origin))
+        current = (key, HumanApproval(control, api.session_store, origin, proxy_peers=tuple(peers)))
         api._human_approval = current
     return current[1]
 
