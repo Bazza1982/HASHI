@@ -41,6 +41,37 @@ def any_path(path, patterns):
     return any(matches(path, p) for p in patterns)
 
 
+def additive_test_registration(old, new, root):
+    if any(key not in new for key in old):
+        return False
+    for key, command in new.items():
+        if old.get(key) == command:
+            continue
+        if not key.startswith(("test:", "pretest:", "posttest:", "ci:")):
+            return False
+        def parts(value):
+            args = shlex.split(value)
+            if not args or args[0] != "node" or "--test" not in args:
+                return None
+            options = [p for p in args[1:] if p.startswith("-")]
+            if any(p not in {"--test", "--test-concurrency=1"} for p in options):
+                return None
+            return options, [p for p in args[1:] if not p.startswith("-")]
+        current = parts(command)
+        previous = parts(old[key]) if key in old else None
+        if current is None or not current[1]:
+            return False
+        if key in old and (previous is None or previous[0] != current[0] or
+                           not set(previous[1]).issubset(current[1])):
+            return False
+        for path in current[1]:
+            if path.startswith("/") or ".." in PurePosixPath(path).parts or "\\" in path:
+                return False
+            if not any(p.is_file() for p in root.glob(path)):
+                raise RuntimeError("registered test entry has no source files: " + path)
+    return True
+
+
 def semantic_metadata_only(path, base, root=ROOT):
     if not base or path not in {"package.json", "pyproject.toml"}:
         return False
@@ -49,16 +80,26 @@ def semantic_metadata_only(path, base, root=ROOT):
         after = (root / path).read_text(encoding="utf-8")
         if path.endswith(".json"):
             old, new = json.loads(before), json.loads(after)
-            fields = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
-                      "engines", "overrides", "workspaces", "scripts", "type", "exports", "main")
-            return (all(old.get(k) == new.get(k) for k in fields)
-                    and str(old.get("version", "")).split(".")[0] == str(new.get("version", "")).split(".")[0])
+            metadata = {"description", "author", "authors", "contributors", "maintainers",
+                        "license", "repository", "homepage", "bugs", "keywords", "funding", "readme",
+                        "version", "scripts"}
+            previous = {k: v for k, v in old.items() if k not in metadata}
+            current = {k: v for k, v in new.items() if k not in metadata}
+            return (previous == current
+                    and str(old.get("version", "")).split(".")[0] == str(new.get("version", "")).split(".")[0]
+                    and additive_test_registration(old.get("scripts", {}), new.get("scripts", {}), root))
         import tomllib
         old, new = tomllib.loads(before), tomllib.loads(after)
+        old_version = str(old.get("project", {}).get("version", ""))
+        new_version = str(new.get("project", {}).get("version", ""))
+        if old_version != new_version:
+            if (old_version.split(".")[0] != new_version.split(".")[0] or
+                not re.fullmatch(r"\d+(?:\.\d+){1,2}(?:(?:a|b|rc)\d+)?(?:\.post\d+|\.dev\d+)?(?:\+[A-Za-z0-9.]+)?", new_version)):
+                return False
         for value in (old, new):
             value["project"] = {k: v for k, v in value.get("project", {}).items()
                                 if k not in {"description", "authors", "maintainers", "readme", "urls",
-                                             "keywords", "classifiers", "license"}}
+                                             "keywords", "classifiers", "license", "version"}}
         return old == new
     except (ValueError, OSError, ImportError, subprocess.CalledProcessError):
         return False
