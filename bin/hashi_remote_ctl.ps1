@@ -470,7 +470,8 @@ function Show-RemoteDoctor {
     $HealthError = $Probe.Error
     $Acceptance = Get-RemoteHealthAcceptance -Probe $Probe
     $Discovery = if ($null -ne $Health) { $Health.discovery } else { $null }
-    $Backends = if ($null -ne $Discovery) { @($Discovery.backends) } else { @() }
+    $Backends = @()
+    if ($null -ne $Discovery) { $Backends = @($Discovery.backends) }
     $Advertising = if ($Backends.Count -gt 0) {
         @($Backends | Where-Object { $_.advertising -ne $true }).Count -eq 0
     } else { $false }

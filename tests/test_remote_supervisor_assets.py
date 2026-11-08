@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -103,9 +104,36 @@ def test_linux_remote_supervisor_units_are_isolated_per_instance(tmp_path):
     assert "Registered, enabled, and activated Remote supervisor" in hashi1_output
 
 
+def test_linux_remote_identity_and_unit_launch_keep_python_readonly(tmp_path, monkeypatch):
+    python = tmp_path / "readonly-python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" != "-B" ]]; then echo "Python must stay readonly" >&2; exit 73; fi\n'
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    monkeypatch.setenv("HASHI_REMOTE_PYTHON", str(python))
+    unit, _ = _install_linux_unit(tmp_path, root_name="readonly home", instance_id="READONLY")
+    for text in [unit.read_text(),
+                 (ROOT / "packaging/systemd/hashi-remote.service").read_text()]:
+        command = shlex.split(next(line.removeprefix("ExecStart=")
+                                  for line in text.splitlines()
+                                  if line.startswith("ExecStart=")))
+        prefix = command[:command.index("-m")]
+        if prefix[0] == "%PYTHON%":
+            prefix[0] = sys.executable
+        result = subprocess.run(
+            [*prefix, "-c", "import sys; raise SystemExit(0 if sys.dont_write_bytecode else 73)"],
+            capture_output=True, text=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+
 def test_packaged_linux_remote_unit_does_not_own_started_core_processes():
     unit_text = (ROOT / "packaging/systemd/hashi-remote.service").read_text(
         encoding="utf-8"
     )
 
     assert "KillMode=process" in unit_text
+# HASHI-Fingerprint: hfp_ceed6352cabc479b88487b3cd7d308db

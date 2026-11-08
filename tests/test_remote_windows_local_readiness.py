@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import shutil
 import sys
@@ -52,4 +53,6 @@ function Invoke-RestMethod {{
         assert result.returncode == 0, result.stderr
         assert "local_ready_untrusted_peers" in result.stdout
         assert "0 trusted" in result.stdout
+        assert re.search(r"(?m)^Advertising\s*:\s*True\s*$", result.stdout)
+        assert re.search(r"(?m)^Browsing\s*:\s*True\s*$", result.stdout)
 # HASHI-Fingerprint: hfp_9d8c3f8a8f9f4f84b48e82411447e4a9

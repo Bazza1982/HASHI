@@ -39,7 +39,7 @@ IDENTITY_ARGS=(--hashi-root "$HASHI_ROOT" --format lines)
 if [[ -n "${HASHI_INSTANCE_ID:-}" ]]; then
     IDENTITY_ARGS+=(--instance-id "$HASHI_INSTANCE_ID")
 fi
-mapfile -t SUPERVISOR_IDENTITY < <("$PYTHON_BIN" "$IDENTITY_SCRIPT" "${IDENTITY_ARGS[@]}")
+mapfile -t SUPERVISOR_IDENTITY < <("$PYTHON_BIN" -B "$IDENTITY_SCRIPT" "${IDENTITY_ARGS[@]}")
 if [[ "${#SUPERVISOR_IDENTITY[@]}" -lt 5 ]]; then
     echo "Could not resolve the Hashi Remote supervisor identity." >&2
     exit 70
@@ -105,7 +105,7 @@ write_service() {
     working_directory="$(unit_directive_value "$HASHI_ROOT")"
     instance_environment="$(unit_quote "HASHI_INSTANCE_ID=$INSTANCE_ID")"
     exec_start=""
-    for arg in "$PYTHON_BIN" -m remote "${REMOTE_ARGS[@]}"; do
+    for arg in "$PYTHON_BIN" -B -m remote "${REMOTE_ARGS[@]}"; do
         [[ -z "$exec_start" ]] || exec_start+=" "
         exec_start+="$(unit_quote "$arg")"
     done
@@ -140,7 +140,7 @@ EOF
 require_systemd_user() {
     if ! have_systemd_user; then
         echo "systemd --user is not available in this shell."
-        echo "Use: $PYTHON_BIN -m remote ${REMOTE_ARGS[*]}"
+        echo "Use: $PYTHON_BIN -B -m remote ${REMOTE_ARGS[*]}"
         exit 2
     fi
 }
@@ -198,7 +198,7 @@ case "$ACTION" in
             systemctl --user status "$SERVICE_NAME" --no-pager || true
         else
             echo "systemd --user unavailable"
-            echo "Fallback command: $PYTHON_BIN -m remote ${REMOTE_ARGS[*]}"
+            echo "Fallback command: $PYTHON_BIN -B -m remote ${REMOTE_ARGS[*]}"
             exit 2
         fi
         ;;
@@ -209,7 +209,7 @@ case "$ACTION" in
         [[ -f "$LOG_PATH" ]] && tail -n "${HASHI_REMOTE_LOG_LINES:-120}" "$LOG_PATH"
         ;;
     command)
-        echo "$PYTHON_BIN -m remote ${REMOTE_ARGS[*]}"
+        echo "$PYTHON_BIN -B -m remote ${REMOTE_ARGS[*]}"
         ;;
     service-name)
         echo "$SERVICE_NAME"
