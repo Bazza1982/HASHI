@@ -328,6 +328,7 @@ async def test_completed_operation_replays_verified_result_after_worker_change(e
         "operation", "file_write", {"path": "recovery.txt", "content": "different"}, reason="report"
     )
     assert changed.state == "conflict"
+    assert changed.payload["permission_diagnostic"]["stage"] == "operation_identity"
     assert recovered_supervisor.recover_calls == 1 and recovered_supervisor.execute_calls == 0
     assert supervisor.execute_calls == 1
 
@@ -343,7 +344,9 @@ async def test_new_worker_cannot_replay_until_the_old_execution_is_fenced(enviro
         authority, PermissionWaiter(authority), supervisor, context=later,
         cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
     )
-    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    conflict = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert conflict.state == "conflict"
+    assert conflict.payload["permission_diagnostic"]["stage"] == "operation_lookup"
     assert supervisor.recover_calls == 0 and supervisor.execute_calls == 0
     authority.fence_execution(context)
     assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "succeeded"
@@ -439,7 +442,9 @@ async def test_another_run_cannot_reuse_the_original_operation_id(environment, t
         authority, PermissionWaiter(authority), supervisor, context=later,
         cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
     )
-    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    conflict = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert conflict.state == "conflict"
+    assert conflict.payload["permission_diagnostic"]["stage"] == "operation_lookup"
     assert supervisor.execute_calls == 0 and supervisor.recover_calls == 0
 
 

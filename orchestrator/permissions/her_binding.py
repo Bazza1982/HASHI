@@ -169,7 +169,7 @@ class PermissionAgentController:
         _, binding, reference, coordinator, accepted = saved
         self.parking.park(
             binding, item, checkpoint_reference=reference, request_id=signal.result.request_id,
-            operation_id=signal.result.operation_id, state=signal.result.state,
+            operation_id=signal.result.operation_id, state=signal.result.state, diagnostic=signal.result,
         )
         coordinator.store.mark_permission_waiting(
             session_id=accepted.session_id, turn_id=accepted.turn_id,
@@ -330,3 +330,4 @@ class PermissionAgentController:
             raise OSError("permission Worker cleanup remains unverified")
         self._turns.clear()
         self._owned_bindings.clear()
+# HASHI-Fingerprint: hfp_ee39be63725f48f1939389a5354fa257

@@ -96,7 +96,7 @@ class PermissionParkingStore:
                 raise SessionConflict("permission route integrity check failed")
             return value
 
-    def park(self, binding, item, *, checkpoint_reference, request_id, operation_id, state):
+    def park(self, binding, item, *, checkpoint_reference, request_id, operation_id, state, diagnostic=None):
         from orchestrator.runtime_common import QueuedRequest
 
         if not isinstance(binding, RuntimeExecutionBinding) or not isinstance(item, QueuedRequest):
@@ -117,6 +117,11 @@ class PermissionParkingStore:
             "item": saved, "checkpoint": checkpoint_reference,
             "request_id": request_id, "operation_id": operation_id, "reason": state,
         }
+        from orchestrator.permissions.execution_gate import permission_diagnostic
+
+        control = permission_diagnostic(diagnostic)
+        if control is not None:
+            payload["diagnostic"] = control
         encoded, digest = _json(payload), _digest(payload)
         if len(encoded.encode("utf-8")) > 16 * 1024 * 1024:
             raise ValueError("parked continuation exceeds the private storage limit")
@@ -332,3 +337,4 @@ class PermissionResumeTicket:
 
     def __repr__(self):
         return "PermissionResumeTicket(<private canonical continuation>)"
+# HASHI-Fingerprint: hfp_8647faff181b4f6b82aa95ff90d4941c
