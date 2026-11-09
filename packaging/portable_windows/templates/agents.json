@@ -13,6 +13,7 @@
     },
     "persistent_session_v1": true,
     "native_audio_chat_v1": true,
+    "desktop_enabled": true,
     "native_audio_retention_seconds": 3600,
     "whatsapp": {
       "enabled": false,
@@ -38,7 +39,7 @@
       "runtime_policy": "require-packaged",
       "max_permission_mode": "danger-full-access",
       "habit_meditation": {
-        "enabled": false
+        "enabled": true
       },
       "providers": {
         "deepseek": {

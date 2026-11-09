@@ -111,7 +111,7 @@ from ..security.shared_token import (
     build_response_auth,
     load_shared_token,
 )
-from ..terminal.executor import AuthLevel, TerminalExecutor
+from ..terminal.executor import TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +257,7 @@ _protocol_manager = None
 _exchange_transport = None
 _hashi_root: Optional[str] = None
 _control_hashi_root: Optional[str] = None
+_control_code_root: Optional[str] = None
 _workbench_port: int = DEFAULT_WORKBENCH_PORT
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
@@ -1777,9 +1778,17 @@ def _restart_evidence_complete(evidence: dict[str, Any]) -> bool:
 def _hashi_start_command() -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
-    root = Path(_control_hashi_root)
+    root = Path(_control_code_root or _control_hashi_root)
     system = platform.system().lower()
     if system == "windows":
+        actuator = root / "bin" / "hashi_restart_ctl.ps1"
+        if actuator.exists():
+            return [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(actuator), "start",
+                "-Python", sys.executable, "-HashiRoot", str(_control_hashi_root),
+                "-CodeRoot", str(root),
+            ]
         bat = root / "bin" / "bridge-u.bat"
         if bat.exists():
             return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
@@ -1792,13 +1801,14 @@ def _hashi_start_command() -> list[str]:
                 "Bypass",
                 "-File",
                 str(ctl),
+                "-BridgeHome", str(_control_hashi_root),
                 "-Action",
                 "start",
                 "-Resume",
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
-        return [str(launcher), "--resume-last", "--api-gateway"]
+        return [str(launcher), "--bridge-home", str(_control_hashi_root), "--resume-last", "--api-gateway"]
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
@@ -1811,6 +1821,7 @@ def _launch_hashi_process(
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
@@ -1820,14 +1831,14 @@ def _launch_hashi_process(
     env.pop("PYTHONHOME", None)
     env.update(
         BRIDGE_HOME=str(root),
-        BRIDGE_CODE_ROOT=str(root),
+        BRIDGE_CODE_ROOT=str(code_root),
         PYTHONDONTWRITEBYTECODE="1",
     )
     kwargs: dict[str, Any] = {
         "env": env,
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
-        "cwd": str(root),
+        "cwd": str(code_root),
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
     }
@@ -1869,8 +1880,9 @@ def _hashi_restart_command() -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
     if platform.system().lower() == "windows":
-        restart_ctl = root / "bin" / "hashi_restart_ctl.ps1"
+        restart_ctl = code_root / "bin" / "hashi_restart_ctl.ps1"
         if restart_ctl.exists():
             return [
                 "powershell.exe",
@@ -1885,8 +1897,10 @@ def _hashi_restart_command() -> list[str]:
                 sys.executable,
                 "-HashiRoot",
                 str(root),
+                "-CodeRoot",
+                str(code_root),
             ]
-        ctl = root / "bin" / "bridge_ctl.ps1"
+        ctl = code_root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
                 "powershell.exe",
@@ -1895,15 +1909,17 @@ def _hashi_restart_command() -> list[str]:
                 "Bypass",
                 "-File",
                 str(ctl),
+                "-BridgeHome", str(root),
                 "-Action",
                 "restart",
                 "-Resume",
                 "-ApiGateway",
             ]
-    launcher = root / "bin" / "bridge-u.sh"
+    launcher = code_root / "bin" / "bridge-u.sh"
     if launcher.exists():
         return [
             str(launcher),
+            "--bridge-home", str(root),
             "--resume-last",
             "--api-gateway",
             "--force",
@@ -1914,7 +1930,7 @@ def _hashi_restart_command() -> list[str]:
 def _qualified_restart_runtime() -> dict[str, Any] | None:
     from remote.restart_runtime import qualified_restart_runtime
 
-    return qualified_restart_runtime(Path(_control_hashi_root))
+    return qualified_restart_runtime(Path(_control_code_root or _control_hashi_root))
 
 
 def _restart_hashi_process() -> dict[str, Any]:
@@ -2808,11 +2824,12 @@ def create_app(
     workbench_port: int = DEFAULT_WORKBENCH_PORT,
     hashi_root: str = None,
     control_hashi_root: str = None,
+    control_code_root: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _control_hashi_root, _protocol_manager, _exchange_transport, _attachment_store
+    global _workbench_port, _hashi_root, _control_hashi_root, _control_code_root, _protocol_manager, _exchange_transport, _attachment_store
 
     _instance_info = instance_info
     _peer_registry = peer_registry
@@ -2823,6 +2840,7 @@ def create_app(
     _workbench_port = workbench_port
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
+    _control_code_root = control_code_root or _control_hashi_root
     _attachment_store = AttachmentStore(
         root=Path(hashi_root) if hashi_root else Path.cwd(),
         instance_id=str(instance_info.get("instance_id") or "hashi"),
@@ -3142,7 +3160,7 @@ def create_app(
         if _protocol_manager is None:
             return {"ok": False, "error": "protocol manager unavailable"}
         authenticated = try_authenticate_request(request, allow_loopback=True)
-        rescue_start_enabled = bool(_terminal_executor and _terminal_executor.allows_level(AuthLevel.L3_RESTART))
+        rescue_start_enabled = True  # Fixed lifecycle APIs use their existing authentication.
         if not authenticated:
             return {
                 "ok": True,
@@ -3150,7 +3168,7 @@ def create_app(
                 "rescue_start_enabled": rescue_start_enabled,
                 "rescue_restart_enabled": rescue_start_enabled,
                 "rescue_reboot_enabled": rescue_start_enabled,
-                "rescue_start_requirement": "L3_RESTART",
+                "rescue_start_requirement": "authenticated_instance_control",
             }
         return {
             "ok": True,
@@ -3165,7 +3183,7 @@ def create_app(
             "rescue_start_enabled": rescue_start_enabled,
             "rescue_restart_enabled": rescue_start_enabled,
             "rescue_reboot_enabled": rescue_start_enabled,
-            "rescue_start_requirement": "L3_RESTART",
+            "rescue_start_requirement": "authenticated_instance_control",
             "trusted_view": True,
         }
 
@@ -4295,25 +4313,30 @@ def create_app(
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
+    @app.get("/control/hashi/qualification")
+    async def hashi_control_qualification(request: Request):
+        """Inspect the fixed restart destination without stopping or starting Core."""
+        _authenticate_rescue_control(request)
+        root = str(_control_code_root or _control_hashi_root or "")
+        try:
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={
+                "ok": False, "phase": "runtime_qualification", "code_root": root,
+                "error": str(exc),
+            })
+        return {"ok": True, "code_root": root, "runtime": qualified}
+
     @app.post("/control/hashi/start")
     async def hashi_control_start(request: Request, payload: HashiStartPayload):
         """
         Start the local HASHI core through a fixed launcher command.
 
-        This is intentionally not a generic shell endpoint. It is gated by
-        L3_RESTART because it is a rescue operation that creates a long-lived
-        local process.
+        Authentication and a fixed instance-bound launcher authorize this
+        operation. Generic terminal command levels do not gate lifecycle APIs.
         """
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
-        if not _terminal_executor or not _terminal_executor.allows_level(AuthLevel.L3_RESTART):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI start requires max_terminal_level=L3_RESTART",
-                },
-            )
 
         reason_meta = _sanitize_rescue_reason(payload.reason)
         current = _hashi_control_status()
@@ -4405,16 +4428,6 @@ def create_app(
                     raise ValueError("invalid restart notification identity")
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not _terminal_executor or not _terminal_executor.allows_level(
-            AuthLevel.L3_RESTART
-        ):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI restart requires max_terminal_level=L3_RESTART",
-                },
-            )
         before = await asyncio.to_thread(_hashi_control_status)
         reason_meta = _sanitize_rescue_reason(payload.reason)
         restart_id = _new_restart_id()
@@ -4634,16 +4647,6 @@ def create_app(
 
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
-        if not _terminal_executor or not _terminal_executor.allows_level(
-            AuthLevel.L3_RESTART
-        ):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI reboot rescue requires max_terminal_level=L3_RESTART",
-                },
-            )
         reason_meta = _sanitize_rescue_reason(payload.reason)
         try:
             status_code, command_result = await asyncio.to_thread(

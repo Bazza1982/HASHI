@@ -23,7 +23,7 @@ from orchestrator.permissions.windows_file_binding import (
 )
 from orchestrator.permissions.file_operations import FILE_TOOLS, search_options
 from orchestrator.permissions.network_worker import NETWORK_TOOLS, RequestNotSent, prepare as prepare_network
-from orchestrator.permissions.file_results import render_helper_result
+from orchestrator.permissions.file_results import PRESTART_BINDING_FAILURE, render_helper_result
 from orchestrator.permissions.windows_process import (
     WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended,
 )
@@ -271,10 +271,13 @@ class WindowsFileProcessSupervisor:
                         and not resource.get("journal_claim")):
                     await self._cleanup(operation_id, resource)
                     with self._guard(context):
-                        receipt = self._store.put(context, operation_id, descriptor, outcome="failed",
-                                                  payload="File could not be opened safely; no action started.")
+                        # Commit the no-start fact before storing its result copy.
+                        # A rejected/stale epoch must not poison a later real result.
+                        digest = sha256(PRESTART_BINDING_FAILURE.encode("utf-8")).hexdigest()
                         self._authority.reject_before_start(context, operation_id, descriptor.arguments_digest,
-                                                            descriptor.scopes, result_digest=receipt.result_digest)
+                                                            descriptor.scopes, result_digest=digest)
+                        receipt = self._store.put(context, operation_id, descriptor, outcome="failed",
+                                                  payload=PRESTART_BINDING_FAILURE)
                     resource["prestart_rejected"] = True
                     return receipt
                 # A failed ResumeThread may already have started. Inspect the
@@ -300,7 +303,9 @@ class WindowsFileProcessSupervisor:
 
     async def recover(self, context, operation_id, descriptor):
         with self._guard(context):
-            return self._store.get(context, operation_id, descriptor)
+            status = self._authority.operation_status_for_task(context, operation_id)
+            return self._store.get(context, operation_id, descriptor,
+                                   expected_outcome=status.state, expected_digest=status.result_digest)
 
     async def _cleanup(self, operation_id, resource):
         # The active record retains every owned handle on an unverified stop.

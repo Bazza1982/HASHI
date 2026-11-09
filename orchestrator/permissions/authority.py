@@ -2595,9 +2595,10 @@ class PermissionAuthority:
             if operation is not None and any((
                 operation["task_id"] != context.task_id, operation["run_id"] != context.run_id,
                 operation["arguments_digest"] != arguments_digest, operation["scope_digest"] != digest,
-                operation["execution_epoch"] != context.execution_epoch,
             )):
                 raise OperationConflict("the unstarted failure belongs to another operation")
+            if operation is not None:
+                self._require_prior_execution_fenced(connection, operation, context)
             if connection.execute("SELECT 1 FROM execution_claims WHERE operation_id=? LIMIT 1",
                                   (operation_id,)).fetchone() is not None:
                 raise OperationConflict("an execution claim already exists")
@@ -2617,8 +2618,8 @@ class PermissionAuthority:
                                    (operation_id, context.task_id, context.run_id, arguments_digest,
                                     digest, context.execution_epoch, "failed"))
             else:
-                connection.execute("UPDATE pending_operations SET state='failed' WHERE operation_id=?",
-                                   (operation_id,))
+                connection.execute("UPDATE pending_operations SET state='failed',execution_epoch=? WHERE operation_id=?",
+                                   (context.execution_epoch, operation_id))
             connection.execute("INSERT INTO prestart_failures VALUES(?,?,?)", (operation_id, result_digest, now))
             self._event(connection, context.task_id, "operation_not_started", operation_id, now)
 

@@ -28,8 +28,8 @@ Peer cold restart is available only when all of these are true:
    source as `handshake_accepted`;
 6. the restart request is authenticated by the existing Remote shared-token
    HMAC path; and
-7. the target Remote has `L3_RESTART` enabled, which is also what causes it to
-   advertise `rescue_restart`.
+7. the target Remote has its exact-instance fixed restart launcher installed.
+   The normal terminal policy does not gate this authenticated operation.
 
 The provider is revalidated immediately before the destructive POST. Stale
 source-side peer state or a stale capability cache is therefore not sufficient
@@ -77,11 +77,12 @@ issuing the restart request.
 
 ## Supported Remote configuration
 
-A restart provider must be running, authenticated, and allow L3 restart:
+A restart provider must be running, authenticated, and have its fixed lifecycle
+installation ready. The default terminal policy is sufficient:
 
 ```yaml
 security:
-  max_terminal_level: "L3_RESTART"
+  max_terminal_level: "L2_WRITE"
 ```
 
 Windows Remote and its fixed restart actuator:
@@ -136,7 +137,7 @@ provider mode is diagnostic context, not an authorization gate.
 Use two supported instances, for example `HASHI1` and `HASHI2`.
 
 1. Start both HASHI cores.
-2. Start both Remotes (child or supervised) with `L3_RESTART`.
+2. Start both Remotes (child or supervised) with their normal terminal policy.
 3. Complete the normal Hashi Remote handshake and confirm both peers show the
    accepted state.
 4. From HASHI1 run:

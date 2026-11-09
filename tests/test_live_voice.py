@@ -291,7 +291,9 @@ class ProviderTests(unittest.TestCase):
                 return self.response
 
         scenarios = (
-            (401, 'invalid_api_key', 'live_provider_authentication_failed'),
+            (401, 'expired_secret_key', 'live_provider_key_expired'),
+            (401, 'invalid_api_key', 'live_provider_key_invalid'),
+            (403, 'permission_denied', 'live_provider_access_denied'),
             (402, 'billing_required', 'live_provider_quota_exceeded'),
             (429, 'insufficient_quota', 'live_provider_quota_exceeded'),
             (429, 'rate_limit_exceeded', 'live_provider_rate_limited'),
@@ -350,3 +352,4 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.store.scheduled, [])
 
 if __name__=='__main__':unittest.main()
+# HASHI-Fingerprint: hfp_5dc821335ec3488eb518d250acfa061f

@@ -34,7 +34,8 @@ param(
     [switch]$Quiet,
     [switch]$Force,
     [switch]$Resume,
-    [switch]$ApiGateway
+    [switch]$ApiGateway,
+    [string]$BridgeHome
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,13 +43,15 @@ $ErrorActionPreference = "Stop"
 # Constants
 $ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
 $ProjectDir = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..")).TrimEnd('\')
-$BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
+if (-not $BridgeHome) {
+    $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
+}
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
 $MainScript = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
-if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
+if (-not (Test-Path $AgentsJson)) { throw "Missing HASHI instance configuration: $AgentsJson" }
 $SecretsJson = Join-Path $BridgeHome "secrets.json"
-if (-not (Test-Path $SecretsJson)) { $SecretsJson = Join-Path $ProjectDir "secrets.json" }
+# Never borrow another instance's credentials from the program directory.
 $WorkbenchPort = 18800
 $PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
     Join-Path $ProjectDir "python\python.exe"
@@ -59,9 +62,9 @@ $PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
 }
 $PathResolver = Join-Path $ProjectDir "scripts\resolve_instance_runtime.py"
 try {
-    $LockFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
-    $PidFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
-    $InstanceId = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
+    $LockFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
+    $PidFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
+    $InstanceId = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
     if (-not $LockFile -or -not $PidFile) {
         throw "empty instance runtime path"
     }

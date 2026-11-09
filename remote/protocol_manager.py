@@ -123,7 +123,7 @@ TERMINAL_INFLIGHT_STATES = {
 }
 
 
-def build_default_capabilities(*, rescue_start_enabled: bool = False) -> list[str]:
+def build_default_capabilities(*, rescue_start_enabled: bool = True) -> list[str]:
     capabilities = list(DEFAULT_CAPABILITIES)
     if rescue_start_enabled:
         capabilities.extend(("rescue_start", "rescue_restart", "rescue_reboot"))
@@ -3434,3 +3434,4 @@ class ProtocolManager:
             json.dumps({"messages": self._inflight}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+# HASHI-Fingerprint: hfp_608bf402d1414783838e3abc04107bc9

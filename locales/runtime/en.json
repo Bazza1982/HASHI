@@ -2406,7 +2406,7 @@
     "api.restart.in_progress": "Restart is already in progress.",
     "api.restart.not_authorized": "Not authorized.",
     "api.restart.cancelled": "Hard restart cancelled.",
-    "api.restart.remote_unavailable": "This instance's HASHI Remote is unavailable or does not have L3_RESTART enabled.",
+    "api.restart.remote_unavailable": "This instance's HASHI Remote or fixed restart provider is unavailable. Check the instance installation.",
     "api.restart.remote_error": "remote error",
     "api.restart.confirm_target": "Target",
     "api.restart.confirm_effect": "HASHI Remote will stop and restart {instance}, then confirm it is back online.",

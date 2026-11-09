@@ -308,7 +308,7 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
             continue
         try:
             _validate_environment_path(Path(executable))
-            args = [*command, str(check), "--code-root", str(code_root)]
+            args = [*command, "-B", str(check), "--code-root", str(code_root)]
             if not full:
                 args.append("--runtime-only")
             checked = subprocess.run(
@@ -349,6 +349,7 @@ def _select_core_runtime(code_root: Path, *, with_functions=False):
     checker = code_root / "scripts/check_runtime_selection.py"
     if not checker.is_file():
         raise InstanceRegistryError("Qualified Core launcher is missing")
+    failures = []
     for runtime in _prepared_role_candidates(code_root):
         try:
             _validate_environment_path(Path(runtime[0]))
@@ -357,6 +358,8 @@ def _select_core_runtime(code_root: Path, *, with_functions=False):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=180, check=False)
             if result.returncode:
+                details = (result.stderr or result.stdout or "").strip().splitlines()
+                failures.append(details[-1][:700] if details else f"selector exited {result.returncode}")
                 continue
             command = json.loads(result.stdout)
             if (not isinstance(command, list) or len(command) != 3
@@ -365,9 +368,14 @@ def _select_core_runtime(code_root: Path, *, with_functions=False):
                 continue
             _validate_environment_path(Path(command[0]))
             return (command, runtime) if with_functions else command
-        except (OSError, ValueError, subprocess.SubprocessError, InstanceRegistryError):
+        except (OSError, ValueError, subprocess.SubprocessError, InstanceRegistryError) as exc:
+            failures.append(f"{type(exc).__name__}: {exc}"[:700])
             continue
-    raise InstanceRegistryError("No installer-qualified independent Core/Functions pair is available")
+    detail = "; ".join(dict.fromkeys(failures))
+    raise InstanceRegistryError(
+        "No installer-qualified independent Core/Functions pair is available"
+        + (f": {detail}" if detail else "")
+    )
 
 
 def _config_path(record: dict[str, Any], code_root: Path) -> Path:
@@ -660,7 +668,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, "-m", "tui.connection"],
+        [*runtime, "-B", "-m", "tui.connection"],
         cwd=code_root,
         env=environment,
         check=False,
@@ -994,7 +1002,7 @@ def _run_tui(registry: InstanceRegistry, record: dict[str, Any], *, attach_only=
     environment = _launch_environment(record, code_root)
     environment["HASHI_TUI_ATTACH_ONLY"] = "1"
     return subprocess.run(
-        [*runtime, str(code_root / "tui.py")],
+        [*runtime, "-B", str(code_root / "tui.py")],
         cwd=code_root,
         env=environment,
         check=False,

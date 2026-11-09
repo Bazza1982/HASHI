@@ -417,22 +417,33 @@ async def test_concurrent_opens_cannot_exceed_session_limit():
     assert len(service.sessions) == 8
 
 
-async def test_http_api_defaults_off_and_requires_existing_auth(tmp_path,monkeypatch):
+async def test_http_api_defaults_ready_and_keeps_existing_auth(desktop,tmp_path,monkeypatch):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
-    api=SimpleNamespace(app=web.Application(),orchestrator=None,admin_token='',_is_governed_profile=lambda:False,
+    from orchestrator.config import GlobalConfig
+    c,_,_=desktop
+    broker,_=make_broker(tmp_path,c)
+    config=GlobalConfig(authorized_id=0)
+    api=SimpleNamespace(app=web.Application(),orchestrator=SimpleNamespace(capability_broker=broker),
+                        global_config=config,admin_token='',_is_governed_profile=lambda:False,
                         _check_admin_auth=lambda r:r.headers.get('X-Workbench-Token')=='existing-token',
                         _v1_owner_id=lambda r:'owner-a')
     register_desktop_api(api)
     async with TestClient(TestServer(api.app)) as client:
         payload={'operation':'targets','client_id':'client-a'}
         monkeypatch.delenv('HASHI_DESKTOP_ENABLED',raising=False)
-        r=await client.post('/api/v1/desktop/operation',json=payload); assert r.status==404
-        monkeypatch.setenv('HASHI_DESKTOP_ENABLED','1')
-        r=await client.post('/api/v1/desktop/operation',json=payload); assert r.status==403
+        r=await client.post('/api/v1/desktop/operation',json=payload)
+        assert r.status==403
         api.admin_token='existing-token'
-        r=await client.post('/api/v1/desktop/operation',json=payload); assert r.status==403
+        r=await client.post('/api/v1/desktop/operation',json=payload)
+        assert r.status==403
         assert 'no-store' in r.headers['Cache-Control']
+        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
+        assert r.status==200
+        assert (await r.json())['targets']
+        config.desktop_enabled=False
+        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
+        assert r.status==404
 
 
 async def test_real_http_route_relays_frame_and_input_receipt(desktop,tmp_path,monkeypatch):
@@ -524,3 +535,4 @@ def test_abandoned_view_sessions_release_cached_frames(desktop):
         c.expire()
         assert len(c.sessions) == 0
     assert native.captures == 12
+# HASHI-Fingerprint: hfp_c59651ddac1849ff8beba460357f5277

@@ -39,7 +39,7 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
 
     loaded = load_api_gateway_config(cfg)
 
-    assert loaded["enabled"] is False
+    assert loaded["enabled"] is True
     assert loaded["default_model"] == "gpt-6-astra"
 
     saved = save_api_gateway_config(
@@ -483,6 +483,7 @@ async def test_api_gateway_health_reports_default_model(tmp_path):
 @pytest.mark.asyncio
 async def test_api_gateway_health_reports_live_runtime_separately_from_config(tmp_path):
     global_config = _global_config(tmp_path, api_gateway_port=0)
+    save_api_gateway_config(global_config, enabled=False, updated_by="test")
     server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
 
     await server.start()

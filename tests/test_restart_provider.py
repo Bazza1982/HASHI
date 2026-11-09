@@ -97,7 +97,7 @@ def test_peer_restart_provider_requires_live_rescue_restart(monkeypatch, tmp_pat
         },
     )
 
-    with pytest.raises(restart_provider.RestartProviderError, match="L3_RESTART"):
+    with pytest.raises(restart_provider.RestartProviderError, match="fixed instance restart provider"):
         restart_provider.peer_restart_provider("HASHI2")
 
 
@@ -266,3 +266,4 @@ def test_restart_via_peer_revalidates_before_post(monkeypatch):
     assert code == 0
     assert payload["restart_launched"] is True
     assert calls == {"revalidated": 1, "restart": 1}
+# HASHI-Fingerprint: hfp_6f88e1f1161a4054bac20ca4e90fe1b1

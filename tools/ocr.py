@@ -348,7 +348,7 @@ def _paddle_runtime_ready() -> bool:
         try:
             result = subprocess.run(
                 [
-                    python, "-I", "-c",
+                    python, "-I", "-B", "-c",
                     "import importlib.util; "
                     "raise SystemExit(0 if all(importlib.util.find_spec(name) "
                     "is not None for name in ('paddleocr', 'paddle')) else 1)",
@@ -430,6 +430,7 @@ def _extract_with_paddle(
     command = [
         _paddle_python_override() or sys.executable,
         "-I",
+        "-B",
         str(Path(ocr_worker.__file__).resolve()),
         "--image",
         str(Path(image_path).resolve()),
@@ -704,3 +705,4 @@ def format_ocr_block(result: OCRResult) -> str:
         if result.missing_languages:
             body += " Missing models: " + ", ".join(result.missing_languages) + "."
     return f"{header}\n{body}\n[/IMAGE_OCR]"
+# HASHI-Fingerprint: hfp_c41f52cb4d0f43c49b96854586f3544e

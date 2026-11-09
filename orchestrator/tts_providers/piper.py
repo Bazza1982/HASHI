@@ -39,6 +39,7 @@ class PiperProvider(BaseTTSProvider):
         if provider_options.get("module_mode"):
             argv = [
                 python_exe,
+                "-B",
                 "-m",
                 "piper",
                 "--model",
@@ -77,3 +78,4 @@ class PiperProvider(BaseTTSProvider):
             wav_path=wav_path,
             ogg_path=ogg_path,
         )
+# HASHI-Fingerprint: hfp_f9b8e7f44992411b8e04dcc31a6ac6aa

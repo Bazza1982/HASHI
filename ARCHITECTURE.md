@@ -299,6 +299,10 @@ Preferred search roots are exact enabled Run Workzones plus own home; explicit
 query roots replace those defaults. Enterprise/privacy/live-runtime policies
 still take precedence. See [scoped search](docs/HERV3_SCOPED_SEARCH.md).
 
-HASHI Remote rescue remains a separately
-deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
-token-protected Backend API admin command endpoint.
+HASHI Remote remains a separately deployed sidecar. Authenticated fixed
+instance start/restart/reboot endpoints are available with the default terminal
+policy; generic terminal levels do not gate instance lifecycle operations.
+Windows installation prepares exact-home fixed tasks while keeping the network
+Remote Limited. Program assets and private instance data are bound separately.
+The local hot-reboot hop must use the token-protected Backend API admin command
+endpoint. See [default function readiness](docs/DEFAULT_FUNCTION_READINESS.md).
