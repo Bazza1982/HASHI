@@ -184,6 +184,69 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(result["capability"]["phone"]["billing"]["usd_per_minute"], 0.05)
         self.assertIn("backend_text_model", result["capability"]["phone"]["billing"]["excludes"])
 
+
+    def _reject_start_for_availability(self, code):
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("UPDATE live_calls SET phase = 'ended' WHERE call_id = ?", (self.call_id,))
+
+        @asynccontextmanager
+        async def http():
+            yield object()
+
+        async def reject(*_args, **_kwargs):
+            raise LiveVoiceError(code, 502)
+
+        payload = {key: self.scope[key] for key in (
+            "instance_id", "instance_generation", "agent_id", "session_id", "context_generation"
+        )}
+        payload.update(sdp="v=0\r\noffer", phone_revision=PHONE_REVISION,
+                       idempotency_key="availability-rejection")
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", http), \
+             patch("orchestrator.frontend_live_voice.openai_live.fit_live_session_input", reject):
+            with self.assertRaisesRegex(LiveVoiceError, code):
+                asyncio.run(self.manager._op_start(self.owner_id, payload))
+
+    def _availability_context(self):
+        return asyncio.run(self.manager._op_context(self.owner_id, {
+            "session_id": self.session_id, "agent_id": self.agent_id, "context_generation": 1,
+        }))["capability"]
+
+    def test_context_distinguishes_missing_credentials_from_unverified_service(self):
+        initial = self._availability_context()
+        self.assertEqual(initial["availability"]["state"], "unverified")
+        self.assertTrue(initial["available"])  # An explicit first attempt remains possible.
+        self.manager.secrets.clear()
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
+            missing = self._availability_context()
+        self.assertFalse(missing["available"])
+        self.assertEqual(missing["unavailable_reason"], "live_credential_unavailable")
+        self.assertEqual(missing["availability"]["state"], "unavailable")
+
+    def test_rejected_credentials_remain_unavailable_until_credentials_change(self):
+        self._reject_start_for_availability("live_provider_key_expired")
+        rejected = self._availability_context()
+        self.assertFalse(rejected["available"])
+        self.assertEqual(rejected["availability"]["state"], "unavailable")
+        self.assertEqual(rejected["unavailable_reason"], "live_provider_key_expired")
+        self.assertNotIn("sk-test-fake", json.dumps(rejected))
+        with self.store._lock, self.store._connection() as connection:
+            row = connection.execute("SELECT state, outcome_json FROM live_call_attempts "
+                                     "WHERE attempt_id = 'availability-rejection'").fetchone()
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(json.loads(row["outcome_json"])["error_code"], "live_provider_key_expired")
+        self.manager.secrets["openai_api_key"] = "sk-replacement-fixture"
+        updated = self._availability_context()
+        self.assertTrue(updated["available"])
+        self.assertEqual(updated["availability"]["state"], "unverified")
+        self.assertIsNone(updated["unavailable_reason"])
+
+    def test_provider_outage_is_explained_without_disabling_explicit_retry(self):
+        self._reject_start_for_availability("live_provider_unavailable")
+        unavailable = self._availability_context()
+        self.assertEqual(unavailable["availability"]["state"], "unavailable")
+        self.assertEqual(unavailable["unavailable_reason"], "live_provider_unavailable")
+        self.assertTrue(unavailable["available"])  # Never automatically retry a provider request.
+
     def test_append_fragment_deduplication(self):
         frag = Fragment(provider_event_id="evt-1", speaker="user", text="hello world", start_ms=0, end_ms=500)
         res1 = asyncio.run(self.manager.append_fragment_once(self.binding, frag))
@@ -2194,6 +2257,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             ["developer", "user", "assistant"],
         )
         self.assertEqual(first["sdp_answer"], "v=0\r\nanswer")
+        self.assertEqual(self._availability_context()["availability"]["state"], "available")
         self.assertEqual(first["binding"]["call_id"], first["call_id"])
         self.assertEqual(replay["call_id"], first["call_id"])
         self.assertEqual(lifecycle, [(first["call_id"], "started", "connecting")])
@@ -2615,3 +2679,4 @@ async def test_forbidden_authority_field_in_body():
 
 if __name__ == "__main__":
     unittest.main()
+# HASHI-Fingerprint: hfp_1e21f76c7bc44ea0974a63b8bddd8e68

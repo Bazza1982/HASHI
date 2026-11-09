@@ -68,3 +68,33 @@ Core, component, build, and source-status checks are recorded with the commit.
 
 This note does not claim running Function adoption or a physical provider test.
 The user retains `/reboot` and physical Phone confirmation.
+
+## Credential and service availability follow-up — 2026-11-09
+
+The provider's structured `expired_secret_key` rejection now remains
+`live_provider_key_expired`; invalid credentials and denied project/account
+access have separate safe codes. Raw provider messages and credentials are
+never public UI input.
+
+The selected Phone context includes `availability.state`
+(`unverified`, `available`, `unavailable`) and a safe `unavailable_reason`.
+The existing `capability.available` remains the compatible admission/attempt
+gate: an explicit first attempt or a transient-provider retry can be permitted
+without claiming that the service has been verified. Consumers must display the
+observed availability state rather than treating a nonempty key as service success.
+Missing credentials and known expired/invalid keys are unavailable; temporary
+quota/rate/provider failures retain an explicit retry, never an automatic dial.
+
+The PAO Function records only actual provider outcomes in a bounded in-memory
+view keyed to the selected configuration and a private credential digest.
+Neither the digest nor credential is published or persisted. A replacement
+credential/configuration begins unverified; a successful provider creation
+verifies that selection. A Function replacement also begins unverified.
+Input/content failures and uncertain outcomes do not mark the service unusable.
+Start and transport-resume observations use the same owner.
+
+Focused regressions first reproduced generic expiry classification and false
+availability after rejection. They verify missing/unverified/rejected/accepted
+states, credential replacement, safe durable attempt errors and explicit retry.
+No valid external key, user microphone or production restart is needed to test
+these failure paths. Source validation does not claim running adoption.
