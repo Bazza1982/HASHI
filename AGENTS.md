@@ -59,4 +59,7 @@ and `docs/TESTING_POLICY.md`; for command/UI work also read
   branch/instance; keep migration inventories as review evidence, not bootstrap.
 
 Install the local hook with `python scripts/install_engineering_hooks.py`; it
-preserves custom hooks and checks staged Core/whitespace. CI remains final.
+preserves custom hooks and checks staged Core/whitespace. Follow
+docs/TESTING_POLICY.md and .github/CI_POLICY.md: choose scope from impact,
+independently from local/hosted execution. CI is not an instruction to run
+the whole product suite for every commit, PR, label, or routine deployment.

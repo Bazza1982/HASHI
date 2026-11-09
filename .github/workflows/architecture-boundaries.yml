@@ -1,230 +1,107 @@
 name: Architecture boundaries
-
-on:
+'on':
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - labeled
+    - unlabeled
   push:
-    branches: [main]
-
+    branches:
+    - main
 permissions:
   contents: read
   pull-requests: read
-
 jobs:
   boundaries:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.13"
-      - name: Validate protected-core manifest
-        run: python scripts/check_protected_core_changes.py --validate-manifest
-      - name: Validate FYI navigation and retained knowledge
-        run: python scripts/validate_agent_fyi.py
-      - name: Enforce Core source and wire-contract approval on pull requests
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CORE_CHANGE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
-        run: |
-          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-            python scripts/check_protected_core_changes.py \
-              --base "$BASE_SHA" --authorized --major-version-change
-          else
-            python scripts/check_protected_core_changes.py --base "$BASE_SHA"
-          fi
-      - name: Resolve merged PR approval on main
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        id: merged_pr_approval
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pulls = await github.paginate(
-              github.rest.repos.listPullRequestsAssociatedWithCommit,
-              {
-                ...context.repo,
-                commit_sha: context.sha,
-              },
-            );
-            const targetBranch = context.ref.replace("refs/heads/", "");
-            const mergedPulls = pulls.filter(
-              (pull) => pull.merged_at && pull.base.ref === targetBranch,
-            );
-            const approvedPull = mergedPulls.find((pull) =>
-              pull.labels.some((label) =>
-                (typeof label === "string" ? label : label.name) === "core-change-approved",
-              ),
-            );
-            core.setOutput("authorized", approvedPull ? "true" : "false");
-            if (approvedPull) {
-              core.info(`Protected-core approval inherited from merged PR #${approvedPull.number}.`);
-            } else if (mergedPulls.length > 0) {
-              core.warning("Associated merged PR lacks the core-change-approved label.");
-            } else {
-              core.info("No associated merged PR; treating this update as a direct push.");
-            }
-      - name: Flag unapproved Core source or wire contracts pushed to main
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        env:
-          BASE_SHA: ${{ github.event.before }}
-          CORE_CHANGE_APPROVED: ${{ steps.merged_pr_approval.outputs.authorized }}
-        run: |
-          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-            python scripts/check_protected_core_changes.py \
-              --base "$BASE_SHA" --authorized --major-version-change
-          else
-            python scripts/check_protected_core_changes.py --base "$BASE_SHA"
-          fi
-      - name: Run architecture contract tests
-        run: |
-          python -m pip install -r constraints/standard-py312.lock ".[test]"
-          python -m pytest -q \
-            tests/test_architecture_boundaries.py \
-            tests/test_check_protected_core_changes.py \
-            tests/test_engineering_safeguards.py \
-            tests/test_dependency_migration_governance.py \
-            tests/test_command_ui.py \
-            tests/test_ui_language.py \
-            tests/test_ui_language_persistence.py \
-            tests/test_settings_failures.py \
-            tests/test_askme_control.py \
-            tests/test_runtime_her_fallback.py \
-            tests/test_model_fallback_policy.py \
-            tests/test_backend_selection_transaction.py \
-            tests/test_backend_switch_outcomes.py \
-            tests/test_credit_failures.py \
-            tests/test_jobs_read_failures.py \
-            tests/test_safety_failure_details.py \
-            tests/test_habit_reset_failures.py \
-            tests/test_runtime_her_habits.py \
-            tests/test_permission_safety_command.py \
-            tests/test_job_ownership.py \
-            tests/test_agent_runtime_job_transfer.py \
-            tests/test_session_operation_failures.py \
-            tests/test_fresh_context.py \
-            tests/test_agent_fyi.py \
-            tests/test_dependency_profiles.py \
-            tests/test_function_worker_protocol.py \
-            tests/test_function_worker_supervisor.py \
-            tests/test_function_generation.py \
-            tests/test_minimal_core.py \
-            tests/test_kernel_process.py \
-            tests/test_runtime_handoff.py \
-            tests/test_instance_lock_scope.py \
-            tests/test_manager_registry.py \
-            tests/test_model_catalog.py \
-            tests/test_reboot_manager.py \
-            tests/test_restart_provider.py \
-            tests/test_runtime_contract.py \
-            tests/test_runtime_command_binding.py \
-            tests/test_runtime_groups.py \
-            tests/test_runtime_usage.py \
-            tests/test_runtime_wol.py \
-            tests/test_service_manager_scheduler_lease.py \
-            tests/test_agent_pcm_edit.py \
-            tests/test_agent_pcm_api.py \
-            tests/test_workbench_enterprise_health.py \
-            tests/test_workspace_state.py
-      - name: Run frontend Session and native file-content regressions
-        run: |
-          python -m pytest -q \
-            tests/test_workbench_primary_session_metadata.py \
-            tests/test_admin_failure_details.py \
-            tests/test_management_failure_details.py \
-            tests/test_workbench_workzone_management.py \
-            tests/test_workzone_pending_projection.py \
-            tests/test_session_read_contention.py \
-            tests/test_overview_read_responsiveness.py \
-            tests/test_history_read_responsiveness.py \
-            tests/test_history_search.py \
-            tests/test_workbench_guarded_deletion.py \
-            tests/test_workzone.py \
-            tests/test_runtime_workzone.py \
-            tests/test_workbench_agent_management.py \
-            tests/test_agent_deletion.py \
-            tests/contract/test_agent_creation.py \
-            tests/test_session_api.py \
-            tests/standby \
-            tests/test_attachment_catalogue.py \
-            tests/test_file_content_service.py \
-            tests/test_transcription_segments.py \
-            tests/test_ocr.py \
-            tests/test_ocr_generation.py \
-            tests/test_ocr_provision.py \
-            tests/test_chat_admission_failures.py \
-            tests/test_workbench_scheduler_api.py \
-            tests/test_tool_gateway_mcp.py \
-            tests/test_chat_projection_transport.py \
-            tests/test_projection_failure_details.py \
-            tests/test_remote_workbench_gateway.py \
-            tests/test_remote_workbench_failure_details.py \
-            tests/test_hchat_submission_details.py \
-            tests/test_hchat_delivery.py \
-            tests/test_hchat_send.py \
-            tests/test_protocol_send.py \
-            tests/test_hchat_freshness.py \
-            tests/test_hchat_delivery_status.py \
-            tests/test_runtime_debug_reporting.py \
-            tests/test_workbench_hchat_channel_gate.py \
-            tests/test_browser_gateway_proxy.py \
-            tests/test_browser_proxy_failure_details.py \
-            tests/test_browser_gateway_phase1.py \
-            tests/test_frontend_contracts.py \
-            tests/test_frontend_multiline_text.py \
-            tests/test_runtime_media.py \
-            tests/test_runtime_long.py \
-            tests/test_frontend_failures.py \
-            tests/test_whatsapp_lifecycle_fc.py \
-            tests/test_whatsapp_enterprise_channel_gate.py \
-            tests/test_frontend_whatsapp_mirror.py
-      - name: Run Telegram activation and readiness regressions
-        run: |
-          python -m pytest -q \
-            tests/test_config.py \
-            tests/test_agent_incarnation.py \
-            tests/test_agent_move_service.py \
-            tests/test_runtime_lifecycle.py \
-            tests/test_runtime_delivery.py \
-            tests/test_runtime_pipeline.py \
-            tests/test_telegram_delivery_failover.py \
-            tests/test_telegram_recovery_reliability.py \
-            tests/test_worker_metadata_status.py \
-            tests/test_workbench_telegram_credential.py \
-            tests/test_telegram_activation_lifecycle.py \
-            tests/test_workbench_telegram_access.py \
-            tests/test_telegram_access.py \
-            tests/test_telegram_access_runtime.py \
-            tests/test_telegram_access_delivery.py \
-            tests/test_telegram_access_media_tool.py \
-            tests/test_telegram_access_workzone.py \
-            tests/test_telegram_actor_scope.py \
-            tests/test_telegram_scoped_delivery.py \
-            tests/test_telegram_configuration_concurrency.py \
-            tests/test_function_worker_quiesce.py \
-            tests/test_telegram_ingress.py
-      - name: Run shared voice and personal frontend authorization regressions
-        run: |
-          python -m pytest -q \
-            tests/test_safevoice_discard.py \
-            tests/test_session_attachment_authorization.py \
-            tests/test_permission_personal_click.py \
-            tests/test_compute_services.py \
-            tests/test_voice_catalog.py \
-            tests/test_voice_transcriber.py \
-            tests/test_voice_transcription_result.py \
-            tests/test_voice_failure_projection.py \
-            tests/test_voice_reply_outcomes.py \
-            tests/test_say_command.py \
-            tests/test_slash_command_audit.py \
-            tests/test_api_voice_ingress.py \
-            tests/test_voice_admission_boundaries.py \
-            tests/test_voice_confirmation_transport.py \
-            tests/test_agent_fyi.py \
-            tests/test_run_questions.py \
-            tests/test_run_question_connectors.py \
-            tests/test_run_questions_review.py \
-            tests/test_run_questions_repair.py \
-            tests/test_permission_questions.py
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: 3.12.13
+    - name: Verify CI scope and failure propagation
+      run: python -B -m unittest discover -s .github -p test_ci_plan.py -q
+    - name: Select checks from actual impact
+      id: scope
+      run: python .github/ci_plan.py plan
+    - name: Validate protected-core manifest
+      run: python scripts/check_protected_core_changes.py --validate-manifest
+    - name: Validate FYI navigation and retained knowledge
+      run: python scripts/validate_agent_fyi.py
+    - name: Enforce Core source and wire-contract approval on pull requests
+      if: github.event_name == 'pull_request'
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        CORE_CHANGE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
+      run: |
+        if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+          python scripts/check_protected_core_changes.py \
+            --base "$BASE_SHA" --authorized --major-version-change
+        else
+          python scripts/check_protected_core_changes.py --base "$BASE_SHA"
+        fi
+    - name: Resolve merged PR approval on main
+      if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+      id: merged_pr_approval
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const pulls = await github.paginate(
+            github.rest.repos.listPullRequestsAssociatedWithCommit,
+            {
+              ...context.repo,
+              commit_sha: context.sha,
+            },
+          );
+          const targetBranch = context.ref.replace("refs/heads/", "");
+          const mergedPulls = pulls.filter(
+            (pull) => pull.merged_at && pull.base.ref === targetBranch,
+          );
+          const approvedPull = mergedPulls.find((pull) =>
+            pull.labels.some((label) =>
+              (typeof label === "string" ? label : label.name) === "core-change-approved",
+            ),
+          );
+          core.setOutput("authorized", approvedPull ? "true" : "false");
+          if (approvedPull) {
+            core.info(`Protected-core approval inherited from merged PR #${approvedPull.number}.`);
+          } else if (mergedPulls.length > 0) {
+            core.warning("Associated merged PR lacks the core-change-approved label.");
+          } else {
+            core.info("No associated merged PR; treating this update as a direct push.");
+          }
+    - name: Flag unapproved Core source or wire contracts pushed to main
+      if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+      env:
+        BASE_SHA: ${{ github.event.before }}
+        CORE_CHANGE_APPROVED: ${{ steps.merged_pr_approval.outputs.authorized }}
+      run: |
+        if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+          python scripts/check_protected_core_changes.py \
+            --base "$BASE_SHA" --authorized --major-version-change
+        else
+          python scripts/check_protected_core_changes.py --base "$BASE_SHA"
+        fi
+    - name: Install only for selected component tests
+      if: ${{ steps.scope.outputs.architecture == 'true' || steps.scope.outputs.frontend == 'true' || steps.scope.outputs.telegram
+        == 'true' || steps.scope.outputs.voice == 'true' }}
+      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+    - name: Run architecture contract tests
+      run: python .github/ci_plan.py test architecture
+      if: ${{ steps.scope.outputs.architecture == 'true' }}
+    - name: Run frontend Session and native file-content regressions
+      run: python .github/ci_plan.py test frontend
+      if: ${{ steps.scope.outputs.frontend == 'true' }}
+    - name: Run Telegram activation and readiness regressions
+      run: python .github/ci_plan.py test telegram
+      if: ${{ steps.scope.outputs.telegram == 'true' }}
+    - name: Run shared voice and personal frontend authorization regressions
+      run: python .github/ci_plan.py test voice
+      if: ${{ steps.scope.outputs.voice == 'true' }}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true

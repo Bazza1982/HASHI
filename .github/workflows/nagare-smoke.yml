@@ -1,111 +1,168 @@
 name: nagare-smoke
-
-on:
+'on':
   push:
     paths:
-      - "nagare/**"
-      - "flow/adapters/**"
-      - "flow/engine/**"
-      - "tests/contract/**"
-      - "tests/fixtures/**"
-      - "docs/HANDLER_GUIDE.md"
-      - "docs/ADAPTER_GUIDE.md"
-      - "docs/INSTALL.md"
-      - "docs/LOGGING.md"
-      - "pyproject.toml"
-      - "constraints/standard-py312.lock"
-      - "setup.py"
-      - ".github/workflows/nagare-smoke.yml"
-      - "nagare-viz/**"
+    - nagare/**
+    - flow/adapters/**
+    - flow/engine/**
+    - tests/contract/**
+    - tests/fixtures/**
+    - docs/HANDLER_GUIDE.md
+    - docs/ADAPTER_GUIDE.md
+    - docs/INSTALL.md
+    - docs/LOGGING.md
+    - pyproject.toml
+    - constraints/standard-py312.lock
+    - setup.py
+    - .github/workflows/nagare-smoke.yml
+    - nagare-viz/**
+    branches:
+    - main
   pull_request:
     paths:
-      - "nagare/**"
-      - "flow/adapters/**"
-      - "flow/engine/**"
-      - "tests/contract/**"
-      - "tests/fixtures/**"
-      - "docs/HANDLER_GUIDE.md"
-      - "docs/ADAPTER_GUIDE.md"
-      - "docs/INSTALL.md"
-      - "docs/LOGGING.md"
-      - "pyproject.toml"
-      - "constraints/standard-py312.lock"
-      - "setup.py"
-      - ".github/workflows/nagare-smoke.yml"
-      - "nagare-viz/**"
-
+    - nagare/**
+    - flow/adapters/**
+    - flow/engine/**
+    - tests/contract/**
+    - tests/fixtures/**
+    - docs/HANDLER_GUIDE.md
+    - docs/ADAPTER_GUIDE.md
+    - docs/INSTALL.md
+    - docs/LOGGING.md
+    - pyproject.toml
+    - constraints/standard-py312.lock
+    - setup.py
+    - .github/workflows/nagare-smoke.yml
+    - nagare-viz/**
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run all retained checks for a stable major/cross-domain candidate
+        type: boolean
+        required: false
+        default: true
 jobs:
+  ci-plan:
+    name: Select necessary checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      architecture: ${{ steps.scope.outputs.architecture }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      telegram: ${{ steps.scope.outputs.telegram }}
+      voice: ${{ steps.scope.outputs.voice }}
+      native: ${{ steps.scope.outputs.native }}
+      full_suite: ${{ steps.scope.outputs.full_suite }}
+      permission: ${{ steps.scope.outputs.permission }}
+      windows: ${{ steps.scope.outputs.windows }}
+      nagare_python: ${{ steps.scope.outputs.nagare_python }}
+      nagare_viz: ${{ steps.scope.outputs.nagare_viz }}
+      full: ${{ steps.scope.outputs.full }}
+      linux_os: ${{ steps.scope.outputs.linux_os }}
+      python_versions: ${{ steps.scope.outputs.python_versions }}
+      node_versions: ${{ steps.scope.outputs.node_versions }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify selection and failure contracts
+      run: python -B -m unittest discover -s .github -p test_ci_plan.py -q
+    - name: Select checks from actual impact
+      id: scope
+      run: python .github/ci_plan.py plan
   python-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.13"
-
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build pytest
-
-      - name: Build package
-        run: python -m build
-
-      - name: Install built wheel
-        run: |
-          python -m venv .venv-smoke
-          . .venv-smoke/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install "dist/$(basename dist/*.whl)[test]"
-
-      - name: CLI smoke run
-        run: |
-          . .venv-smoke/bin/activate
-          nagare run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler --output smoke-result.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          payload = json.loads(Path("smoke-result.json").read_text(encoding="utf-8"))
-          assert payload["success"] is True
-          assert set(payload["completed_steps"]) == {"step_write", "step_check"}
-          PY
-
-      - name: Install locked standard runtime for integration contracts
-        run: |
-          . .venv-smoke/bin/activate
-          python -m pip install -r constraints/standard-py312.lock
-
-      - name: Contract tests
-        run: |
-          . .venv-smoke/bin/activate
-          python -m pytest -q tests/contract
-
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: 3.12.13
+    - name: Install build tools
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install build pytest
+    - name: Build package
+      run: python -m build
+    - name: Install built wheel
+      run: |
+        python -m venv .venv-smoke
+        . .venv-smoke/bin/activate
+        python -m pip install --upgrade pip
+        python -m pip install "dist/$(basename dist/*.whl)[test]"
+    - name: CLI smoke run
+      run: |
+        . .venv-smoke/bin/activate
+        nagare run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler --output smoke-result.json
+        python - <<'PY'
+        import json
+        from pathlib import Path
+        payload = json.loads(Path("smoke-result.json").read_text(encoding="utf-8"))
+        assert payload["success"] is True
+        assert set(payload["completed_steps"]) == {"step_write", "step_check"}
+        PY
+    - name: Install locked standard runtime for integration contracts
+      run: |
+        . .venv-smoke/bin/activate
+        python -m pip install -r constraints/standard-py312.lock
+    - name: Contract tests
+      run: |
+        . .venv-smoke/bin/activate
+        python -m pytest -q tests/contract
+    needs:
+    - ci-plan
+    if: ${{ needs.ci-plan.result == 'success' && needs.ci-plan.outputs.nagare_python == 'true' }}
   viz-smoke:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: nagare-viz
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: nagare-viz/package-lock.json
-
-      - name: Install frontend deps
-        run: npm ci
-
-      - name: Test nagare-viz
-        run: npm test
-
-      - name: Install UI test browser
-        run: npx playwright install --with-deps chromium
-
-      - name: Verify save errors in the page
-        run: npm run test:ui
-
-      - name: Build nagare-viz
-        run: npm run build
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: npm
+        cache-dependency-path: nagare-viz/package-lock.json
+    - name: Install frontend deps
+      run: npm ci
+    - name: Test nagare-viz
+      run: npm test
+    - name: Install UI test browser
+      run: npx playwright install --with-deps chromium
+    - name: Verify save errors in the page
+      run: npm run test:ui
+    - name: Build nagare-viz
+      run: npm run build
+    needs:
+    - ci-plan
+    if: ${{ needs.ci-plan.result == 'success' && needs.ci-plan.outputs.nagare_viz == 'true' }}
+  ci-result:
+    name: nagare-smoke result
+    if: ${{ always() }}
+    needs:
+    - ci-plan
+    - python-smoke
+    - viz-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Require actual success of every selected check
+      env:
+        CI_NEEDS: ${{ toJSON(needs) }}
+      run: python .github/ci_plan.py summary --jobs '{"python-smoke":"nagare_python","viz-smoke":"nagare_viz"}'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
