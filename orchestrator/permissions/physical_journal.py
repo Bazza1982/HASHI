@@ -17,7 +17,7 @@ from orchestrator.permissions.descriptors import ToolDescriptor, _arguments_dige
 from orchestrator.permissions.models import ExecutionContext, Scope
 from orchestrator.permissions.file_operations import FILE_TOOLS
 from orchestrator.permissions.network_worker import NETWORK_TOOLS
-from orchestrator.permissions.file_results import render_helper_result
+from orchestrator.permissions.file_results import PRESTART_BINDING_FAILURE, render_helper_result
 from orchestrator.permissions.windows_process import ProcessObservation, observe_original_process_stopped
 from orchestrator.permissions.windows_jobs import WindowsJob
 from orchestrator.permissions.windows_job_security import private_job_name
@@ -268,7 +268,8 @@ class PhysicalFileJournal:
         status = self.authority.operation_status_for_task(context, operation_id)
         if status.state not in {"succeeded", "failed"} or self.authority.resource_state(claim_id) != "stopped":
             return False
-        result = self.results.get(context, operation_id, descriptor)
+        result = self.results.get(context, operation_id, descriptor,
+                                  expected_outcome=status.state, expected_digest=status.result_digest)
         if result.outcome != status.state or result.result_digest != status.result_digest:
             raise ValueError("the settled result differs from the permission ledger")
         self._state(claim_id, "finished")
@@ -342,7 +343,24 @@ class PhysicalFileJournal:
                 payload = render_helper_result(descriptor, value["arguments"], candidate)
                 if recovered_script is not None and (recovered_script["payload"] != payload or recovered_script["outcome"] != candidate["outcome"]):
                     raise ValueError("the helper and original script result disagree")
-                result = self.results.put(context, value["operation_id"], descriptor, outcome=candidate["outcome"], payload=payload)
+                from orchestrator.permissions.result_store import ResultConflict
+
+                try:
+                    result = self.results.put(context, value["operation_id"], descriptor,
+                                              outcome=candidate["outcome"], payload=payload)
+                except ResultConflict:
+                    previous = self.results.get(context, value["operation_id"], descriptor)
+                    # Older supervisors could store this fixed no-start copy
+                    # before authority rejection failed. Keep it as evidence.
+                    # Only the stopped original helper may supply a candidate;
+                    # a signed authority reconciliation still commits the fact.
+                    if (status.state != "unknown" or status.result_digest is not None
+                            or previous is None or previous.outcome != "failed"
+                            or previous.payload != PRESTART_BINDING_FAILURE):
+                        raise
+                    result = self.results.put_recovery_candidate(
+                        context, value["operation_id"], descriptor,
+                        outcome=candidate["outcome"], payload=payload)
         if result is not None:
             if status.state == "unknown":
                 self.authority.reconcile_outcome(

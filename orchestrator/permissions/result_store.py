@@ -179,8 +179,24 @@ class EncryptedResultStore:
     def put(
         self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor, *, outcome: str, payload: str,
     ) -> SupervisedResult:
+        return self._put(context, operation_id, descriptor, outcome=outcome, payload=payload)
+
+    def put_recovery_candidate(self, context, operation_id, descriptor, *, outcome, payload):
+        """Append a private candidate; only the authority can commit its outcome."""
+        return self._put(context, operation_id, descriptor, outcome=outcome, payload=payload,
+                         recovery_candidate=True)
+
+    @staticmethod
+    def _recovery_key(base, outcome, digest):
+        if outcome not in {"succeeded", "failed"} or not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+            raise ValueError("a final outcome and digest are required")
+        return sha256(_json({"base": base, "recovery_outcome": outcome, "digest": digest})).hexdigest()
+
+    def _put(self, context, operation_id, descriptor, *, outcome, payload, recovery_candidate=False):
         result_key, aad, facts = self._binding(context, operation_id, descriptor)
         raw = self._payload(facts, outcome, payload)
+        if recovery_candidate:
+            result_key = self._recovery_key(result_key, outcome, sha256(payload.encode("utf-8")).hexdigest())
         with self._transaction() as connection:
             self._check_schema(connection)
             row = self._fetch(connection, result_key)
@@ -207,12 +223,20 @@ class EncryptedResultStore:
             )
 
     def get(
-        self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor,
+        self, context: ExecutionContext, operation_id: str, descriptor: ToolDescriptor, *,
+        expected_outcome=None, expected_digest=None,
     ) -> SupervisedResult | None:
         result_key, aad, facts = self._binding(context, operation_id, descriptor)
+        expected = expected_outcome is not None or expected_digest is not None
+        candidate = self._recovery_key(result_key, expected_outcome, expected_digest) if expected else None
         with self._transaction() as connection:
             self._check_schema(connection)
-            row = self._fetch(connection, result_key)
-            if row is None:
-                return None
-            return self._decode(row[0], row[1], aad, facts)
+            for key in ((candidate, result_key) if expected else (result_key,)):
+                row = self._fetch(connection, key)
+                if row is None:
+                    continue
+                result = self._decode(row[0], row[1], aad, facts)
+                if not expected or (result.outcome == expected_outcome and result.result_digest == expected_digest):
+                    return result
+            return None
+# HASHI-Fingerprint: hfp_ea162055c5ee41e2b27ab62ca922cfb6

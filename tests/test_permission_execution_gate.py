@@ -501,8 +501,9 @@ async def test_completed_result_waits_for_verified_resource_cleanup(environment,
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
 
 
+@pytest.mark.parametrize("worker_change", [False, True])
 @pytest.mark.asyncio
-async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once(environment, tmp_path):
+async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once(environment, tmp_path, worker_change):
     from orchestrator.permissions.descriptors import describe_tool
     from orchestrator.permissions.result_store import EncryptedResultStore
 
@@ -525,6 +526,18 @@ async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once
     async def recover(ctx, operation_id, plan):
         return results.get(ctx, operation_id, plan)
 
+    if worker_change:
+        from orchestrator.permissions.authority import OperationConflict
+        later = replace(context, execution_epoch="prestart-new", worker_generation="prestart-worker")
+        authority.bind_execution(later)
+        with pytest.raises(OperationConflict):
+            authority.reject_before_start(later, "prestart", descriptor.arguments_digest,
+                                          descriptor.scopes, result_digest=sha256(b"failure").hexdigest())
+        authority.fence_execution(context)
+        maximum = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+        gate = PermissionExecutionGate(authority, PermissionWaiter(authority), supervisor,
+                                      context=later, cwd=tmp_path, read_roots=(tmp_path,),
+                                      requestable_scopes=(maximum,))
     supervisor.execute, supervisor.recover = fail_before_start, recover
     first = await gate.execute("prestart", "file_write", arguments, reason="Save")
     second = await gate.execute("prestart", "file_write", arguments, reason="Save")
