@@ -50,6 +50,7 @@ def test_onboarding_runs_as_a_module_from_the_program_root(tmp_path, monkeypatch
     assert hashi_instance_cli.run_onboarding(record, code_root) == 0
     assert captured["command"] == [
         "python-runtime",
+        "-B",
         "-m",
         "tui.connection",
     ]
@@ -229,6 +230,10 @@ def test_graceful_stop_uses_exact_local_api_and_waits_for_unlock(
     monkeypatch.setattr(hashi_instance_cli, "_http_json", request)
     monkeypatch.setattr(hashi_instance_cli, "_admin_token", lambda *_: "secret")
     monkeypatch.setattr(hashi_instance_cli, "_lock_is_held", lambda _: False)
+    # This fixture owns a child process but no listener. Host instances using
+    # the example ports are unrelated and must not affect its release receipt.
+    import psutil
+    monkeypatch.setattr(psutil, "net_connections", lambda **_: [])
     try:
         assert hashi_instance_cli.stop_instance(registry, record) == 0
         assert calls == [(("POST", 18800, "/api/admin/shutdown"), {

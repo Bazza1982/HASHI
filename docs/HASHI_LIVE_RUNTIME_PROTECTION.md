@@ -85,11 +85,57 @@ Schema 1 accepts only absolute paths:
 ```
 
 Runtime target derivation checks qualified manifests against the observed Core
-receipt. Selector replacement invalidates the Tool Registry cache. Missing,
-ambiguous or mismatched required installation records deny execution before
-the executor; they never fall back to an unprotected interpretation. Read-only
-inspection remains available when the installation itself is valid. This is
-Functions tool admission, not a new Core executable-selection channel.
+receipt. Selector replacement invalidates the target cache. The cache is a
+denial boundary, never evidence that current installation bytes remain qualified.
+
+If an installation later drifts, retain the complete previously verified
+Core/FR/base/manifests/selector boundary for that same Worker and installation.
+Ordinary workzone reads and writes still follow their original permissions.
+Core, runtime, secret and process protection remain enforced.
+
+At a cold boundary failure, safe structured reads retain their existing roots
+and secret exclusions. A partial Core fingerprint plus a bound FR cannot prove
+the Core manifest or an independent Core base: it is not a complete boundary.
+Without a complete prior snapshot, writes, command execution and process control
+return a specific pre-dispatch recovery denial. No empty/partial target set is
+treated as permission. A malformed optional extension still cannot freeze an
+otherwise complete baseline.
+
+New processes and adoption are separate: they always require strict current
+installation qualification, including the full executable file closure. A
+retained target snapshot cannot authorize a new MCP process or Worker.
+
+### Fixed CLI MCP ownership
+
+Installed MCP invocations relay every tool to the original owning ToolRegistry.
+The JSON file carries a catalogue and an invocation-scoped capability, never
+the runtime object, a copied permission authority or tool secrets. Altering
+its paths or catalogue cannot widen the owner's access. The parent pins the
+context digest on the child command. Installed children require the owner's
+admission, requalify the pinned FR and bind before importing product tools.
+
+The owner freezes the canonical PAO owner/Agent/Session/Run/fence/generation/
+worker identity and its current workzone scope. It rechecks after resource
+waiting and again at the actual business executor entry after asynchronous
+fingerprint/evidence preparation. Stop, changed context, revoked invocation
+or changed workzone cannot dispatch a pending effect. Cancellation is per call;
+a cancellation arriving before registration remains recorded until revocation.
+An acknowledgement means cancellation was requested, not that effects rolled back
+or cleanup completed. Progress uses the existing activity projection; general
+tools acquire no extra browser deadline or HERV3 execution limit.
+
+A preflight catalogue without a Run has no executable capability. Installed
+calls missing owner facts fail specifically and cannot use legacy local
+execution. This relay does not qualify Fixed CLIs for managed L1/L2; it never
+substitutes the unrestricted catalogue for an assigned permission channel.
+
+Pre-dispatch runtime errors preserve their category, tool_executed=false and
+effect=no_change through every result adapter. A lost response after dispatch
+remains unconfirmed and must not invite a blind retry. Sanitised result/audit
+details identify a failed boundary refresh, completeness and controlled
+installation maintenance; target caching is not a current health claim.
+
+This is Functions tool admission, not a new Core executable-selection channel.
 
 The file can only extend the derived baseline; it cannot disable Core,
 interpreter, secret, or PID protection. Unknown fields, relative paths, or a
@@ -134,7 +180,9 @@ receives read/execute, while SYSTEM and Administrators retain full control.
 elevated deployment process.
 
 The Windows non-elevated mode blocks real file modification and child creation,
-but the same file owner can deliberately replace its ACL. It is a canary and
+but deliberately leaves ACL/owner repair rights available to that same file
+owner so an exact saved descriptor can be restored. The owner can therefore
+deliberately replace its ACL. It is a canary and
 compatibility mode, not account isolation. Strong Windows deployment needs an
 Administrator-owned dedicated live parent; a live environment placed beneath
 an Agent-writable repository can still have its top-level directory renamed by

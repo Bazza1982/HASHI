@@ -61,6 +61,69 @@ def _reason(result) -> str:
     return str((result.details or {}).get("reason") or "")
 
 
+def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundary(tmp_path, monkeypatch):
+    import asyncio
+    import orchestrator.live_runtime_protection as protection
+    from orchestrator.runtime_contract import RuntimeContractError
+    registry, paths = _registry(tmp_path)
+    note = paths["workspace"]/"cold.txt"
+    note.write_text("cold-read-evidence", encoding="utf-8")
+    def unavailable(*args, **kwargs):
+        raise RuntimeContractError("fixture qualification failed")
+    monkeypatch.setattr(protection, "admitted_protection_targets", unavailable)
+    async def exercise():
+        result = await registry.execute("file_read", {"path":str(note)}, "cold-read")
+        assert not result.is_error and "cold-read-evidence" in result.output
+        assert result.details["runtime_protection"]["protection_complete"] is False
+        denied = await registry.execute("file_read", {"path":str(paths["secrets_path"])}, "secret")
+        assert denied.is_error
+        destination = paths["workspace"]/"unverified.txt"
+        denied = await registry.execute("file_write", {"path":str(destination), "content":"unsafe"}, "write")
+        assert denied.is_error
+        assert denied.details["tool_executed"] is False
+        assert not destination.exists()
+        for path in (paths["runtime_root"]/"Lib/stdlib.py", paths["code_root"]/"main.py"):
+            denied = await registry.execute("file_write", {"path":str(path), "content":"unsafe"}, "protected")
+            assert denied.is_error and not path.exists()
+    asyncio.run(exercise())
+
+
+def test_runtime_drift_keeps_workspace_access_and_prior_protection(tmp_path, monkeypatch):
+    import asyncio
+    import orchestrator.live_runtime_protection as protection
+    from orchestrator.runtime_contract import RuntimeContractError
+
+    registry, paths = _registry(tmp_path)
+    business = paths["workspace"] / "notes.txt"
+    business.write_text("business-evidence", encoding="utf-8")
+
+    async def exercise():
+        before = await registry.execute("file_read", {"path": str(business)}, "before")
+        assert not before.is_error
+        assert "business-evidence" in before.output
+
+        def broken(*args, **kwargs):
+            raise RuntimeContractError("Runtime installation file closure changed: unlisted=['Lib/__pycache__/sample.pyc']")
+
+        monkeypatch.setattr(protection, "admitted_protection_targets", broken)
+        policy_path = paths["bridge_home"] / "state/platform/live-runtime-protection.json"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text('{"schema":1}', encoding="utf-8")
+        observed = await registry.execute("file_read", {"path": str(business)}, "after")
+        assert not observed.is_error, observed.output
+        assert "business-evidence" in observed.output
+
+        note = paths["workspace"] / "result.txt"
+        written = await registry.execute("file_write", {"path": str(note), "content": "permitted"}, "write")
+        assert not written.is_error, written.output
+        assert note.read_text(encoding="utf-8") == "permitted"
+        core = paths["code_root"] / "main.py"
+        denied = await registry.execute("file_write", {"path": str(core), "content": "unsafe"}, "core")
+        assert denied.is_error
+        assert not core.exists()
+
+    asyncio.run(exercise())
+
 def test_live_runtime_gate_denies_core_and_secret_but_allows_workzone(tmp_path):
     registry, paths = _registry(tmp_path)
 
@@ -242,3 +305,4 @@ def test_malformed_optional_policy_does_not_disable_derived_core_protection(tmp_
         )
         is None
     )
+# HASHI-Fingerprint: hfp_bd21f58119e14009837bbd0fcec8cc4f

@@ -883,6 +883,7 @@ class ToolRegistry:
             if cache_key != self._live_runtime_policy_cache_key:
                 self._live_runtime_policy_cache = load_live_runtime_policy(
                     global_config, runtime_prefix=runtime_prefix, core_runtime=core_runtime,
+                    previous_policy=self._live_runtime_policy_cache,
                 )
                 self._live_runtime_policy_cache_key = cache_key
         except (OSError, ValueError, RuntimeContractError):
@@ -892,6 +893,7 @@ class ToolRegistry:
                 is_error=True,
                 details={"control_disposition": "denied", "reason": "live_runtime_protection",
                          "operation": "runtime_qualification_unavailable", "retryable": False,
+                         "error_code": "runtime_integrity_failed",
                          "tool_executed": False},
             )
         if tool_name == "file_search":
@@ -1025,6 +1027,23 @@ class ToolRegistry:
         try:
             from orchestrator.execution_resources import tool_resource
             async with tool_resource(self, tool_name, arguments) as resource_wait_ms:
+                guard = self._effective_audit_context().get("_tool_dispatch_guard")
+                if callable(guard):
+                    # Never hold a PAO database transaction across an await.
+                    # Recheck after any resource wait, immediately before dispatch.
+                    from orchestrator.session_store import SessionConflict
+                    try:
+                        with guard():
+                            pass
+                    except SessionConflict:
+                        result = ToolResult(
+                            tool_call_id=effective_call_id, is_error=True,
+                            output="Error: owner_run_not_current; this call did not execute.",
+                            details={"control_disposition":"denied", "tool_executed":False,
+                                     "error_code":"owner_run_not_current", "retryable":False})
+                        result = self._finalize_tool_result(tool_name, arguments, result, started)
+                        self._record_tool_audit(tool_name, arguments, result, started)
+                        return result
                 from orchestrator.fingerprint.execution import dispatch_controlled
                 dispatched = await dispatch_controlled(
                     self, tool_name, arguments, tool_call_id=effective_call_id,
@@ -1053,6 +1072,26 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             raise
         except Exception as e:
+            from orchestrator.session_store import SessionConflict
+            if isinstance(e, SessionConflict):
+                details = dict(getattr(e, "hashi_tool_details", {}) or {})
+                details.update({
+                    "control_disposition": "denied",
+                    "tool_executed": False,
+                    "error_code": "owner_run_not_current",
+                    "retryable": False,
+                })
+                result = ToolResult(
+                    tool_call_id=effective_call_id,
+                    output="Error: owner_run_not_current; this call did not execute.",
+                    is_error=True,
+                    details=details,
+                )
+                result = self._finalize_tool_result(
+                    tool_name, arguments, result, started
+                )
+                self._record_tool_audit(tool_name, arguments, result, started)
+                return result
             remote = getattr(e, "error", None)
             broker_error = (
                 type(e).__name__ == "CapabilityBrokerError"
@@ -1213,6 +1252,17 @@ class ToolRegistry:
         """Apply the optional five-field contract and append one ledger row."""
         from tools.effect_receipts import observe_tool_effect
 
+        policy = self._live_runtime_policy_cache
+        if policy is not None and policy.qualification_error:
+            result.details = {**(result.details or {}), "runtime_protection": {
+                "qualification": "failed_at_boundary_refresh",
+                "error_code": ("runtime_protection_context_unavailable"
+                    if policy.qualification_error == "missing_core_receipt"
+                    else "runtime_integrity_failed"),
+                "protection_complete": policy.protection_complete,
+                "new_process_admission": "strict_qualification_required",
+                "recovery": "controlled_installation_maintenance",
+            }}
         try:
             receipt = (result.details or {}).get("effect_receipt")
             if "fingerprint" not in (result.details or {}):
@@ -1761,6 +1811,13 @@ class ToolRegistry:
         *,
         tool_call_id: str = "",
     ) -> str | StructuredToolOutput:
+        guard = self._effective_audit_context().get("_tool_dispatch_guard")
+        if callable(guard):
+            # Fingerprint and other evidence preparation may await after the
+            # resource-level check. Recheck at the actual business executor
+            # entry, with no await before selecting the tool implementation.
+            with guard():
+                pass
         from tools.builtins import (
             execute_bash,
             execute_shell,

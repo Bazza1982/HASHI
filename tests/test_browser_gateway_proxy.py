@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,62 @@ def _registry(tmp_path: Path, audit: dict) -> ToolRegistry:
         secrets={}, audit_context=audit,
     )
 
+
+def _pao_audit(tmp_path, facade, agent="fixture", request_id="read-request"):
+    from orchestrator.session_store import SessionStore
+    store = SessionStore(tmp_path/"state/sessions.sqlite3", instance_id="HASHI4")
+    session = store.create_session(owner_id="owner", agent_id=agent)
+    accepted = store.accept_run(session_id=session["session_id"], owner_id="owner",
+        agent_id=agent, request_id=request_id, text="test tools", source="test",
+        idempotency_key=request_id)
+    fence = store.mark_request_running(request_id, worker_id="HASHI4:"+agent)
+    return {"_runtime":SimpleNamespace(orchestrator=facade, session_store=store),
+        "agent_name":agent, "request_id":request_id, "owner_id":"owner", "instance_id":"HASHI4",
+        "hashi_session_id":session["session_id"], "hashi_run_id":accepted.run_id,
+        "hashi_fencing_token":fence}
+
+
+@pytest.mark.asyncio
+async def test_installed_cli_file_tools_return_to_authoritative_owner(tmp_path):
+    from tools.gateway.mcp_stdio import ToolGateway
+    facade = _Facade()
+    config = SimpleNamespace(
+        instance_id="HASHI4", project_root=Path(__file__).resolve().parents[1],
+        bridge_home=tmp_path, secrets_path=tmp_path/"secret.json",
+    )
+    audit = {**_pao_audit(tmp_path, facade), "global_config":config}
+    workspace = tmp_path/"workspace"
+    workspace.mkdir()
+    note = workspace/"note.txt"
+    note.write_text("owner-read-evidence", encoding="utf-8")
+    registry = ToolRegistry(["file_read", "file_write"], access_root=workspace,
+                            workspace_dir=workspace, secrets={}, audit_context=audit)
+    adapter = SimpleNamespace(tool_registry=registry,
+        config=SimpleNamespace(workspace_dir=workspace), global_config=config)
+    invocation = prepare_hashi_mcp(adapter, backend="codex-cli")
+    try:
+        context = load_gateway_context(Path(invocation["context_path"]))
+        assert context.audit.get("tool_gateway_proxy"), "Installed CLI lost its owner authority"
+        gateway = ToolGateway(context)
+        result = await gateway.call("hashi_file_read", {"path":str(note)}, "read")
+        assert result["isError"] is False
+        assert "owner-read-evidence" in json.dumps(result)
+        outside = tmp_path/"outside.txt"
+        from dataclasses import replace
+        altered = replace(context, access_root=str(tmp_path), access_roots=[str(tmp_path)])
+        denied = await ToolGateway(altered).call(
+            "hashi_file_write", {"path":str(outside), "content":"unsafe"}, "write")
+        assert denied["isError"] is True
+        assert not outside.exists()
+        descriptor = dict(context.audit["tool_gateway_proxy"])
+        invocation.close()
+        rejected = await gateway.call("hashi_file_read", {"path":str(note)}, "revoked")
+        assert rejected["isError"] is True
+    finally:
+        invocation.close()
+        proxy = getattr(adapter, "_browser_gateway_proxy", None)
+        if proxy:
+            await asyncio.to_thread(proxy.close)
 
 @pytest.mark.asyncio
 async def test_cli_browser_gateway_uses_owner_registry_and_core_facade(tmp_path):
@@ -166,11 +223,8 @@ async def test_cli_browser_gateway_scope_limit_is_fail_closed_and_recoverable(tm
 @pytest.mark.asyncio
 async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
     facade = _Facade()
-    registry = _registry(tmp_path, {
-        "_runtime": SimpleNamespace(orchestrator=facade),
-        "agent_name": "agent1", "request_id": "request-8",
-        "global_config": SimpleNamespace(instance_id="HASHI4"),
-    })
+    registry = _registry(tmp_path, {**_pao_audit(tmp_path, facade, "agent1", "request-8"),
+        "global_config": SimpleNamespace(instance_id="HASHI4")})
     adapter = SimpleNamespace(
         tool_registry=registry,
         config=SimpleNamespace(workspace_dir=tmp_path),
@@ -181,7 +235,7 @@ async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
         descriptor = prepare_hashi_mcp(adapter, backend="codex-cli")
         assert descriptor is not None
         context = load_gateway_context(Path(descriptor["context_path"]))
-        assert context.audit["browser_gateway_proxy"]["url"].startswith(
+        assert context.audit["tool_gateway_proxy"]["url"].startswith(
             "http://127.0.0.1:"
         )
         assert context.audit["request_id"] == "request-8"
@@ -192,3 +246,4 @@ async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
         proxy = getattr(adapter, "_browser_gateway_proxy", None)
         if proxy is not None:
             await asyncio.to_thread(proxy.close)
+# HASHI-Fingerprint: hfp_7c9dcfd71f854fe18d24f90d38c02b99

@@ -14,6 +14,27 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO
 
+# Installed MCP children requalify and bind before importing product tooling.
+# The parent passes its pinned admission reference, never an Agent-selected root.
+if (__name__ == "__main__" and (Path(sys.prefix) / "runtime-policy").is_dir()
+        and ("--runtime-manifest" not in sys.argv or "--owner-proxy-required" not in sys.argv)):
+    raise SystemExit("runtime_protection_context_unavailable: installed MCP requires its owner admission")
+if __name__ == "__main__" and "--runtime-manifest" in sys.argv:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--runtime-manifest", type=Path, required=True)
+    bootstrap.add_argument("--runtime-manifest-digest", required=True)
+    binding, _ = bootstrap.parse_known_args()
+    from orchestrator.runtime_contract import (
+        FUNCTIONS_ROLE, qualified_runtime_from_reference, bind_process_runtime,
+        enforce_runtime_contract,
+    )
+    root = Path(__file__).resolve().parents[2]
+    qualified = qualified_runtime_from_reference(
+        {"path":str(binding.runtime_manifest), "digest":binding.runtime_manifest_digest},
+        code_root=root, role=FUNCTIONS_ROLE)
+    bind_process_runtime(qualified, code_root=root)
+    enforce_runtime_contract(root, role=FUNCTIONS_ROLE)
+
 from jsonschema import Draft7Validator
 
 from tools.gateway.context import GatewayContext, load_gateway_context
@@ -133,7 +154,7 @@ def _bridge_legacy_screenshot_output(
 class ToolGateway:
     def __init__(self, context: GatewayContext):
         self.context = context
-        self.registry = context.build_registry()
+        self.registry = None if context.audit.get("tool_gateway_required") else context.build_registry()
         self.call_count = 0
         self.consecutive_errors = 0
         self.fingerprints: Counter[str] = Counter()
@@ -158,7 +179,9 @@ class ToolGateway:
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         definitions = []
-        for definition in self.registry.get_tool_definitions():
+        catalog = (self.context.owner_tool_definitions if self.registry is None
+                   else self.registry.get_tool_definitions())
+        for definition in catalog:
             function = definition["function"]
             internal_name = function["name"]
             exposed_name = exposed_tool_name(internal_name)
@@ -223,7 +246,12 @@ class ToolGateway:
             )
 
         internal_name = _GATEWAY_INTERNAL_TOOL_NAMES.get(name, name)
-        if callable(on_tool_activity):
+        if self.context.audit.get("tool_gateway_required"):
+            from tools.gateway.owner_proxy import execute_via_owner
+            result = await execute_via_owner(
+                self.context.audit.get("tool_gateway_proxy"), internal_name, arguments, call_id,
+                on_tool_activity=on_tool_activity)
+        elif callable(on_tool_activity):
             result = await self.registry.execute_with_audit_context(
                 internal_name, arguments, tool_call_id=call_id,
                 audit_context={"tool_activity_observer": on_tool_activity})
@@ -353,8 +381,13 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
-    gateway = ToolGateway(load_gateway_context(context_path))
+async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO, *,
+                owner_required: bool = False, context_digest: str | None = None) -> None:
+    context = load_gateway_context(context_path, expected_digest=context_digest)
+    if owner_required:
+        from dataclasses import replace
+        context = replace(context, audit={**context.audit, "tool_gateway_required": True})
+    gateway = ToolGateway(context)
     pending: dict[str, asyncio.Task] = {}
     write_lock = asyncio.Lock()
 
@@ -388,7 +421,7 @@ async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
             else:
                 response = await _dispatch(gateway, request)
         except asyncio.CancelledError:
-            response = _error(request_id, -32800, "request cancelled; foreground cleanup completed or reported")
+            response = _error(request_id, -32800, "request cancelled; check the owner cleanup receipt before retrying")
         except Exception as exc:
             response = _error(request_id, -32603, f"internal gateway error: {exc}")
         if response is not None:
@@ -424,11 +457,19 @@ async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Expose HASHI ToolRegistry over MCP stdio")
     parser.add_argument("--context", type=Path, required=True)
+    parser.add_argument("--owner-proxy-required", action="store_true")
+    parser.add_argument("--context-digest")
+    parser.add_argument("--runtime-manifest", type=Path)
+    parser.add_argument("--runtime-manifest-digest")
     args = parser.parse_args()
+    if args.owner_proxy_required and not args.context_digest:
+        parser.error("--owner-proxy-required needs its admitted context digest")
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
-    asyncio.run(serve(args.context, sys.stdin.buffer, sys.stdout.buffer))
+    asyncio.run(serve(args.context, sys.stdin.buffer, sys.stdout.buffer,
+        owner_required=args.owner_proxy_required, context_digest=args.context_digest))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_a46c42d66f764fbbb6aa65768a2a59c7

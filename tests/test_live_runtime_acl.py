@@ -60,6 +60,53 @@ def _windows_token_is_elevated() -> bool:
     return os.name == "nt" and bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows recovery identity contract")
+def test_windows_strong_lock_rejects_same_runtime_and_recovery_identity(tmp_path, monkeypatch):
+    root = tmp_path / "unsafe-shared-identity"
+    root.mkdir()
+    calls = []
+    monkeypatch.setattr(live_runtime_acl, "_run_windows_acl", lambda argv: calls.append(argv))
+    with pytest.raises(PermissionError, match="recovery|maintenance"):
+        apply_windows_read_only(
+            (NativeProtectionTarget(root, recursive=True, kind="runtime"),),
+            runtime_sid=windows_current_sid(), lock_owner=True,
+        )
+    assert calls == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows non-mutating verification")
+def test_windows_verify_never_creates_a_probe_in_the_installation(tmp_path, monkeypatch):
+    from scripts.protect_live_runtime import _verify_windows
+    root = tmp_path / "sealed"
+    root.mkdir()
+    attempted = []
+    monkeypatch.setattr(Path, "write_bytes", lambda path, data: attempted.append(path))
+    reports = _verify_windows(
+        (NativeProtectionTarget(root, recursive=True, kind="runtime"),),
+        windows_current_sid(),
+    )
+    assert attempted == []
+    assert reports[0]["write_denied"] is False
+    assert list(root.iterdir()) == []
+
+
+def test_deployment_policy_retains_incomplete_runtime_facts(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import scripts.protect_live_runtime as deployment
+    from dataclasses import replace
+    policy = replace(_policy(tmp_path), protection_complete=False,
+                     qualification_error="RuntimeContractError")
+    monkeypatch.setattr(deployment, "load_live_runtime_policy", lambda *args, **kwargs: policy)
+    args = SimpleNamespace(
+        code_root=policy.code_root, bridge_home=policy.bridge_home,
+        secrets_path=None, instance_id="TEST", runtime_root=policy.runtime_roots[0],
+        service_config=[], restart_secret=[], service_target=[],
+    )
+    observed = deployment._policy(args, include_unpublished=True)
+    assert observed.protection_complete is False
+    assert observed.qualification_error == "RuntimeContractError"
+
+
 def test_native_target_plan_is_exact_and_never_protects_repo_or_workzone(tmp_path):
     policy = _policy(tmp_path)
     workzone = tmp_path / "workzones" / "agent"
@@ -115,61 +162,60 @@ def test_native_target_plan_accepts_exact_managed_python_prefix(
 @pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
 def test_windows_acl_rejects_real_writes_and_restores_disposable_target(tmp_path):
-    if _windows_token_is_elevated():
-        pytest.skip("Write denial requires a non-admin runtime token")
     root = tmp_path / "live-runtime"
     root.mkdir()
     child = root / "package.py"
     child.write_text("before\n", encoding="utf-8")
     sid = windows_current_sid()
     targets = (NativeProtectionTarget(root, recursive=True, kind="runtime"),)
+    backup = tmp_path / "acl-recovery.json"
+    live_runtime_acl._run_windows_acl(["icacls.exe", str(child), "/grant:r", f"*{sid}:(F)", "/inheritance:r"])
+    before = {path: live_runtime_acl._windows_get_sddl(path) for path in (tmp_path, root, child)}
 
     try:
-        apply_windows_read_only(targets, runtime_sid=sid, lock_owner=False)
+        reports = apply_windows_read_only(targets, runtime_sid=sid, lock_owner=False,
+                                         snapshot_path=backup, canary=True)
+        assert reports[0]["assurance"] == "canary"
         assert child.read_text(encoding="utf-8") == "before\n"
         with pytest.raises(PermissionError):
             child.write_text("changed\n", encoding="utf-8")
         with pytest.raises(PermissionError):
             (root / "new.py").write_text("new\n", encoding="utf-8")
     finally:
-        restore_windows_access(targets, runtime_sid=sid)
+        restore_windows_access(targets, runtime_sid=sid, snapshot_path=backup)
 
+    assert {path: live_runtime_acl._windows_get_sddl(path) for path in before} == before
     child.write_text("restored\n", encoding="utf-8")
     assert child.read_text(encoding="utf-8") == "restored\n"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
-def test_windows_acl_installs_replacement_before_removing_inheritance(
-    tmp_path,
-    monkeypatch,
-):
-    root = tmp_path / "inherited-runtime"
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL recovery contract")
+def test_windows_acl_failed_apply_restores_exact_acl(tmp_path, monkeypatch):
+    root = tmp_path / "failed-runtime"
     root.mkdir()
-    calls: list[list[str]] = []
-
-    def record(command):
+    child = root / "package.py"
+    child.write_text("before", encoding="utf-8")
+    sid = windows_current_sid()
+    targets = (NativeProtectionTarget(root, recursive=True, kind="runtime"),)
+    before = {path: live_runtime_acl._windows_get_sddl(path) for path in (tmp_path, root, child)}
+    original = live_runtime_acl._run_windows_acl
+    calls = []
+    def fail_during_apply(command):
         calls.append(command)
-        return "ok"
-
-    monkeypatch.setattr(live_runtime_acl, "_run_windows_acl", record)
-    apply_windows_read_only(
-        (NativeProtectionTarget(root, recursive=True, kind="runtime"),),
-        runtime_sid="S-1-5-21-1000",
-        lock_owner=False,
-    )
-
-    assert len(calls) == 1
-    assert calls[0].index("/grant:r") < calls[0].index("/inheritance:r")
-    assert "*S-1-5-21-1000:(OI)(CI)(RX)" in calls[0]
-    assert "*S-1-5-18:(OI)(CI)(F)" in calls[0]
-    assert "*S-1-5-32-544:(OI)(CI)(F)" in calls[0]
+        if len(calls) == 3:
+            raise OSError("injected ACL update failure")
+        return original(command)
+    monkeypatch.setattr(live_runtime_acl, "_run_windows_acl", fail_during_apply)
+    with pytest.raises(OSError, match="injected"):
+        apply_windows_read_only(targets, runtime_sid=sid, lock_owner=False,
+            snapshot_path=tmp_path / "failure-recovery.json", canary=True)
+    assert {path: live_runtime_acl._windows_get_sddl(path) for path in before} == before
+    child.write_text("after rollback", encoding="utf-8")
 
 
 @pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows deployment script contract")
 def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path):
-    if _windows_token_is_elevated():
-        pytest.skip("Write denial requires a non-admin runtime token")
     code_root = tmp_path / "source"
     runtime_root = code_root / ".venv"
     bridge_home = tmp_path / "instance"
@@ -189,10 +235,11 @@ def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path)
         str(bridge_home),
         "--runtime-root",
         str(runtime_root),
+        "--canary", "--acl-backup", str(tmp_path / "deployment-acl.json"),
     ]
 
     plan = subprocess.run(
-        [sys.executable, str(script), "plan", *common],
+        [sys.executable, "-B", str(script), "plan", *common],
         capture_output=True,
         text=True,
     )
@@ -203,6 +250,7 @@ def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path)
         applied = subprocess.run(
             [
                 sys.executable,
+                "-B",
                 str(script),
                 "apply",
                 *common,
@@ -214,7 +262,7 @@ def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path)
         )
         assert applied.returncode == 0, applied.stderr
         verified = subprocess.run(
-            [sys.executable, str(script), "verify", *common],
+            [sys.executable, "-B", str(script), "verify", *common],
             capture_output=True,
             text=True,
         )
@@ -223,6 +271,7 @@ def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path)
         restored = subprocess.run(
             [
                 sys.executable,
+                "-B",
                 str(script),
                 "restore",
                 *common,
@@ -322,3 +371,4 @@ def test_posix_acl_rejects_real_writes_and_restores_disposable_target(tmp_path):
     )
     assert restored.returncode == 0
     assert child.read_text(encoding="utf-8") == "restored"
+# HASHI-Fingerprint: hfp_d06483aebc6d479a886ac6947daf2b5e
