@@ -443,6 +443,7 @@ $operations = @{
     accounts = WindowsAccounts()
     identity = None
     cleanup_safe = False
+    probe_receipt = None
     try:
         identity = DisposableTestIdentity(accounts, base / "identity.json")
         with identity:
@@ -511,6 +512,7 @@ $operations = @{
                 assert receipt["renamed_exists"] is False
                 assert receipt["root_renamed_exists"] is False
                 assert child.read_text(encoding="utf-8") == "protected"
+                probe_receipt = receipt
             finally:
                 _close_test_process(process)
                 if sealed:
@@ -524,6 +526,13 @@ $operations = @{
             cleanup_safe = True
         if cleanup_safe:
             shutil.rmtree(base)
+    assert probe_receipt is not None
+    assert not base.exists(), "disposable runtime probe directory cleanup was not confirmed"
+    print(json.dumps({
+        "windows_identity_acl_probe": probe_receipt,
+        "account_deleted": cleanup_safe,
+        "directory_removed": not base.exists(),
+    }, sort_keys=True))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows policy rollback contract")
