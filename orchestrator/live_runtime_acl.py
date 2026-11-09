@@ -271,9 +271,9 @@ def apply_windows_read_only(
             # Explicit deny on every existing object also wins against explicit
             # per-child grants and protected (non-inheriting) child DACLs.
             if parent_guard:
-                rights = "(DC)" if canary else "(DC,WDAC,WO)"
+                rights = "(DC)" if canary else "(D,DC,WDAC,WO)"
             else:
-                rights = "(WD,AD,WEA,WA)" if canary else "(WD,AD,WEA,WA,WDAC,WO)"
+                rights = "(WD,AD,WEA,WA)" if canary else "(D,WD,AD,WEA,WA,WDAC,WO)"
             commands = []
             if lock_owner:
                 commands.append(["icacls.exe", str(path), "/setowner", "*" + maintainer])
@@ -284,7 +284,7 @@ def apply_windows_read_only(
                 inherited_rights = (
                     "(WD,AD,WEA,WA)"
                     if canary
-                    else "(WD,AD,WEA,WA,WDAC,WO)"
+                    else "(D,WD,AD,WEA,WA,WDAC,WO)"
                 )
                 commands.append(["icacls.exe", str(path), "/deny",
                                  f"*{sid}:(OI)(CI)(IO){inherited_rights}"])

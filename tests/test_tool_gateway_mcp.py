@@ -196,6 +196,50 @@ async def test_mcp_lists_hashi_browser_tools_and_validates_arguments(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mcp_preserves_safe_authoritative_error_details(tmp_path, monkeypatch):
+    gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
+
+    async def denied(*args, **kwargs):
+        return ToolResult(
+            tool_call_id="runtime-denial",
+            output="Error: installed runtime protection could not be verified; use controlled recovery.",
+            is_error=True,
+            details={
+                "control_disposition": "denied",
+                "tool_executed": False,
+                "error_code": "runtime_integrity_failed",
+                "retryable": False,
+                "runtime_protection": {
+                    "execution_role": "functions",
+                    "qualification_scope": "core_and_functions",
+                    "instance_id": "HASHI6",
+                    "agent_id": "lin_yueru",
+                    "request_id": "request-1",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "recovery": "controlled_installation_maintenance",
+                },
+                "secret": "must-not-cross-mcp",
+            },
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", denied)
+    result = await gateway.call(
+        "hashi_file_read", {"path": str(tmp_path / "note.txt")}, "runtime-denial"
+    )
+
+    projected = result["structuredContent"]["hashi"]["details"]
+    assert result["_meta"]["hashi/toolResultDetails"] == projected
+    assert projected["error_code"] == "runtime_integrity_failed"
+    assert projected["tool_executed"] is False
+    assert projected["retryable"] is False
+    assert projected["runtime_protection"]["instance_id"] == "HASHI6"
+    assert projected["runtime_protection"]["run_id"] == "run-1"
+    assert "secret" not in projected
+    assert any("runtime_integrity_failed" in block.get("text", "") for block in result["content"])
+
+
+@pytest.mark.asyncio
 async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, monkeypatch):
     registry = _registry(tmp_path)
     context_path = tmp_path / "scheduler-context.json"

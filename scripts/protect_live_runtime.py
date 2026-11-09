@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -17,6 +17,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from orchestrator.config_json import (  # noqa: E402
+    ConfigConflictError,
+    ConfigDocument,
+    file_write_lock,
     new_config_json,
     read_config_json,
     write_config_json,
@@ -150,14 +153,39 @@ def _policy(args: argparse.Namespace, *, include_unpublished: bool):
     )
 
 
-def _publish_policy(args: argparse.Namespace) -> Path:
+@dataclass(frozen=True)
+class _PolicyPublication:
+    path: Path
+    previous: ConfigDocument | None
+    revision: str
+
+
+def _publish_policy(args: argparse.Namespace) -> _PolicyPublication:
     path = args.bridge_home / POLICY_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot = read_config_json(path) if path.exists() else new_config_json(path)
+    previous = read_config_json(path) if path.exists() else None
+    snapshot = previous.copy() if previous is not None else new_config_json(path)
     snapshot.clear()
     snapshot.update(_policy_payload(args))
-    write_config_json(path, snapshot)
-    return path
+    revision = write_config_json(path, snapshot)
+    return _PolicyPublication(path=path, previous=previous, revision=revision)
+
+
+def _rollback_policy(publication: _PolicyPublication) -> None:
+    if publication.previous is not None:
+        write_config_json(
+            publication.path,
+            publication.previous,
+            expected_revision=publication.revision,
+        )
+        return
+    with file_write_lock(publication.path):
+        current = read_config_json(publication.path)
+        if current.revision != publication.revision:
+            raise ConfigConflictError(
+                "live runtime policy changed after publication; refusing rollback"
+            )
+        publication.path.unlink()
 
 
 def _targets(args: argparse.Namespace, *, include_unpublished: bool):
@@ -242,24 +270,33 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("complete verified Core/Functions references are required before apply")
     if args.action == "apply":
         _confirmation(args, "protect")
-        _publish_policy(args)
-        targets, _pending = _targets(args, include_unpublished=False)
-        if os.name == "nt":
-            reports = apply_windows_read_only(
-                targets,
-                runtime_sid=principal,
-                lock_owner=args.lock_owner,
-                snapshot_path=args.acl_backup, maintenance_sid=args.maintenance_principal,
-                runtime_pid=args.runtime_pid, protection_anchor=args.protection_anchor,
-                canary=args.canary,
-            )
-        else:
-            reports = apply_posix_read_only(
-                targets,
-                runtime_user=principal,
-                runtime_group=str(group),
-                immutable=args.immutable,
-            )
+        publication = _publish_policy(args)
+        try:
+            targets, _pending = _targets(args, include_unpublished=False)
+            if os.name == "nt":
+                reports = apply_windows_read_only(
+                    targets,
+                    runtime_sid=principal,
+                    lock_owner=args.lock_owner,
+                    snapshot_path=args.acl_backup, maintenance_sid=args.maintenance_principal,
+                    runtime_pid=args.runtime_pid, protection_anchor=args.protection_anchor,
+                    canary=args.canary,
+                )
+            else:
+                reports = apply_posix_read_only(
+                    targets,
+                    runtime_user=principal,
+                    runtime_group=str(group),
+                    immutable=args.immutable,
+                )
+        except Exception as error:
+            try:
+                _rollback_policy(publication)
+            except Exception as rollback_error:
+                error.add_note(
+                    "live runtime policy rollback incomplete: " + str(rollback_error)
+                )
+            raise
     elif args.action == "verify":
         targets, _pending = _targets(args, include_unpublished=False)
         reports = (

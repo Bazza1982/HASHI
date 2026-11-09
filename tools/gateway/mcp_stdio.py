@@ -59,6 +59,59 @@ _GATEWAY_INTERNAL_TOOL_NAMES = {
     exposed: internal for internal, exposed in _GATEWAY_EXPOSED_TOOL_NAMES.items()
 }
 
+_SAFE_MCP_RESULT_KEYS = frozenset({
+    "control_disposition",
+    "tool_executed",
+    "error_code",
+    "operation",
+    "reason",
+    "retryable",
+    "recovery",
+    "effect_state",
+    "transport_state",
+    "cleanup_confirmed",
+    "runtime_protection",
+})
+_SAFE_RUNTIME_PROTECTION_KEYS = frozenset({
+    "qualification",
+    "error_code",
+    "protection_complete",
+    "new_process_admission",
+    "execution_role",
+    "qualification_scope",
+    "instance_id",
+    "agent_id",
+    "request_id",
+    "session_id",
+    "run_id",
+    "recovery",
+})
+
+
+def _safe_mcp_result_details(details: Any) -> dict[str, Any]:
+    """Project only model-safe control facts from the authoritative owner."""
+
+    if not isinstance(details, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in _SAFE_MCP_RESULT_KEYS:
+        if key not in details:
+            continue
+        value = details[key]
+        if key == "runtime_protection":
+            if isinstance(value, dict):
+                nested = {
+                    nested_key: nested_value[:512] if isinstance(nested_value, str) else nested_value
+                    for nested_key, nested_value in value.items()
+                    if nested_key in _SAFE_RUNTIME_PROTECTION_KEYS
+                    and (nested_value is None or isinstance(nested_value, (str, int, float, bool)))
+                }
+                if nested:
+                    safe[key] = nested
+        elif value is None or isinstance(value, (str, int, float, bool)):
+            safe[key] = value[:512] if isinstance(value, str) else value
+    return safe
+
 
 def exposed_tool_name(internal_name: str) -> str:
     return _GATEWAY_EXPOSED_TOOL_NAMES.get(internal_name, internal_name)
@@ -270,6 +323,7 @@ class ToolGateway:
             result.output,
             result.is_error or bridge_error,
             content,
+            result.details,
         )
 
     def _result(
@@ -277,6 +331,7 @@ class ToolGateway:
         output: str,
         is_error: bool,
         content: list[dict[str, Any]] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         safe_content: list[dict[str, Any]] = []
         for block in content or []:
@@ -300,10 +355,24 @@ class ToolGateway:
                 )
         if not safe_content:
             safe_content = [{"type": "text", "text": output}]
-        return {
+        safe_details = _safe_mcp_result_details(details)
+        if is_error and safe_details:
+            safe_content.append({
+                "type": "text",
+                "text": "HASHI result details: " + json.dumps(
+                    safe_details, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+            })
+        result = {
             "content": safe_content,
             "isError": is_error,
         }
+        if safe_details:
+            result["structuredContent"] = {
+                "hashi": {"isError": is_error, "details": safe_details}
+            }
+            result["_meta"] = {"hashi/toolResultDetails": safe_details}
+        return result
 
 
 def _read_frame(stream: BinaryIO) -> dict[str, Any] | None:

@@ -66,6 +66,13 @@ def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundar
     import orchestrator.live_runtime_protection as protection
     from orchestrator.runtime_contract import RuntimeContractError
     registry, paths = _registry(tmp_path)
+    registry.audit_context.update({
+        "agent_name": "rika",
+        "instance_id": "HASHI6",
+        "request_id": "request-runtime-failure",
+        "hashi_session_id": "session-runtime-failure",
+        "hashi_run_id": "run-runtime-failure",
+    })
     note = paths["workspace"]/"cold.txt"
     note.write_text("cold-read-evidence", encoding="utf-8")
     def unavailable(*args, **kwargs):
@@ -81,6 +88,15 @@ def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundar
         denied = await registry.execute("file_write", {"path":str(destination), "content":"unsafe"}, "write")
         assert denied.is_error
         assert denied.details["tool_executed"] is False
+        diagnostic = denied.details["runtime_protection"]
+        assert diagnostic["execution_role"] == "functions"
+        assert diagnostic["qualification_scope"] == "core_and_functions"
+        assert diagnostic["instance_id"] == "HASHI6"
+        assert diagnostic["agent_id"] == "rika"
+        assert diagnostic["request_id"] == "request-runtime-failure"
+        assert diagnostic["session_id"] == "session-runtime-failure"
+        assert diagnostic["run_id"] == "run-runtime-failure"
+        assert diagnostic["recovery"] == "controlled_installation_maintenance"
         assert not destination.exists()
         for path in (paths["runtime_root"]/"Lib/stdlib.py", paths["code_root"]/"main.py"):
             denied = await registry.execute("file_write", {"path":str(path), "content":"unsafe"}, "protected")

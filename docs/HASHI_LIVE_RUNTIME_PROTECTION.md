@@ -134,6 +134,12 @@ effect=no_change through every result adapter. A lost response after dispatch
 remains unconfirmed and must not invite a blind retry. Sanitised result/audit
 details identify a failed boundary refresh, completeness and controlled
 installation maintenance; target caching is not a current health claim.
+Direct and MCP callers receive the same allowlisted result facts. MCP exposes
+them as structured result content and HASHI metadata, while its readable error
+text contains only the same sanitised projection. Runtime-integrity diagnostics
+include the execution role and qualified scope plus available instance, Agent,
+request, Session and Run identities and a recovery action. Unknown detail keys
+and secrets are never forwarded.
 
 This is Functions tool admission, not a new Core executable-selection channel.
 
@@ -144,7 +150,11 @@ active so a malformed optional file neither removes Core protection nor makes
 the Agent's whole workzone read-only.
 
 The policy itself is a protected write target. Platform deployment must apply
-native ACLs to it together with the live targets.
+native ACLs to it together with the live targets. Policy publication and ACL
+application form one deployment transaction: if target planning or ACL apply
+fails, the exact prior revision is restored, or a newly-created policy is
+removed under its configuration lock. An incomplete rollback remains an
+explicit recovery failure and cannot be reported as a successful apply.
 
 ## Deployment command
 
@@ -187,10 +197,17 @@ compatibility mode, not account isolation. Strong Windows deployment needs an
 Administrator-owned dedicated live parent; a live environment placed beneath
 an Agent-writable repository can still have its top-level directory renamed by
 that owner. The Tool Registry blocks supported Agent routes in both layouts,
-but reports must retain this distinction.
+but reports must retain this distinction. Strong mode denies `DELETE` on every
+existing protected object, `DELETE_CHILD` on guarded parents, and inherited
+write/delete/ACL/owner rights on future descendants. Its native platform probe
+first proves that a disposable non-administrator identity can mutate the target,
+then proves the same live token cannot delete, rename, replace, or rename the
+protected root, and finally verifies exact ACL and account cleanup.
 
-`verify` performs a real runtime-identity write-open/create probe and requires
-read access plus write denial for every exact target. Rollout retains the
+`verify` impersonates the real runtime token and performs non-mutating access
+checks for read, write, append, delete, delete-child, ACL and owner rights on
+every exact target and guarded parent. The disposable platform probe supplies
+the separate real mutation evidence. Rollout retains the
 previous immutable source/environment as the authoritative rollback; the
 helper's `restore` operation only removes the applied canary restriction so
 that trusted recovery can proceed.
@@ -257,7 +274,8 @@ Focused verification proves:
 - workspace writes and explicit development environments still work;
 - malformed optional policy does not widen or globally freeze access;
 - Windows and WSL native permissions deny real write attempts in a disposable
-  target before any instance adoption.
+  target before any instance adoption; strong Windows evidence additionally
+  covers a distinct SID/PID and real delete, rename and replacement attempts.
 
 Live adoption follows the approved rollout: disposable target first, then only
 the explicitly authorized HASHI2 and HASHI3 canaries. HASHI1 and HASHI4 are not

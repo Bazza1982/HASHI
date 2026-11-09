@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
+from contextlib import nullcontext
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import time
+from uuid import uuid4
 
 import pytest
 
@@ -58,6 +64,81 @@ def _policy(tmp_path: Path) -> LiveRuntimePolicy:
 
 def _windows_token_is_elevated() -> bool:
     return os.name == "nt" and bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
+class _StartupInfo(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("reserved", wintypes.LPWSTR),
+        ("desktop", wintypes.LPWSTR),
+        ("title", wintypes.LPWSTR),
+        ("x", wintypes.DWORD),
+        ("y", wintypes.DWORD),
+        ("x_size", wintypes.DWORD),
+        ("y_size", wintypes.DWORD),
+        ("x_count_chars", wintypes.DWORD),
+        ("y_count_chars", wintypes.DWORD),
+        ("fill_attribute", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("show_window", wintypes.WORD),
+        ("reserved2_size", wintypes.WORD),
+        ("reserved2", ctypes.POINTER(ctypes.c_byte)),
+        ("stdin", wintypes.HANDLE),
+        ("stdout", wintypes.HANDLE),
+        ("stderr", wintypes.HANDLE),
+    ]
+
+
+class _ProcessInformation(ctypes.Structure):
+    _fields_ = [
+        ("process", wintypes.HANDLE),
+        ("thread", wintypes.HANDLE),
+        ("process_id", wintypes.DWORD),
+        ("thread_id", wintypes.DWORD),
+    ]
+
+
+def _launch_as_windows_identity(username, password, argv, *, cwd):
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.CreateProcessWithLogonW.argtypes = [
+        wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.LPCWSTR, ctypes.POINTER(_StartupInfo),
+        ctypes.POINTER(_ProcessInformation),
+    ]
+    security.CreateProcessWithLogonW.restype = wintypes.BOOL
+    startup = _StartupInfo()
+    startup.cb = ctypes.sizeof(startup)
+    process = _ProcessInformation()
+    command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+    if not security.CreateProcessWithLogonW(
+        username, ".", password, 0, argv[0], command, 0x400, None,
+        str(cwd), ctypes.byref(startup), ctypes.byref(process),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    ctypes.windll.kernel32.CloseHandle(process.thread)
+    return process
+
+
+def _wait_for_path(path: Path, process, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        if ctypes.windll.kernel32.WaitForSingleObject(process.process, 0) == 0:
+            raise RuntimeError("disposable runtime identity exited before its receipt")
+        time.sleep(0.05)
+    raise TimeoutError(f"disposable runtime identity did not publish {path.name}")
+
+
+def _close_test_process(process):
+    kernel = ctypes.windll.kernel32
+    try:
+        if kernel.WaitForSingleObject(process.process, 5000) != 0:
+            kernel.TerminateProcess(process.process, 1)
+            kernel.WaitForSingleObject(process.process, 5000)
+    finally:
+        kernel.CloseHandle(process.process)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows recovery identity contract")
@@ -211,6 +292,281 @@ def test_windows_acl_failed_apply_restores_exact_acl(tmp_path, monkeypatch):
             snapshot_path=tmp_path / "failure-recovery.json", canary=True)
     assert {path: live_runtime_acl._windows_get_sddl(path) for path in before} == before
     child.write_text("after rollback", encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows strong DACL contract")
+def test_windows_strong_acl_denies_delete_for_distinct_runtime_identity(tmp_path, monkeypatch):
+    anchor = tmp_path / "installer-anchor"
+    root = anchor / "runtime"
+    root.mkdir(parents=True)
+    child = root / "package.py"
+    child.write_text("protected", encoding="utf-8")
+    runtime_sid = "S-1-5-21-111111111-222222222-333333333-4444"
+    maintainer_sid = windows_current_sid()
+    commands = []
+
+    monkeypatch.setattr(
+        live_runtime_acl,
+        "windows_process_identity",
+        lambda process_id=None: {"sid": runtime_sid, "pid": process_id},
+    )
+    monkeypatch.setattr(
+        live_runtime_acl, "_windows_runtime_token", lambda process_id: nullcontext()
+    )
+    monkeypatch.setattr(live_runtime_acl, "_windows_can_open", lambda *args: False)
+    monkeypatch.setattr(live_runtime_acl, "_run_windows_acl", lambda argv: commands.append(argv))
+
+    reports = apply_windows_read_only(
+        (NativeProtectionTarget(root, recursive=True, kind="runtime"),),
+        runtime_sid=runtime_sid,
+        maintenance_sid=maintainer_sid,
+        lock_owner=True,
+        runtime_pid=4242,
+        protection_anchor=anchor,
+        snapshot_path=tmp_path / "recovery" / "acl.json",
+        canary=False,
+    )
+
+    assert reports[0]["assurance"] == "maintenance_owned"
+    deny_commands = [command for command in commands if "/deny" in command]
+    child_deny = next(command[-1] for command in deny_commands if command[1] == str(child))
+    root_deny = next(command[-1] for command in deny_commands if command[1] == str(root))
+    anchor_deny = next(command[-1] for command in deny_commands if command[1] == str(anchor))
+    assert f"*{runtime_sid}:(D," in child_deny
+    assert f"*{runtime_sid}:(D," in root_deny
+    assert f"*{runtime_sid}:(D,DC," in anchor_deny
+
+
+@pytest.mark.platform
+@pytest.mark.skipif(os.name != "nt", reason="Windows independent identity contract")
+def test_windows_strong_acl_blocks_real_identity_delete_rename_and_replace():
+    if os.environ.get("HASHI_RUN_WINDOWS_IDENTITY_PROBE") != "1":
+        pytest.skip("set HASHI_RUN_WINDOWS_IDENTITY_PROBE=1 for disposable account probe")
+    if not _windows_token_is_elevated():
+        pytest.skip("disposable account probe requires an elevated maintenance identity")
+
+    from scripts.permissions.windows_test_identity import (
+        DisposableTestIdentity,
+        WindowsAccounts,
+    )
+
+    program_data = Path(os.environ["ProgramData"]).resolve()
+    base = program_data / ("HashiAclProbe_" + uuid4().hex)
+    anchor = base / "installer-anchor"
+    root = anchor / "runtime"
+    exchange = base / "exchange"
+    recovery = base / "recovery"
+    for path in (root, exchange, recovery):
+        path.mkdir(parents=True, exist_ok=True)
+    child = root / "package.py"
+    child.write_text("protected", encoding="utf-8")
+    worker = exchange / "acl-worker.ps1"
+    ready, trigger, result = (
+        exchange / "ready.json",
+        exchange / "sealed.trigger",
+        exchange / "result.json",
+    )
+    worker.write_text(
+        r'''param(
+  [Parameter(Mandatory=$true)][string]$Root,
+  [Parameter(Mandatory=$true)][string]$Child,
+  [Parameter(Mandatory=$true)][string]$Ready,
+  [Parameter(Mandatory=$true)][string]$Trigger,
+  [Parameter(Mandatory=$true)][string]$Result,
+  [Parameter(Mandatory=$true)][string]$Exchange
+)
+$ErrorActionPreference = "Stop"
+$baseline = Join-Path $Root "baseline.txt"
+$baselineRenamed = Join-Path $Root "baseline-renamed.txt"
+Set-Content -LiteralPath $baseline -Value "baseline" -NoNewline
+Rename-Item -LiteralPath $baseline -NewName "baseline-renamed.txt"
+Remove-Item -LiteralPath $baselineRenamed -Force
+@{ pid = $PID; baseline_mutation = $true } | ConvertTo-Json -Compress | Set-Content -LiteralPath $Ready
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
+while (-not (Test-Path -LiteralPath $Trigger)) {
+  if ([DateTime]::UtcNow -ge $deadline) { throw "sealed trigger timeout" }
+  Start-Sleep -Milliseconds 50
+}
+try {
+$env:TEMP = $Exchange
+$env:TMP = $Exchange
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class HashiAclNativeProbe {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, EntryPoint="DeleteFileW")]
+  public static extern bool DeleteFile(string path);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, EntryPoint="MoveFileExW")]
+  public static extern bool MoveFileEx(string source, string destination, int flags);
+}
+"@
+function Convert-NativeResult([bool]$Succeeded, [int]$Code) {
+  return @{ denied = ((-not $Succeeded) -and ($Code -eq 5)); code = $Code }
+}
+$replacement = Join-Path $Exchange "replacement.py"
+Set-Content -LiteralPath $replacement -Value "replacement" -NoNewline
+$renamed = Join-Path $Root "renamed.py"
+$anchor = Split-Path -Parent $Root
+$rootRenamed = Join-Path $anchor "runtime-renamed"
+$deleteOk = [HashiAclNativeProbe]::DeleteFile($Child)
+$deleteCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$renameOk = [HashiAclNativeProbe]::MoveFileEx($Child, $renamed, 0)
+$renameCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$replaceOk = [HashiAclNativeProbe]::MoveFileEx($replacement, $Child, 1)
+$replaceCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$renameRootOk = [HashiAclNativeProbe]::MoveFileEx($Root, $rootRenamed, 0)
+$renameRootCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$operations = @{
+  delete = Convert-NativeResult $deleteOk $deleteCode
+  rename = Convert-NativeResult $renameOk $renameCode
+  replace = Convert-NativeResult $replaceOk $replaceCode
+  rename_root = Convert-NativeResult $renameRootOk $renameRootCode
+}
+@{
+  pid = $PID
+  operations = $operations
+  child_exists = (Test-Path -LiteralPath $Child)
+  renamed_exists = (Test-Path -LiteralPath $renamed)
+  root_renamed_exists = (Test-Path -LiteralPath $rootRenamed)
+} | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $Result
+} catch {
+  @{
+    pid = $PID
+    fatal = $_.Exception.ToString()
+  } | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $Result
+  exit 1
+}
+''',
+        encoding="utf-8",
+    )
+
+    accounts = WindowsAccounts()
+    identity = None
+    cleanup_safe = False
+    try:
+        identity = DisposableTestIdentity(accounts, base / "identity.json")
+        with identity:
+            runtime_sid = identity.sid
+            assert runtime_sid and identity.password
+            maintainer_sid = windows_current_sid()
+            powershell = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(base), "/grant:r", f"*{runtime_sid}:(RX)"]
+            )
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(exchange), "/grant:r", f"*{runtime_sid}:(OI)(CI)(F)"]
+            )
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(root), "/grant:r", f"*{runtime_sid}:(OI)(CI)(M)"]
+            )
+            # Strong sealing requires its installer anchor, anchor parent and
+            # recovery directory to be outside the runtime identity's control.
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(base), "/deny", f"*{runtime_sid}:(DC)"]
+            )
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(anchor), "/deny", f"*{runtime_sid}:(D,WD,AD,WEA,WA,WDAC,WO)"]
+            )
+            live_runtime_acl._run_windows_acl(
+                ["icacls.exe", str(recovery), "/deny", f"*{runtime_sid}:(D,DC,WD,AD,WEA,WA,WDAC,WO)"]
+            )
+
+            argv = [
+                str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(worker),
+                "-Root", str(root), "-Child", str(child), "-Ready", str(ready),
+                "-Trigger", str(trigger), "-Result", str(result),
+                "-Exchange", str(exchange),
+            ]
+            process = _launch_as_windows_identity(
+                identity.name, identity.password, argv, cwd=exchange,
+            )
+            sealed = False
+            try:
+                _wait_for_path(ready, process)
+                baseline = json.loads(ready.read_text(encoding="utf-8-sig"))
+                assert baseline == {"baseline_mutation": True, "pid": process.process_id}
+                targets = (NativeProtectionTarget(root, recursive=True, kind="runtime"),)
+                snapshot = recovery / "acl.json"
+                apply_windows_read_only(
+                    targets,
+                    runtime_sid=runtime_sid,
+                    maintenance_sid=maintainer_sid,
+                    lock_owner=True,
+                    runtime_pid=process.process_id,
+                    protection_anchor=anchor,
+                    snapshot_path=snapshot,
+                    canary=False,
+                )
+                sealed = True
+                trigger.write_text("run", encoding="utf-8")
+                _wait_for_path(result, process)
+                receipt = json.loads(result.read_text(encoding="utf-8-sig"))
+                assert receipt["pid"] == process.process_id
+                assert "fatal" not in receipt, receipt.get("fatal")
+                assert all(item["denied"] for item in receipt["operations"].values()), json.dumps(
+                    receipt, sort_keys=True,
+                )
+                assert receipt["child_exists"] is True
+                assert receipt["renamed_exists"] is False
+                assert receipt["root_renamed_exists"] is False
+                assert child.read_text(encoding="utf-8") == "protected"
+            finally:
+                _close_test_process(process)
+                if sealed:
+                    restore_windows_access(
+                        targets, runtime_sid=runtime_sid, snapshot_path=snapshot,
+                    )
+        cleanup_safe = accounts.info(identity.name) is None
+        assert cleanup_safe, "disposable runtime identity cleanup was not confirmed"
+    finally:
+        if identity is not None and accounts.info(identity.name) is None:
+            cleanup_safe = True
+        if cleanup_safe:
+            shutil.rmtree(base)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows policy rollback contract")
+@pytest.mark.parametrize("existing", [False, True])
+def test_windows_deployment_acl_failure_rolls_back_policy(tmp_path, monkeypatch, existing):
+    import scripts.protect_live_runtime as deployment
+    from orchestrator.config_json import new_config_json, write_config_json
+
+    code_root = tmp_path / "source"
+    runtime_root = tmp_path / "runtime"
+    bridge_home = tmp_path / "instance"
+    code_root.mkdir()
+    runtime_root.mkdir()
+    policy_path = bridge_home / "state" / "platform" / "live-runtime-protection.json"
+    before = None
+    if existing:
+        policy_path.parent.mkdir(parents=True)
+        prior = new_config_json(policy_path, {"schema": 1, "service_targets": ["before"]})
+        write_config_json(policy_path, prior)
+        before = policy_path.read_bytes()
+
+    monkeypatch.setattr(deployment, "_targets", lambda *args, **kwargs: ((), None))
+
+    def fail_acl(*args, **kwargs):
+        raise OSError("injected ACL failure after policy publication")
+
+    monkeypatch.setattr(deployment, "apply_windows_read_only", fail_acl)
+    with pytest.raises(OSError, match="injected ACL failure"):
+        deployment.main([
+            "apply",
+            "--instance-id", "TEST",
+            "--code-root", str(code_root),
+            "--bridge-home", str(bridge_home),
+            "--runtime-root", str(runtime_root),
+            "--canary",
+            "--acl-backup", str(tmp_path / "acl.json"),
+            "--confirm", "PROTECT LIVE RUNTIME TEST",
+        ])
+
+    if before is None:
+        assert not policy_path.exists()
+    else:
+        assert policy_path.read_bytes() == before
 
 
 @pytest.mark.platform

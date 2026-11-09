@@ -26,6 +26,37 @@ def setup(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_owner_transport_loss_is_unknown_and_never_blindly_retryable(monkeypatch):
+    class LostConnection:
+        def request(self, *args, **kwargs):
+            raise ConnectionResetError("response lost after dispatch")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "tools.gateway.owner_proxy.http.client.HTTPConnection",
+        lambda *args, **kwargs: LostConnection(),
+    )
+    result = await execute_via_owner(
+        {"url": "http://127.0.0.1:49152/tool", "token": "test-capability"},
+        "file_write",
+        {"path": "unobserved", "content": "unobserved"},
+        "lost-owner-response",
+    )
+
+    assert result.is_error
+    assert result.details == {
+        "control_disposition": "unknown",
+        "error_code": "owner_tool_response_unconfirmed",
+        "retryable": False,
+        "effect_state": "unknown",
+        "transport_state": "response_unconfirmed",
+        "recovery": "inspect_request_diagnostics_before_retry",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["stop", "revoke"])
 async def test_queued_owner_call_does_not_execute_after_scope_ends(tmp_path, monkeypatch, ending):
     import orchestrator.execution_resources as resources

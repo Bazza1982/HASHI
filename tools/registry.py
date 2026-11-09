@@ -893,8 +893,12 @@ class ToolRegistry:
                 is_error=True,
                 details={"control_disposition": "denied", "reason": "live_runtime_protection",
                          "operation": "runtime_qualification_unavailable", "retryable": False,
-                         "error_code": "runtime_integrity_failed",
-                         "tool_executed": False},
+                         "error_code": "runtime_integrity_failed", "tool_executed": False,
+                         "runtime_protection": self._runtime_protection_diagnostic(
+                             qualification="failed_before_policy_projection",
+                             error_code="runtime_integrity_failed",
+                             protection_complete=False,
+                         )},
             )
         if tool_name == "file_search":
             for root in arguments.get("roots") or []:
@@ -915,6 +919,39 @@ class ToolRegistry:
             is_error=True,
             details=decision.details(),
         )
+
+    def _runtime_protection_diagnostic(
+        self,
+        *,
+        qualification: str,
+        error_code: str,
+        protection_complete: bool,
+    ) -> dict[str, Any]:
+        context = self._effective_audit_context()
+        global_config = context.get("global_config")
+        diagnostic: dict[str, Any] = {
+            "qualification": qualification,
+            "error_code": error_code,
+            "protection_complete": protection_complete,
+            "new_process_admission": "strict_qualification_required",
+            "execution_role": "functions",
+            "qualification_scope": "core_and_functions",
+            "recovery": "controlled_installation_maintenance",
+        }
+        identity = {
+            "instance_id": context.get("instance_id")
+                or getattr(global_config, "instance_id", None),
+            "agent_id": context.get("agent_name"),
+            "request_id": context.get("request_id"),
+            "session_id": context.get("hashi_session_id"),
+            "run_id": context.get("hashi_run_id"),
+        }
+        diagnostic.update({
+            key: str(value)
+            for key, value in identity.items()
+            if value is not None and str(value).strip()
+        })
+        return diagnostic
 
     def _check_system_exchange_loop_gate(
         self,
@@ -1254,15 +1291,15 @@ class ToolRegistry:
 
         policy = self._live_runtime_policy_cache
         if policy is not None and policy.qualification_error:
-            result.details = {**(result.details or {}), "runtime_protection": {
-                "qualification": "failed_at_boundary_refresh",
-                "error_code": ("runtime_protection_context_unavailable"
-                    if policy.qualification_error == "missing_core_receipt"
-                    else "runtime_integrity_failed"),
-                "protection_complete": policy.protection_complete,
-                "new_process_admission": "strict_qualification_required",
-                "recovery": "controlled_installation_maintenance",
-            }}
+            error_code = ("runtime_protection_context_unavailable"
+                if policy.qualification_error == "missing_core_receipt"
+                else "runtime_integrity_failed")
+            result.details = {**(result.details or {}), "runtime_protection":
+                self._runtime_protection_diagnostic(
+                    qualification="failed_at_boundary_refresh",
+                    error_code=error_code,
+                    protection_complete=policy.protection_complete,
+                )}
         try:
             receipt = (result.details or {}).get("effect_receipt")
             if "fingerprint" not in (result.details or {}):

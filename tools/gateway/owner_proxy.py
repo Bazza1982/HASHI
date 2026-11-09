@@ -98,5 +98,8 @@ async def execute_via_owner(descriptor, name, arguments, call_id, *, on_tool_act
         # A transport loss after dispatch never proves that no effect occurred.
         return ToolResult(tool_call_id=call_id, is_error=True,
             output="Error: owner_tool_response_unconfirmed; inspect the request before retrying.",
-            details={"error_code":"owner_tool_response_unconfirmed", "retryable":False})
+            details={"control_disposition":"unknown",
+                     "error_code":"owner_tool_response_unconfirmed", "retryable":False,
+                     "effect_state":"unknown", "transport_state":"response_unconfirmed",
+                     "recovery":"inspect_request_diagnostics_before_retry"})
 # HASHI-Fingerprint: hfp_14a8a74cfb7b439da50c7834e9d61041
