@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ from orchestrator.config_admin import (
     AgentScaffoldReceipt,
     AgentWorkspaceConflictError,
     ConfigAdmin,
+    normalize_new_agent_name,
 )
 from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 from orchestrator.flexible_backend_registry import (
@@ -143,19 +143,19 @@ class AgentCreationResult:
 
 
 def validate_agent_name(name: str) -> str:
-    """Validate and return the canonical agent name; raise otherwise.
+    """Validate ASCII identifier syntax and return the lowercase creation ID.
 
-    The identifier is never silently sanitized into a different name.
+    Only letter case is normalized; invalid characters are never sanitized.
     """
     if not isinstance(name, str):
         raise InvalidAgentNameError("agent name is required")
-    if not AGENT_NAME_PATTERN.match(name):
+    if not AGENT_NAME_PATTERN.fullmatch(name):
         raise InvalidAgentNameError(
             "agent name may contain letters, numbers, hyphens and underscores "
             "only, must start with a letter or number, and be at most 64 "
             "characters"
         )
-    return name
+    return normalize_new_agent_name(name)
 
 
 def _provider_profiles(global_config: Any) -> dict[str, dict[str, Any]]:
@@ -538,10 +538,8 @@ class AgentCreationService:
             for agent in raw.get("agents", [])
             if isinstance(agent, dict)
         ]
-        if os.name == "nt":
-            folded = {value.casefold() for value in existing}
-            return name.casefold() in folded
-        return name in existing
+        normalized = {normalize_new_agent_name(value) for value in existing}
+        return normalize_new_agent_name(name) in normalized
 
     def _agent_row_exists(self, name: str) -> bool:
         try:

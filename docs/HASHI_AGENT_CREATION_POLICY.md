@@ -1,8 +1,27 @@
 # PAO Agent creation selection policy
 
 Owner: PAO. Engineering placement: shared Functions and ignored Instance
-Configuration. Parent: `HASHI_PAO_SYSTEM_DESIGN.md`. This decision changes no
-Protected Core, credentials, tool grant, identity or workspace permission.
+Configuration. Parent: `HASHI_PAO_SYSTEM_DESIGN.md`. This policy changes no
+Protected Core, credentials, Tool grants or workspace permissions.
+
+## New Agent identifiers
+
+Ordinary creation accepts the existing ASCII letter/digit/hyphen/underscore
+syntax and canonicalizes the internal Agent ID to lowercase before checking
+uniqueness, selecting the workspace, publishing configuration or returning the
+creation result. The original display name is preserved. Case variants such as
+`Lina`, `lina` and `lINA` request the same ID `lina`; an existing Agent with
+that case-insensitive name blocks creation on every platform.
+
+`orchestrator.config_admin.normalize_new_agent_name` is the shared rule for the
+public creation service and the retained direct configuration/command creation
+entry. Workspace names, stored IDs, creation responses and lifecycle startup
+targets use the same canonical value. Invalid public identifier characters,
+including whitespace, are rejected rather than sanitized.
+
+This rule does not rename existing Agents, migrate their Sessions or workspace
+paths, or alter the narrow Agent Move import path. Existing records retain
+their identity; duplicate checks must not create a case-only twin.
 
 ## One explicit source
 
