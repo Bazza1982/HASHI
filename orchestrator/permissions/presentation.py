@@ -86,6 +86,22 @@ def request_list_card(page: SessionRequestPage) -> str:
     return "\n".join(lines)
 
 
+def request_summary(view: SessionRequestView) -> dict:
+    """Read-only, locale-neutral facts. Never contains decision controls or credentials."""
+    import ntpath
+
+    request = view.request
+    return {
+        "version": 1, "purpose": request.purpose, "state": request.state,
+        "task_state": view.task_state, "binding_state": view.binding_state,
+        "task_id": request.task_id,
+        "resources": [{"kind": scope.kind, "resource": scope.resource,
+                       "name": (ntpath.basename(scope.resource.rstrip("/\\\\")) or scope.resource)
+                       if scope.kind in {"file", "directory"} else scope.resource,
+                       "actions": list(scope.actions)} for scope in request.scopes],
+    }
+
+
 def request_prompt_card(view: SessionRequestView) -> str:
     """Compact button-first view; diagnostics and typed commands stay in detail."""
     request = view.request
@@ -150,3 +166,4 @@ def backend_permission_notice(status) -> str:
         return "\n".join(lines)
     key = "safety.backend_unmanaged" if status.state == "unmanaged" else "safety.backend_unavailable"
     return ui_language.tr(key, backend=status.backend_id, level=status.requested_level.value)
+# HASHI-Fingerprint: hfp_8c84e8100abb47ca9569400d869e7aa7
