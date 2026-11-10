@@ -21,6 +21,19 @@ const PRIVACY_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_privacy_runtim
 const TRANSCRIPTION_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_transcription_runtime.py');
 const TTS_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_tts_runtime.py');
 
+function installerChildOptions(options = {}) {
+  return {
+    ...options,
+    env: {
+      ...process.env,
+      ...(options.env || {}),
+      // An installer-owned isolated runtime must not depend on a shared pip
+      // cache whose ACL or partial contents may belong to another process.
+      PIP_NO_CACHE_DIR: '1',
+    },
+  };
+}
+
 function dataRoot() {
   if (process.env.HASHI_DATA_ROOT) return path.resolve(process.env.HASHI_DATA_ROOT);
   if (process.platform === 'win32') {
@@ -54,18 +67,18 @@ function sameEnvironmentCommand(command) {
 function checkRuntime(candidate, full) {
   const args = [...candidate.prefix, '-B', RUNTIME_CHECK, '--code-root', HASHI_ROOT];
   if (!full) args.push('--runtime-only');
-  const result = spawnSync(candidate.command, args, {
+  const result = spawnSync(candidate.command, args, installerChildOptions({
     stdio: 'ignore',
     windowsHide: true,
     timeout: 60_000,
-  });
+  }));
   return result.status === 0;
 }
 
 function checkRolePair(candidate) {
   const result = spawnSync(candidate.command,
     [...candidate.prefix, '-B', ROLE_CHECK, '--code-root', HASHI_ROOT, '--import-functions'],
-    { stdio: 'ignore', windowsHide: true, timeout: 180_000 });
+    installerChildOptions({ stdio: 'ignore', windowsHide: true, timeout: 180_000 }));
   return result.status === 0;
 }
 
@@ -86,7 +99,7 @@ function preparePrivacy(base, versionRoot) {
     const runtimeDir = path.dirname(path.dirname(python));
     const result = spawnSync(base.command, [
       ...base.prefix, PRIVACY_SETUP, '--runtime-dir', runtimeDir, '--check',
-    ], { stdio: 'ignore', windowsHide: true, timeout: 120_000 });
+    ], installerChildOptions({ stdio: 'ignore', windowsHide: true, timeout: 120_000 }));
     return result.status === 0;
   };
   if (active && ready(active)) {
@@ -96,7 +109,7 @@ function preparePrivacy(base, versionRoot) {
   const buildRoot = path.join(versionRoot, `privacy-${Date.now()}-${crypto.randomUUID()}`);
   const install = spawnSync(base.command, [
     ...base.prefix, PRIVACY_SETUP, '--runtime-dir', buildRoot,
-  ], { stdio: 'inherit', windowsHide: true, timeout: 960_000 });
+  ], installerChildOptions({ stdio: 'inherit', windowsHide: true, timeout: 960_000 }));
   const python = preparedPython(buildRoot);
   if (install.status !== 0 || !ready(python)) {
     safeRemoveBuild(versionRoot, buildRoot);
@@ -141,7 +154,7 @@ function prepareSpeechHelper(base, versionRoot, {kind, setup, selected, lockDige
     const result = spawnSync(base.command, [
       ...base.prefix, setup,
       '--bridge-home', runtimeDir, '--runtime-dir', runtimeDir, '--check', ...extra,
-    ], { stdio: 'ignore', windowsHide: true, timeout: 120_000 });
+    ], installerChildOptions({ stdio: 'ignore', windowsHide: true, timeout: 120_000 }));
     return result.status === 0;
   };
   let buildRoot = '';
@@ -159,7 +172,7 @@ function prepareSpeechHelper(base, versionRoot, {kind, setup, selected, lockDige
     const install = spawnSync(base.command, [
       ...base.prefix, setup,
       '--bridge-home', buildRoot, '--runtime-dir', buildRoot, ...extra,
-    ], { stdio: 'inherit', windowsHide: true, timeout: 1_560_000 });
+    ], installerChildOptions({ stdio: 'inherit', windowsHide: true, timeout: 1_560_000 }));
     const python = preparedPython(buildRoot);
     if (install.status !== 0 || !ready(python)) throw new Error('transcription probe failed');
     const receipt = JSON.parse(fs.readFileSync(
@@ -286,7 +299,7 @@ function main() {
   const buildRoot = path.join(versionRoot, 'build-' + Date.now() + '-' + crypto.randomUUID());
   const prepared = spawnSync(base.command, [
     ...base.prefix, '-B', BOOTSTRAP_PREPARE, '--output', buildRoot,
-  ], { stdio: 'inherit', windowsHide: true, timeout: 300_000 });
+  ], installerChildOptions({ stdio: 'inherit', windowsHide: true, timeout: 300_000 }));
   const seedPython = preparedPython(path.join(buildRoot, 'bootstrap'));
   if (prepared.status !== 0 || !fs.existsSync(seedPython)) {
     safeRemoveBuild(versionRoot, buildRoot);
@@ -314,7 +327,7 @@ function main() {
   const install = spawnSync(seedPython, [
     '-B', '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
     '--only-binary=:all:', '--require-hashes', '--target', functionsSite, '-r', LOCK,
-  ], { stdio: 'inherit', windowsHide: true, timeout: 900_000 });
+  ], installerChildOptions({ stdio: 'inherit', windowsHide: true, timeout: 900_000 }));
   if (install.status !== 0) {
     safeRemoveBuild(versionRoot, buildRoot);
     incomplete('The hashed Functions dependencies could not be installed.');
@@ -327,7 +340,7 @@ function main() {
   const build = spawnSync(seedPython, [
     '-B', ROLE_PREPARE, '--functions-site', functionsSite, '--output', releaseRoot,
     '--reference', path.join(buildRoot, 'reference.json'),
-  ], { stdio: 'inherit', windowsHide: true, timeout: 900_000 });
+  ], installerChildOptions({ stdio: 'inherit', windowsHide: true, timeout: 900_000 }));
   const python = preparedPython(path.join(releaseRoot, 'runtimes', 'functions'));
   const candidate = { command: python, prefix: [] };
   if (build.status !== 0 || !checkRuntime(candidate, true) || !checkRolePair(candidate)) {

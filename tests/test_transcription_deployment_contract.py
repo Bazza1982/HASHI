@@ -42,7 +42,11 @@ const versionRoot = process.argv[2];
 const fault = process.argv[3];
 const calls = [];
 cp.spawnSync = (command, args, options) => {
-  calls.push({command, args});
+  calls.push({
+    command,
+    args,
+    pipNoCacheDir: options && options.env && options.env.PIP_NO_CACHE_DIR,
+  });
   // Build-process fixtures create only their declared outputs; no interpreter
   // or dependency code is executed by these orchestration unit tests.
   if (args.some(x => String(x).endsWith('prepare_runtime_bootstrap.py'))) {
@@ -109,6 +113,7 @@ def test_default_npm_preparation_runs_locked_sidecar_then_checks_before_publish(
     assert install["command"] == check["command"] == "/approved/base-python"
     assert "--check" not in install["args"] and "--check" in check["args"]
     for call in data["calls"]:
+        assert call["pipNoCacheDir"] == "1"
         assert "--runtime-dir" in call["args"] and "--bridge-home" in call["args"]
         assert not {"pip", "install", "-m"}.intersection(call["args"])
     pointer = data["pointer"]
@@ -164,6 +169,8 @@ console.log('RESULT=' + JSON.stringify({output, calls,
     data = _result(_node(script, ROOT, version_root, fault, data_root))
     assert data["output"] == (0 if fault == "none" else 1)
     assert data["pointer"] is data["tts"] is (fault == "none")
+    if data["calls"]:
+        assert {call["pipNoCacheDir"] for call in data["calls"]} == {"1"}
     for kind in ("transcription", "tts"):
         assert len([c for c in data["calls"] if any(
             str(a).endswith(f"provision_{kind}_runtime.py") for a in c["args"])]) == (
