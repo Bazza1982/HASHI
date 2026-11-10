@@ -384,7 +384,7 @@ async def test_restart_arm_fails_closed_when_own_remote_status_fails(monkeypatch
 
     assert "forbidden" in query.edits[-1][0]
     assert query.answers[-1] == (
-        "This instance's HASHI Remote is unavailable or does not have L3_RESTART enabled.",
+        "This instance's HASHI Remote or fixed restart provider is unavailable. Check the instance installation.",
         True,
     )
     buttons = query.edits[-1][1]["reply_markup"].inline_keyboard

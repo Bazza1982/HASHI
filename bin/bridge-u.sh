@@ -65,7 +65,8 @@ DRY_RUN=0
 
 # State file for resuming
 STATE_FILE="$BRIDGE_HOME/.bridge_u_last_agents.txt"
-BRIDGE_AUDIT_LOG="$SCRIPT_DIR/logs/bridge.log"
+BRIDGE_AUDIT_LOG="$BRIDGE_HOME/logs/bridge.log"
+EXPLICIT_BRIDGE_HOME=""
 
 # Agent arrays
 declare -a ACTIVE_AGENTS=()
@@ -92,6 +93,7 @@ SECRETS_EXIST="no"
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --bridge-home) EXPLICIT_BRIDGE_HOME="$2"; shift 2 ;;
         --resume-last) AUTO_RESUME_LAST=1; shift ;;
         --force) FORCE_LAUNCH=1; shift ;;
         --api-gateway|-a) API_GATEWAY_LAUNCH=1; shift ;;
@@ -100,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: $0 [options]"
             echo "Options:"
+            echo "  --bridge-home PATH  Use this instance data home with this program"
             echo "  --resume-last       Automatically resume last selected agents"
             echo "  --api-gateway, -a   Enable API Gateway on the configured port"
             echo "  --agents NAME       Start specific agent(s)"
@@ -110,6 +113,14 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Inherited shell state never selects another instance. A fixed controller or
+# installer may bind a separate data home through this explicit path argument.
+if [[ -n "$EXPLICIT_BRIDGE_HOME" ]]; then
+    export BRIDGE_HOME="$(cd "$EXPLICIT_BRIDGE_HOME" && pwd)"
+fi
+STATE_FILE="$BRIDGE_HOME/.bridge_u_last_agents.txt"
+BRIDGE_AUDIT_LOG="$BRIDGE_HOME/logs/bridge.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -197,7 +208,7 @@ is_in_last() {
 render_menu() {
     clear || true
     
-    local api_label="OFF"
+    local api_label="SAVED"
     [[ "$API_GATEWAY_LAUNCH" == "1" ]] && api_label="ON"
     
     print_banner "HASHI LAUNCHER" "Multi-agent orchestrator"
@@ -494,25 +505,12 @@ preflight_check() {
     echo -e "  ${C_MUTED}Stopping existing instance...${C_RESET}"
     log_launcher_event "preflight: sending SIGTERM to PID=$existing_pid"
     
-    # Try graceful kill first
-    kill "$existing_pid" 2>/dev/null || true
-    
-    # Wait up to 5 seconds
-    local waited=0
-    while kill -0 "$existing_pid" 2>/dev/null && [[ $waited -lt 5 ]]; do
-        sleep 1
-        ((waited++)) || true
-    done
-    log_launcher_event "preflight: waited ${waited}s for PID=$existing_pid to exit after SIGTERM"
-    
-    # Force kill if still running
-    if kill -0 "$existing_pid" 2>/dev/null; then
-        echo -e "  ${C_WARN}Force killing...${C_RESET}"
-        log_launcher_event "preflight: PID=$existing_pid still alive; escalating to SIGKILL"
-        kill -9 "$existing_pid" 2>/dev/null || true
-        sleep 1
-    else
-        log_launcher_event "preflight: PID=$existing_pid exited cleanly after SIGTERM"
+    # Capture old descendants before Core exits; waiting for Core alone can
+    # leave its detached shared Functions alive and duplicate background work.
+    if ! "$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/stop_instance_runtime.py" \
+        --pid "$existing_pid" --bridge-home "$BRIDGE_HOME"; then
+        log_launcher_event "preflight: captured runtime shutdown was not verified"
+        return 1
     fi
     
     # Clean up files
@@ -545,7 +543,7 @@ launch() {
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"
         py_args="$py_args --api-gateway"
     else
-        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_MUTED}disabled${C_RESET}"
+        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_MUTED}saved instance setting${C_RESET}"
     fi
     
     if [[ "$WHATSAPP_ENABLED" == "yes" ]]; then

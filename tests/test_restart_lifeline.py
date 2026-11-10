@@ -100,5 +100,6 @@ async def test_restart_does_not_fall_back_to_watchtower(monkeypatch):
     )
 
     assert runtime.messages == [
-        "This instance's HASHI Remote is unavailable or does not have L3_RESTART enabled."
+        "This instance's HASHI Remote or fixed restart provider is unavailable. Check the instance installation."
     ]
+# HASHI-Fingerprint: hfp_f1c04a552a1443248ad35cc81e60f571

@@ -873,7 +873,7 @@ def test_portable_tts_helper_uses_capacity_safe_edge_only_runtime(tmp_path, monk
     )
 
 
-def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
+def test_portable_launchers_are_drive_relative_and_preserve_saved_gateway_choice():
     for name in (
         "Start_HASHI_TUI.bat",
         "Install_HASHI_On_This_PC.bat",

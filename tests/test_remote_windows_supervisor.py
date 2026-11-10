@@ -93,6 +93,17 @@ def _ps_string(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _stub_fixed_lifecycle_setup(root):
+    # These scenarios exercise Remote process/ACL/discovery, not task deployment.
+    # The real actuator, split roots and task ACL upgrade have their own native tests.
+    (root / "bin").mkdir(exist_ok=True)
+    (root / "bin/hashi_restart_ctl.ps1").write_text(
+        "param($Action, $HashiRoot, $CodeRoot, $Python, $TaskUserId)\n"
+        "if ($Action -ne 'ensure') { throw 'Unexpected lifecycle operation' }\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.parametrize("separate_home", [False, True])
 @pytest.mark.parametrize("existing_home", ["missing", "same", "other"])
 def test_remote_registration_keeps_network_process_limited_and_actuator_highest(
@@ -111,6 +122,10 @@ def test_remote_registration_keeps_network_process_limited_and_actuator_highest(
     )
     if separate_home:
         (remote / "supervisor_identity.py").unlink()
+    else:
+        (root / "bin").mkdir()
+        for filename in ("hashi_restart_ctl.ps1", "hashi_restart_task_runner.ps1", "bridge_ctl.ps1"):
+            shutil.copyfile(ROOT / "bin" / filename, root / "bin" / filename)
     code_arguments = f" -CodeRoot {_ps_string(ROOT)}" if separate_home else ""
     captured = tmp_path / "registered-tasks.json"
     result = _powershell(f"""
@@ -162,11 +177,13 @@ $global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -
     remote_task = by_name["HashiRemote-supervisor-contract"]
     assert remote_task["Action"]["WorkingDirectory"] == str(root)
     assert remote_task["Principal"]["RunLevel"] == "Limited"
+    assert set(by_name) == {
+        "HashiRemote-supervisor-contract", "HashiRestart-supervisor-contract",
+        "HashiRuntime-supervisor-contract",
+    }
     if separate_home:
-        assert set(by_name) == {"HashiRemote-supervisor-contract"}
         assert "-CodeRoot" in remote_task["Action"]["Arguments"]
         assert str(ROOT) in remote_task["Action"]["Arguments"]
-        return
     restart = by_name["HashiRestart-supervisor-contract"]
     runtime = by_name["HashiRuntime-supervisor-contract"]
     assert restart["Principal"]["RunLevel"] == "Highest"
@@ -290,7 +307,7 @@ def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path, h
     started = tmp_path / "started.txt"
     log = tmp_path / "restart.log"
     (bin_dir / "bridge_ctl.ps1").write_text(
-        "param([string]$Action)\n"
+        "param([string]$Action, [string]$BridgeHome)\n"
         f"Set-Content -LiteralPath {_ps_string(stopped)} -Value $Action\n"
         "if ($Action -ne 'stop') { exit 9 }\n"
         "exit 0\n",
@@ -329,6 +346,7 @@ function Invoke-RestMethod {{
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_task_runner.ps1')} `
     -HashiRoot {_ps_string(root)} `
+    -CodeRoot {_ps_string(root)} `
     -LogPath {_ps_string(log)} `
     -RuntimeTaskName 'HashiRuntime-restart-exact'
 exit $LASTEXITCODE
@@ -644,6 +662,7 @@ def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_p
     root = tmp_path / "hashi protected secrets"
     remote = root / "remote"
     remote.mkdir(parents=True)
+    _stub_fixed_lifecycle_setup(root)
     (root / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "SUPERVISOR-ACL"}}),
         encoding="utf-8",
@@ -725,6 +744,7 @@ def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
     other = tmp_path / "other instance"
     remote = root / "remote"
     remote.mkdir(parents=True)
+    _stub_fixed_lifecycle_setup(root)
     (root / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "SUPERVISOR-TEST"}}), encoding="utf-8"
     )
@@ -769,6 +789,7 @@ def test_restart_waits_for_force_terminated_process_to_leave_cim(tmp_path):
     root = tmp_path / "hashi delayed exit"
     remote = root / "remote"
     remote.mkdir(parents=True)
+    _stub_fixed_lifecycle_setup(root)
     (root / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "SUPERVISOR-DELAYED"}}),
         encoding="utf-8",
@@ -821,6 +842,7 @@ def test_start_rejects_reachable_remote_with_degraded_discovery(tmp_path):
     root = tmp_path / "hashi degraded"
     remote = root / "remote"
     remote.mkdir(parents=True)
+    _stub_fixed_lifecycle_setup(root)
     (root / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "SUPERVISOR-DEGRADED"}}),
         encoding="utf-8",
@@ -855,6 +877,7 @@ def test_start_allows_trusted_handshake_to_settle_after_initial_degraded_health(
     root = tmp_path / "hashi settling"
     remote = root / "remote"
     remote.mkdir(parents=True)
+    _stub_fixed_lifecycle_setup(root)
     (root / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "SUPERVISOR-SETTLING"}}),
         encoding="utf-8",

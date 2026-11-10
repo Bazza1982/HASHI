@@ -800,9 +800,11 @@ async def test_activate_remote_supervisor_uses_enable_action(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("separate_home", [False, True])
 async def test_windows_remote_lifecycle_refreshes_fixed_restart_actuator(
     monkeypatch,
     tmp_path,
+    separate_home,
 ):
     monkeypatch.setattr(remote_lifecycle.sys, "platform", "win32")
     helper = tmp_path / "bin" / "hashi_restart_ctl.ps1"
@@ -826,7 +828,13 @@ async def test_windows_remote_lifecycle_refreshes_fixed_restart_actuator(
         fake_subprocess,
     )
 
-    result = await remote_lifecycle.ensure_remote_restart_actuator(tmp_path)
+    home = tmp_path / "private home" if separate_home else tmp_path
+    home.mkdir(exist_ok=True)
+    options = {"code_root": tmp_path} if separate_home else {}
+    result = await remote_lifecycle.ensure_remote_restart_actuator(home, **options)
+    argv = calls[0][0]
+    assert argv[argv.index("-HashiRoot") + 1] == str(home)
+    assert argv[argv.index("-CodeRoot") + 1] == str(tmp_path)
 
     assert result["ok"] is True
     assert result["action"] == "restart_actuator_ready"
@@ -1060,3 +1068,4 @@ async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
     await manager._ensure_remote_lifecycle()
 
     assert calls == [(str(portable_root), tmp_path / "code")]
+# HASHI-Fingerprint: hfp_860039726b17432386100672ecb74352

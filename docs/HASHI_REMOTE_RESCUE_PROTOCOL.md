@@ -25,8 +25,8 @@ WatchTower enables two operational capabilities:
 
 The normal `/restart` command does not depend on WatchTower. It selects the
 calling instance's running authenticated HASHI Remote, and that Remote owns
-stop/start/verify. The Remote must advertise `rescue_restart`, which requires
-`L3_RESTART`; child versus supervised mode is not an authorization gate. On
+stop/start/verify. The Remote advertises `rescue_restart` with its default
+terminal policy; child versus supervised mode is not an authorization gate. On
 Windows a Limited Remote triggers a separate exact-instance Highest actuator,
 so Core privilege does not require elevating the network service. An explicitly
 named trusted peer is routed to that peer's Remote only after the bilateral
@@ -223,7 +223,7 @@ requesting Agent and supported command source:
 
 No separate human HMAC proof, nonce, replay database, or second confirmation is
 required. Authorization remains the existing authenticated Remote control
-protocol plus `L3_RESTART`. The target Remote rejects a request before launch
+protocol and exact-instance fixed lifecycle installation. The target Remote rejects a request before launch
 unless `target_instance` matches the instance controlled by that Remote. The
 same credential cannot authorize arbitrary shell execution, service-definition
 changes, or secret reads through this endpoint.
@@ -246,17 +246,21 @@ primary chat. It is not a general command execution endpoint. Notification
 success or failure is stored in the restart record but never changes the
 already verified restart result.
 
+## Readonly restart qualification
+
+`GET /control/hashi/qualification` uses the same authenticated control admission.
+It returns the exact program root and qualified destination without stopping or
+starting Core. Qualification failures retain the underlying installer failure
+rather than collapsing every cause into an unavailable-provider message.
+
 ## Capability Advertisement
 
 Upgraded Remotes advertise rescue support through protocol capabilities:
 
 - `rescue_control`: status endpoint exists.
-- `rescue_start`: start endpoint exists and this Remote is configured with
-  `L3_RESTART`.
-- `rescue_restart`: restart endpoint exists and this Remote is configured with
-  `L3_RESTART`.
-- `rescue_reboot`: supervised per-Agent hot reboot exists and this Remote is
-  configured with `L3_RESTART`.
+- `rescue_start`: authenticated fixed start endpoint exists.
+- `rescue_restart`: authenticated fixed restart endpoint exists.
+- `rescue_reboot`: authenticated per-Agent hot reboot endpoint exists.
 
 Older Remotes will not advertise these capabilities and may return `404` for
 the rescue endpoints. Client tools must treat that as "unsupported", not as a
@@ -264,26 +268,18 @@ peer outage.
 
 ## Safety Gate
 
-Remote start is a restart-class operation. It is blocked unless Hashi Remote is
-started with:
+Fixed lifecycle operations use the existing authenticated Remote control
+protocol and exact target binding. They do not require changing terminal
+permissions. Generic shell commands keep their existing permission policy.
 
-```text
---max-terminal-level L3_RESTART
-```
+Windows deployment installs and verifies separate exact-instance runtime and
+restart tasks. A Limited Remote can trigger those fixed definitions; it cannot
+edit their commands or select another home. Updating a definition preserves its
+registered principal and existing task access rules. Split installations pass
+both the program CodeRoot and private HashiRoot explicitly.
 
-or the equivalent `remote/config.yaml` setting:
-
-```yaml
-security:
-  max_terminal_level: "L3_RESTART"
-```
-
-Default `L2_WRITE` Remote instances can push files and perform normal hchat
-relay, but cannot start or restart HASHI core.
-
-Do not expose an L3 Remote instance directly to the public internet. Use
-Tailscale or a trusted LAN, and disable LAN auto-auth before any wider network
-exposure.
+Do not expose unauthenticated Remote control to the public internet. Preserve
+the existing shared-token HMAC/pairing and trusted-peer checks.
 
 ## Operational Flow
 
@@ -363,9 +359,9 @@ For an existing same-principal installation, `start` and `restart` verify that
 the credential file is readable and preserve its restrictive ACL. ACL mutation
 is reserved for initial provisioning or an intentional principal change.
 
-Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
-machines where remote HASHI rescue is intentionally enabled. Default supervised
-Remote remains `L2_WRITE`.
+Default supervised Remote remains `L2_WRITE`. Fixed lifecycle support is
+included in normal installation and needs no separate enable flag. Use
+`-HashiRoot <private-home> -CodeRoot <program-root>` for split installations.
 
 ## Operator Notes
 

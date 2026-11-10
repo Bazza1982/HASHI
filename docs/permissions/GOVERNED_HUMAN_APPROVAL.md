@@ -6,6 +6,23 @@ Owner: PAO and shared Frontend Connector, in Functions. This document describes 
 
 A configured installation may opt in to `global.permission_service.approval_origin`: an exact, operator-owned HTTPS origin for the HASHI Backend API; plain HTTP is accepted only on loopback. Other descriptor fields and pinned private service endpoints remain unchanged. No address is inferred from an incoming Host, relay HMAC, folder name or model text. Absence keeps the existing unavailable governed path. Production configuration is not changed by this PR.
 
+HTTPS termination at an operator-owned reverse proxy is explicitly opt-in through
+`global.permission_service.approval_proxy_peers`, a list of exact socket-peer IP
+addresses (for a local proxy, typically `["127.0.0.1"]`). It requires the configured
+HTTPS `approval_origin`; hostnames, CIDRs, unspecified and multicast peers are
+rejected. The default empty list preserves direct-origin checks. No origin or
+trust decision is inferred from `Host`, `Forwarded`, `X-Forwarded-For` or a relay
+credential.
+
+For a configured peer only, an HTTP upstream hop must preserve the configured
+Host and exactly one `X-Forwarded-Proto: https` plus one matching
+`X-Forwarded-Host`. The proxy must overwrite caller-supplied forwarded headers,
+and its upstream should be locally bound or restricted to that trusted proxy.
+This transport configuration does not authenticate a human or qualify approval
+isolation. The public browser still uses HTTPS; Secure/HttpOnly/SameSite cookies,
+exact form Origin, CSRF, invitation and independently authenticated owner checks
+remain required. Proxy changes invalidate cached invitation presentations.
+
 The existing shared /safety prompt produces an ordinary URL button when a governed session is missing. Stock Workbench already renders this generic button. The opaque invitation binds the original instance, owner, Agent, Session/generation, pending request/revision and FC connection. It authenticates nobody and grants nothing. Reopening a prompt after invitation expiry makes a new presentation, not a permission lease.
 
 The URL opens the HASHI-owned approval page. Organisation, email and password are submitted by its same-origin form to the existing permission service login. Human sessions remain HttpOnly, SameSite=Strict, path-bound cookies (Secure on HTTPS). They never enter the URL, command schema, Worker envelope, page script, logs or model context. Same-origin validation, a separate double-submit CSRF nonce, escaped HTML, no-store, a same-origin referrer policy and restrictive CSP apply. The referrer policy preserves Origin on local form POSTs and suppresses cross-origin referrers; a null or foreign Origin is still rejected. No Workbench-specific identity store, permission API schema or client business logic is added.
@@ -24,6 +41,6 @@ An identical decision replay uses the existing durable action and result, not an
 
 ## Validation and remaining acceptance
 
-`tests/test_permission_human_approval.py` covers actual HTTP password forms, HMAC/L1 rejection, owner/CSRF/origin boundaries, exact decision replay, expiry, revocation/logout and a committed-but-lost response. The service responsiveness tests hold a real ledger commit; transaction contention tests verify that an already waiting revocation commits before a later access poll. Existing native isolation tests remain mandatory.
+`tests/test_permission_human_approval.py` covers actual HTTP password forms, a real TLS-to-HTTP proxy with certificate/hostname validation, explicit peer opt-in and forwarded-header rejection, HMAC/L1 rejection, owner/CSRF/origin boundaries, exact decision replay, expiry, revocation/logout and a committed-but-lost response. The service responsiveness tests hold a real ledger commit; transaction contention tests verify that an already waiting revocation commits before a later access poll. Existing native isolation tests remain mandatory.
 
 A real stock Workbench browser qualification must include the URL button, password login, exact approval, the original operation's one effect, a replay without another effect, expiry/revocation against the same resource, and persisted final history after refresh. Record its exact HASHI source and Workbench artifact, identity source, use of automation, and cleanup. An automated fixture human is not a manual user acceptance receipt. A same-process file supervisor is not independent LPAC L2 isolation. Preserve all historical native failures/receipts at their original source SHA; final production activation remains on hold until formal acceptance passes.

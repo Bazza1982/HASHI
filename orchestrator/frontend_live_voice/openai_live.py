@@ -104,6 +104,12 @@ def _provider_rejection_error(response: Any, body: bytes, fallback: str) -> Live
     error_type, error_code = _provider_error_fields(body)
     marker = f"{error_type}:{error_code}"
     if status in {401, 403}:
+        if error_code == "expired_secret_key":
+            return LiveVoiceError("live_provider_key_expired", 502)
+        if error_code in {"invalid_api_key", "invalid_secret_key"}:
+            return LiveVoiceError("live_provider_key_invalid", 502)
+        if status == 403:
+            return LiveVoiceError("live_provider_access_denied", 502)
         return LiveVoiceError("live_provider_authentication_failed", 502)
     if status == 402:
         return LiveVoiceError("live_provider_quota_exceeded", 503)
@@ -577,3 +583,4 @@ class OpenAILiveProvider:
 
     def opening(self, goal: str, event_id: str) -> dict[str, Any]:
         return self.update("instructions", goal, None, event_id)
+# HASHI-Fingerprint: hfp_c905b212214c44bbbcd242b9c26f75ee

@@ -1,4 +1,4 @@
-"""FC loopback credential bootstrap for an already authenticated Remote bridge."""
+"""Private instance credentials prepared during personal Functions startup."""
 from __future__ import annotations
 
 import os
@@ -106,11 +106,12 @@ def ensure_local_api_credential(
     profile: str,
     remote_runtime_sids: Iterable[str] | None = None,
 ) -> ConfigDocument:
-    """Retain existing credentials; publish a missing personal loopback key once.
+    """Prepare missing personal instance keys without replacing existing secrets.
 
-    Remote already reads this canonical key before each loopback request.  A
-    private, revision-checked publication lets that existing hop authenticate
-    without accepting anonymous question reads or exposing the network key.
+    The local API and authenticated Remote lifecycle hop are installed together.
+    Publish both keys privately in one revision-checked transaction so a normal
+    installation never needs a separate feature-enablement step. Enterprise
+    credentials remain owned by the configured authentication provider.
     """
     if profile != "personal":
         return document
@@ -118,9 +119,13 @@ def ensure_local_api_credential(
     if current is not None and not isinstance(current, str):
         raise ValueError("workbench_admin_token must be a string")
     network = document.get("hashi_remote_shared_token")
-    if not ((isinstance(network, str) and network.strip())
-            or os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()):
-        return document
+    if network is not None and not isinstance(network, str):
+        raise ValueError("hashi_remote_shared_token must be a string")
+    needs_network = not (
+        (isinstance(network, str) and network.strip())
+        or os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()
+    )
+    needs_local = not (isinstance(current, str) and current.strip())
     if isinstance(remote_runtime_sids, (str, bytes)):
         raise TypeError("remote_runtime_sids must be an iterable of SIDs")
     runtime_sids = (
@@ -128,7 +133,7 @@ def ensure_local_api_credential(
         if remote_runtime_sids is not None
         else resolve_remote_runtime_sids(document.source.parent)
     )
-    if isinstance(current, str) and current.strip():
+    if not needs_local and not needs_network:
         if runtime_sids:
             from tools.private_files import protect_private_file
 
@@ -138,7 +143,10 @@ def ensure_local_api_credential(
             )
         return document
     updated = document.copy()
-    updated["workbench_admin_token"] = secrets.token_urlsafe(48)
+    if needs_network:
+        updated["hashi_remote_shared_token"] = secrets.token_urlsafe(48)
+    if needs_local:
+        updated["workbench_admin_token"] = secrets.token_urlsafe(48)
     updated.revision = write_config_json(
         updated.source,
         updated,

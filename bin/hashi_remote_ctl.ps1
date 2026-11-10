@@ -73,12 +73,7 @@ if ($SupervisorIdentity.workbench_port) {
     $ArgsList += @("--workbench-port", [string]$SupervisorIdentity.workbench_port)
 }
 $TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
-$RestartController = if ($CodeRoot.Equals($HashiRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    Join-Path $PSScriptRoot "hashi_restart_ctl.ps1"
-} else {
-    # A separate home needs its own configured cold-restart actuator.
-    Join-Path $HashiRoot "bin\hashi_restart_ctl.ps1"
-}
+$RestartController = Join-Path $CodeRoot "bin\hashi_restart_ctl.ps1"
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
     $ArgsList += "--no-tls"
@@ -167,13 +162,14 @@ function Register-HashiRemoteSupervisor {
     Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
     if (Test-Path -LiteralPath $RestartController -PathType Leaf) {
         try {
-            & $RestartController register `
+            & $RestartController ensure `
                 -HashiRoot $HashiRoot `
+                -CodeRoot $CodeRoot `
                 -Python $Python `
                 -TaskUserId $ResolvedPrincipal.UserId `
                 -InstanceId $SupervisorIdentity.instance_id
         } catch {
-            Write-Warning "Fixed restart task registration deferred: $($_.Exception.Message)"
+            throw "Fixed instance lifecycle setup failed: $($_.Exception.Message)"
         }
     }
     $RunnerArgs = @(
@@ -339,6 +335,16 @@ function Get-RemoteHealthAcceptance {
             Reason = "$TrustedPeerCount trusted peer handshake(s) accepted"
         }
     }
+    if ($PeerCount -gt 0 -and $TrustedPeerCount -eq 0 -and $TrustState -eq "rejected") {
+        # Rejecting foreign advertisements does not disable this local service.
+        # The ready listener, instance identity and discovery backends above are
+        # still required. Peer authentication remains rejected and visible.
+        return [PSCustomObject]@{
+            Accepted = $true
+            Mode = "local_ready_untrusted_peers"
+            Reason = "0 trusted peers accepted; untrusted peers remain rejected; local service is ready"
+        }
+    }
     return [PSCustomObject]@{
         Accepted = $false
         Mode = if ($TrustState) { $TrustState } else { "trust_unknown" }
@@ -464,7 +470,8 @@ function Show-RemoteDoctor {
     $HealthError = $Probe.Error
     $Acceptance = Get-RemoteHealthAcceptance -Probe $Probe
     $Discovery = if ($null -ne $Health) { $Health.discovery } else { $null }
-    $Backends = if ($null -ne $Discovery) { @($Discovery.backends) } else { @() }
+    $Backends = @()
+    if ($null -ne $Discovery) { $Backends = @($Discovery.backends) }
     $Advertising = if ($Backends.Count -gt 0) {
         @($Backends | Where-Object { $_.advertising -ne $true }).Count -eq 0
     } else { $false }
@@ -540,6 +547,7 @@ switch ($Action) {
         if (Test-Path -LiteralPath $RestartController -PathType Leaf) {
             & $RestartController unregister `
                 -HashiRoot $HashiRoot `
+                -CodeRoot $CodeRoot `
                 -Python $Python `
                 -InstanceId $SupervisorIdentity.instance_id
         }
@@ -548,6 +556,8 @@ switch ($Action) {
     "start" {
         $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
         Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
+        & $RestartController ensure -HashiRoot $HashiRoot -CodeRoot $CodeRoot `
+            -Python $Python -TaskUserId $ResolvedPrincipal.UserId -InstanceId $SupervisorIdentity.instance_id
         Start-ScheduledTask -TaskName $TaskName
         Wait-RemoteHealthAcceptance -EffectivePort (Get-RemotePort) | Out-Null
     }
@@ -557,6 +567,8 @@ switch ($Action) {
     "restart" {
         $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
         Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
+        & $RestartController ensure -HashiRoot $HashiRoot -CodeRoot $CodeRoot `
+            -Python $Python -TaskUserId $ResolvedPrincipal.UserId -InstanceId $SupervisorIdentity.instance_id
         Stop-RemoteSupervisor
         Start-ScheduledTask -TaskName $TaskName
         Wait-RemoteHealthAcceptance -EffectivePort (Get-RemotePort) | Out-Null

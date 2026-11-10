@@ -1561,7 +1561,11 @@ async def test_scheduler_preserves_selected_model_effort_and_instruction(
 
     assert ordinary.is_success is True
     ordinary_stages = [request.stage for _profile, request in provider.requests]
-    assert ordinary_stages == [Stage.DIRECT]
+    # Default habit learning may already have dispatched its auxiliary job.
+    # It must not add another foreground route or change scheduled effort.
+    assert ordinary_stages.count(Stage.DIRECT) == 1
+    assert ordinary_stages.count(Stage.MEDITATION) <= 1
+    assert set(ordinary_stages) <= {Stage.DIRECT, Stage.MEDITATION}
     assert ordinary.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",

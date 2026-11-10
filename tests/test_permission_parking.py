@@ -11,7 +11,7 @@ from orchestrator.session_store import SessionConflict, StaleFencingToken
 from tests.test_permission_pao_fence import setup_run
 
 
-def setup_park(tmp_path):
+def setup_park(tmp_path, diagnostic=None):
     store, session, accepted, fence, context = setup_run(tmp_path)
     binding = RuntimeExecutionBinding(context, accepted.request_id, fence, "INSTANCE:agent")
     item = QueuedRequest(
@@ -24,7 +24,7 @@ def setup_park(tmp_path):
     parking.record_binding(binding)
     parking.park(binding, item, checkpoint_reference={
         "digest": "a" * 64, "her_session_id": "her-session", "turn_id": "turn",
-    }, request_id="permission-request", operation_id="operation", state="waiting")
+    }, request_id="permission-request", operation_id="operation", state="waiting", diagnostic=diagnostic)
     return store, binding, item, parking
 
 
@@ -71,3 +71,22 @@ def test_corrupt_park_is_never_treated_as_recoverable(tmp_path):
         parking.list_parked(agent_id="agent")
     with pytest.raises(SessionConflict):
         store.reconcile_incomplete_runs(agent_id="agent")
+
+def test_conflict_diagnostic_survives_park_without_copying_arbitrary_payload(tmp_path):
+    from orchestrator.permissions.execution_gate import GateResult
+
+    conflict = GateResult("conflict", "operation", payload={"permission_diagnostic": {
+        "stage": "operation_identity", "arguments_match": False,
+        "observed_arguments_digest": "a" * 64,
+        "raw_arguments": "SYNTHETIC_SECRET",
+    }})
+    store, binding, item, _ = setup_park(tmp_path, diagnostic=conflict)
+    reopened = PermissionParkingStore(store)
+    payload, = reopened.list_parked(agent_id="agent")
+    assert payload["diagnostic"] == {
+        "stage": "operation_identity", "arguments_match": False,
+        "observed_arguments_digest": "a" * 64,
+    }
+    restored, _ = reopened.claim_resume(binding)
+    assert restored.run_id == item.run_id and restored.request_id == item.request_id
+# HASHI-Fingerprint: hfp_aa67820bad6e477ca30238c4a38de7e8

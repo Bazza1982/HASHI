@@ -64,7 +64,7 @@ async def run_automation(
 
     suffix = run_path.suffix.lower()
     if suffix == ".py":
-        cmd = [sys.executable, str(run_path)]
+        cmd = [sys.executable, "-B", str(run_path)]
     elif suffix == ".ps1":
         cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(run_path)]
     elif suffix in {".bat", ".cmd"}:
@@ -129,3 +129,4 @@ async def run_automation(
         lines.append(f"exit_code={proc.returncode}")
     text = "\n\n".join(lines).strip() or f"Automation '{canonical_id}' completed."
     return proc.returncode == 0, text
+# HASHI-Fingerprint: hfp_8f70f0d2fd6441c48d9567e67c85f73b

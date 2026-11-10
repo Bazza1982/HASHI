@@ -76,6 +76,7 @@ def start(
         proc = subprocess.Popen(
             [
                 str(python_bin),
+                "-B",
                 "-m",
                 "browser_gateway",
                 "--host",
@@ -133,3 +134,4 @@ def stop(root: Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> dict:
             pass
     paths["pid"].unlink(missing_ok=True)
     return status(root, host=host, port=port)
+# HASHI-Fingerprint: hfp_371b020ea76340a3a522d4524d016db2

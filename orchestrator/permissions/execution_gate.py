@@ -40,6 +40,34 @@ class GateResult:
     replayed: bool = False
 
 
+_CONFLICT_STAGES = frozenset({
+    "operation_lookup", "operation_identity", "access_request",
+    "approval_wait", "supervisor_execution",
+})
+
+
+def permission_diagnostic(result):
+    """Project bounded private control facts; never persist raw arguments/errors."""
+    if not isinstance(result, GateResult) or not isinstance(result.payload, dict):
+        return None
+    value = result.payload.get("permission_diagnostic")
+    if (not isinstance(value, dict)
+            or not isinstance(value.get("stage"), str)
+            or value["stage"] not in _CONFLICT_STAGES):
+        return None
+    diagnostic = {"stage": value["stage"]}
+    for key in ("arguments_match", "scopes_match"):
+        if type(value.get(key)) is bool:
+            diagnostic[key] = value[key]
+    for key in ("expected_arguments_digest", "observed_arguments_digest",
+                "expected_scope_digest", "observed_scope_digest"):
+        digest = value.get(key)
+        if (isinstance(digest, str) and len(digest) == 64
+                and all(char in "0123456789abcdef" for char in digest)):
+            diagnostic[key] = digest
+    return diagnostic
+
+
 class Supervisor(Protocol):
     """Trusted runner port; implementation must enforce its own boundary."""
 
@@ -99,6 +127,11 @@ class PermissionExecutionGate:
         # confirm actual baseline/lease coverage and recheck at the final start.
         self._eligible = canonical_scope_set((*baseline_scopes, *self._requestable))
 
+    @staticmethod
+    def _conflict(operation_id, stage, request_id="", **facts):
+        return GateResult("conflict", operation_id, request_id,
+                          payload={"permission_diagnostic": {"stage": stage, **facts}})
+
     async def execute(
         self,
         operation_id: str,
@@ -144,14 +177,22 @@ class PermissionExecutionGate:
                 self._authority.find_operation_for_task, self._context, operation_id,
             )
         except OperationConflict:
-            return GateResult("conflict", operation_id)
+            return self._conflict(operation_id, "operation_lookup")
         except Exception:
             return GateResult("unavailable", operation_id)
 
         if existing is not None:
             if (existing.arguments_digest != descriptor.arguments_digest
                     or existing.scope_digest != scope_digest(descriptor.scopes)):
-                return GateResult("conflict", operation_id)
+                return self._conflict(
+                    operation_id, "operation_identity",
+                    arguments_match=existing.arguments_digest == descriptor.arguments_digest,
+                    scopes_match=existing.scope_digest == scope_digest(descriptor.scopes),
+                    expected_arguments_digest=existing.arguments_digest,
+                    observed_arguments_digest=descriptor.arguments_digest,
+                    expected_scope_digest=existing.scope_digest,
+                    observed_scope_digest=scope_digest(descriptor.scopes),
+                )
             if existing.state in {"prepared", "started", "unknown"}:
                 return GateResult("unknown", operation_id)
         try:
@@ -201,7 +242,7 @@ class PermissionExecutionGate:
             except PermissionDenied:
                 return GateResult("permission_changed", operation_id)
             except OperationConflict:
-                return GateResult("conflict", operation_id)
+                return self._conflict(operation_id, "access_request")
             except Exception:
                 return GateResult("unavailable", operation_id)
             request_id = request.request_id
@@ -216,7 +257,7 @@ class PermissionExecutionGate:
                         descriptor.scopes, reason=reason, timeout_seconds=timeout_seconds,
                     )
                 except OperationConflict:
-                    return GateResult("conflict", operation_id, request_id)
+                    return self._conflict(operation_id, "approval_wait", request_id)
                 except Exception:
                     return GateResult("unavailable", operation_id, request_id)
                 request_id = wait.request_id
@@ -240,8 +281,9 @@ class PermissionExecutionGate:
                 # Even a denial from the runner may arrive after it started a
                 # side effect. Do not mislabel that state as safe to retry.
                 return GateResult("unknown", operation_id, request_id)
-            state = "permission_changed" if isinstance(exc, PermissionDenied) else "conflict"
-            return GateResult(state, operation_id, request_id)
+            if isinstance(exc, OperationConflict):
+                return self._conflict(operation_id, "supervisor_execution", request_id)
+            return GateResult("permission_changed", operation_id, request_id)
         except Exception:
             # A runner failure can follow a side effect. The caller must not
             # replace the operation ID and retry without reconciliation.
@@ -280,3 +322,4 @@ class PermissionExecutionGate:
         if payload_digest != receipt.result_digest:
             return GateResult(failure, operation_id, request_id)
         return GateResult(receipt.outcome, operation_id, request_id, receipt.payload, replayed=replay)
+# HASHI-Fingerprint: hfp_06186a5b0ebf407aae155a4ba82b5960

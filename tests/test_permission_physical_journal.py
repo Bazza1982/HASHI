@@ -91,6 +91,33 @@ def test_completed_private_result_survives_service_crash_without_reexecuting_a_w
     assert results.get(context, "original-operation", descriptor) == cached
 
 
+@pytest.mark.parametrize("orphan", [True, False])
+def test_stopped_original_result_recovers_only_a_known_uncommitted_prestart_copy(tmp_path, orphan):
+    from orchestrator.permissions.file_results import PRESTART_BINDING_FAILURE
+
+    authority, context, claim, journal, results, descriptor = interrupted(tmp_path)
+    prior = results.put(context, "original-operation", descriptor, outcome="failed",
+                        payload=PRESTART_BINDING_FAILURE if orphan else "a different failure")
+    if not orphan:
+        with pytest.raises(OSError):
+            journal.reconcile()
+        assert authority.operation_state("original-operation") == "unknown"
+        assert results.get(context, "original-operation", descriptor) == prior
+        return
+    journal.reconcile()
+    status = authority.operation_status_for_task(context, "original-operation")
+    assert status.state == "succeeded" and authority.resource_state(claim) == "stopped"
+    cached = results.get(context, "original-operation", descriptor,
+                         expected_outcome=status.state, expected_digest=status.result_digest)
+    assert cached.outcome == "succeeded" and "wrote 5 characters" in cached.payload
+    assert results.get(context, "original-operation", descriptor) == prior
+    assert results.get(context, "original-operation", descriptor,
+                       expected_outcome="succeeded", expected_digest="0" * 64) is None
+    journal.reconcile()
+    assert not journal.pending()
+    assert not (tmp_path / "report.txt").exists()
+
+
 def test_missing_result_stops_resources_but_keeps_business_outcome_unknown(tmp_path):
     authority, context, claim, journal, _, _ = interrupted(tmp_path, raw_result=False)
     journal.reconcile()

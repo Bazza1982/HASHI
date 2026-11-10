@@ -76,7 +76,7 @@ def probe(python):
         "'packages':{n:m.version(n) for n in ('paddleocr','paddlepaddle')}}))"
     )
     output = run(
-        [str(python), "-I", "-c", source], timeout=90, action="native import check"
+        [str(python), "-I", "-B", "-c", source], timeout=90, action="native import check"
     )
     result = next(
         (

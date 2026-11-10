@@ -2406,7 +2406,7 @@
     "api.restart.in_progress": "重启已经在进行中。",
     "api.restart.not_authorized": "没有操作权限。",
     "api.restart.cancelled": "已取消硬重启。",
-    "api.restart.remote_unavailable": "本实例的 HASHI Remote 当前不可用，或尚未启用 L3_RESTART。",
+    "api.restart.remote_unavailable": "本实例的 HASHI Remote 或固定重启入口当前不可用，请检查实例安装状态。",
     "api.restart.remote_error": "远程错误",
     "api.restart.confirm_target": "目标",
     "api.restart.confirm_effect": "HASHI Remote 将停止并重新启动 {instance}，然后确认它恢复在线。",

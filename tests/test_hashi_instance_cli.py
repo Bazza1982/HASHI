@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -214,10 +215,15 @@ def test_graceful_stop_uses_exact_local_api_and_waits_for_unlock(
         program_root=tmp_path / "program", program_version="test",
         registry_root=tmp_path / "registry", data_root=tmp_path / "data", environment_id="test-os",
     )
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    api_socket, gateway_socket = socket.socket(), socket.socket()
+    for listener in (api_socket, gateway_socket):
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+    record.update(api_port=api_socket.getsockname()[1], gateway_port=gateway_socket.getsockname()[1])
+    child = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(30)"])
     monkeypatch.setattr(hashi_instance_cli, "inspect_instance", lambda *_: {
         "lock_held": True, "healthy": True, "instance_id": "ALPHA", "running": True, "activity_verified": True,
-        "busy": False, "busy_agents": [], "api_port": 18800, "pid": child.pid,
+        "busy": False, "busy_agents": [], "api_port": record["api_port"], "pid": child.pid,
     })
     calls = []
 
@@ -225,23 +231,24 @@ def test_graceful_stop_uses_exact_local_api_and_waits_for_unlock(
         calls.append((args, kwargs))
         child.terminate()
         child.wait(timeout=5)
+        api_socket.close()
+        gateway_socket.close()
         return 200, {"ok": True}
 
     monkeypatch.setattr(hashi_instance_cli, "_http_json", request)
     monkeypatch.setattr(hashi_instance_cli, "_admin_token", lambda *_: "secret")
     monkeypatch.setattr(hashi_instance_cli, "_lock_is_held", lambda _: False)
-    # This fixture owns a child process but no listener. Host instances using
-    # the example ports are unrelated and must not affect its release receipt.
-    import psutil
-    monkeypatch.setattr(psutil, "net_connections", lambda **_: [])
     try:
+        assert hashi_instance_cli._stop_remaining(record, {}, []) == ["api_port", "gateway_port"]
         assert hashi_instance_cli.stop_instance(registry, record) == 0
-        assert calls == [(("POST", 18800, "/api/admin/shutdown"), {
+        assert calls == [(("POST", record["api_port"], "/api/admin/shutdown"), {
             "token": "secret", "body": {"reason": "hashi-cli"}, "timeout": 5.0,
         })]
         assert child.poll() is not None
         assert "gracefully" in capsys.readouterr().out
     finally:
+        api_socket.close()
+        gateway_socket.close()
         if child.poll() is None:
             child.terminate()
         child.wait(timeout=5)
