@@ -7,11 +7,14 @@ name: Call connector focused checks
     - orchestrator/frontend_call/**
     - orchestrator/workbench_api.py
     - orchestrator/flexible_agent_runtime.py
-    - orchestrator/frontend_live_voice/manager.py
     - tests/frontend_call/**
     - tests/test_desktop_failure_details.py
     - examples/call_profiles.example.json
     - docs/call/**
+    - orchestrator/frontend_live_voice/**
+    - orchestrator/translate_manager.py
+    - orchestrator/translate_settings.py
+    - tests/test_translate_entry.py
   pull_request:
     types:
     - opened
@@ -23,49 +26,51 @@ name: Call connector focused checks
     - orchestrator/frontend_call/**
     - orchestrator/workbench_api.py
     - orchestrator/flexible_agent_runtime.py
-    - orchestrator/frontend_live_voice/manager.py
     - tests/frontend_call/**
     - tests/test_desktop_failure_details.py
+    - orchestrator/frontend_live_voice/**
+    - orchestrator/translate_manager.py
+    - orchestrator/translate_settings.py
+    - tests/test_translate_entry.py
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   focused:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        persist-credentials: 'false'
-    - uses: actions/setup-python@v5
-      with:
-        python-version: 3.12.13
-    - name: Isolated mandated runtime and test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
-    - name: New connector lint
-      run: |
-        ruff check orchestrator/frontend_call tests/frontend_call
-        ruff format --check orchestrator/frontend_call tests/frontend_call
-    - name: Focused connector and phone regression
-      run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_phone_interpretation.py
-        tests/test_agent_fyi.py tests/test_architecture_boundaries.py
-    - name: Protected Core and source invariants
-      shell: bash
-      env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name,
-          'core-change-approved') }}
-      run: |
-        core_args=()
-        if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-          core_args+=(--authorized --major-version-change)
-        fi
-        core_base_ref="${BASE_SHA:-origin/main}"
-        if [ "$core_base_ref" = 0000000000000000000000000000000000000000 ]; then
-          core_base_ref=origin/main
-        fi
-        python scripts/check_protected_core_changes.py --base "$core_base_ref" "${core_args[@]}"
-        git diff --check "$core_base_ref" HEAD
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+      - name: Isolated mandated runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      - name: New connector lint
+        run: |
+          ruff check orchestrator/frontend_call tests/frontend_call
+          ruff format --check orchestrator/frontend_call tests/frontend_call
+      - name: Focused connector and phone regression
+        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_phone_interpretation.py tests/test_translate_entry.py tests/test_agent_fyi.py tests/test_architecture_boundaries.py
+      - name: Protected Core and source invariants
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CORE_CHANGE_APPROVED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
+        run: |
+          core_args=()
+          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+            core_args+=(--authorized --major-version-change)
+          fi
+          core_base_ref="${BASE_SHA:-origin/main}"
+          if [ "$core_base_ref" = 0000000000000000000000000000000000000000 ]; then
+            core_base_ref=origin/main
+          fi
+          python scripts/check_protected_core_changes.py --base "$core_base_ref" "${core_args[@]}"
+          git diff --check "$core_base_ref" HEAD

@@ -297,6 +297,11 @@ def _runtime_candidates(code_root: Path) -> list[list[str]]:
     return unique
 
 
+def _without_bytecode(command: list[str]) -> list[str]:
+    """Every management child must leave sealed Python installations unchanged."""
+    return list(command) if "-B" in command else [*command, "-B"]
+
+
 def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
     _validate_environment_path(code_root)
     check = code_root / "scripts" / "check_runtime_contract.py"
@@ -308,7 +313,7 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
             continue
         try:
             _validate_environment_path(Path(executable))
-            args = [*command, "-B", str(check), "--code-root", str(code_root)]
+            args = [*_without_bytecode(command), str(check), "--code-root", str(code_root)]
             if not full:
                 args.append("--runtime-only")
             checked = subprocess.run(
@@ -323,7 +328,7 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
         except (OSError, subprocess.SubprocessError, InstanceRegistryError):
             continue
         if checked.returncode == 0:
-            return command
+            return _without_bytecode(command)
     kind = "runtime and dependency lock" if full else "runtime"
     raise InstanceRegistryError(
         f"No approved CPython 3.12.13 {kind} is available for {code_root}."
@@ -668,7 +673,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, "-B", "-m", "tui.connection"],
+        [*_without_bytecode(runtime), "-m", "tui.connection"],
         cwd=code_root,
         env=environment,
         check=False,
@@ -1002,7 +1007,7 @@ def _run_tui(registry: InstanceRegistry, record: dict[str, Any], *, attach_only=
     environment = _launch_environment(record, code_root)
     environment["HASHI_TUI_ATTACH_ONLY"] = "1"
     return subprocess.run(
-        [*runtime, "-B", str(code_root / "tui.py")],
+        [*_without_bytecode(runtime), str(code_root / "tui.py")],
         cwd=code_root,
         env=environment,
         check=False,

@@ -56,6 +56,26 @@ def _ledger(tmp_path) -> list[dict]:
     ]
 
 
+@pytest.mark.parametrize("tool_name", ["file_read", "shell", "verification_run"])
+def test_runtime_admission_error_is_specific_and_known_no_change(tool_name):
+    _spec, outcome = adapt_legacy_result(
+        tool_name,
+        output="Error: Functions installation contains unlisted bytecode; controlled recovery is required.",
+        raw_is_error=True,
+        details={
+            "control_disposition": "denied",
+            "reason": "live_runtime_protection",
+            "operation": "runtime_qualification_unavailable",
+            "error_code": "runtime_integrity_failed",
+            "tool_executed": False,
+            "retryable": False,
+        },
+    )
+    assert outcome.status == "failed"
+    assert outcome.effect == "no_change"
+    assert outcome.error.code == "runtime_integrity_failed"
+    assert outcome.error.retryable is False
+
 def test_every_registered_tool_has_one_minimal_profile() -> None:
     assert set(SMART_TOOL_SPECS) == set(ALL_TOOL_NAMES)
     assert SMART_TOOL_PROFILES == {
@@ -507,3 +527,4 @@ async def test_log_query_bounds_an_18m_character_single_record(tmp_path) -> None
         }
     ]
     assert len(result.output) < 16000
+# HASHI-Fingerprint: hfp_0d3679ece05041458b314304ba505d76

@@ -85,11 +85,63 @@ Schema 1 accepts only absolute paths:
 ```
 
 Runtime target derivation checks qualified manifests against the observed Core
-receipt. Selector replacement invalidates the Tool Registry cache. Missing,
-ambiguous or mismatched required installation records deny execution before
-the executor; they never fall back to an unprotected interpretation. Read-only
-inspection remains available when the installation itself is valid. This is
-Functions tool admission, not a new Core executable-selection channel.
+receipt. Selector replacement invalidates the target cache. The cache is a
+denial boundary, never evidence that current installation bytes remain qualified.
+
+If an installation later drifts, retain the complete previously verified
+Core/FR/base/manifests/selector boundary for that same Worker and installation.
+Ordinary workzone reads and writes still follow their original permissions.
+Core, runtime, secret and process protection remain enforced.
+
+At a cold boundary failure, safe structured reads retain their existing roots
+and secret exclusions. A partial Core fingerprint plus a bound FR cannot prove
+the Core manifest or an independent Core base: it is not a complete boundary.
+Without a complete prior snapshot, writes, command execution and process control
+return a specific pre-dispatch recovery denial. No empty/partial target set is
+treated as permission. A malformed optional extension still cannot freeze an
+otherwise complete baseline.
+
+New processes and adoption are separate: they always require strict current
+installation qualification, including the full executable file closure. A
+retained target snapshot cannot authorize a new MCP process or Worker.
+
+### Fixed CLI MCP ownership
+
+Installed MCP invocations relay every tool to the original owning ToolRegistry.
+The JSON file carries a catalogue and an invocation-scoped capability, never
+the runtime object, a copied permission authority or tool secrets. Altering
+its paths or catalogue cannot widen the owner's access. The parent pins the
+context digest on the child command. Installed children require the owner's
+admission, requalify the pinned FR and bind before importing product tools.
+
+The owner freezes the canonical PAO owner/Agent/Session/Run/fence/generation/
+worker identity and its current workzone scope. It rechecks after resource
+waiting and again at the actual business executor entry after asynchronous
+fingerprint/evidence preparation. Stop, changed context, revoked invocation
+or changed workzone cannot dispatch a pending effect. Cancellation is per call;
+a cancellation arriving before registration remains recorded until revocation.
+An acknowledgement means cancellation was requested, not that effects rolled back
+or cleanup completed. Progress uses the existing activity projection; general
+tools acquire no extra browser deadline or HERV3 execution limit.
+
+A preflight catalogue without a Run has no executable capability. Installed
+calls missing owner facts fail specifically and cannot use legacy local
+execution. This relay does not qualify Fixed CLIs for managed L1/L2; it never
+substitutes the unrestricted catalogue for an assigned permission channel.
+
+Pre-dispatch runtime errors preserve their category, tool_executed=false and
+effect=no_change through every result adapter. A lost response after dispatch
+remains unconfirmed and must not invite a blind retry. Sanitised result/audit
+details identify a failed boundary refresh, completeness and controlled
+installation maintenance; target caching is not a current health claim.
+Direct and MCP callers receive the same allowlisted result facts. MCP exposes
+them as structured result content and HASHI metadata, while its readable error
+text contains only the same sanitised projection. Runtime-integrity diagnostics
+include the execution role and qualified scope plus available instance, Agent,
+request, Session and Run identities and a recovery action. Unknown detail keys
+and secrets are never forwarded.
+
+This is Functions tool admission, not a new Core executable-selection channel.
 
 The file can only extend the derived baseline; it cannot disable Core,
 interpreter, secret, or PID protection. Unknown fields, relative paths, or a
@@ -98,7 +150,11 @@ active so a malformed optional file neither removes Core protection nor makes
 the Agent's whole workzone read-only.
 
 The policy itself is a protected write target. Platform deployment must apply
-native ACLs to it together with the live targets.
+native ACLs to it together with the live targets. Policy publication and ACL
+application form one deployment transaction: if target planning or ACL apply
+fails, the exact prior revision is restored, or a newly-created policy is
+removed under its configuration lock. An incomplete rollback remains an
+explicit recovery failure and cannot be reported as a successful apply.
 
 ## Deployment command
 
@@ -134,15 +190,24 @@ receives read/execute, while SYSTEM and Administrators retain full control.
 elevated deployment process.
 
 The Windows non-elevated mode blocks real file modification and child creation,
-but the same file owner can deliberately replace its ACL. It is a canary and
+but deliberately leaves ACL/owner repair rights available to that same file
+owner so an exact saved descriptor can be restored. The owner can therefore
+deliberately replace its ACL. It is a canary and
 compatibility mode, not account isolation. Strong Windows deployment needs an
 Administrator-owned dedicated live parent; a live environment placed beneath
 an Agent-writable repository can still have its top-level directory renamed by
 that owner. The Tool Registry blocks supported Agent routes in both layouts,
-but reports must retain this distinction.
+but reports must retain this distinction. Strong mode denies `DELETE` on every
+existing protected object, `DELETE_CHILD` on guarded parents, and inherited
+write/delete/ACL/owner rights on future descendants. Its native platform probe
+first proves that a disposable non-administrator identity can mutate the target,
+then proves the same live token cannot delete, rename, replace, or rename the
+protected root, and finally verifies exact ACL and account cleanup.
 
-`verify` performs a real runtime-identity write-open/create probe and requires
-read access plus write denial for every exact target. Rollout retains the
+`verify` impersonates the real runtime token and performs non-mutating access
+checks for read, write, append, delete, delete-child, ACL and owner rights on
+every exact target and guarded parent. The disposable platform probe supplies
+the separate real mutation evidence. Rollout retains the
 previous immutable source/environment as the authoritative rollback; the
 helper's `restore` operation only removes the applied canary restriction so
 that trusted recovery can proceed.
@@ -209,7 +274,8 @@ Focused verification proves:
 - workspace writes and explicit development environments still work;
 - malformed optional policy does not widen or globally freeze access;
 - Windows and WSL native permissions deny real write attempts in a disposable
-  target before any instance adoption.
+  target before any instance adoption; strong Windows evidence additionally
+  covers a distinct SID/PID and real delete, rename and replacement attempts.
 
 Live adoption follows the approved rollout: disposable target first, then only
 the explicitly authorized HASHI2 and HASHI3 canaries. HASHI1 and HASHI4 are not

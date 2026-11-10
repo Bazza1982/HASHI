@@ -69,6 +69,10 @@ jobs:
         fi
     - name: Install runtime and test dependencies
       run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+    - name: Verify Agent tool ownership, runtime ACL and protection
+      run: python -m pytest -q tests/test_mcp_owner_admission.py tests/test_tool_gateway_mcp.py
+        tests/test_live_runtime_acl.py tests/test_live_runtime_protection.py tests/test_smart_tool_registry.py
+        tests/test_browser_gateway_proxy.py tests/test_hashi_instance_cli.py
     - name: Verify native patch integrity and shared approval wiring
       run: python -m pytest -q tests/test_apply_patch_cross_platform.py tests/test_fingerprint_execution.py tests/test_live_voice_actions.py
         tests/test_permission_api_decisions.py tests/test_permission_frontend_decisions.py tests/test_permission_model_broker.py
@@ -137,6 +141,10 @@ jobs:
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
     - name: Install original runtime and test dependencies
       run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+    - name: Verify Agent tool ownership, runtime ACL and protection
+      run: python -m pytest -q tests/test_mcp_owner_admission.py tests/test_tool_gateway_mcp.py
+        tests/test_live_runtime_acl.py tests/test_live_runtime_protection.py tests/test_smart_tool_registry.py
+        tests/test_browser_gateway_proxy.py tests/test_hashi_instance_cli.py
     - name: Quarantine wheel-build metadata before real entry qualification
       shell: python
       run: |

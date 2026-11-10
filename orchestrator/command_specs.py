@@ -139,6 +139,17 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "translate",
+        "cmd_translate",
+        "Configure simultaneous interpretation",
+        "session",
+        guide=CommandGuide(
+            "/translate [status|direction en-zh|zh-en|reset]",
+            ("status", "menu", "direction", "reset"),
+            example="/translate direction en-zh",
+        ),
+    ),
+    CommandSpec(
         "phone",
         "cmd_phone",
         "Configure audio phone calls with companion away",

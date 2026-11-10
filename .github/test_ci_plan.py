@@ -291,6 +291,47 @@ class RepositoryPolicyTests(unittest.TestCase):
                 if case["full"]:
                     self.assertTrue(all(result["groups"].values()))
 
+    def test_runtime_protection_changes_select_native_qualification(self):
+        folder = Path(__file__).parent
+        policy = json.loads((folder / "ci_policy.json").read_text(encoding="utf-8"))
+        protected_runtime_paths = (
+            "adapters/hashi_mcp.py",
+            "orchestrator/live_runtime_acl.py",
+            "orchestrator/live_runtime_protection.py",
+            "orchestrator/runtime_protection_targets.py",
+            "scripts/protect_live_runtime.py",
+            "tools/gateway/owner_proxy.py",
+            "tools/registry.py",
+            "tools/smart_tools.py",
+        )
+        for path in protected_runtime_paths:
+            with self.subTest(path=path):
+                result = ci.select(policy, [path])
+                self.assertTrue(result["groups"]["native"])
+                self.assertFalse(result["full"])
+
+    def test_runtime_protection_regressions_run_on_windows_and_posix(self):
+        workflow = (
+            Path(__file__).parent / "workflows" / "windows-runtime-contract.yml"
+        ).read_text(encoding="utf-8")
+        windows = workflow.split("  native-windows:\n", 1)[1].split(
+            "  posix-runtime:\n", 1
+        )[0]
+        posix = workflow.split("  posix-runtime:\n", 1)[1].split(
+            "  ci-result:\n", 1
+        )[0]
+        focused = (
+            "tests/test_mcp_owner_admission.py",
+            "tests/test_tool_gateway_mcp.py",
+            "tests/test_live_runtime_acl.py",
+            "tests/test_live_runtime_protection.py",
+            "tests/test_smart_tool_registry.py",
+        )
+        for test in focused:
+            with self.subTest(test=test):
+                self.assertIn(test, windows)
+                self.assertIn(test, posix)
+
 
 if __name__ == "__main__":
     unittest.main()

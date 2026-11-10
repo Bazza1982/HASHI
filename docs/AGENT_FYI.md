@@ -23,7 +23,7 @@ These owners differ from deployment layers: Core, replaceable Functions, platfor
 | lifecycle | Agent and instance operations | Creating, stopping, deleting, rebooting, moving or cloning | [Lifecycle](agent-guide/lifecycle.md) |
 | pcm | Authority and context projection | Changing PCM, FYI, HCC, memory or context handoff | [PCM](agent-guide/pcm.md) |
 | messaging | Conversations and delivery | Changing Sessions, messages, questions or Remote protocols | [Messaging](agent-guide/messaging.md) |
-| voice | Speech, Call, Phone and Presence | Changing voice, translation, playback or live interaction | [Voice](agent-guide/voice.md) |
+| voice | Speech, Call, Phone, Translate and Presence | Changing voice, translation, playback or live interaction | [Voice](agent-guide/voice.md) |
 | compute | Models and external services | Selecting models, translation, TTS, transcription, vision or fallback | [Compute](agent-guide/compute.md) |
 | permissions | Authorization and privacy | Investigating access, governance or uncertain outcomes | [Permissions](agent-guide/permissions.md) |
 | files-and-media | Scoped files and media | Changing attachments, extraction or file discovery | [Files and media](agent-guide/files-and-media.md) |
