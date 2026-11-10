@@ -656,7 +656,7 @@ async def test_add_agent_api_starts_agent_when_created_active(tmp_path):
     created = await server.handle_admin_add_agent(
         _Request(
             payload={
-                "name": "ready-agent",
+                "name": "ReAdY-Agent",
                 "display_name": "Ready Agent",
                 "backend": "codex-cli",
                 "model": "gpt-5.6-sol",
@@ -668,6 +668,12 @@ async def test_add_agent_api_starts_agent_when_created_active(tmp_path):
     assert created.status == 201
     response = json.loads(created.text)
     assert response["ok"] is True
+    assert response["agent"]["name"] == "ready-agent"
+    assert response["agent"]["display_name"] == "Ready Agent"
+    stored = read_config_json(server.config_path)
+    assert stored["agents"][-1]["name"] == "ready-agent"
+    assert stored["agents"][-1]["workspace_dir"] == "workspaces/ready-agent"
+    assert (tmp_path / "workspaces" / "ready-agent" / "agent.md").is_file()
     assert response["agent"]["is_active"] is True
     assert response["lifecycle"] == {
         "ok": True,
@@ -694,7 +700,7 @@ async def test_add_active_agent_is_accepted_once_by_shared_lifecycle_owner(tmp_p
     created = await server.handle_admin_add_agent(
         _Request(
             payload={
-                "name": "pending-agent",
+                "name": "PeNdInG-Agent",
                 "backend": "codex-cli",
                 "model": "gpt-5.6-sol",
                 "is_active": True,
@@ -705,6 +711,7 @@ async def test_add_active_agent_is_accepted_once_by_shared_lifecycle_owner(tmp_p
     assert created.status == 202
     body = json.loads(created.text)
     assert body["ok"] is True
+    assert body["agent"]["name"] == "pending-agent"
     assert body["lifecycle"]["status"] == "starting"
     assert len(calls) == 1
     assert calls[0][0] == "pending-agent"
@@ -763,7 +770,7 @@ async def test_add_agent_api_start_failure_leaves_created_agent_inactive(tmp_pat
     created = await server.handle_admin_add_agent(
         _Request(
             payload={
-                "name": "offline-agent",
+                "name": "OFFLINE-Agent",
                 "display_name": "Offline Agent",
                 "backend": "codex-cli",
                 "model": "gpt-5.6-sol",
