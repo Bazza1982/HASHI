@@ -17,6 +17,7 @@ import secrets
 import threading
 import time
 from urllib.parse import urlsplit
+from types import SimpleNamespace
 
 from aiohttp import web
 
@@ -26,6 +27,7 @@ from orchestrator.permissions.enterprise_decisions import SessionDecisionDenied
 from orchestrator.permissions.models import PermissionSubject
 from orchestrator.permissions.wire import PermissionRemoteError
 from orchestrator.ui_language import normalize_locale, tr
+from orchestrator.permissions.approval_page import CSS, STYLE_HASH, THEME, MODE, page_theme, review_details
 
 _PATH = "/api/auth/permission-approval"
 _CSRF, _SESSION = "hashi_approval_csrf", "hashi_approval_session"
@@ -137,12 +139,17 @@ class HumanApproval:
         locale = invitation.locale
         title = escape(tr("safety.human_title", locale=locale))
         response = web.Response(
-            text='<!doctype html><html lang="' + escape(locale, quote=True) + '"><meta charset="utf-8">'
+            text='<!doctype html><html lang="' + escape(locale, quote=True) + '"><head><meta charset="utf-8">'
                  '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                 '<title>' + title + '</title><main><h1>' + title + '</h1>' + body + '</main></html>',
+                 '<title>' + title + '</title><style>' + CSS + '</style></head>'
+                 '<body class="app theme-' + THEME.get() + '">'
+                 + ('<div class="simple-mode simple-theme-' + THEME.get() + '">' if MODE.get() == "simple" else '')
+                 + '<main><h1>' + title + '</h1>' + body
+                 + '<p class="note">' + escape(tr("safety.human_return", locale=locale)) + '</p></main>'
+                 + ('</div>' if MODE.get() == "simple" else '') + '</body></html>',
             content_type="text/html", status=status,
             headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin",
-                     "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+                     "Content-Security-Policy": "default-src 'none'; style-src 'sha256-" + STYLE_HASH + "'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
                      "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"},
         )
         if csrf:
@@ -153,7 +160,7 @@ class HumanApproval:
     def _form(self, invitation, csrf, operation, contents):
         hidden = '<input type="hidden" name="csrf" value="' + escape(csrf, quote=True) + '">'
         hidden += '<input type="hidden" name="operation" value="' + operation + '">'
-        return '<form method="post" action="' + invitation.path + '">' + hidden + contents + '</form>'
+        return '<form method="post" action="' + invitation.path + '?theme=' + THEME.get() + '&amp;mode=' + MODE.get() + '">' + hidden + contents + '</form>'
 
     def _login(self, invitation, csrf, *, status=200):
         locale = invitation.locale
@@ -194,11 +201,22 @@ class HumanApproval:
         )
 
     async def handle(self, request):
+        mode_token = MODE.set("simple" if request.query.get("mode") == "simple" else "chat")
+        theme_token = THEME.set(page_theme(request.query.get("theme")))
+        try:
+            return await self._handle(request)
+        finally:
+            THEME.reset(theme_token)
+            MODE.reset(mode_token)
+
+    async def _handle(self, request):
         ticket = request.match_info["ticket"]
         with self._lock:
             invitation = self._invitations.get(ticket)
         if invitation is None or invitation.expires_at <= time.time():
-            raise web.HTTPGone(text="This approval link has expired. Open the current request again.")
+            page = invitation or SimpleNamespace(locale="en")
+            body = '<p role="status">' + escape(tr("safety.human_expired", locale=page.locale)) + '</p>'
+            return self._response(page, body, status=410)
         # Never trust Host or forwarded headers to choose a credential target.
         if not self._request_origin_matches(request):
             raise web.HTTPForbidden(text="Approval origin does not match.")
@@ -234,7 +252,7 @@ class HumanApproval:
 
                         session_expiry = datetime.fromisoformat(login["session"]["expires_at"]).timestamp()
                         response = web.Response(status=303, headers={
-                            "Location": invitation.path, "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
+                            "Location": invitation.path + "?theme=" + THEME.get() + "&mode=" + MODE.get(), "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
                         })
                         response.set_cookie(_SESSION, new_token, path=invitation.path, httponly=True,
                                             secure=self.origin.startswith("https:"), samesite="Strict",
@@ -293,24 +311,31 @@ class HumanApproval:
                     raise RevisionConflict("the displayed request changed")
                 locale = invitation.locale
                 body = '<p>' + escape(tr("safety.human_review", locale=locale)) + '</p>'
-                body += '<dl><dt>' + escape(tr("safety.human_agent", locale=locale)) + '</dt><dd>' + escape(invitation.subject.agent_id) + '</dd>'
-                body += '<dt>' + escape(tr("safety.task_id", locale=locale)) + '</dt><dd>' + escape(view.request.task_id) + '</dd>'
-                body += '<dt>' + escape(tr("safety.request_id", locale=locale)) + '</dt><dd>' + escape(view.request.request_id) + '</dd>'
+                body += review_details(view, invitation.subject, locale)
                 expiry = datetime.fromtimestamp(view.request.expires_at, timezone.utc).isoformat()
-                body += '<dt>' + escape(tr("safety.expires", locale=locale)) + '</dt><dd>' + escape(expiry) + '</dd>'
-                body += '<dt>' + escape(tr("safety.agent_reason", locale=locale)) + '</dt><dd>' + escape(view.request.purpose) + '</dd></dl><ul>'
-                for scope in view.request.scopes:
-                    body += '<li>' + escape(scope.kind + ": " + scope.resource + " — " + ", ".join(scope.actions)) + '</li>'
-                body += '</ul>'
+                body += '<p class="note">' + escape(tr("safety.expires", locale=locale)) + ' · <time>' + escape(expiry) + '</time></p>'
                 if invitation.uncertain:
                     body += '<p role="alert">' + escape(tr("safety.human_uncertain", locale=locale)) + '</p>'
                 elif invitation.outcome is not None:
                     body += '<p role="status">' + escape(tr("safety.human_recorded", locale=locale)) + '</p>'
+                    if invitation.outcome.choice == "deny":
+                        body += '<p role="status">' + escape(tr("safety.state.denied", locale=locale)) + '</p>'
+                    body += '<p class="note">' + escape(tr("safety.human_execution_note", locale=locale)) + '</p>'
                     if invitation.outcome.lease is not None:
 
-                        expiry = datetime.fromtimestamp(invitation.outcome.lease.expires_at, timezone.utc).isoformat()
-                        body += '<p>' + escape(tr("safety.decision_approved", locale=locale, expiry=expiry)) + '</p>'
-                        if not invitation.revoked:
+                        snapshot = await settled_thread(self.control.session_summary, subject=invitation.subject)
+                        task = next((item for item in snapshot["tasks"] if item["task_id"] == view.request.task_id), None)
+                        lease = next((item for item in task["leases"]
+                                      if item.lease_id == invitation.outcome.lease.lease_id), None) if task else None
+                        state = lease.status if lease is not None else "unknown"
+                        if state not in {"active", "reserved", "consumed", "revoked", "expired"}:
+                            state = "unknown"
+                        body += '<p role="status">' + escape(tr("safety.human_access_" + state, locale=locale)) + '</p>'
+                        if task and task["cleanup_pending"]:
+                            body += '<p class="note">' + escape(tr("safety.human_cleanup_pending", locale=locale)) + '</p>'
+                        if state in {"active", "reserved"} and not invitation.revoked:
+                            expiry = datetime.fromtimestamp(lease.expires_at, timezone.utc).isoformat()
+                            body += '<p>' + escape(tr("safety.decision_approved", locale=locale, expiry=expiry)) + '</p>'
                             body += self._button(invitation, csrf, "revoke", tr("safety.human_revoke", locale=locale))
                     if invitation.revoked:
                         body += '<p role="status">' + escape(tr("safety.human_revoked", locale=locale)) + '</p>'
@@ -325,14 +350,28 @@ class HumanApproval:
                         seconds = actions[0].duration_seconds
                         divisor, unit = (3600, "hours") if seconds % 3600 == 0 else ((60, "minutes") if seconds % 60 == 0 else (1, "seconds"))
                         body += '<p>' + escape(tr("safety.maximum_" + unit, locale=locale, value=seconds // divisor)) + '</p>'
+                    primary, extra = [], []
                     for action in actions:
                         label = tr("safety.choose_" + (action.lifetime if action.choice == "approve" else "deny"), locale=locale)
                         if action.choice == "approve" and action.lifetime == "ttl":
                             seconds = action.duration_seconds
                             divisor, unit = (3600, "hours") if seconds % 3600 == 0 else ((60, "minutes") if seconds % 60 == 0 else (1, "seconds"))
                             label = tr("safety.approve_" + unit, locale=locale, value=seconds // divisor)
-                        body += self._button(invitation, csrf, "decide", label, action_id=action.action_id)
+                        if action.choice == "approve" and action.lifetime == "once":
+                            label = tr("safety.human_once", locale=locale)
+                        button = self._button(invitation, csrf, "decide", label, action_id=action.action_id)
+                        if action.choice == "deny" or action.lifetime == "once":
+                            rank = 0 if action.choice == "approve" else 1
+                            primary.append((rank, '<div class="primary">' + button + '</div>' if rank == 0 else button))
+                        else:
+                            extra.append(button)
+                    body += '<div class="actions">' + "".join(button for _, button in sorted(primary)) + '</div>'
+                    if extra:
+                        body += '<details class="more"><summary>' + escape(tr("safety.human_more", locale=locale)) + '</summary>'
+                        body += '<p class="note">' + escape(tr("safety.human_scope_note", locale=locale)) + '</p>'
+                        body += "".join(extra) + '</details>'
                 else:
+                    body += '<p role="status">' + escape(tr("safety.state." + view.request.state, locale=locale)) + '</p>'
                     body += '<p>' + escape(tr("safety.human_changed", locale=locale)) + '</p>'
                 body += self._button(invitation, csrf, "logout", tr("safety.human_logout", locale=locale))
                 return self._response(invitation, body, csrf=csrf)
