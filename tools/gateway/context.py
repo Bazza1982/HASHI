@@ -17,8 +17,8 @@ from tools.workbench_client import (
 from orchestrator.file_permissions import tighten_fd_permissions
 from orchestrator.agent_documentation import documentation_root
 
-CONTEXT_SCHEMA_VERSION = 6
-_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, 5, CONTEXT_SCHEMA_VERSION})
+CONTEXT_SCHEMA_VERSION = 7
+_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, 5, 6, CONTEXT_SCHEMA_VERSION})
 
 # LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HERV3 or any
 # direct API backend. Its circuit breakers remain solely to contain a retired
@@ -96,6 +96,7 @@ class GatewayContext:
     canonical_audit: dict[str, Any] = field(default_factory=dict)
     access_roots: list[str] = field(default_factory=list)
     search_scope: dict[str, Any] = field(default_factory=dict)
+    owner_tool_definitions: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_registry(
@@ -186,7 +187,7 @@ class GatewayContext:
                 ),
             ),
             tool_options=_json_safe(registry.tool_options) or {},
-            secrets=_json_safe(scoped_secrets) or {},
+            secrets={} if audit.get("tool_gateway_required") else (_json_safe(scoped_secrets) or {}),
             agents_config=_json_safe(registry.agents_config) or [],
             audit={**audit, "backend": backend},
             vision_enabled=vision_enabled,
@@ -214,8 +215,10 @@ class GatewayContext:
                 if global_config is not None
                 else {}
             ),
+            owner_tool_definitions=(registry.get_tool_definitions()
+                if audit.get("tool_gateway_required") else []),
             canonical_audit=(
-                _json_safe(canonical.descriptor()) or {}
+                {} if audit.get("tool_gateway_required") else _json_safe(canonical.descriptor()) or {}
                 if canonical is not None and hasattr(canonical, "descriptor")
                 else {}
             ),
@@ -305,7 +308,7 @@ def write_gateway_context(
     return context
 
 
-def load_gateway_context(path: Path) -> GatewayContext:
+def load_gateway_context(path: Path, *, expected_digest: str | None = None) -> GatewayContext:
     path = Path(path)
     if os.name != "nt":
         mode = path.stat().st_mode & 0o777
@@ -317,7 +320,13 @@ def load_gateway_context(path: Path) -> GatewayContext:
     # cannot describe the NTFS DACL.  The portable installer owns the local
     # data-tree ACL, so rejecting that synthetic mode would make every fixed
     # Tool Gateway context unreadable on the supported Windows runtime.
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_bytes()
+    if expected_digest is not None:
+        import hashlib
+        import hmac
+        if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), expected_digest):
+            raise ValueError("gateway context changed after owner admission")
+    payload = json.loads(raw)
     if payload.get("schema_version") not in _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS:
         raise ValueError(
             f"unsupported gateway context schema_version={payload.get('schema_version')!r}"

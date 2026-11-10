@@ -41,9 +41,10 @@ PHONE_PROVIDERS = {
     },
     "hy-simulmt": {
         "label": "HY-SimulMT · Simultaneous interpretation",
+        "mode": "interpretation",
         "models": {
-            "hy-simulmt-en-zh": {"label": "English → 中文", "voices": ("default",), "target_language": "zh-CN"},
-            "hy-simulmt-zh-en": {"label": "中文 → English", "voices": ("default",), "target_language": "en"},
+            "hy-simulmt-en-zh": {"label": "English → 中文", "voices": ("default",), "target_language": "zh-CN", "direction": "en-zh"},
+            "hy-simulmt-zh-en": {"label": "中文 → English", "voices": ("default",), "target_language": "en", "direction": "zh-en"},
         },
     },
     "local-cascade": {

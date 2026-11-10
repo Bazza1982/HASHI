@@ -14,6 +14,27 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO
 
+# Installed MCP children requalify and bind before importing product tooling.
+# The parent passes its pinned admission reference, never an Agent-selected root.
+if (__name__ == "__main__" and (Path(sys.prefix) / "runtime-policy").is_dir()
+        and ("--runtime-manifest" not in sys.argv or "--owner-proxy-required" not in sys.argv)):
+    raise SystemExit("runtime_protection_context_unavailable: installed MCP requires its owner admission")
+if __name__ == "__main__" and "--runtime-manifest" in sys.argv:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--runtime-manifest", type=Path, required=True)
+    bootstrap.add_argument("--runtime-manifest-digest", required=True)
+    binding, _ = bootstrap.parse_known_args()
+    from orchestrator.runtime_contract import (
+        FUNCTIONS_ROLE, qualified_runtime_from_reference, bind_process_runtime,
+        enforce_runtime_contract,
+    )
+    root = Path(__file__).resolve().parents[2]
+    qualified = qualified_runtime_from_reference(
+        {"path":str(binding.runtime_manifest), "digest":binding.runtime_manifest_digest},
+        code_root=root, role=FUNCTIONS_ROLE)
+    bind_process_runtime(qualified, code_root=root)
+    enforce_runtime_contract(root, role=FUNCTIONS_ROLE)
+
 from jsonschema import Draft7Validator
 
 from tools.gateway.context import GatewayContext, load_gateway_context
@@ -37,6 +58,59 @@ _GATEWAY_EXPOSED_TOOL_NAMES = {
 _GATEWAY_INTERNAL_TOOL_NAMES = {
     exposed: internal for internal, exposed in _GATEWAY_EXPOSED_TOOL_NAMES.items()
 }
+
+_SAFE_MCP_RESULT_KEYS = frozenset({
+    "control_disposition",
+    "tool_executed",
+    "error_code",
+    "operation",
+    "reason",
+    "retryable",
+    "recovery",
+    "effect_state",
+    "transport_state",
+    "cleanup_confirmed",
+    "runtime_protection",
+})
+_SAFE_RUNTIME_PROTECTION_KEYS = frozenset({
+    "qualification",
+    "error_code",
+    "protection_complete",
+    "new_process_admission",
+    "execution_role",
+    "qualification_scope",
+    "instance_id",
+    "agent_id",
+    "request_id",
+    "session_id",
+    "run_id",
+    "recovery",
+})
+
+
+def _safe_mcp_result_details(details: Any) -> dict[str, Any]:
+    """Project only model-safe control facts from the authoritative owner."""
+
+    if not isinstance(details, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in _SAFE_MCP_RESULT_KEYS:
+        if key not in details:
+            continue
+        value = details[key]
+        if key == "runtime_protection":
+            if isinstance(value, dict):
+                nested = {
+                    nested_key: nested_value[:512] if isinstance(nested_value, str) else nested_value
+                    for nested_key, nested_value in value.items()
+                    if nested_key in _SAFE_RUNTIME_PROTECTION_KEYS
+                    and (nested_value is None or isinstance(nested_value, (str, int, float, bool)))
+                }
+                if nested:
+                    safe[key] = nested
+        elif value is None or isinstance(value, (str, int, float, bool)):
+            safe[key] = value[:512] if isinstance(value, str) else value
+    return safe
 
 
 def exposed_tool_name(internal_name: str) -> str:
@@ -133,7 +207,7 @@ def _bridge_legacy_screenshot_output(
 class ToolGateway:
     def __init__(self, context: GatewayContext):
         self.context = context
-        self.registry = context.build_registry()
+        self.registry = None if context.audit.get("tool_gateway_required") else context.build_registry()
         self.call_count = 0
         self.consecutive_errors = 0
         self.fingerprints: Counter[str] = Counter()
@@ -158,7 +232,9 @@ class ToolGateway:
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         definitions = []
-        for definition in self.registry.get_tool_definitions():
+        catalog = (self.context.owner_tool_definitions if self.registry is None
+                   else self.registry.get_tool_definitions())
+        for definition in catalog:
             function = definition["function"]
             internal_name = function["name"]
             exposed_name = exposed_tool_name(internal_name)
@@ -223,7 +299,12 @@ class ToolGateway:
             )
 
         internal_name = _GATEWAY_INTERNAL_TOOL_NAMES.get(name, name)
-        if callable(on_tool_activity):
+        if self.context.audit.get("tool_gateway_required"):
+            from tools.gateway.owner_proxy import execute_via_owner
+            result = await execute_via_owner(
+                self.context.audit.get("tool_gateway_proxy"), internal_name, arguments, call_id,
+                on_tool_activity=on_tool_activity)
+        elif callable(on_tool_activity):
             result = await self.registry.execute_with_audit_context(
                 internal_name, arguments, tool_call_id=call_id,
                 audit_context={"tool_activity_observer": on_tool_activity})
@@ -242,6 +323,7 @@ class ToolGateway:
             result.output,
             result.is_error or bridge_error,
             content,
+            result.details,
         )
 
     def _result(
@@ -249,6 +331,7 @@ class ToolGateway:
         output: str,
         is_error: bool,
         content: list[dict[str, Any]] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         safe_content: list[dict[str, Any]] = []
         for block in content or []:
@@ -272,10 +355,24 @@ class ToolGateway:
                 )
         if not safe_content:
             safe_content = [{"type": "text", "text": output}]
-        return {
+        safe_details = _safe_mcp_result_details(details)
+        if is_error and safe_details:
+            safe_content.append({
+                "type": "text",
+                "text": "HASHI result details: " + json.dumps(
+                    safe_details, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+            })
+        result = {
             "content": safe_content,
             "isError": is_error,
         }
+        if safe_details:
+            result["structuredContent"] = {
+                "hashi": {"isError": is_error, "details": safe_details}
+            }
+            result["_meta"] = {"hashi/toolResultDetails": safe_details}
+        return result
 
 
 def _read_frame(stream: BinaryIO) -> dict[str, Any] | None:
@@ -353,8 +450,13 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
-    gateway = ToolGateway(load_gateway_context(context_path))
+async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO, *,
+                owner_required: bool = False, context_digest: str | None = None) -> None:
+    context = load_gateway_context(context_path, expected_digest=context_digest)
+    if owner_required:
+        from dataclasses import replace
+        context = replace(context, audit={**context.audit, "tool_gateway_required": True})
+    gateway = ToolGateway(context)
     pending: dict[str, asyncio.Task] = {}
     write_lock = asyncio.Lock()
 
@@ -388,7 +490,7 @@ async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
             else:
                 response = await _dispatch(gateway, request)
         except asyncio.CancelledError:
-            response = _error(request_id, -32800, "request cancelled; foreground cleanup completed or reported")
+            response = _error(request_id, -32800, "request cancelled; check the owner cleanup receipt before retrying")
         except Exception as exc:
             response = _error(request_id, -32603, f"internal gateway error: {exc}")
         if response is not None:
@@ -424,11 +526,19 @@ async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Expose HASHI ToolRegistry over MCP stdio")
     parser.add_argument("--context", type=Path, required=True)
+    parser.add_argument("--owner-proxy-required", action="store_true")
+    parser.add_argument("--context-digest")
+    parser.add_argument("--runtime-manifest", type=Path)
+    parser.add_argument("--runtime-manifest-digest")
     args = parser.parse_args()
+    if args.owner_proxy_required and not args.context_digest:
+        parser.error("--owner-proxy-required needs its admitted context digest")
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
-    asyncio.run(serve(args.context, sys.stdin.buffer, sys.stdout.buffer))
+    asyncio.run(serve(args.context, sys.stdin.buffer, sys.stdout.buffer,
+        owner_required=args.owner_proxy_required, context_digest=args.context_digest))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_a46c42d66f764fbbb6aa65768a2a59c7

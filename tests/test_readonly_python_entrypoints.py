@@ -15,7 +15,7 @@ def test_runtime_probe_keeps_the_candidate_installation_readonly(tmp_path, monke
         encoding="utf-8",
     )
     monkeypatch.setattr(cli, "_runtime_candidates", lambda root: [[sys.executable]])
-    assert cli._select_runtime(tmp_path) == [sys.executable]
+    assert cli._select_runtime(tmp_path) == [sys.executable, "-B"]
 
 
 def test_ocr_readiness_probe_keeps_the_candidate_installation_readonly(monkeypatch):

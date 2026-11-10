@@ -2246,6 +2246,7 @@ class SessionStore:
             """SELECT call_id FROM live_calls
                WHERE owner_id = ? AND foreground = 1
                  AND phase IN ('connecting', 'active', 'ending', 'recovering')
+                 AND COALESCE(json_extract(phone_config_json, '$.public.mode'), 'conversation') != 'interpretation'
                ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
                         started_at DESC, rowid DESC
                LIMIT 1""",
@@ -2293,6 +2294,7 @@ class SessionStore:
             """SELECT call_id FROM live_calls
                WHERE owner_id = ? AND foreground = 1
                  AND phase IN ('connecting', 'active', 'ending', 'recovering')
+                 AND COALESCE(json_extract(phone_config_json, '$.public.mode'), 'conversation') != 'interpretation'
                ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
                         started_at DESC, rowid DESC
                LIMIT 1""",
