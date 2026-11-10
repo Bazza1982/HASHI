@@ -318,6 +318,8 @@ class HumanApproval:
                     body += '<p role="alert">' + escape(tr("safety.human_uncertain", locale=locale)) + '</p>'
                 elif invitation.outcome is not None:
                     body += '<p role="status">' + escape(tr("safety.human_recorded", locale=locale)) + '</p>'
+                    if invitation.outcome.choice == "deny":
+                        body += '<p role="status">' + escape(tr("safety.state.denied", locale=locale)) + '</p>'
                     body += '<p class="note">' + escape(tr("safety.human_execution_note", locale=locale)) + '</p>'
                     if invitation.outcome.lease is not None:
 

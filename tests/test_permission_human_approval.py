@@ -93,6 +93,44 @@ def choice(browser, forms, lifetime):
 
 
 @pytest.mark.asyncio
+async def test_recorded_denial_remains_explicit_after_refresh_without_grant_or_effect(browser):
+    class StatusText(HTMLParser):
+        def __init__(self, body):
+            super().__init__()
+            self.in_status = False
+            self.text = []
+            self.feed(body)
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "p":
+                self.in_status = dict(attrs).get("role") == "status"
+
+        def handle_endtag(self, tag):
+            if tag == "p":
+                self.in_status = False
+
+        def handle_data(self, data):
+            if self.in_status:
+                self.text.append(data)
+
+    b = browser
+    _, body = await login(b)
+    invitation = b.manager._invitations[b.path.rsplit("/", 1)[1]]
+    actions = {key: action for group in invitation.actions.values() for key, action in group.items()}
+    deny = next(form for form in Forms(body).rows
+                if form.get("action_id") in actions and actions[form["action_id"]].choice == "deny")
+    response = await b.client.post(b.path, data=deny, headers={"Origin": b.origin})
+    assert response.status == 200
+    for body in (await response.text(), (await get_forms(b))[1]):
+        assert "Denied" in StatusText(body).text
+        assert not any(form.get("operation") in {"decide", "revoke"} for form in Forms(body).rows)
+    assert b.authority.decision_count(b.request.request_id) == 1
+    assert not b.authority.evaluate(b.binding.context, [b.scope], operation_id="original-op")
+    assert not b.target.exists()
+    assert all(not task["leases"] for task in b.service.session_summary(subject=b.subject)["tasks"])
+
+
+@pytest.mark.asyncio
 async def test_themed_review_keeps_exact_once_and_deny_primary_and_broad_grants_explicit(browser):
     import base64
     import hashlib
@@ -521,3 +559,33 @@ def test_approval_origin_is_configured_and_never_guessed_from_request_headers(or
     with pytest.raises(ValueError):
         approval_origin(origin)
 # HASHI-Fingerprint: hfp_ed926dddcdf345479e266750d9cd90a0
+
+
+@pytest.mark.asyncio
+async def test_pending_discovery_keeps_two_original_requests_in_one_session(browser):
+    import json
+    import os
+    from pathlib import Path
+    from orchestrator.permissions.frontend_requests import read
+
+    b = browser
+    second_scope = normalize_scope("file", str(b.target.parent / "second-report.txt"), ("read",), cwd=b.target.parent)
+    second = b.authority.request_access(b.binding.context, [second_scope], purpose="Read second report",
+                                       operation_id="second-op", arguments_digest="c" * 64)
+    b.api._strict_authenticated_owner = lambda _: b.subject.owner_id
+    request = SimpleNamespace(match_info={"session_id": b.subject.session_id},
+                              query={"agent_id": b.subject.agent_id,
+                                     "context_generation": b.subject.context_generation})
+    response = await read(b.api, request)
+    assert response.status == 200
+    payload = json.loads(response.text)
+    rows = {row["request_id"]: row for row in payload["requests"]}
+    assert set(rows) == {b.request.request_id, second.request_id}
+    assert payload["session_id"] == b.subject.session_id
+    assert payload["context_generation"] == int(b.subject.context_generation)
+    assert rows[second.request_id]["summary"]["resources"][0]["actions"] == ["read"]
+    assert b.authority.decision_count(second.request_id) == 0
+    folder = os.environ.get("HASHI_APPROVAL_PREVIEW_DIR")
+    if folder:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        Path(folder, "pending-requests.json").write_text(response.text, encoding="utf-8")

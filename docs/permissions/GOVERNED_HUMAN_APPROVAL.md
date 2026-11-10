@@ -53,8 +53,9 @@ Only policy-issued once approval and denial appear in the primary row; existing
 task/Run/timed options remain behind More authorization options. Their opaque
 IDs, scope and expiry are unchanged. The current Session summary supplies lease
 status on refresh: consumed/expired/revoked leases have no stale revoke control.
-A recorded decision never claims the operation completed or resources were
-cleaned up. Resource cleanup pending remains a separate observation.
+A recorded denial explicitly displays the localized Denied status on submission
+and refresh. The page keeps the recorded decision and execution/cleanup feedback
+as separate observations. Resource cleanup pending remains a separate observation.
 
 Theme/mode query hints affect appearance only. Theme names are allowlisted;
 Simple uses its independent bright/dark/cli owner. Static presentation tokens
@@ -68,7 +69,11 @@ points to the original conversation without accepting an arbitrary redirect.
 
 The external frontend uses a compact pending card and an explicitly opened
 Simple dialog, desktop conversation drawer or mobile bottom sheet. Deferral is
-local presentation state, not denial; polling cannot reopen it. Generic legacy
+local presentation state. Each pending request and revision keeps its own
+review and uncertain-result state. All discovery pages are read within the
+original connection/Session binding. A fresh scoped read after menu issue
+confirms the request revision before controls become available. Polling updates
+the pending list while a user opens each review explicitly. Generic legacy
 command controls stay compatible, with exact opaque action submission. L2
 credentials and decisions remain on the trusted page.
 
