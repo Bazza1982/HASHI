@@ -314,15 +314,24 @@ class ProtocolManager:
         return build_local_network_profile(info)
 
     def _core_online(self) -> bool:
-        now = time.time()
-        cached_at, cached_value = getattr(self, "_core_health_cache", (0.0, False))
-        if now - cached_at <= 5:
-            return cached_value
-        ok = any(
-            self._probe_local_workbench(host, port, timeout=0.4)
-            for host, port in self._local_workbench_routes()
+        # Directory and health rendering run on Remote's HTTP event loop.  A
+        # cold Core can expose many local interface candidates, so probing all
+        # of them here would make even /health wait on synchronous socket
+        # timeouts.  Only publish the last asynchronously observed state.
+        _cached_at, cached_value = getattr(
+            self, "_core_health_cache", (0.0, False)
         )
-        self._core_health_cache = (now, ok)
+        return bool(cached_value)
+
+    async def _refresh_core_online(self) -> bool:
+        def probe() -> bool:
+            return any(
+                self._probe_local_workbench(host, port, timeout=0.4)
+                for host, port in self._local_workbench_routes()
+            )
+
+        ok = bool(await asyncio.to_thread(probe))
+        self._core_health_cache = (time.time(), ok)
         return ok
 
     def _local_workbench_routes(self) -> list[tuple[str, int]]:
@@ -730,6 +739,12 @@ class ProtocolManager:
                 if now - self._last_refresh_run >= 30:
                     await self._refresh_peer_liveness_once()
                     self._last_refresh_run = now
+                core_health_cache = getattr(
+                    self, "_core_health_cache", (0.0, False)
+                )
+                core_health_checked_at = float(core_health_cache[0])
+                if now - core_health_checked_at >= 5:
+                    await self._refresh_core_online()
                 self._refresh_local_agent_snapshot_if_changed()
                 if now - self._last_handshake_run >= 5:
                     await self._handshake_once()
