@@ -236,6 +236,19 @@ Functions. Agent Move and legacy import writers require their own migration and
 validation under their existing contracts; this repair changes only deletion's
 lookup of the registered instance Remote consumers.
 
+On Windows, credential publication resolves only the exact instance task in the
+scheduler root (`\HashiRemote-<instance-slug>`), matching the installer's
+registration. It reads the task through Task Scheduler COM instead of loading
+ScheduledTasks/CIM and enumerating the machine during cold startup. The task
+name remains process-environment data, never interpolated PowerShell code.
+Only a missing exact task (`ERROR_FILE_NOT_FOUND`) means no registered Remote
+consumer. Scheduler/access failures, a mismatched task path, missing principal,
+invalid SID and the bounded 10-second query timeout abort before publication;
+there is no fallback to the writer's identity. Existing Remote grants and
+revision-aware private publication remain required. The Windows transport and
+failure-publication cases are exercised by `tests/test_workbench_auth_windows.py`;
+the real isolated startup gate remains `tests/test_runtime_role_native.py`.
+
 UTF-8 editor output with or without BOM is supported at these migrated read
 boundaries. A conflict asks for a fresh read, not permission to overwrite.
 Unreadable or incompatible saved preferences require diagnosis; do not delete
