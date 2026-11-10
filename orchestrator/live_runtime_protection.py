@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from orchestrator.runtime_contract import CORE_SOURCE_PATHS
+from orchestrator.runtime_contract import CORE_SOURCE_PATHS, RuntimeContractError
 from orchestrator.runtime_protection_targets import (
-    admitted_protection_targets, protection_context_key,
+    admitted_protection_targets, bound_protection_targets, protection_context_key,
 )
 
 
@@ -115,6 +115,8 @@ class LiveRuntimePolicy:
     core_pid: int | None
     policy_path: Path
     configuration_error: str | None = None
+    qualification_error: str | None = None
+    protection_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,9 @@ class ProtectionDecision:
             "operation": self.operation,
             "target": self.target,
             "retryable": False,
+            "tool_executed": False,
+            **({"error_code": "runtime_integrity_failed"}
+               if self.operation == "runtime_qualification_unavailable" else {}),
         }
 
 
@@ -167,6 +172,7 @@ def load_live_runtime_policy(
     *,
     runtime_prefix: str | Path | None,
     core_runtime=None,
+    previous_policy: LiveRuntimePolicy | None = None,
 ) -> LiveRuntimePolicy | None:
     """Build the narrow live policy from authoritative runtime facts.
 
@@ -185,8 +191,23 @@ def load_live_runtime_policy(
         runtime_roots.append(_absolute_path(runtime_prefix))
     protected_write = [code_root / relative for relative in CORE_SOURCE_PATHS]
     protected_write.append(policy_path)
-    admitted_roots, admitted_files = admitted_protection_targets(
-        code_root, core_runtime=core_runtime)
+    qualification_error = None
+    protection_complete = True
+    try:
+        admitted_roots, admitted_files = admitted_protection_targets(
+            code_root, core_runtime=core_runtime)
+    except (OSError, ValueError, RuntimeContractError) as exc:
+        qualification_error = type(exc).__name__
+        protection_complete = False
+        try:
+            admitted_roots, admitted_files, protection_complete = bound_protection_targets(
+                code_root, core_runtime=core_runtime)
+        except (OSError, ValueError, RuntimeContractError):
+            admitted_roots, admitted_files = (), ()
+    from orchestrator.runtime_contract import current_process_runtime
+    if current_process_runtime() is not None and core_runtime is None:
+        protection_complete = False
+        qualification_error = qualification_error or "missing_core_receipt"
     runtime_roots.extend(admitted_roots)
     protected_write.extend(admitted_files)
     protected_read: list[Path] = []
@@ -210,6 +231,14 @@ def load_live_runtime_policy(
             protected_read.extend(extension["protected_read_paths"])
             service_targets.extend(extension["service_targets"])
 
+    # Retain the running Worker's verified boundary across drift and handoff.
+    if (previous_policy is not None and previous_policy.code_root == code_root
+            and previous_policy.bridge_home == bridge_home):
+        runtime_roots.extend(previous_policy.runtime_roots)
+        protected_write.extend(previous_policy.protected_write_paths)
+        protected_read.extend(previous_policy.protected_read_paths)
+        service_targets.extend(previous_policy.service_targets)
+        protection_complete = protection_complete or previous_policy.protection_complete
     core_pid = _read_core_pid(bridge_home / "state" / "instance" / "process.pid")
     return LiveRuntimePolicy(
         code_root=code_root,
@@ -227,6 +256,8 @@ def load_live_runtime_policy(
         core_pid=core_pid,
         policy_path=policy_path,
         configuration_error=configuration_error,
+        qualification_error=qualification_error,
+        protection_complete=protection_complete,
     )
 
 
@@ -240,6 +271,12 @@ def evaluate_live_runtime_request(
     if policy is None:
         return None
     args = dict(arguments or {})
+    if (not policy.protection_complete
+            and tool_name in (_PATH_WRITE_TOOLS | _COMMAND_TOOLS | {"process_kill"})):
+        return ProtectionDecision(
+            "runtime_qualification_unavailable", "runtime",
+            "Runtime protection facts are incomplete; use controlled recovery."
+        )
     if tool_name in _PATH_WRITE_TOOLS:
         candidate = _argument_path(args.get("path"), workspace_dir)
         if candidate is None:

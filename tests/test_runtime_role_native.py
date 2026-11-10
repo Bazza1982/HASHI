@@ -331,10 +331,24 @@ def test_selector_change_protects_new_and_bound_old_fr_and_corruption_denies(nat
                                 Path(native_roles["destination"])/"base",
                                 tmp_path/"new-functions.json", FUNCTIONS_ROLE)
     assert newer.runtime_id != bound.runtime_id
-    assert _admit_role_write(registry,workspace/"ordinary-before.txt") is None
     try:
-        record["functions"] = runtime_installation_reference(newer)
-        selector.write_text(json.dumps(record),encoding="utf-8")
+        replacement = dict(record)
+        replacement["functions"] = runtime_installation_reference(newer)
+        old_payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
+        new_payload = json.dumps(replacement, separators=(",", ":")).encode("utf-8")
+        fixed_size = max(len(old_payload), len(new_payload)) + 32
+        old_payload += b" " * (fixed_size - len(old_payload))
+        new_payload += b" " * (fixed_size - len(new_payload))
+        selector.write_bytes(old_payload)
+        assert _admit_role_write(registry,workspace/"ordinary-before.txt") is None
+        old_stat = selector.stat()
+
+        # Replace valid selector content while preserving the legacy cache key.
+        selector.write_bytes(new_payload)
+        os.utime(selector, ns=(selector.stat().st_atime_ns, old_stat.st_mtime_ns))
+        changed_stat = selector.stat()
+        assert changed_stat.st_size == old_stat.st_size
+        assert changed_stat.st_mtime_ns == old_stat.st_mtime_ns
         for target in (candidate/"pyvenv.cfg",newer.manifest_path,
                        Path(bound.fingerprint.environment_prefix)/"pyvenv.cfg",bound.manifest_path):
             result = _admit_role_write(registry,target)
@@ -342,11 +356,30 @@ def test_selector_change_protects_new_and_bound_old_fr_and_corruption_denies(nat
             assert result.details["reason"] == "live_runtime_protection"
         assert _admit_role_write(registry,workspace/"ordinary-after.txt") is None
         selector.write_text('{"schema_version":1,"schema_version":1}',encoding="utf-8")
-        denial = _admit_role_write(registry,workspace/"must-not-execute.txt")
-        assert denial is not None and denial.is_error
-        assert denial.details["operation"] == "runtime_qualification_unavailable"
-        assert denial.details["tool_executed"] is False
-        assert not (workspace/"must-not-execute.txt").exists()
+        # A broken selector still forbids new admission, but cannot erase the
+        # running Worker's previously verified boundary or freeze its workzone.
+        assert _admit_role_write(registry,workspace/"ordinary-during-drift.txt") is None
+        for target in (candidate/"pyvenv.cfg", newer.manifest_path,
+                       Path(bound.fingerprint.environment_prefix)/"pyvenv.cfg", bound.manifest_path):
+            denial = _admit_role_write(registry,target)
+            assert denial is not None and denial.is_error
+        probe = _run(native_roles["functions"]["executable"], """
+import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from orchestrator.runtime_contract import (
+    qualified_runtime_from_reference,bind_process_runtime,load_core_runtime_selection,RuntimeContractError)
+root=Path(sys.argv[1])
+runtime=qualified_runtime_from_reference({"path":sys.argv[2],"digest":sys.argv[3]},code_root=root)
+bind_process_runtime(runtime,code_root=root)
+try:
+    load_core_runtime_selection(root)
+except RuntimeContractError as error:
+    print(json.dumps({"denied":True,"duplicate": "Duplicate" in str(error)}))
+else:
+    print(json.dumps({"denied":False}))
+""",bound.manifest_path,bound.manifest_digest)
+        assert probe["denied"] and probe["duplicate"]
     finally:
         selector.write_bytes(previous)
     assert selector.read_bytes() == previous
@@ -773,7 +806,12 @@ def test_real_cli_tool_and_hook_entrypoints_preserve_installer_seals(native_role
     from adapters import hashi_mcp
     from orchestrator import codex_native_hooks
     from tools.registry import ToolRegistry
+    import orchestrator.runtime_contract as contract
+    from scripts import hashi_instance_cli
 
+    reference = json.loads(Path(native_roles["selection"]).read_bytes())["functions"]
+    admitted = contract.qualified_runtime_from_reference(reference, code_root=ROOT)
+    monkeypatch.setattr(contract, "current_process_runtime", lambda: admitted)
     python = native_roles["functions"]["executable"]
     registry = ToolRegistry(
         allowed_tools=["file_read"], access_root=tmp_path, workspace_dir=tmp_path,
@@ -807,6 +845,9 @@ def test_real_cli_tool_and_hook_entrypoints_preserve_installer_seals(native_role
         assert "--context" in result.stdout
     finally:
         invocation.close()
+    monkeypatch.setattr(hashi_instance_cli, "_runtime_candidates", lambda _: [[python]])
+    for full in (False, True):
+        assert hashi_instance_cli._select_runtime(ROOT, full=full) == [python, "-B"]
     setting = next(value for value in flags if value.startswith("hooks.SessionStart="))
     command = tomllib.loads(setting)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     hook = subprocess.run(

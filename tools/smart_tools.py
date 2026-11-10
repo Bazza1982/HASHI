@@ -848,8 +848,19 @@ def adapt_legacy_result(
     """Translate one legacy tool result without changing the underlying tool."""
 
     spec = SMART_TOOL_SPECS.get(tool_name) or smart_tool_spec(tool_name)
+    evidence = dict(details or {})
+    # Pre-dispatch denials have a known effect, independent of the executor.
+    if (raw_is_error and evidence.get("tool_executed") is False
+            and evidence.get("control_disposition") in {"denied", "blocked"}
+            and evidence.get("error_code")):
+        return spec, SmartToolOutcome(
+            status="failed", effect="no_change",
+            error=SmartToolError(
+                str(evidence["error_code"]), _legacy_error_message(output), False
+            ),
+        )
     adapter = _ADAPTERS.get(spec.adapter or "", _generic_outcome)
-    outcome = adapter(spec, str(output or ""), bool(raw_is_error), dict(details or {}))
+    outcome = adapter(spec, str(output or ""), bool(raw_is_error), evidence)
     if outcome.status not in SMART_TOOL_STATUSES:
         raise ValueError(f"invalid smart tool status: {outcome.status}")
     if outcome.effect not in SMART_TOOL_EFFECTS:
@@ -1089,3 +1100,4 @@ __all__ = [
     "adapt_legacy_result",
     "smart_tool_spec",
 ]
+# HASHI-Fingerprint: hfp_3edf37a4cbbb4b858d24f011254ea774
