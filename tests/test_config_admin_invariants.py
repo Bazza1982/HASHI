@@ -22,6 +22,39 @@ def _admin(tmp_path, agents):
     ), path
 
 
+def test_ordinary_creation_normalizes_ids_for_dict_and_legacy_callers(tmp_path):
+    for mode in ("dict", "legacy"):
+        root = tmp_path / mode
+        root.mkdir()
+        admin, path = _admin(root, [])
+        config = (
+            {"name": "LeGaCy", "workspace_dir": "workspaces/LeGaCy",
+             "display_name": "Mixed CASE Display"}
+            if mode == "dict" else "Mixed CASE Display"
+        )
+        result = admin.add_agent_to_config("LeGaCy", config)
+        assert (result[0] if isinstance(result, tuple) else result) is True
+        row = json.loads(path.read_text(encoding="utf-8"))["agents"][0]
+        assert row["name"] == "legacy"
+        assert row["workspace_dir"] == "workspaces/legacy"
+        assert row["display_name"] == "Mixed CASE Display"
+        workspace = root / "workspaces" / "legacy"
+        before_pcm = (workspace / "agent.md").read_bytes()
+        before_config = path.read_bytes()
+        duplicate = admin.add_agent_to_config("LEGACY", config)
+        assert (duplicate[0] if isinstance(duplicate, tuple) else duplicate) is False
+        assert path.read_bytes() == before_config
+        assert (workspace / "agent.md").read_bytes() == before_pcm
+
+
+def test_creation_rejects_case_variant_of_existing_id_without_rewriting_it(tmp_path):
+    admin, path = _admin(tmp_path, [{"name": "LeGaCy", "is_active": False}])
+    before = path.read_bytes()
+    assert admin.add_agent_to_config("legacy") is False
+    assert path.read_bytes() == before
+    assert not (tmp_path / "workspaces" / "legacy").exists()
+
+
 def test_config_admin_refuses_to_deactivate_or_delete_last_active_agent(tmp_path):
     admin, path = _admin(
         tmp_path,

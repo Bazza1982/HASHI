@@ -111,7 +111,7 @@ def _service_create_contender(
     try:
         result = AgentCreationService(paths, global_config={}).create(
             AgentCreationSpec(
-                name="same-agent",
+                name="Same-Agent" if identity == "a" else "sAME-aGENT",
                 display_name=f"Owner {identity}",
                 backend="codex-cli",
             )
@@ -130,7 +130,8 @@ def installed_cli_backends(monkeypatch):
 
 def test_agent_name_validation_rejects_paths():
     assert validate_agent_name("researcher-1") == "researcher-1"
-    for value in ("../escape", "agent/name", "agent name", "-agent", ""):
+    assert validate_agent_name("ReSearchEr_1") == "researcher_1"
+    for value in ("../escape", "agent/name", "agent name", "-agent", "", "agent\n"):
         with pytest.raises(InvalidAgentNameError):
             validate_agent_name(value)
 
@@ -141,7 +142,7 @@ def test_service_creates_inactive_agent_through_authoritative_config_writer(
     paths = _paths(tmp_path)
     result = AgentCreationService(paths, global_config={}).create(
         AgentCreationSpec(
-            name="researcher",
+            name="ReSearchEr",
             display_name="Researcher",
             backend="codex-cli",
             model="gpt-5.6-sol",
@@ -152,7 +153,11 @@ def test_service_creates_inactive_agent_through_authoritative_config_writer(
 
     stored = json.loads(paths.config_path.read_text(encoding="utf-8"))
     assert result.config_published is True
+    assert result.name == "researcher"
+    assert result.display_name == "Researcher"
     assert stored["agents"][0]["name"] == "researcher"
+    assert stored["agents"][0]["display_name"] == "Researcher"
+    assert stored["agents"][0]["workspace_dir"] == "workspaces/researcher"
     assert stored["agents"][0]["is_active"] is False
     assert stored["agents"][0]["active_backend"] == "codex-cli"
     assert stored["agents"][0].get(AGENT_LIFECYCLE_FIELD)
@@ -218,16 +223,19 @@ def test_non_selectable_backend_is_rejected():
 def test_duplicate_and_orphan_workspace_are_preserved(tmp_path, installed_cli_backends):
     paths = _paths(tmp_path)
     service = AgentCreationService(paths, global_config={})
-    service.create(AgentCreationSpec(name="one", backend="codex-cli"))
+    service.create(AgentCreationSpec(name="OnE", backend="codex-cli"))
+    before = paths.config_path.read_bytes()
     with pytest.raises(AgentExistsError):
-        service.create(AgentCreationSpec(name="one", backend="codex-cli"))
+        service.create(AgentCreationSpec(name="oNE", backend="codex-cli"))
+    assert paths.config_path.read_bytes() == before
+    assert [row["name"] for row in json.loads(before)["agents"]] == ["one"]
 
     orphan = paths.workspaces_root / "orphan"
     orphan.mkdir()
     keep = orphan / "keep.txt"
     keep.write_text("preserve", encoding="utf-8")
     with pytest.raises(WorkspaceExistsError):
-        service.create(AgentCreationSpec(name="orphan", backend="codex-cli"))
+        service.create(AgentCreationSpec(name="OrPhAn", backend="codex-cli"))
     assert keep.read_text(encoding="utf-8") == "preserve"
 
 
