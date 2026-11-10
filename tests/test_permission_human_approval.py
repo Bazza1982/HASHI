@@ -93,6 +93,100 @@ def choice(browser, forms, lifetime):
 
 
 @pytest.mark.asyncio
+async def test_themed_review_keeps_exact_once_and_deny_primary_and_broad_grants_explicit(browser):
+    import base64
+    import hashlib
+    import re
+    from orchestrator.permissions.approval_page import THEMES, SIMPLE_THEMES
+
+    class Layout(Forms):
+        def __init__(self, body):
+            self.more = False
+            super().__init__(body)
+
+        def handle_starttag(self, tag, attributes):
+            super().handle_starttag(tag, attributes)
+            attrs = dict(attributes)
+            if tag == "details" and attrs.get("class") == "more":
+                self.more = True
+            if tag == "form":
+                self.rows[-1]["_more"] = self.more
+
+        def handle_endtag(self, tag):
+            if tag == "details":
+                self.more = False
+
+    import os
+    import json
+    from pathlib import Path
+    export = os.environ.get("HASHI_APPROVAL_PREVIEW_DIR")
+    previews = []
+    b = browser
+    await login(b)
+    for mode, themes in (("chat", THEMES), ("simple", SIMPLE_THEMES)):
+        for theme in sorted(themes):
+            url = b.path + "?theme=" + theme + "&mode=" + mode
+            if export:
+                b.client.session.cookie_jar.clear()
+                login_response = await b.client.get(url)
+                login_body = await login_response.text()
+                await login(b)
+            response = await b.client.get(url)
+            body = await response.text()
+            assert response.status == 200
+            assert not re.search(r"safety\.human_", body), "visible translation keys must never replace UI copy"
+            if export:
+                previews.append({"mode": mode, "theme": theme, "login": login_body,
+                                 "review": body, "csp": response.headers["Content-Security-Policy"]})
+            style = re.search(r"<style>(.*?)</style>", body, re.S).group(1)
+            digest = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
+            assert "style-src 'sha256-" + digest + "'" in response.headers["Content-Security-Policy"]
+            assert "default-src 'none'" in response.headers["Content-Security-Policy"]
+            assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+            assert "<script" not in body and "unsafe-inline" not in response.headers["Content-Security-Policy"]
+            assert 'class="app theme-' + theme in body
+            forms = [form for form in Layout(body).rows if form.get("operation") == "decide"]
+            invitation = b.manager._invitations[b.path.rsplit("/", 1)[1]]
+            actions = {key: action for group in invitation.actions.values() for key, action in group.items()}
+            primary = [actions[form["action_id"]] for form in forms if not form["_more"]]
+            assert [action.choice for action in primary] == ["approve", "deny"]
+            assert primary[0].lifetime == "once"
+            assert all(form["_more"] for form in forms
+                       if actions[form["action_id"]].choice == "approve"
+                       and actions[form["action_id"]].lifetime != "once")
+    if export:
+        folder = Path(export)
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.joinpath("trusted-pages.json").write_text(json.dumps({"pages": previews}), encoding="utf-8")
+    response = await b.client.get(b.path + '?theme=%22%3E%3Cscript%3E&mode=forged')
+    body = await response.text()
+    assert 'class="app theme-bright"' in body
+    assert "<script>" not in body
+    assert b.authority.decision_count(b.request.request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_discovery_projects_original_resource_facts_and_never_actions(browser):
+    import json
+    from orchestrator.permissions.frontend_requests import read
+
+    b = browser
+    b.api._strict_authenticated_owner = lambda _: b.subject.owner_id
+    request = SimpleNamespace(match_info={"session_id": b.subject.session_id},
+                              query={"agent_id": b.subject.agent_id,
+                                     "context_generation": b.subject.context_generation})
+    response = await read(b.api, request)
+    assert response.status == 200
+    row = json.loads(response.text)["requests"][0]
+    assert row["request_id"] == b.request.request_id
+    assert row["summary"]["purpose"] == b.request.purpose
+    assert row["summary"]["resources"] == [{"name": b.target.name, "kind": "file",
+                                            "resource": b.scope.resource, "actions": ["write"]}]
+    assert "actions" not in row and "token" not in response.text
+    assert b.authority.decision_count(b.request.request_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_governed_form_login_once_and_exact_duplicate_decision(browser):
     b = browser
     with pytest.raises(PermissionDenied):
@@ -122,6 +216,11 @@ async def test_governed_form_login_once_and_exact_duplicate_decision(browser):
         b.authority.prepare(b.binding.context, "original-op", "a" * 64, [b.scope])
     assert b.authority.operation_status_for_task(b.binding.context, "original-op").state == "succeeded"
     assert b.target.read_text(encoding="utf-8") == "effect once"
+    refreshed = await b.client.get(b.path)
+    current_body = await refreshed.text()
+    assert refreshed.status == 200
+    assert not any(form.get("operation") in {"decide", "revoke"} for form in Forms(current_body).rows)
+    assert "cannot be reused" in current_body
     assert not b.authority.evaluate(b.binding.context, [b.scope], operation_id="another-op")
     cookie = b.client.session.cookie_jar.filter_cookies(b.client.make_url(b.path))["hashi_approval_session"]
     assert cookie.value not in body and cookie.value not in repr(b.manager._invitations)
