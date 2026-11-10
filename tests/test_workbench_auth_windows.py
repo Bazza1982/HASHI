@@ -101,19 +101,28 @@ def test_invalid_registration_cannot_publish_credentials(registered_scheduler, m
     assert sorted(p.name for p in registered_scheduler.iterdir()) == ["secrets.json"]
 
 
-def test_query_timeout_fails_before_credential_publication(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("stderr", "phase"),
+    [
+        (b"", "powershell_startup"),
+        (b"HASHI_REMOTE_QUERY_PHASE:script_ready:0\n"
+         b"HASHI_REMOTE_QUERY_PHASE:connected:25\n", "connected"),
+    ],
+)
+def test_query_timeout_fails_before_credential_publication(tmp_path, monkeypatch, stderr, phase):
     path = tmp_path / "secrets.json"
     original = b'{"workbench_admin_token":"existing-fixture","unrelated":"keep"}\n'
     path.write_bytes(original)
     document = read_config_json(path)
 
     def timeout(argv, **kwargs):
-        assert kwargs["timeout"] == 10
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        assert 0 < kwargs["timeout"] <= 30
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], stderr=stderr)
 
     monkeypatch.setattr(workbench_auth.subprocess, "run", timeout)
-    with pytest.raises(RuntimeError, match="Timed out.*Remote runtime principal"):
+    with pytest.raises(RuntimeError, match="Timed out.*Remote runtime principal") as error:
         workbench_auth.ensure_local_api_credential(document, profile="personal")
+    assert f"stage={phase}" in str(error.value)
     assert path.read_bytes() == original
 
 

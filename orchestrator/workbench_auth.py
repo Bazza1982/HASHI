@@ -1,10 +1,12 @@
 """Private instance credentials prepared during personal Functions startup."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
 import subprocess
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -12,6 +14,18 @@ from orchestrator.config_json import ConfigDocument, write_config_json
 
 
 _WINDOWS_SID = re.compile(r"S-1(?:-\d+)+", re.IGNORECASE)
+_WINDOWS_REMOTE_QUERY_TIMEOUT = 30
+_WINDOWS_QUERY_PHASE = re.compile(r"HASHI_REMOTE_QUERY_PHASE:([a-z_]{1,40}):(\d{1,12})")
+
+
+def _windows_query_phase(stderr: str | bytes | None) -> tuple[str, int]:
+    text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
+    phase, elapsed_ms = "powershell_startup", 0
+    for line in text.splitlines():
+        match = _WINDOWS_QUERY_PHASE.fullmatch(line.strip())
+        if match:
+            phase, elapsed_ms = match.group(1), int(match.group(2))
+    return phase, elapsed_ms
 
 
 def _windows_remote_runtime_sids(root: Path) -> tuple[str, ...]:
@@ -31,12 +45,22 @@ def _windows_remote_runtime_sids(root: Path) -> tuple[str, ...]:
     )
     script = r"""
 $ErrorActionPreference = 'Stop'
+$queryClock = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-QueryPhase([string]$Phase) {
+    [Console]::Error.WriteLine(
+        'HASHI_REMOTE_QUERY_PHASE:' + $Phase + ':' + $queryClock.ElapsedMilliseconds
+    )
+}
+Write-QueryPhase 'script_ready'
 # The installer registers one instance task in the scheduler root. Accessing
 # that exact task through COM avoids loading ScheduledTasks/CIM and enumerating
 # every task during cold startup.
 $service = New-Object -ComObject 'Schedule.Service'
+Write-QueryPhase 'service_created'
 $service.Connect()
+Write-QueryPhase 'connected'
 $folder = $service.GetFolder('\')
+Write-QueryPhase 'folder_opened'
 try {
     $task = $folder.GetTask($env:HASHI_REMOTE_PRINCIPAL_QUERY_TASK)
 } catch {
@@ -45,9 +69,11 @@ try {
     # Only ERROR_FILE_NOT_FOUND means the exact task is not installed. Access,
     # scheduler, and other failures must abort before publishing credentials.
     if ($failure.HResult -ne -2147024894) { throw }
+    Write-QueryPhase 'task_missing'
     [Console]::Out.WriteLine('ABSENT')
     exit 0
 }
+Write-QueryPhase 'task_found'
 if ($task.Path -ne ('\' + $env:HASHI_REMOTE_PRINCIPAL_QUERY_TASK)) {
     throw 'Remote task registration path does not match this instance'
 }
@@ -55,6 +81,7 @@ $principal = [string]$task.Definition.Principal.UserId
 if ([string]::IsNullOrWhiteSpace($principal)) {
     throw 'Remote task has no principal'
 }
+Write-QueryPhase 'principal_read'
 try {
     $sid = [System.Security.Principal.SecurityIdentifier]::new($principal).Value
 } catch {
@@ -63,10 +90,12 @@ try {
         [System.Security.Principal.SecurityIdentifier]
     ).Value
 }
+Write-QueryPhase 'sid_resolved'
 [Console]::Out.WriteLine("SID:$sid")
 """
     environment = dict(os.environ)
     environment["HASHI_REMOTE_PRINCIPAL_QUERY_TASK"] = task_name
+    started = time.monotonic()
     try:
         result = subprocess.run(
             [
@@ -80,14 +109,26 @@ try {
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_WINDOWS_REMOTE_QUERY_TIMEOUT,
             env=environment,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as error:
+        phase, elapsed_ms = _windows_query_phase(error.stderr)
         raise RuntimeError(
-            "Timed out resolving the registered Remote runtime principal (10 seconds)"
+            "Timed out resolving the registered Remote runtime principal "
+            f"({_WINDOWS_REMOTE_QUERY_TIMEOUT} seconds; stage={phase}, "
+            f"script_elapsed_ms={elapsed_ms})"
         ) from error
+    elapsed = time.monotonic() - started
+    if result.returncode == 0 and elapsed >= 10:
+        _phase, script_elapsed_ms = _windows_query_phase(result.stderr)
+        script_elapsed = script_elapsed_ms / 1000
+        logging.getLogger(__name__).warning(
+            "Windows Remote principal query took %.3fs "
+            "(PowerShell startup/exit %.3fs, scheduler query %.3fs)",
+            elapsed, max(0, elapsed - script_elapsed), script_elapsed,
+        )
     output = result.stdout.strip()
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip().splitlines()
