@@ -1168,6 +1168,17 @@ class FunctionWorkerHost:
                     )
                 return
 
+    async def _reset_telegram_application(self, runtime) -> None:
+        """Reset partial PTB initialization before the next background attempt."""
+        if getattr(runtime.app, "running", False):
+            await asyncio.wait_for(runtime.app.stop(), timeout=5)
+        await asyncio.wait_for(runtime.app.shutdown(), timeout=5)
+        # Application.shutdown skips a partially initialized Application.
+        bot = getattr(runtime.app, "bot", None)
+        if bot is not None:
+            await asyncio.wait_for(bot.shutdown(), timeout=5)
+        self._telegram_cleanup_required = False
+
     async def _prepare_telegram_application(self) -> bool:
         """Validate and start handlers; Core alone owns long polling."""
 
@@ -1176,6 +1187,8 @@ class FunctionWorkerHost:
             runtime.telegram_connected = False
             return False
         try:
+            if getattr(self, "_telegram_cleanup_required", False):
+                await self._reset_telegram_application(runtime)
             if not getattr(runtime.app, "running", False):
                 await runtime.app.initialize()
                 await runtime.app.start()
@@ -1196,15 +1209,13 @@ class FunctionWorkerHost:
             # Quiesce fences effects immediately. The retiring runtime owns
             # potentially slow client cleanup; local cutover never awaits it.
             runtime.telegram_connected = False
+            self._telegram_cleanup_required = True
             raise
         except Exception:
             runtime.telegram_connected = False
-            # initialize/start/restoration can fail halfway through.
-            # Close partially opened clients before retrying or retiring.
+            self._telegram_cleanup_required = True
             try:
-                if getattr(runtime.app, "running", False):
-                    await asyncio.wait_for(runtime.app.stop(), timeout=5)
-                await asyncio.wait_for(runtime.app.shutdown(), timeout=5)
+                await self._reset_telegram_application(runtime)
             except Exception:
                 logger.warning("Telegram client cleanup deferred for %s", self.agent_name)
             raise

@@ -107,3 +107,17 @@ Audio retention and legacy scalar Workzone recovery remain active; future
 schemas are rejected instead of downgraded. HERV3 does not enumerate historical
 ledger files for an explicitly empty canonical recovery set. Unfiltered legacy
 and nonempty recovery retain their original integrity rules.
+
+### Failed checkpoint handoff and initialization retry
+
+A processing acknowledgement retained during a checkpoint failure is included
+in the durable shared handoff, even if the normal offset file remains stale.
+Recovery merges cursors monotonically only for the same Bot fingerprint.
+Transport replacement also retains that acknowledgement. Local handoff cancels
+idle login/polling/checkpoint retries; only a dispatched update drains its ACK.
+
+Failed or cancelled Worker application initialization marks its client state
+for reset. Before retry, stop/shutdown the application and explicitly close
+the Bot clients, including the partial-initialization case that PTB's
+Application.shutdown skips. This cleanup belongs to background connector work;
+quiesce need not wait for it.

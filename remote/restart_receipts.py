@@ -114,7 +114,8 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
         "instance_id": instance, "accepted": state != "rejected",
         "status": "succeeded" if succeeded else "failed" if terminal else "running",
         "terminal": terminal, "outcome": "succeeded" if succeeded else "failed" if terminal else "unknown",
-        "phase": phase, "reason": None if succeeded or not terminal else "restart_unconfirmed",
+        "phase": phase, "reason": ("restart_unconfirmed" if terminal and not succeeded
+            and (state == "completed" or phase == "terminal_verification") else None),
         "created_at": _epoch(record.get("started_at")), "finished_at": _epoch(record.get("completed_at")),
         "duration_ms": timing.get("total_ms"), "latest_sequence": sequence,
         "kernel_pid": evidence.get("new_pid") if succeeded else None,

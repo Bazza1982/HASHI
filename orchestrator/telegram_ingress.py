@@ -71,12 +71,18 @@ class CoreTelegramIngress:
         self.connected = False
         self._stopping = False
         self._poll_task: asyncio.Task[Any] | None = None
+        self._delivering_update = False
         self._initialized = False
         self._drop_pending_on_connect = False
 
     @property
     def is_running(self) -> bool:
         return bool(self.task is not None and not self.task.done())
+
+    @property
+    def acknowledged_offset(self) -> int | None:
+        """Cursor carried by a durable handoff, including a pending checkpoint."""
+        return self._pending_checkpoint if self._pending_checkpoint is not None else self.offset
 
     def _check_bot_identity(self, handle: Any) -> None:
         metadata = getattr(handle, "metadata", {})
@@ -179,13 +185,15 @@ class CoreTelegramIngress:
                     stage = "worker_delivery"
                     self._check_bot_identity(handle)
                     self.diagnostics.stage(stage)
-                    accepted = await handle.deliver_telegram_update(update.to_dict())
-                    if accepted is not True:
-                        raise RuntimeError("Worker did not acknowledge Telegram processing")
-                    # Retain the processing ACK while retrying a failed durable
-                    # checkpoint. Never process the same batch again merely
-                    # because the checkpoint filesystem was temporarily busy.
-                    self._pending_checkpoint = int(update.update_id) + 1
+                    self._delivering_update = True
+                    try:
+                        accepted = await handle.deliver_telegram_update(update.to_dict())
+                        if accepted is not True:
+                            raise RuntimeError("Worker did not acknowledge Telegram processing")
+                        # Keep the ACK before any cancellable checkpoint/status I/O.
+                        self._pending_checkpoint = int(update.update_id) + 1
+                    finally:
+                        self._delivering_update = False
                     stage = "offset_checkpoint"
                     self.diagnostics.stage(stage)
                     await self._checkpoint_processed_update()
@@ -195,9 +203,11 @@ class CoreTelegramIngress:
                 raise
             except Exception as exc:
                 self.diagnostics.failure(exc, stage=stage, retry_seconds=TELEGRAM_RETRY_SECONDS)
-                await self._set_connected(False)
                 if not self._stopping:
+                    await self._set_connected(False)
                     await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
+                else:
+                    self.connected = False
 
     async def _checkpoint_processed_update(self) -> None:
         offset = self._pending_checkpoint
@@ -217,6 +227,11 @@ class CoreTelegramIngress:
         drains and checkpoints before this method returns.
         """
         self._stopping = True
+        # Login, idle polling and checkpoint retries are not local readiness.
+        # Only an update already dispatched to a Worker needs to finish its ACK.
+        if not self._delivering_update:
+            await self.stop(notify_status=False)
+            return
         if self._poll_task is not None and not self._poll_task.done():
             self._poll_task.cancel()
         if self.task is not None:

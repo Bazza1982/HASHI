@@ -1686,9 +1686,11 @@ class FunctionWorkerSupervisor:
                 and getattr(existing, "api_root", None) == api_root):
             return True
         same_bot = existing is not None and existing.token == str(token)
-        previous_offset = existing.offset if same_bot else None
+        previous_offset = None
         if existing is not None:
             await existing.stop()
+            if same_bot:
+                previous_offset = getattr(existing, "acknowledged_offset", existing.offset)
 
         diagnostics = TelegramIngressDiagnostics(bridge_home=self.kernel.paths.bridge_home,
             instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),

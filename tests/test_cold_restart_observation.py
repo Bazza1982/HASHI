@@ -105,3 +105,24 @@ def test_detached_remote_admits_before_qualification_and_blocks_overlap(tmp_path
             assert state=="failed"
     finally:release.set()
 # HASHI-Fingerprint: hfp_9693e4335cb04e129e26839db89e47ba
+
+def test_definite_launch_failure_is_not_presented_as_missing_receipt():
+    value = record()
+    value.update(state="failed", phase="runtime_qualification",
+        error="qualification rejected", completed_at=datetime.now(timezone.utc).isoformat())
+    operation = project_restart(value, instance_id="HASHI3", owner_id="user:7")
+    assert operation["terminal"] and operation["status"] == "failed"
+    assert operation["reason"] != "restart_unconfirmed"
+
+
+def test_incomplete_core_proof_can_recover_from_later_same_receipt(tmp_path):
+    value = complete(record())
+    value["evidence"] = {}
+    reader = save(tmp_path, value)
+    pending = reader.operation(RID, owner_id="user:7", agent_id="ying")
+    assert pending["reason"] == "restart_unconfirmed"
+    assert pending["status"] != "succeeded"
+    save(tmp_path, complete(record()))
+    done = reader.operation(RID, owner_id="user:7", agent_id="ying")
+    assert done["operation_id"] == pending["operation_id"]
+    assert done["status"] == "succeeded"
