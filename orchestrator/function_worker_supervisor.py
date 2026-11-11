@@ -59,12 +59,6 @@ TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS = 0.5
 TELEGRAM_STATUS_WARNING_COOLDOWN_SECONDS = 30.0
 
 
-def _current_worker_runtime(code_root: Path):
-    return cached_current_runtime_fingerprint(
-        load_runtime_policy(code_root), code_root=code_root,
-    )
-
-
 class FunctionWorkerError(RuntimeError):
     """A Function Worker could not be prepared, switched, or recovered."""
 
@@ -1904,12 +1898,10 @@ class FunctionWorkerSupervisor:
             artifact = generation_root
         nonce = uuid4().hex
         worker_runtime = self.kernel.runtime_fingerprint.to_dict()
-        # The metadata freshness scan reads installed distribution files.
-        # Keep the same per-Worker check off the control/IPC event loop.
-        with span("worker.runtime_fingerprint", agent=agent_name):
-            live_runtime = await asyncio.to_thread(
-                _current_worker_runtime, self.kernel.paths.code_root,
-            )
+        live_runtime = cached_current_runtime_fingerprint(
+            load_runtime_policy(self.kernel.paths.code_root),
+            code_root=self.kernel.paths.code_root,
+        )
         worker_runtime["dependency_digest"] = live_runtime.dependency_digest
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
