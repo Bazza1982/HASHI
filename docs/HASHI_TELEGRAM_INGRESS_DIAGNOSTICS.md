@@ -103,6 +103,8 @@ Frontend requests cannot supply this setting. Never log URL token paths.
 
 Session schema 36 marks completion of the full migration before later Workers
 use its read-only version fast path. Older versions still migrate completely.
+A missing foreground-call index or pending legacy voice inbox also invokes the
+existing ordered migration; the current version marker alone is insufficient.
 Audio retention and legacy scalar Workzone recovery remain active; future
 schemas are rejected instead of downgraded. HERV3 does not enumerate historical
 ledger files for an explicitly empty canonical recovery set. Unfiltered legacy

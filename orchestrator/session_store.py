@@ -554,7 +554,23 @@ class SessionStore:
                 version = 0
             if version > self.SCHEMA_VERSION:
                 raise RuntimeError("Session database requires a newer schema reader")
-        if version == self.SCHEMA_VERSION:
+            schema_ready = version == self.SCHEMA_VERSION
+            if schema_ready:
+                foreground_index = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                    "AND name = 'one_live_call_per_owner'"
+                ).fetchone()
+                # Legacy writers/restores can leave recovery work even when
+                # the version marker is current. Reuse the ordered migration.
+                schema_ready = (
+                    bool(foreground_index)
+                    and "foreground" in str(foreground_index["sql"] or "").lower()
+                    and connection.execute(
+                        "SELECT 1 FROM live_provider_fragment_inbox UNION ALL "
+                        "SELECT 1 FROM live_provider_delegation_inbox LIMIT 1"
+                    ).fetchone() is None
+                )
+        if schema_ready:
             # Legacy writers can still set the scalar preference. This data
             # projection is recovery, not a repeated schema migration.
             with self._lock, self._connection() as connection:
