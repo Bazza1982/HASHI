@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.bootstrap_logging import AnimMute
-from orchestrator.lifecycle_timing import timed
+from orchestrator.lifecycle_timing import emit, timed
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -590,11 +590,16 @@ class StartupManager:
             _publish_progress()
             return generation, generation_root
 
+        configured_limit = getattr(global_cfg, "startup_agent_concurrency", INITIAL_AGENT_STARTUP_CONCURRENCY)
+        if type(configured_limit) is not int or not 1 <= configured_limit <= 16:
+            raise ValueError("startup_agent_concurrency must be an integer from 1 to 16")
         prepared_generation_task = asyncio.create_task(
             _prepare_initial_generation(),
             name="boot-function-generation",
         )
-        startup_limit = max(1, min(INITIAL_AGENT_STARTUP_CONCURRENCY, len(initial_agent_names) or 1))
+        startup_limit = max(1, min(configured_limit, len(initial_agent_names) or 1))
+        startup_progress["startup_concurrency"] = startup_limit
+        bridge_logger.info("Agent startup concurrency: %s for %s configured Agents", startup_limit, len(initial_agent_names))
         startup_sem = asyncio.Semaphore(startup_limit)
 
         async def _start_initial_agent(agent_name: str):
@@ -612,7 +617,9 @@ class StartupManager:
                     e,
                 )
                 return agent_name, (False, str(e))
+            queued_at = time.perf_counter()
             async with startup_sem:
+                emit("startup.agent_queue_wait", duration_ms=(time.perf_counter() - queued_at) * 1000, agent=agent_name, concurrency=startup_limit)
                 boot_state[agent_name] = "connecting"
                 bridge_logger.info("%s: pending -> connecting", agent_name)
                 _publish_progress()

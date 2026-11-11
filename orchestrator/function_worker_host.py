@@ -37,7 +37,7 @@ from orchestrator.runtime_contract import (
     enforce_runtime_contract,
 )
 from orchestrator.service_endpoints import endpoint_from_snapshot
-from orchestrator.lifecycle_timing import timed
+from orchestrator.lifecycle_timing import span, timed
 
 logger = logging.getLogger("BridgeU.FunctionWorker")
 
@@ -826,76 +826,82 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError(
                 "Function Worker bootstrap protocol does not match Core"
             )
-        actual_runtime = enforce_runtime_contract(self.code_root)
-        compare_runtime_fingerprints(self.expected_runtime, actual_runtime)
-        if actual_runtime.worker_protocol != FUNCTION_WORKER_PROTOCOL_VERSION:
-            raise FunctionWorkerStateError(
-                "Function Worker protocol implementation does not match Core policy"
+        with span("worker.runtime_contract"):
+            actual_runtime = enforce_runtime_contract(self.code_root)
+            compare_runtime_fingerprints(self.expected_runtime, actual_runtime)
+            if actual_runtime.worker_protocol != FUNCTION_WORKER_PROTOCOL_VERSION:
+                raise FunctionWorkerStateError(
+                    "Function Worker protocol implementation does not match Core policy"
+                )
+            if actual_runtime.generation_schema != FUNCTION_GENERATION_SCHEMA_VERSION:
+                raise FunctionWorkerStateError(
+                    "Function generation schema implementation does not match Core policy"
+                )
+        with span("worker.import_runtime"):
+            self._install_generation_import_paths()
+
+            from orchestrator.config import ConfigManager
+            from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+            from orchestrator.skill_manager import SkillManager
+
+        with span("worker.load_config"):
+            self.paths = build_bridge_paths(self.code_root, bridge_home=self.bridge_home, canonical_home=True)
+            from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
+
+            ensure_agent_lifecycle_id(self.paths.config_path, self.agent_name)
+            manager = ConfigManager(
+                self.paths.config_path,
+                self.paths.secrets_path,
+                bridge_home=self.paths.bridge_home,
+                code_root=self.paths.code_root,
             )
-        if actual_runtime.generation_schema != FUNCTION_GENERATION_SCHEMA_VERSION:
-            raise FunctionWorkerStateError(
-                "Function generation schema implementation does not match Core policy"
+            global_cfg, agent_configs, secrets = manager.load()
+            agent_cfg = next(
+                (item for item in agent_configs if item.name == self.agent_name),
+                None,
             )
-        self._install_generation_import_paths()
-
-        from orchestrator.config import ConfigManager
-        from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-        from orchestrator.skill_manager import SkillManager
-
-        self.paths = build_bridge_paths(self.code_root, bridge_home=self.bridge_home, canonical_home=True)
-        from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
-
-        ensure_agent_lifecycle_id(self.paths.config_path, self.agent_name)
-        manager = ConfigManager(
-            self.paths.config_path,
-            self.paths.secrets_path,
-            bridge_home=self.paths.bridge_home,
-            code_root=self.paths.code_root,
-        )
-        global_cfg, agent_configs, secrets = manager.load()
-        agent_cfg = next(
-            (item for item in agent_configs if item.name == self.agent_name),
-            None,
-        )
-        if agent_cfg is None:
-            raise FunctionWorkerStateError(
-                f"Agent {self.agent_name!r} is not configured"
+            if agent_cfg is None:
+                raise FunctionWorkerStateError(
+                    f"Agent {self.agent_name!r} is not configured"
+                )
+        with span("worker.construct_runtime"):
+            token = secrets.get(agent_cfg.telegram_token_key) or LOCAL_MODE_TOKEN
+            skill_manager = SkillManager(self.paths.code_root, self.paths.tasks_path)
+            runtime = FlexibleAgentRuntime(
+                agent_cfg,
+                global_cfg,
+                token,
+                secrets,
+                skill_manager,
             )
-        token = secrets.get(agent_cfg.telegram_token_key) or LOCAL_MODE_TOKEN
-        skill_manager = SkillManager(self.paths.code_root, self.paths.tasks_path)
-        runtime = FlexibleAgentRuntime(
-            agent_cfg,
-            global_cfg,
-            token,
-            secrets,
-            skill_manager,
-        )
-        from orchestrator.execution_resources import execution_configuration
-        execution_configuration(getattr(runtime.backend_manager, '_agents_json_global', None), agent_cfg.extra)
-        facade = WorkerKernelFacade(
-            peer=self.peer,
-            paths=self.paths,
-            global_cfg=global_cfg,
-            skill_manager=skill_manager,
-            agent_name=self.agent_name,
-            topology=self.bootstrap.get("topology") or {},
-        )
-        runtime.orchestrator = facade
-        runtime._runtime_fingerprint = self.expected_runtime
-        runtime._worker_version_metadata = {
-            "agent": self.agent_name,
-            "pid": os.getpid(),
-            "generation_id": self.manifest.generation_id,
-            "started_at": self.started_at,
-            "adopted_at": self.adopted_at,
-            "phase": self.phase,
-            "accepting": self.accepting,
-        }
-        facade.attach_runtime(runtime)
-        runtime.agent_directory = facade.agent_directory
-        runtime.bind_handlers()
+        with span("worker.bind_runtime"):
+            from orchestrator.execution_resources import execution_configuration
+            execution_configuration(getattr(runtime.backend_manager, '_agents_json_global', None), agent_cfg.extra)
+            facade = WorkerKernelFacade(
+                peer=self.peer,
+                paths=self.paths,
+                global_cfg=global_cfg,
+                skill_manager=skill_manager,
+                agent_name=self.agent_name,
+                topology=self.bootstrap.get("topology") or {},
+            )
+            runtime.orchestrator = facade
+            runtime._runtime_fingerprint = self.expected_runtime
+            runtime._worker_version_metadata = {
+                "agent": self.agent_name,
+                "pid": os.getpid(),
+                "generation_id": self.manifest.generation_id,
+                "started_at": self.started_at,
+                "adopted_at": self.adopted_at,
+                "phase": self.phase,
+                "accepting": self.accepting,
+            }
+            facade.attach_runtime(runtime)
+            runtime.agent_directory = facade.agent_directory
+            runtime.bind_handlers()
 
-        initialized = await runtime.initialize()
+        with span("worker.initialize_runtime"):
+            initialized = await runtime.initialize()
         if not initialized:
             raise FunctionWorkerStateError(
                 f"Backend initialization returned false for {self.agent_name!r}"
@@ -905,7 +911,8 @@ class FunctionWorkerHost:
         self.facade = facade
         self._bridge_request_completions(runtime)
         self.phase = "READY"
-        await self.peer.emit("worker.ready", self.metadata())
+        with span("worker.publish_ready"):
+            await self.peer.emit("worker.ready", self.metadata())
 
     def _install_generation_import_paths(self) -> None:
         """Install exact manifest routing without shadowing protected Core."""
