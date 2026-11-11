@@ -1672,6 +1672,14 @@ class FunctionWorkerSupervisor:
         from orchestrator.telegram_transport import bot_api_root, bot_api_kwargs
         handle = self.kernel._runtime_map().get(name)
         config = getattr(handle, "config", None)
+        # A route handle exposes only a partial configuration descriptor.
+        # Connector endpoints come from the trusted instance-config owner.
+        load_raw = getattr(self.kernel, "_load_raw_config", None)
+        if callable(load_raw):
+            raw = load_raw()
+            row = next((a for a in raw.get("agents", ()) if a.get("name") == name), None)
+            if row is not None:
+                config = SimpleNamespace(extra=dict(row.get("extra") or {}))
         api_root = bot_api_root(config)
         existing = self._telegram_ingress.get(name)
         if (existing is not None and existing.is_running and existing.token == str(token)
