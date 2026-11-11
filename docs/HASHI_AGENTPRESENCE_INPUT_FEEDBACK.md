@@ -68,3 +68,12 @@ Focused checks: test_agent_presence_captions.py (real SessionStore, standard
 projection, outbox claim/replay and canonical scope), test_agent_presence_notify.py,
 desktop-context tests and terminal resolution regressions. Native executable,
 Worker adoption, real audio and physical-device acceptance are separate facts.
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 054 Owner-bound Agent Presence feedback
+
+AgentPresence限owner且默认关闭；HASHI认证并冻结Agent/Conversation。仅PAO受理的人类/客户端输入触发owner路由反馈，AP本地输入不回声。
+`/phone`按范围发离开/返回；AP管呈现，HASHI管服务/音色；入口失败关闭，各界面独立。[反馈](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md)。

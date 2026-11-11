@@ -6,6 +6,7 @@ from aiohttp import web
 
 from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.models import PermissionSubject
+from orchestrator.permissions.presentation import request_summary
 from orchestrator.permissions.wire import PermissionRemoteError
 from orchestrator.session_store import SessionNotFound, SessionConflict
 
@@ -26,12 +27,21 @@ async def read(api, request):
                                     session["session_id"], str(session["context_generation"]))
         control = getattr(api, "permission_control", None)
         if control is None:
+            # A saved installation still needs adoption by the shared frontend.
+            # An unavailable owner must not look like an empty authority view.
+            configuration = api._load_raw_agent_config()
+            settings = configuration.get("global", {})
+            if not isinstance(settings, dict):
+                raise ValueError("invalid instance permission configuration")
+            if settings.get("permission_service") is not None:
+                raise OSError("configured permission frontend is not loaded")
             return web.json_response({"ok": True, "requests": [], "next_before": None}, headers=headers)
         page = await asyncio.to_thread(
             control.list_session_requests, subject, before=request.query.get("before"), limit=100,
         )
         rows = [{"request_id": view.request.request_id, "revision": view.request.revision,
-                 "expires_at": view.request.expires_at}
+                 "expires_at": view.request.expires_at,
+                 "summary": request_summary(view)}
                 for view in page.requests if view.request.state == "pending"
                 and view.task_state in {"active", "paused"} and view.binding_state == "active"]
         return web.json_response({
@@ -43,3 +53,4 @@ async def read(api, request):
         return api._v1_error(error)
     except (PermissionDenied, PermissionRemoteError, OSError, ValueError):
         return web.json_response({"ok": False, "error_code": "permission_requests_unavailable"}, status=503, headers=headers)
+# HASHI-Fingerprint: hfp_ef3dd795289a4deca87b54cd7ec847f7

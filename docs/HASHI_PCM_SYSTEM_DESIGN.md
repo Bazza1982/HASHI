@@ -203,6 +203,13 @@ must not discard the current user request or higher-authority PCM sections to
 retain older history. HERV3 continues to use its own context-capacity and
 Compact controls.
 
+When omitted exchanges are represented by a continuity capsule, each source
+receipt and its timestamps remain intact. If the capsule still exceeds a
+non-HER budget after raw history is removed, PCM shortens only its bounded
+excerpts. It does not trim the current request, higher-authority text or the
+canonical history. Protected content and minimum continuity metadata can still
+form an irreducible budget floor.
+
 |                                                                                                                                                                                          |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Known issue** The current `/backend +` process rebuilds a handoff file and sets a one-time prompt, but may not send the handoff content to the selected Engine. This remains to be resolved. |
@@ -687,3 +694,21 @@ document. This is a current usability limitation: reopen the latest document,
 review the refreshed context and reapply the intended edits before explicitly
 importing again. Automatic merging, ignoring HCC in the revision and automatic
 write retries are outside this change.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 012 Task-local system prompts and parked deletion
+
+- Task/local /sys + parked deletion: auth/revision checked; retain causes and unknown writes;
+  /sys excludes global/permanent, parked needs guarded Worker, keeps chat.
+  [PAO](HASHI_PAO_SYSTEM_DESIGN.md), [PCM](HASHI_PCM_SYSTEM_DESIGN.md).
+
+### FYI v1 036 Typed message identity and current authorization
+
+CURRENT MESSAGE CONTEXT separates source/assurance/authority/destination. Only
+successful current private_authorization grants scope. HChat separates claimed
+sender/verified peer/relay/target; cross-instance requires authenticated
+[Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).

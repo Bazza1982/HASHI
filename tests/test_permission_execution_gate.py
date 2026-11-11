@@ -14,6 +14,11 @@ from orchestrator.permissions.models import ExecutionContext, normalize_scope, s
 from orchestrator.permissions.waiting import PermissionWaiter
 
 
+# Shared by these ledger/dispatch integration fixtures. This is a deadlock
+# watchdog; ordering and permission deadlines are asserted independently.
+CONTRACT_WATCHDOG_SECONDS = 10
+
+
 class Issuer:
     def __init__(self):
         self.proofs = {}
@@ -126,7 +131,7 @@ async def find_pending(authority, context):
             if pending:
                 return pending[0]
             await asyncio.sleep(0.01)
-    return await asyncio.wait_for(poll(), 1)
+    return await asyncio.wait_for(poll(), CONTRACT_WATCHDOG_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -142,7 +147,7 @@ async def test_approval_resumes_original_immutable_file_operation(environment, t
     # This bounds a stalled operation, not its performance. Loaded Windows
     # runners may need over one second for the post-write threaded SQLite
     # receipt check; approval and immutable-argument assertions stay unchanged.
-    result = await asyncio.wait_for(task, 10)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "succeeded"
     assert result.operation_id == "operation"
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "original"
@@ -159,10 +164,10 @@ async def test_revoking_while_queued_never_dispatches_file_write(environment, tm
     operation = authority.operation_status_for_task(context, "operation")
     lease = issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    await asyncio.wait_for(supervisor.queued.wait(), 1)
+    await asyncio.wait_for(supervisor.queued.wait(), CONTRACT_WATCHDOG_SECONDS)
     authority.revoke(context, lease.lease_id)
     supervisor.resource.release()
-    result = await asyncio.wait_for(task, 1)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "permission_changed"
     assert not (tmp_path / "out.txt").exists()
 
@@ -186,7 +191,7 @@ async def test_runner_error_after_start_is_unknown_and_cannot_repeat(environment
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    result = await asyncio.wait_for(task, 1)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert authority.operation_state("operation") == "started"
     assert (tmp_path / "uncertain.txt").read_text(encoding="utf-8") == "written"
@@ -250,7 +255,7 @@ async def test_runner_cannot_replace_payload_after_the_result_was_recorded(envir
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    result = await asyncio.wait_for(task, 1)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "unknown"
     assert result.payload is None
 
@@ -294,7 +299,7 @@ async def _complete_recoverable_operation(environment, tmp_path, *, confirm_stop
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
     # Watchdog for a stuck workflow, not a one-second SQLite/runner latency contract.
-    assert (await asyncio.wait_for(task, 5)).state == ("succeeded" if confirm_stop else "unknown")
+    assert (await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)).state == ("succeeded" if confirm_stop else "unknown")
     return authority, issuer, context, gate, supervisor, arguments, request
 
 
@@ -323,6 +328,7 @@ async def test_completed_operation_replays_verified_result_after_worker_change(e
         "operation", "file_write", {"path": "recovery.txt", "content": "different"}, reason="report"
     )
     assert changed.state == "conflict"
+    assert changed.payload["permission_diagnostic"]["stage"] == "operation_identity"
     assert recovered_supervisor.recover_calls == 1 and recovered_supervisor.execute_calls == 0
     assert supervisor.execute_calls == 1
 
@@ -338,7 +344,9 @@ async def test_new_worker_cannot_replay_until_the_old_execution_is_fenced(enviro
         authority, PermissionWaiter(authority), supervisor, context=later,
         cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
     )
-    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    conflict = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert conflict.state == "conflict"
+    assert conflict.payload["permission_diagnostic"]["stage"] == "operation_lookup"
     assert supervisor.recover_calls == 0 and supervisor.execute_calls == 0
     authority.fence_execution(context)
     assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "succeeded"
@@ -383,7 +391,7 @@ async def test_started_operation_with_lost_result_never_runs_again(environment, 
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    assert (await asyncio.wait_for(task, 1)).state == "unknown"
+    assert (await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)).state == "unknown"
     monkeypatch.setattr(supervisor, "supports", lambda _name: False)
     assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "unknown"
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 0
@@ -414,10 +422,10 @@ async def test_stopped_task_cannot_receive_a_result_that_is_still_loading(enviro
 
     monkeypatch.setattr(supervisor, "recover", slow_recovery)
     task = asyncio.create_task(gate.execute("operation", "file_write", arguments, reason="report"))
-    await asyncio.wait_for(loading.wait(), 1)
+    await asyncio.wait_for(loading.wait(), CONTRACT_WATCHDOG_SECONDS)
     authority.end_task(context, outcome="cancelled")
     release.set()
-    result = await asyncio.wait_for(task, 1)
+    result = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert result.state == "result_unavailable" and result.payload is None
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
 
@@ -434,7 +442,9 @@ async def test_another_run_cannot_reuse_the_original_operation_id(environment, t
         authority, PermissionWaiter(authority), supervisor, context=later,
         cwd=tmp_path, read_roots=(tmp_path,), requestable_scopes=(maximum,),
     )
-    assert (await gate.execute("operation", "file_write", arguments, reason="report")).state == "conflict"
+    conflict = await gate.execute("operation", "file_write", arguments, reason="report")
+    assert conflict.state == "conflict"
+    assert conflict.payload["permission_diagnostic"]["stage"] == "operation_lookup"
     assert supervisor.execute_calls == 0 and supervisor.recover_calls == 0
 
 
@@ -466,7 +476,7 @@ async def test_a_completed_failure_replays_its_original_result_without_executing
     operation = authority.operation_status_for_task(context, "operation")
     issuer.approve(authority, context, request, operation.arguments_digest)
     waiter.notify()
-    first = await asyncio.wait_for(task, 1)
+    first = await asyncio.wait_for(task, CONTRACT_WATCHDOG_SECONDS)
     assert first.state == "failed" and first.payload == "target already exists" and not first.replayed
     again = await gate.execute("operation", "file_write", arguments, reason="report")
     assert again.state == "failed" and again.payload == first.payload and again.replayed
@@ -491,8 +501,9 @@ async def test_completed_result_waits_for_verified_resource_cleanup(environment,
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
 
 
+@pytest.mark.parametrize("worker_change", [False, True])
 @pytest.mark.asyncio
-async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once(environment, tmp_path):
+async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once(environment, tmp_path, worker_change):
     from orchestrator.permissions.descriptors import describe_tool
     from orchestrator.permissions.result_store import EncryptedResultStore
 
@@ -515,6 +526,18 @@ async def test_prestart_failure_is_terminal_replayable_and_does_not_consume_once
     async def recover(ctx, operation_id, plan):
         return results.get(ctx, operation_id, plan)
 
+    if worker_change:
+        from orchestrator.permissions.authority import OperationConflict
+        later = replace(context, execution_epoch="prestart-new", worker_generation="prestart-worker")
+        authority.bind_execution(later)
+        with pytest.raises(OperationConflict):
+            authority.reject_before_start(later, "prestart", descriptor.arguments_digest,
+                                          descriptor.scopes, result_digest=sha256(b"failure").hexdigest())
+        authority.fence_execution(context)
+        maximum = normalize_scope("file", str(tmp_path), ["create", "write"], cwd=tmp_path)
+        gate = PermissionExecutionGate(authority, PermissionWaiter(authority), supervisor,
+                                      context=later, cwd=tmp_path, read_roots=(tmp_path,),
+                                      requestable_scopes=(maximum,))
     supervisor.execute, supervisor.recover = fail_before_start, recover
     first = await gate.execute("prestart", "file_write", arguments, reason="Save")
     second = await gate.execute("prestart", "file_write", arguments, reason="Save")
@@ -543,3 +566,4 @@ async def test_prestart_failure_cannot_replace_a_prepared_or_started_claim(envir
             authority.reject_before_start(context, "started", descriptor.arguments_digest, descriptor.scopes,
                                           result_digest=sha256(b"failed").hexdigest())
     assert authority.operation_state("started") == "started"
+# HASHI-Fingerprint: hfp_b05477b830af4bd1908d4111c95b6d73

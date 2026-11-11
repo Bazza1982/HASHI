@@ -9,7 +9,7 @@ compatibility shim.
 
 | Need | Command | Includes |
 |---|---|---|
-| Normal local HASHI | `python -m pip install -r constraints/standard-py312.lock` | Core, media, Hashi Remote, TUI at the approved versions |
+| Normal local HASHI | `node postinstall.js` | Independently qualified zero-app Core and exact hashed Functions, plus separate helpers |
 | Development and tests | `python -m pip install -r requirements-dev.txt` | Standard profile and test tools |
 | Minimal source-checkout environment | `python -m pip install -e .` | Base Python dependencies; optional APIs, Remote, and TUI need their extras |
 | Every declared integration | `python -m pip install -e ".[all]"` | All optional profiles; potentially very large |
@@ -142,3 +142,13 @@ A source lock edit does not update an existing helper or rebuild an already
 published installer. Record source validation, installed-environment readiness,
 and actual use separately. Never install this optional profile into a running
 Core, or restart any instance merely to make a dependency audit green.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 025 Optional speech dependency qualification
+
+Prove isolated speech locks/runtimes/releases separately:
+[dependencies](DEPENDENCIES.md#security-maintenance-of-optional-runtime-locks).

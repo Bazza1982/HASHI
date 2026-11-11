@@ -1255,7 +1255,9 @@ def test_remote_config_snapshot_prefers_bridge_home_runtime_state_when_separated
 
     cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
 
-    assert cfg["root"] == code_root
+    # HashiRoot owns credentials/configuration; CodeRoot owns program assets.
+    assert cfg["root"] == state_root
+    assert cfg["code_root"] == code_root
     assert cfg["state_root"] == state_root
     assert cfg["port"] == 8768
     assert cfg["ports"] == [8768]
@@ -2026,6 +2028,39 @@ def test_local_agents_snapshot_marks_fresh_directory_state(tmp_path):
     assert snapshot[0]["agent_name"] == "zelda"
     assert snapshot[0]["directory_state"] == "fresh"
     assert snapshot[0]["agent_snapshot_version"]
+
+
+def test_core_online_reads_cached_health_without_probing_network():
+    manager = object.__new__(ProtocolManager)
+    manager._core_health_cache = (0.0, True)
+    manager._local_workbench_routes = lambda: (_ for _ in ()).throw(
+        AssertionError("cached health reads must not enumerate network routes")
+    )
+    manager._probe_local_workbench = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("cached health reads must not perform network probes")
+    )
+
+    assert ProtocolManager._core_online(manager) is True
+
+
+def test_core_health_refresh_runs_blocking_probes_off_event_loop(monkeypatch):
+    manager = object.__new__(ProtocolManager)
+    manager._core_health_cache = (0.0, False)
+    manager._local_workbench_routes = lambda: [("127.0.0.1", 18804)]
+    events = []
+
+    async def fake_to_thread(callback):
+        events.append("offloaded")
+        return callback()
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    manager._probe_local_workbench = lambda host, port, timeout: (
+        events.append((host, port, timeout)) or True
+    )
+
+    assert asyncio.run(ProtocolManager._refresh_core_online(manager)) is True
+    assert events == ["offloaded", ("127.0.0.1", 18804, 0.4)]
+    assert ProtocolManager._core_online(manager) is True
 
 
 def test_local_agents_snapshot_marks_stale_when_core_is_offline(tmp_path):

@@ -142,3 +142,15 @@ immediate next request completed normally. After a full page reload and chat
 reopen, the Agent remained idle with queue zero, no stop spinner, and no late
 output from the cancelled request. This is not evidence of HASHI4 adoption;
 source deployment and Function adoption remain distinct.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 048 Agent-wide stop fencing and retained definitions
+
+`/stop` fences every Agent Session, cancels owned work, rejects stale callbacks,
+retains periodic definitions, and durably records `stopped` before cleanup.
+Never retry uncertain saves; HERV3 releases its Turn first. See
+[stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).

@@ -4,10 +4,12 @@ The canonical architecture and engineering guideline is
 [`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 The normative Python/ABI and transactional function-generation decision is
 [`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`](docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md).
-The current minimal Core decision for HASHI2 is
-[`docs/HASHI_SLIM_CORE_ARCHITECTURE.md`](docs/HASHI_SLIM_CORE_ARCHITECTURE.md);
-source, offline checks and pending cold adoption are recorded in
-[`docs/HASHI2_MINIMAL_CORE_2026-09-07.md`](docs/HASHI2_MINIMAL_CORE_2026-09-07.md).
+The v5 Core/environment separation is specified in the runtime contract above;
+[the v5 overview](docs/RELEASE_NOTES_v5.0.0-alpha.1.md) explains the upgrade.
+The underlying process design remains
+[`Minimal Core`](docs/HASHI_SLIM_CORE_ARCHITECTURE.md); the earlier HASHI2
+[source/adoption record](docs/HASHI2_MINIMAL_CORE_2026-09-07.md) is historical
+qualification evidence, not the current candidate's adoption status.
 The earlier HASHI3 implementation and promotion boundary is
 [`docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 The accepted HASHI3 Browser/Computer Worker, cross-WSL/Windows discovery, lease,
@@ -272,10 +274,12 @@ stable process core
 ```
 
 Changes should be local, derived from a single fact owner, and replaceable with
-`/reboot` when they are functional. The Core Python/runtime baseline, protected
-Core sources and Core protocol/API versions require a planned Core migration.
-Optional Function dependencies remain outside that baseline in replaceable
-sidecars, so feature work never acquires a cold-restart requirement. In-process
+`/reboot` when they are functional. Protected Core sources and Core protocol/API changes require an authorized
+Core-generation migration. A Core Python/standard-library/ABI change with the
+same protected code instead needs independent Core-runtime qualification and
+an approved cold cutover. Compatible Functions dependency changes use the
+separate qualified Functions runtime; optional native extras use isolated
+sidecars. Feature dependencies never enter the active Core environment. In-process
 module reload is forbidden. Contributor workflow and required checks are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -295,6 +299,10 @@ Preferred search roots are exact enabled Run Workzones plus own home; explicit
 query roots replace those defaults. Enterprise/privacy/live-runtime policies
 still take precedence. See [scoped search](docs/HERV3_SCOPED_SEARCH.md).
 
-HASHI Remote rescue remains a separately
-deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
-token-protected Backend API admin command endpoint.
+HASHI Remote remains a separately deployed sidecar. Authenticated fixed
+instance start/restart/reboot endpoints are available with the default terminal
+policy; generic terminal levels do not gate instance lifecycle operations.
+Windows installation prepares exact-home fixed tasks while keeping the network
+Remote Limited. Program assets and private instance data are bound separately.
+The local hot-reboot hop must use the token-protected Backend API admin command
+endpoint. See [default function readiness](docs/DEFAULT_FUNCTION_READINESS.md).

@@ -49,8 +49,17 @@ and `docs/TESTING_POLICY.md`; for command/UI work also read
   alone. Resolve checkout, instance, and Agent; never widen or carry authority.
   Keep screenshots, receipts, snapshots, and observations distinct. Every
   mandatory item and the final Core/source invariant must pass.
-- Update the owning decision and FYI when behavior changes. Record approval,
-  implementation and live verification separately, scoped to branch/instance.
+- Read the relevant domain guide and owning contract before feature work.
+  Every behavior change updates that contract and its tests. Root FYI changes
+  only for global principles, ownership boundaries, major domains, top-level
+  navigation or documentation retrieval changes. Domain guides change for
+  significant features, moved/superseded contracts or new code/verification
+  routes. Routine repairs normally leave root FYI unchanged.
+- Record approval, implementation and live verification separately, scoped to
+  branch/instance; keep migration inventories as review evidence, not bootstrap.
 
 Install the local hook with `python scripts/install_engineering_hooks.py`; it
-preserves custom hooks and checks staged Core/whitespace. CI remains final.
+preserves custom hooks and checks staged Core/whitespace. Follow
+docs/TESTING_POLICY.md and .github/CI_POLICY.md: choose scope from impact,
+independently from local/hosted execution. CI is not an instruction to run
+the whole product suite for every commit, PR, label, or routine deployment.

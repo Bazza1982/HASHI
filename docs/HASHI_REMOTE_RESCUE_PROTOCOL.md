@@ -25,8 +25,8 @@ WatchTower enables two operational capabilities:
 
 The normal `/restart` command does not depend on WatchTower. It selects the
 calling instance's running authenticated HASHI Remote, and that Remote owns
-stop/start/verify. The Remote must advertise `rescue_restart`, which requires
-`L3_RESTART`; child versus supervised mode is not an authorization gate. On
+stop/start/verify. The Remote advertises `rescue_restart` with its default
+terminal policy; child versus supervised mode is not an authorization gate. On
 Windows a Limited Remote triggers a separate exact-instance Highest actuator,
 so Core privilege does not require elevating the network service. An explicitly
 named trusted peer is routed to that peer's Remote only after the bilateral
@@ -69,20 +69,47 @@ independent of Function hot handoff and preserves the Remote process across it.
 HASHI may still start/stop Remote for convenience. Provider authorization uses
 live identity, trust, and capability evidence rather than launch mode.
 
-## v1 Topology
+## Native Windows and Linux/WSL restart
 
-v1 implements **Topology A only**:
+Remote and its controlled Core run in the same native OS environment. A Windows
+Remote controlling Linux processes across the WSL boundary is not supported;
+run that instance's Remote inside WSL.
 
-- Remote: Windows native
-- HASHI core: Windows native
-- launcher: `bin/bridge_ctl.ps1 -Action start -Resume`
-- fallback: `bin/bridge-u.bat --resume-last --no-pause`
-- PID checks: Windows PID semantics
-- Backend API health: HASHI Windows Backend API port
+- Windows uses the exact-instance `hashi_restart_ctl.ps1` actuator, with the
+  existing same-privilege `bridge_ctl.ps1` fallback for manual installations.
+  The platform protection policy's `service_targets` is an allowlist for
+  protection, **not** evidence of the live process's service owner. Remote must
+  not select an NSSM/SCM restart from that list.
+- Linux/WSL uses its local `bridge-u.sh --resume-last --api-gateway --force`
+  controller in an independent session. Both OS launch paths close stdin and
+  bind `BRIDGE_HOME`/`BRIDGE_CODE_ROOT` to the controlled root, discarding
+  inherited Python import paths. They never infer a sibling instance by prefix.
+- v5 restart first resolves the installed Core/Functions pair through the
+  authoritative installer selector and executes its isolated qualification
+  checker. The destination contract is stored in the durable receipt **before**
+  launching a stop/start action. Failed qualification leaves the live instance
+  running; no fallback to the coupled legacy virtual environment is allowed.
+- Terminal verification compares every frozen runtime field, including
+  `dependency_digest`, against that qualified destination B. The old runtime A
+  remains in `status_before`: A→B is valid adoption, while an unexpected B→C
+  fails verification even when only Functions dependencies differ or disappear.
+  `runtime_version_changed` compares against A; `runtime_version_verified`
+  compares against B. Legacy programs retain their pre-restart baseline contract.
+- Both Windows Remote recovery fallbacks explicitly request `-ApiGateway`,
+  preserving the required Gateway even without an old Core or command-line
+  metadata. Ordinary manual `bridge_ctl.ps1 restart` still preserves detected
+  Gateway use and does not enable it unless requested or previously observed.
+- Windows's separate runtime task starts the qualified Core with API Gateway.
+  Its readiness check requires the exact instance and accepts local services
+  ready with zero failed Agents when an optional connector is degraded. Remote
+  still independently verifies old PID exit, new PID, runtime and generation.
 
-**Topology C** (Windows Remote -> WSL2 HASHI core) stays out of scope for v1.
-Treat it as a future advanced mode after separate launcher, PID, and log
-contracts exist for cross-boundary operation.
+After updating Windows supervisor assets, run the existing privileged
+`hashi_restart_ctl.ps1 ensure -HashiRoot <home> -Python <management-python>`
+under the intended runtime user. This updates mismatching fixed task definitions
+without triggering a restart. A later Limited Remote trigger refuses mismatching
+tasks instead of rewriting them or guessing a service. Back up existing task
+definitions before operational migration.
 
 ## Rescue Endpoints
 
@@ -149,8 +176,8 @@ outcome, status state, and error text when available.
 4. start HASHI again with the fixed launcher
 5. verify Backend API health
 6. verify the old PID exited, the new PID differs and is alive, Backend API
-   health is ready, instance identity matches, and runtime version plus Function
-   generation match the pre-restart expectation
+   health is ready, instance identity matches, runtime matches the qualified
+   destination contract, and the process publishes a Function generation
 7. update the restart record to `completed` or a failed phase
 8. append a structured audit event to `logs/remote_rescue_audit.jsonl`
 
@@ -196,7 +223,7 @@ requesting Agent and supported command source:
 
 No separate human HMAC proof, nonce, replay database, or second confirmation is
 required. Authorization remains the existing authenticated Remote control
-protocol plus `L3_RESTART`. The target Remote rejects a request before launch
+protocol and exact-instance fixed lifecycle installation. The target Remote rejects a request before launch
 unless `target_instance` matches the instance controlled by that Remote. The
 same credential cannot authorize arbitrary shell execution, service-definition
 changes, or secret reads through this endpoint.
@@ -219,17 +246,21 @@ primary chat. It is not a general command execution endpoint. Notification
 success or failure is stored in the restart record but never changes the
 already verified restart result.
 
+## Readonly restart qualification
+
+`GET /control/hashi/qualification` uses the same authenticated control admission.
+It returns the exact program root and qualified destination without stopping or
+starting Core. Qualification failures retain the underlying installer failure
+rather than collapsing every cause into an unavailable-provider message.
+
 ## Capability Advertisement
 
 Upgraded Remotes advertise rescue support through protocol capabilities:
 
 - `rescue_control`: status endpoint exists.
-- `rescue_start`: start endpoint exists and this Remote is configured with
-  `L3_RESTART`.
-- `rescue_restart`: restart endpoint exists and this Remote is configured with
-  `L3_RESTART`.
-- `rescue_reboot`: supervised per-Agent hot reboot exists and this Remote is
-  configured with `L3_RESTART`.
+- `rescue_start`: authenticated fixed start endpoint exists.
+- `rescue_restart`: authenticated fixed restart endpoint exists.
+- `rescue_reboot`: authenticated per-Agent hot reboot endpoint exists.
 
 Older Remotes will not advertise these capabilities and may return `404` for
 the rescue endpoints. Client tools must treat that as "unsupported", not as a
@@ -237,26 +268,18 @@ peer outage.
 
 ## Safety Gate
 
-Remote start is a restart-class operation. It is blocked unless Hashi Remote is
-started with:
+Fixed lifecycle operations use the existing authenticated Remote control
+protocol and exact target binding. They do not require changing terminal
+permissions. Generic shell commands keep their existing permission policy.
 
-```text
---max-terminal-level L3_RESTART
-```
+Windows deployment installs and verifies separate exact-instance runtime and
+restart tasks. A Limited Remote can trigger those fixed definitions; it cannot
+edit their commands or select another home. Updating a definition preserves its
+registered principal and existing task access rules. Split installations pass
+both the program CodeRoot and private HashiRoot explicitly.
 
-or the equivalent `remote/config.yaml` setting:
-
-```yaml
-security:
-  max_terminal_level: "L3_RESTART"
-```
-
-Default `L2_WRITE` Remote instances can push files and perform normal hchat
-relay, but cannot start or restart HASHI core.
-
-Do not expose an L3 Remote instance directly to the public internet. Use
-Tailscale or a trusted LAN, and disable LAN auto-auth before any wider network
-exposure.
+Do not expose unauthenticated Remote control to the public internet. Preserve
+the existing shared-token HMAC/pairing and trusted-peer checks.
 
 ## Operational Flow
 
@@ -336,9 +359,9 @@ For an existing same-principal installation, `start` and `restart` verify that
 the credential file is readable and preserve its restrictive ACL. ACL mutation
 is reserved for initial provisioning or an intentional principal change.
 
-Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
-machines where remote HASHI rescue is intentionally enabled. Default supervised
-Remote remains `L2_WRITE`.
+Default supervised Remote remains `L2_WRITE`. Fixed lifecycle support is
+included in normal installation and needs no separate enable flag. Use
+`-HashiRoot <private-home> -CodeRoot <program-root>` for split installations.
 
 ## Operator Notes
 

@@ -31,7 +31,7 @@ def _saved(path):
 
 def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert gateway.load_api_gateway_config(cfg) == {
-        "enabled": False, "default_model": gateway.default_api_model(),
+        "enabled": True, "default_model": gateway.default_api_model(),
         "max_parallel_per_model": 2,
         "updated_at": "", "updated_by": "",
     }
@@ -42,6 +42,15 @@ def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert _saved(gateway.config_path_for(cfg)) == saved
     assert gateway.load_api_gateway_config(cfg) == saved
     assert not cfg.project_root.exists()
+
+
+def test_first_model_selection_keeps_fresh_gateway_available(cfg):
+    result = gateway.save_api_gateway_config(cfg, default_model="gpt-5.5")
+    assert result["enabled"] is True
+    assert gateway.load_api_gateway_config(cfg)["enabled"] is True
+    gateway.save_api_gateway_config(cfg, enabled=False)
+    gateway.save_api_gateway_config(cfg, default_model="grok-4.5")
+    assert gateway.load_api_gateway_config(cfg)["enabled"] is False
 
 
 def test_bom_read_is_non_mutating_and_save_preserves_unowned_fields(cfg):
@@ -209,8 +218,13 @@ def test_committed_durability_error_is_not_silently_retried_or_rolled_back(cfg, 
     path = gateway.config_path_for(cfg)
     _seed(path, {"enabled": False, "default_model": "gpt-5.5"})
     syncs = []
+    real_sync = config_json._sync_directory
 
     def fail(parent):
+        # Other gateway tests may still finish independent background snapshots.
+        # Inject only at this document's publication boundary.
+        if parent != path.parent:
+            return real_sync(parent)
         syncs.append(parent)
         raise OSError("injected directory sync failure")
 
@@ -336,3 +350,4 @@ async def test_service_success_keeps_existing_contract_and_saves_before_effects(
     assert ok is True and isinstance(message, str) and message
     assert events == ([] if operation == "already_running" else [operation])
     assert _saved(path)["enabled"] is (operation != "stop")
+# HASHI-Fingerprint: hfp_b659134890124901add40e6f02b84628

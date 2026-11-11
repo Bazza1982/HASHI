@@ -184,9 +184,10 @@ async def test_platform_transcription_runtime_keeps_native_dependencies_out_of_w
     assert len(spawn_calls) == 1
     command = spawn_calls[0][0]
     assert command[0] == str(external_python)
-    assert command[1] == "-I"
-    assert Path(str(command[2])).name == "voice_transcription_worker.py"
-    assert command[3] == "--serve"
+    assert command[1:3] == ("-I", "-B")
+    assert Path(str(command[3])).name == "voice_transcription_worker.py"
+    assert command[4] == "--serve"
+
     request = json.loads(process.stdin.writes[0])
     assert request == {
         "version": 1,
@@ -349,3 +350,4 @@ async def test_invalid_remote_transcription_configuration_never_falls_back_local
                         lambda: pytest.fail("Invalid Compute config must fail closed"))
     result = await transcriber.transcribe(audio)
     assert result.startswith("[Transcription error]")
+# HASHI-Fingerprint: hfp_ae5c7342a536463da1373f72c7d631ce

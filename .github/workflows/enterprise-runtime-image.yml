@@ -1,0 +1,58 @@
+name: Enterprise separated runtime image
+'on':
+  pull_request:
+    paths:
+    - Dockerfile.enterprise
+    - .dockerignore
+    - scripts/build_enterprise_image.py
+    - scripts/compile_enterprise_functions.py
+    - scripts/prepare_runtime_roles.py
+    - scripts/check_enterprise_runtime_image.py
+    - orchestrator/function_source_publication.py
+    - orchestrator/runtime_installation_builder.py
+    - constraints/standard-py312.lock
+    - constraints/functions-py312.hashes.lock
+  workflow_dispatch: null
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - profile: standard
+          extras: ''
+        - profile: kubernetes
+          extras: kubernetes
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: 'false'
+    - uses: actions/setup-python@v5
+      with:
+        python-version: 3.12.13
+    - name: Build a committed-source image with independently sealed roles
+      run: python -B scripts/build_enterprise_image.py --tag hashi-core5-qualification --extras "${{ matrix.extras
+        }}"
+    - name: Verify the actual zero-dependency Core and separate Functions
+      run: |
+        docker run --rm --network none --entrypoint /opt/hashi-release/runtimes/core/bin/python hashi-core5-qualification -I -B /app/scripts/check_enterprise_runtime_image.py --role core-host
+        docker run --rm --network none --entrypoint /opt/hashi-release/runtimes/functions/bin/python hashi-core5-qualification -I -B /app/scripts/check_enterprise_runtime_image.py --role functions
+    - name: Verify the optional Kubernetes backend inside its own FR
+      if: matrix.profile == 'kubernetes'
+      run: docker run --rm --network none --entrypoint /opt/hashi-release/runtimes/functions/bin/python hashi-core5-qualification
+        -I -B /app/scripts/check_enterprise_runtime_image.py --role functions --require-module kubernetes
+    - name: Retain actual immutable image identity
+      run: docker image inspect hashi-core5-qualification > enterprise-runtime-image.json
+    - uses: actions/upload-artifact@v4
+      with:
+        name: enterprise-runtime-image-${{ matrix.profile }}
+        path: enterprise-runtime-image.json
+        if-no-files-found: error
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true

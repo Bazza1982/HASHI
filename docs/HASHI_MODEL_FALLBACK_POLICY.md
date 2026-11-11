@@ -173,3 +173,13 @@ per-interaction limit.
 
 Source, offline verification, adoption, and live verification are separate
 facts.  This document records source and offline status only.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 044 User-controlled fallback and effect boundaries
+
+Chat-only无工具。`/fallback`默认`OFF`；`RETRY`等60/180/300秒或更长`Retry-After`，`ASK`失败关闭，`AUTO`限精确路由。
+A在effects后暂停，B续原Engine Session，不重放/改目标；PAO负责切Codex及累计次数/费用。Phone/call/voice不长重试或fallback。[策略](HASHI_MODEL_FALLBACK_POLICY.md)。

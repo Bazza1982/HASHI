@@ -39,6 +39,8 @@ class PhoneConfigError(RuntimeError):
 
 class PhoneManager:
     SCHEMA_VERSION = 1
+    STATE_FILE = "phone_state.json"
+    INTERPRETATION_ONLY = False
     MAX_CUSTOM_INSTRUCTIONS_CHARS = 1200
     PROVIDERS = PHONE_PROVIDERS
     VOICE_LABELS = {
@@ -62,7 +64,7 @@ class PhoneManager:
 
     def __init__(self, workspace_dir: str | Path):
         self.workspace_dir = Path(workspace_dir)
-        self.state_path = self.workspace_dir / "phone_state.json"
+        self.state_path = self.workspace_dir / self.STATE_FILE
 
     @classmethod
     def _validate_choice(cls, value: Any, choices: Any, field: str) -> str:
@@ -142,7 +144,10 @@ class PhoneManager:
 
     @classmethod
     def provider_options(cls) -> tuple[tuple[str, str], ...]:
-        return tuple((key, str(value["label"])) for key, value in cls.PROVIDERS.items())
+        return tuple(
+            (key, str(value["label"])) for key, value in cls.PROVIDERS.items()
+            if (value.get("mode") == "interpretation") == cls.INTERPRETATION_ONLY
+        )
 
     def model_options(self) -> tuple[tuple[str, str], ...]:
         state = self.get_state()

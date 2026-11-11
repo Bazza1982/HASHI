@@ -166,7 +166,7 @@ def _validate_gateway_config_for_update(data: dict[str, Any]) -> None:
 
 def _gateway_config_view(data: dict[str, Any], global_config: Any) -> dict[str, Any]:
     """Effective public values; never use this projection as a writable snapshot."""
-    enabled = data.get("enabled")
+    enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         enabled = False
     model = normalize_api_model(data.get("default_model"), global_config) or default_api_model()
@@ -222,10 +222,12 @@ def load_api_gateway_config(global_config: Any) -> dict[str, Any]:
     try:
         data = read_config_json(path)
     except FileNotFoundError:
-        data = {}
+        # Fresh installs are ready by default. A broken legacy document is
+        # still an operator error, not permission to enable over its intent.
+        data = {"enabled": False} if legacy_state_path_for(global_config).exists() else {}
     except (OSError, ValueError) as exc:
         logger.warning("Failed to read %s, using defaults: %s", path, exc)
-        data = {}
+        data = {"enabled": False}
     return _gateway_config_view(data, global_config)
 
 
@@ -256,7 +258,7 @@ def save_api_gateway_config(
         except FileNotFoundError:
             current = {}
     _validate_gateway_config_for_update(current)
-    current.setdefault("enabled", False)
+    current.setdefault("enabled", True)
     current.setdefault("default_model", default_api_model())
     current.setdefault("max_parallel_per_model", 2)
     if enabled is not None:
@@ -274,3 +276,4 @@ def save_api_gateway_config(
     result = _gateway_config_view(current, global_config)
     _write_config_atomic(path, current)
     return result
+# HASHI-Fingerprint: hfp_11543b2c095042718d01fd64a886e636

@@ -7,6 +7,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.config import default_global_tools_config
 from orchestrator.flexible_backend_registry import get_default_model, removed_backend_reason
@@ -174,7 +175,7 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
                 "agents": [agent_cfg],
             }
         )
-    write_config_json(agents_path, agents_json)
+    write_agent_config_json(agents_path, agents_json)
 
     # Write secrets.json (merge if exists)
     secrets.setdefault("hashiko", "WORKBENCH_ONLY_NO_TOKEN")
@@ -182,3 +183,4 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
     if or_key:
         secrets["openrouter_key"] = or_key
     write_config_json(secrets_path, secrets)
+# HASHI-Fingerprint: hfp_51710c8663e54e39aaa0c5876535413d

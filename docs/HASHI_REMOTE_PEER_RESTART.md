@@ -28,8 +28,8 @@ Peer cold restart is available only when all of these are true:
    source as `handshake_accepted`;
 6. the restart request is authenticated by the existing Remote shared-token
    HMAC path; and
-7. the target Remote has `L3_RESTART` enabled, which is also what causes it to
-   advertise `rescue_restart`.
+7. the target Remote has its exact-instance fixed restart launcher installed.
+   The normal terminal policy does not gate this authenticated operation.
 
 The provider is revalidated immediately before the destructive POST. Stale
 source-side peer state or a stale capability cache is therefore not sufficient
@@ -77,11 +77,12 @@ issuing the restart request.
 
 ## Supported Remote configuration
 
-A restart provider must be running, authenticated, and allow L3 restart:
+A restart provider must be running, authenticated, and have its fixed lifecycle
+installation ready. The default terminal policy is sufficient:
 
 ```yaml
 security:
-  max_terminal_level: "L3_RESTART"
+  max_terminal_level: "L2_WRITE"
 ```
 
 Windows Remote and its fixed restart actuator:
@@ -106,6 +107,18 @@ principal is not expected to read protected `agents.json`; failure to do so
 must never silently advertise the generic `HASHI` identity or default Backend
 API port.
 
+Both fixed tasks explicitly delegate read access to their runtime principal.
+Elevated registration and `ensure` repair this delegation even when the
+existing task definitions already match, preserving the owner and other
+access entries without granting task-edit rights. An administrator seeing a
+task does not prove that Limited Remote can see or invoke it. Deployment
+acceptance must run the actual `/restart` command through that Remote and
+verify the terminal receipt and replacement processes.
+
+Remote's Windows controller helpers, new task registrations and legacy task
+runner all disable Python bytecode writes. Starting or refreshing Remote must
+preserve the qualified interpreter's sealed file closure.
+
 Linux/WSL supervised Remote:
 
 ```bash
@@ -124,7 +137,7 @@ provider mode is diagnostic context, not an authorization gate.
 Use two supported instances, for example `HASHI1` and `HASHI2`.
 
 1. Start both HASHI cores.
-2. Start both Remotes (child or supervised) with `L3_RESTART`.
+2. Start both Remotes (child or supervised) with their normal terminal policy.
 3. Complete the normal Hashi Remote handshake and confirm both peers show the
    accepted state.
 4. From HASHI1 run:
@@ -148,16 +161,33 @@ show that the old PID exited, a different live Core PID appeared, the instance
 identity matches, the stable Core runtime contract still matches, and the new
 process published a Function generation.
 
-Cold restart is also an adoption boundary. The approved dependency digest and
-Function generation may therefore change across it; those changes are recorded
-but are not compared to the pre-restart values as equality gates. The restarted
-Core enforces the active dependency contract before publishing health.
+The bounded cold-start verification window is ten minutes. Independent-runtime
+preparation plus multi-Agent startup can exceed four minutes even when the
+replacement is healthy. Windows registration/ensure also upgrades an existing
+restart task's execution limit without replacing its principal. A longer wait
+never substitutes for the required PID, readiness and frozen-runtime evidence.
 
-Workbench health may be `degraded` when an optional connector such as
-Remote/HChat is unavailable. If local services are ready and no Agent failed to
-start, the cold restart is complete and the user receives a success notice with
-the remaining warning. A genuine terminal failure notice includes the failed
-stage and the first actionable verification reasons instead of a generic retry.
+Cold restart is also an adoption boundary. For an independent-Core installation,
+Remote qualifies the installer-selected destination before stopping the live
+process and freezes that contract in the receipt. Terminal verification uses
+that admitted destination, while `status_before` retains the old runtime.
+An approved Core adoption can therefore succeed; an unqualified target fails
+before cutover, and an unexpected Core digest still fails verification.
+Dependency and Function generation changes remain recorded, and the restarted
+Core enforces its active dependency contract before publishing health.
+
+Backend API health may be `degraded` when an optional connector such as
+Telegram or Remote/HChat is unavailable. If local services are ready and no
+Agent failed to start, the cold restart is complete. Workbench is the primary
+remote frontend; optional Telegram connectivity is not a restart condition.
+
+The completion notice reports only the verified instance restart. Connector
+snapshots remain in the durable receipt and live health diagnostics; they are
+not appended to success notices, including notices from older Remote peers.
+Acceptance wording is channel-neutral and promises a completion notification,
+rather than instructing Telegram users to reconnect Workbench. A genuine
+terminal failure notice still includes the failed stage and actionable
+verification reasons instead of a generic retry.
 
 ## Compatibility
 

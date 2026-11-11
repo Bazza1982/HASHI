@@ -233,10 +233,15 @@ try {
     $env:PYTHONPATH = $HashiRoot
     $env:PYTHONUTF8 = '1'
 
-    $mainArguments = @(
-        $mainPath,
-        '--bridge-home', $HashiRoot
-    )
+    $mainArguments = @($mainPath, '--bridge-home', $HashiRoot)
+    if (Test-Path -LiteralPath (Join-Path $HashiRoot 'constraints/core-host-py312.lock') -PathType Leaf) {
+        # PythonExecutable is only a management bootstrap for role-aware releases.
+        $qualifiedLauncher = Join-Path $HashiRoot 'scripts/run_qualified_core.py'
+        if (-not (Test-Path -LiteralPath $qualifiedLauncher -PathType Leaf)) {
+            throw 'The qualified Core launcher is missing.'
+        }
+        $mainArguments = @('-I', '-B', $qualifiedLauncher, '--bridge-home', $HashiRoot)
+    }
     if ($ApiGateway) {
         $mainArguments += '--api-gateway'
     }

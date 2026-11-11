@@ -28,6 +28,26 @@ The shared source of truth lives under:
 superloops/loops/<loop_id>/
 ```
 
+## Agent API authorization
+
+Backend Superloop creation, updates and deletion require an authenticated
+Workbench owner with the existing Agent visibility/management rights, or an
+existing personal-profile scoped Agent capability for the exact live Run,
+instance, Agent, API audience and tool. CLI/MCP forwards only that capability.
+Caller-supplied `requested_by` and `explicit_user_authorization` fields are
+intent markers, never authentication or approval.
+
+Normal creation and control keep their existing operations without a new
+approval UI. A scoped deletion additionally consumes the existing PAO owner
+decision for `activity.superloop.delete`, bound to the Agent and loop ID.
+The short file mutation holds the existing Run fence after parsing the body.
+Stopped, cancelled, revoked or superseded Runs cannot mutate loops. Loop
+ownership remains checked by the existing service; deletion retains its audit
+record and prevents further advancement.
+
+See [PAO's Backend mutation contract](HASHI_PAO_SYSTEM_DESIGN.md#backend-mutation-authentication-2026-11-07)
+for the shared Scheduler/Superloop authentication boundary.
+
 ## Required Files
 
 Every runnable loop must have:

@@ -126,7 +126,7 @@ def register_desktop_api(api):
         headers = {"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"}
         authenticated, dispatched, readonly, phase = False, False, False, "scope"
         try:
-            if not getattr(getattr(api, "global_config", None), "desktop_enabled", False) and os.environ.get("HASHI_DESKTOP_ENABLED") != "1":
+            if not getattr(getattr(api, "global_config", None), "desktop_enabled", True) and os.environ.get("HASHI_DESKTOP_ENABLED") != "1":
                 raise DesktopError("desktop_disabled", 404)
             # The personal local API must have its EXISTING admin token configured.
             # HASHI Remote injects it on the authenticated loopback hop.
@@ -174,3 +174,4 @@ def register_desktop_api(api):
         await service.close()
     api.app.router.add_post("/api/v1/desktop/operation", handle)
     api.app.on_cleanup.append(cleanup)
+# HASHI-Fingerprint: hfp_a8af9118e2034e5782459ff2ccb89843

@@ -2247,6 +2247,7 @@ class SessionStore:
             """SELECT call_id FROM live_calls
                WHERE owner_id = ? AND foreground = 1
                  AND phase IN ('connecting', 'active', 'ending', 'recovering')
+                 AND COALESCE(json_extract(phone_config_json, '$.public.mode'), 'conversation') != 'interpretation'
                ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
                         started_at DESC, rowid DESC
                LIMIT 1""",
@@ -2294,6 +2295,7 @@ class SessionStore:
             """SELECT call_id FROM live_calls
                WHERE owner_id = ? AND foreground = 1
                  AND phase IN ('connecting', 'active', 'ending', 'recovering')
+                 AND COALESCE(json_extract(phone_config_json, '$.public.mode'), 'conversation') != 'interpretation'
                ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
                         started_at DESC, rowid DESC
                LIMIT 1""",
@@ -8791,6 +8793,65 @@ class SessionStore:
         result["scope"] = _json_object(result.pop("scope_json"))
         return result
 
+    @contextmanager
+    def hold_operation_approval(
+        self, *, binding: Mapping[str, Any], scope: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """Reserve one trusted PAO decision for a short, exact Run-bound effect.
+
+        A pending request uses the existing owner approval endpoint/events.
+        Consumption commits before dispatch, then the normal Run fence is
+        reacquired through the effect. Failure/unknown outcomes never refund a
+        decision; stop in the gap prevents dispatch rather than replaying it.
+        """
+        scope_json = _json(dict(scope))
+        with self.hold_active_run(**binding) as connection:
+            row = connection.execute(
+                """SELECT * FROM run_approvals
+                   WHERE run_id=? AND owner_id=? AND fencing_token=? AND scope_json=?
+                   ORDER BY created_at DESC, approval_id DESC LIMIT 1""",
+                (binding["run_id"], binding["owner_id"], binding["fencing_token"], scope_json),
+            ).fetchone()
+            if row is None:
+                approval_id, now = _new_id("approval"), _utc_now()
+                run = connection.execute(
+                    "SELECT attempt FROM runs WHERE run_id=?", (binding["run_id"],)
+                ).fetchone()
+                connection.execute(
+                    """INSERT INTO run_approvals(approval_id,session_id,run_id,owner_id,
+                       attempt,fencing_token,scope_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                    (approval_id, binding["session_id"], binding["run_id"], binding["owner_id"],
+                     run["attempt"], binding["fencing_token"], scope_json, now),
+                )
+                self._append_event(
+                    connection, session_id=binding["session_id"], run_id=binding["run_id"],
+                    kind="approval.requested", status="pending", phase="control",
+                    summary="Exact operation requires owner approval",
+                    detail={"approval_id": approval_id, "scope": dict(scope)}, outbox=True,
+                )
+                row = connection.execute(
+                    "SELECT * FROM run_approvals WHERE approval_id=?", (approval_id,)
+                ).fetchone()
+            result = dict(row)
+            result["scope"] = _json_object(result.pop("scope_json"))
+            result["authorized"] = row["state"] == "decided" and row["decision"] == "approved"
+            if result["authorized"]:
+                connection.execute(
+                    "UPDATE run_approvals SET state='consumed' WHERE approval_id=?",
+                    (row["approval_id"],),
+                )
+                self._append_event(
+                    connection, session_id=binding["session_id"], run_id=binding["run_id"],
+                    kind="approval.consumed", status="consumed", phase="control",
+                    summary="Approval reserved for one dispatch",
+                    detail={"approval_id": row["approval_id"], "scope": dict(scope)}, outbox=True,
+                )
+        if result["authorized"]:
+            with self.hold_active_run(**binding):
+                yield result
+        else:
+            yield result
+
     def reconcile_incomplete_runs(
         self,
         *,
@@ -13801,4 +13862,4 @@ __all__ = [
     "SessionStoreError",
     "StaleFencingToken",
 ]
-# HASHI-Fingerprint: hfp_ad055b664adf4021866241f73e249bed
+# HASHI-Fingerprint: hfp_330a8d124daa423199d8a6de96f44f31

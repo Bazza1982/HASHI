@@ -238,8 +238,32 @@ def _validate_environment_path(path: Path) -> None:
         )
 
 
+def _prepared_role_candidates(code_root: Path) -> list[list[str]]:
+    """Installer catalogue only; management Python cannot select Core."""
+    from tools.instance_registry import default_data_root
+    values = []
+    if code_root.name == "hashi" and code_root.parent.name == "app":
+        bundled = code_root.parent.parent / "runtime/functions"
+        values.append([str(bundled / ("python.exe" if sys.platform == "win32" else "bin/python3"))])
+    try:
+        version = json.loads((code_root / "package.json").read_text(encoding="utf-8"))["version"]
+        if (not isinstance(version, str) or not version or "/" in version
+                or chr(92) in version or version in {".", ".."}):
+            raise ValueError("Invalid installed program version")
+        version_root = default_data_root() / "runtimes" / version
+        record = json.loads((version_root / "active.json").read_text(encoding="utf-8"))
+        candidate = Path(record["python"])
+        if (record.get("schema_version") == 1 and record.get("program_version") == version
+                and candidate.is_absolute() and candidate.is_file()
+                and candidate.resolve().is_relative_to(version_root.resolve())):
+            values.append([str(candidate)])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return values
+
+
 def _runtime_candidates(code_root: Path) -> list[list[str]]:
-    values: list[list[str]] = []
+    values: list[list[str]] = list(_prepared_role_candidates(code_root))
     explicit = str(os.environ.get("HASHI_PYTHON") or "").strip()
     if explicit:
         values.append([explicit])
@@ -273,6 +297,11 @@ def _runtime_candidates(code_root: Path) -> list[list[str]]:
     return unique
 
 
+def _without_bytecode(command: list[str]) -> list[str]:
+    """Every management child must leave sealed Python installations unchanged."""
+    return list(command) if "-B" in command else [*command, "-B"]
+
+
 def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
     _validate_environment_path(code_root)
     check = code_root / "scripts" / "check_runtime_contract.py"
@@ -284,7 +313,7 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
             continue
         try:
             _validate_environment_path(Path(executable))
-            args = [*command, str(check), "--code-root", str(code_root)]
+            args = [*_without_bytecode(command), str(check), "--code-root", str(code_root)]
             if not full:
                 args.append("--runtime-only")
             checked = subprocess.run(
@@ -299,10 +328,58 @@ def _select_runtime(code_root: Path, *, full: bool = True) -> list[str]:
         except (OSError, subprocess.SubprocessError, InstanceRegistryError):
             continue
         if checked.returncode == 0:
-            return command
+            return _without_bytecode(command)
     kind = "runtime and dependency lock" if full else "runtime"
     raise InstanceRegistryError(
         f"No approved CPython 3.12.13 {kind} is available for {code_root}."
+    )
+
+
+def _select_core_runtime(code_root: Path, *, with_functions=False):
+    # An explicit rollback to the known coupled release keeps its own launcher.
+    # For role-aware source, no environment/Agent variable can select Core.
+    metadata = code_root / "pyproject.toml"
+    if metadata.is_file():
+        import tomllib
+        try:
+            values = tomllib.loads(metadata.read_text(encoding="utf-8"))
+            roles = values.get("tool", {}).get("hashi", {}).get("runtime", {})
+        except (OSError, ValueError) as exc:
+            raise InstanceRegistryError("Program runtime policy is invalid") from exc
+    else:
+        roles = {}
+    if "core-host-lock" not in roles:
+        legacy = _select_runtime(code_root, full=True)
+        return (legacy, legacy) if with_functions else legacy
+    checker = code_root / "scripts/check_runtime_selection.py"
+    if not checker.is_file():
+        raise InstanceRegistryError("Qualified Core launcher is missing")
+    failures = []
+    for runtime in _prepared_role_candidates(code_root):
+        try:
+            _validate_environment_path(Path(runtime[0]))
+            result = subprocess.run(
+                [*runtime, "-I", "-B", str(checker), "--code-root", str(code_root), "--core-command"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=180, check=False)
+            if result.returncode:
+                details = (result.stderr or result.stdout or "").strip().splitlines()
+                failures.append(details[-1][:700] if details else f"selector exited {result.returncode}")
+                continue
+            command = json.loads(result.stdout)
+            if (not isinstance(command, list) or len(command) != 3
+                    or command[1:] != ["-I", "-B"] or not isinstance(command[0], str)
+                    or not Path(command[0]).is_absolute() or not Path(command[0]).is_file()):
+                continue
+            _validate_environment_path(Path(command[0]))
+            return (command, runtime) if with_functions else command
+        except (OSError, ValueError, subprocess.SubprocessError, InstanceRegistryError) as exc:
+            failures.append(f"{type(exc).__name__}: {exc}"[:700])
+            continue
+    detail = "; ".join(dict.fromkeys(failures))
+    raise InstanceRegistryError(
+        "No installer-qualified independent Core/Functions pair is available"
+        + (f": {detail}" if detail else "")
     )
 
 
@@ -596,7 +673,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, "-m", "tui.connection"],
+        [*_without_bytecode(runtime), "-m", "tui.connection"],
         cwd=code_root,
         env=environment,
         check=False,
@@ -648,7 +725,7 @@ def start_instance(
         return EXIT_RUNTIME
 
     try:
-        runtime = _select_runtime(code_root, full=True)
+        runtime = _select_core_runtime(code_root)
     except InstanceRegistryError as exc:
         print(f"HASHI runtime is incomplete: {exc}", file=sys.stderr)
         return EXIT_RUNTIME
@@ -930,7 +1007,7 @@ def _run_tui(registry: InstanceRegistry, record: dict[str, Any], *, attach_only=
     environment = _launch_environment(record, code_root)
     environment["HASHI_TUI_ATTACH_ONLY"] = "1"
     return subprocess.run(
-        [*runtime, str(code_root / "tui.py")],
+        [*_without_bytecode(runtime), str(code_root / "tui.py")],
         cwd=code_root,
         env=environment,
         check=False,

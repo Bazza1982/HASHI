@@ -115,7 +115,13 @@ def parse_exchange_config(value: Any) -> ExchangeConfig:
         raise ExchangeConfigError(
             "unknown exchange configuration fields: " + ", ".join(sorted(unknown))
         )
-    enabled = value.get("enabled", False)
+    # Supplying a connection is the request to use it. An unconfigured instance
+    # stays offline, while an explicit owner opt-out is always retained.
+    enabled = value.get("enabled", any(
+        key in value for key in (
+            "authority_id", "url", "registered_instance_id", "credential_ref", "instance_alias",
+        )
+    ))
     if not isinstance(enabled, bool):
         raise ExchangeConfigError("exchange.enabled must be boolean")
     published = value.get("published_agents", [])
@@ -264,3 +270,4 @@ __all__ = [
     "published_agent_records",
     "update_exchange_config",
 ]
+# HASHI-Fingerprint: hfp_328939ad90ef4376ab47c278a860719c

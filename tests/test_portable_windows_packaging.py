@@ -867,12 +867,13 @@ def test_portable_tts_helper_uses_capacity_safe_edge_only_runtime(tmp_path, monk
     assert any(str(tts_lock) in command for command in commands)
     assert any(
         command[-2:] == ["--probe", "--edge-only"]
-        and command[2].endswith("voice_synthesis_worker.py")
+        and command[1:3] == ["-I", "-B"]
+        and command[3].endswith("voice_synthesis_worker.py")
         for command in commands
     )
 
 
-def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
+def test_portable_launchers_are_drive_relative_and_preserve_saved_gateway_choice():
     for name in (
         "Start_HASHI_TUI.bat",
         "Install_HASHI_On_This_PC.bat",
@@ -907,13 +908,17 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "pyproject.toml",
         "requirements-privacy.txt",
         "LICENSE",
+        *builder.ROOT_DOCUMENTS,
     }
     assert builder.RUNTIME_POLICY_FILES == (
         load_runtime_policy(ROOT).standard_lock,
+        load_runtime_policy(ROOT, role="core-host").standard_lock,
+        "constraints/functions-py312.hashes.lock",
         "constraints/transcription-py312.lock",
         "constraints/tts-edge-py312.lock",
     )
-    assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
+    assert {"exp/loader.py", "exp/AGENT.md", "exp/schema.md", "exp/training.md"} <= set(builder.ROOT_PACKAGE_FILES)
+    assert "specs" in builder.SOURCE_DIRS
     assert "veritas" in builder.SOURCE_DIRS
     for name in ("codex", "claude", "gemini", "grok"):
         assert f"adapters/{name}_cli.py" in builder.PRUNED_SOURCE_PATHS

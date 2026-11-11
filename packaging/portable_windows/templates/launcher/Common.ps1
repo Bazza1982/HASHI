@@ -18,7 +18,8 @@ $script:ExpectedInstallRoot = $script:PortableRoot
 $script:AppRoot = Join-Path $script:PortableRoot 'app'
 $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
-$script:PythonRoot = Join-Path $script:PortableRoot 'runtime\python'
+$script:PythonRoot = Join-Path $script:PortableRoot 'runtime\functions'
+$script:CorePythonRoot = Join-Path $script:PortableRoot 'runtime\core'
 $script:BinRoot = Join-Path $script:PortableRoot 'runtime\bin'
 $script:PortableIdentityPath = Join-Path $script:DataRoot 'portable-instance.json'
 $script:InstallMarkerPath = Join-Path $script:PortableRoot '.hashi-local-install.json'
@@ -159,6 +160,8 @@ function Initialize-LocalInstallation {
     }
     foreach ($required in @(
         (Join-Path $script:PythonRoot 'python.exe'),
+        (Join-Path $script:CorePythonRoot 'python.exe'),
+        (Join-Path $script:PortableRoot 'runtime\hashi-runtime-release.json'),
         (Join-Path $script:HashiRoot 'main.py'),
         (Join-Path $script:HashiRoot 'tui.py'),
         (Join-Path $script:DataRoot 'agents.json'),
@@ -527,7 +530,7 @@ function Start-HASHIBackend {
     Set-LocalApiPort -Port $port
     $env:HASHI_WORKBENCH_URL = "http://127.0.0.1:$port"
 
-    $python = Join-Path $script:PythonRoot 'python.exe'
+    $python = Join-Path $script:CorePythonRoot 'python.exe'
     $main = Join-Path $script:HashiRoot 'main.py'
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Portable Python is missing: $python" }
     if (-not (Test-Path -LiteralPath $main -PathType Leaf)) { throw "HASHI entry point is missing: $main" }
@@ -535,6 +538,7 @@ function Start-HASHIBackend {
     $stdout = Join-Path $script:DataRoot 'logs\hashi-console.log'
     $stderr = Join-Path $script:DataRoot 'logs\hashi-console-error.log'
     $arguments = @(
+        '-I', '-B',
         (Quote-ProcessArgument $main),
         '--bridge-home',
         (Quote-ProcessArgument $script:DataRoot),

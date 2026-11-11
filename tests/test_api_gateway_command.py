@@ -39,7 +39,7 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
 
     loaded = load_api_gateway_config(cfg)
 
-    assert loaded["enabled"] is False
+    assert loaded["enabled"] is True
     assert loaded["default_model"] == "gpt-6-astra"
 
     saved = save_api_gateway_config(
@@ -276,6 +276,7 @@ async def test_api_gateway_uses_default_model_when_request_omits_model(tmp_path)
     server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
     fake_pool = _FakePool()
     server._pool = fake_pool
+    server._engine_status["codex-cli"] = {"available": True, "reason": "in-process fixture"}
 
     response = await server.handle_chat_completions(
         _FakeRequest({"messages": [{"role": "user", "content": "hello"}]})
@@ -313,6 +314,7 @@ async def test_api_gateway_passes_valid_reasoning_effort_to_codex_request(
     )
     fake_pool = _FakePool()
     server._pool = fake_pool
+    server._engine_status["codex-cli"] = {"available": True, "reason": "in-process fixture"}
 
     response = await server.handle_chat_completions(
         _FakeRequest(
@@ -391,6 +393,7 @@ async def test_api_gateway_streams_backend_usage_with_request_effort(tmp_path):
     )
     fake_pool = _FakePool()
     server._pool = fake_pool
+    server._engine_status["codex-cli"] = {"available": True, "reason": "in-process fixture"}
 
     async with TestClient(TestServer(server.app)) as client:
         response = await client.post(
@@ -480,6 +483,7 @@ async def test_api_gateway_health_reports_default_model(tmp_path):
 @pytest.mark.asyncio
 async def test_api_gateway_health_reports_live_runtime_separately_from_config(tmp_path):
     global_config = _global_config(tmp_path, api_gateway_port=0)
+    save_api_gateway_config(global_config, enabled=False, updated_by="test")
     server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
 
     await server.start()
@@ -517,3 +521,4 @@ async def test_api_callback_rejects_crafted_unknown_model(tmp_path):
 
     assert query.answers == [("Unknown API model: not-a-model", True)]
     assert query.edits == []
+# HASHI-Fingerprint: hfp_88bdc2647c1e4be28dc70c664b18ae01

@@ -42,6 +42,7 @@ _READ_EFFECT_TOOLS = frozenset(
         "obsidian_search",
         "obsidian_get_active",
         "memory_search",
+        "documentation_read",
         "workspace_inspect",
     }
 )
@@ -90,7 +91,7 @@ def observe_tool_effect(*, tool_name: str, call_id: str, arguments: dict,
                         access_roots: tuple[Path, ...]) -> dict[str, Any] | None:
     if is_error:
         return None
-    from tools.tool_audit import sanitize_value
+
 
     kind = "read" if tool_name in _READ_EFFECT_TOOLS else ""
     target = str(arguments.get("path") or arguments.get("url") or arguments.get("query") or "")
@@ -194,3 +195,4 @@ def publish_phone_effect(*, context: Mapping[str, Any], receipt: Mapping[str, An
             detail={"call_id": row["call_id"], "request_id": request_id,
                     "tool_call_id": tool_call_id, "workspace_dir": str(workspace_dir),
                     "effect_receipt": json.loads(json.dumps(dict(receipt)))})
+# HASHI-Fingerprint: hfp_f8bfa08cc4d9466a91d2e40a5597109a

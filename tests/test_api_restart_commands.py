@@ -176,8 +176,9 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
     await asyncio.sleep(0)
 
     text, _kwargs = runtime.messages[-1]
-    assert "Restart request accepted for HASHI_TEST" in text
-    assert "wait for it to reconnect and verify" in text
+    assert text == api_restart.ui_language.tr(
+        "api.restart.requested", instance="HASHI_TEST"
+    )
     assert observed["chat_id"] == 777
     assert observed["payload"]["target_instance"] == "HASHI_TEST"
     assert "human_restart_proof" not in observed["payload"]
@@ -383,7 +384,7 @@ async def test_restart_arm_fails_closed_when_own_remote_status_fails(monkeypatch
 
     assert "forbidden" in query.edits[-1][0]
     assert query.answers[-1] == (
-        "This instance's HASHI Remote is unavailable or does not have L3_RESTART enabled.",
+        "This instance's HASHI Remote or fixed restart provider is unavailable. Check the instance installation.",
         True,
     )
     buttons = query.edits[-1][1]["reply_markup"].inline_keyboard

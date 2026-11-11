@@ -51,10 +51,12 @@ Apply these rules to the reviewed release scope, not to every commit:
    is a `Z` change; a new PCM capability or HER execution policy may be a `Y`
    change. The release record states the functional owner and the observable
    change that justifies the classification, rather than counting files/lines.
-3. Core scope derives solely from
-   `orchestrator.runtime_contract.CORE_SOURCE_PATHS`, not a copied list or a
-   permanent assumption that Core always contains nine files. An implementation
-   change in protected Core belongs to `X`, even if described as a small fix.
+3. Protected Core source scope derives solely from
+   `orchestrator.runtime_contract.CORE_SOURCE_PATHS`, not a copied path list.
+   Its versioned API/Worker/schema declarations in the runtime policy are Core
+   wire contracts too. Actual source or wire-contract changes belong to
+   `X`. Independently qualified Core-host, Functions or helper dependency and
+   interpreter revisions do not by themselves change the Core code generation.
 4. Pure Core comments/formatting with no implementation or contract change do
    not alone increase `X`. They still require Core-edit authorization and may
    change the exact source fingerprint. A version label never bypasses the
@@ -69,12 +71,14 @@ Apply these rules to the reviewed release scope, not to every commit:
 7. Ordinary commits do not each consume a release number. Once a release or
    pre-release is published, its tag and artifacts are immutable. Changed
    product code needs a new release/pre-release identifier, never an overwrite.
-8. Every pull request that changes a path in the authoritative Core manifest is
-   one reviewed Core-generation release scope. It raises `X` relative to its
+8. Every pull request that changes protected Core implementation or a Core wire
+   contract is one reviewed Core-generation release scope. It raises `X` relative to its
    base and resets `Y` and `Z` to zero. Batch one planned generation into that
    pull request; a later Core-changing pull request starts another generation.
-   The required label and independent review record are authorization evidence,
-   not substitutes for the version change.
+   The required label and matching independent-human or owner-approved review
+   record are authorization evidence, not substitutes for the version change.
+   The sole repository owner may use the documented owner-approved mode without
+   appointing a second human reviewer.
 
 Changing a number is descriptive, not authorization to edit Core, publish,
 restart, or broaden an adoption operation.
@@ -182,6 +186,27 @@ runtime-compatibility specification even when the product label is unchanged.
 Sharing `X` or a release string never authorizes hot adoption across a rejected
 fingerprint or substitutes for a configuration/data migration check.
 
+Protected code C, Core runtime CR, Functions runtime FR and Function code FG
+have independent identities. A qualified Python/stdlib security patch in CR
+with unchanged protected code does not by itself consume X, but still requires
+separate native qualification and explicit cold-cutover approval. A compatible
+vendor dependency update in FR normally uses a maintenance revision and a new
+FR_ID, with the same Core PID, interpreter, CR_ID and protected-source digest.
+A significant new Function capability still uses Y; a protected implementation
+or contract change still uses X and the independent same-tree review gate.
+Neither an independent role ID nor a package version weakens compatibility,
+file seals, audit, rollback or adoption authority.
+
+Core v5's structured version payload adds `runtime_roles.core_host` and
+`runtime_roles.functions`. They project the admitted Core receipt and the
+observed current Functions process separately, retaining their actual runtime
+IDs, Core source digest and PID. Agent views receive Core facts through the
+existing private shared-Functions topology and report their own Functions
+runtime. Missing/legacy Core receipts stay unknown; checkout metadata and the
+Functions identity never fill that gap. Public data and the full `/version`
+diagnostic view omit interpreter/prefix/manifest paths. Product and FG facts
+remain separate. This additive display does not admit or activate a candidate.
+
 Reports distinguish checked-out source, built/qualified artifact, running Core,
 shared Functions generation, and per-Agent Worker generation. Different
 instances may adopt the same release at different times. A repository version
@@ -196,10 +221,14 @@ edit or a successful offline check is not proof of running-version adoption.
   HASHI1 `main`; the Beta promotion is recorded through the repository release
   metadata, documentation index, release notes, roadmap, and checklist. Each
   checkout still requires separate synchronization evidence.
-- **Current version:** on 2026-09-21 the user approved the first v4 Beta for
-  small-scale public testing. The canonical public label is
-  `v4.0.0-beta.1`, with Python metadata `4.0.0b1`. Historical tags remain
-  unchanged, and registry/artifact publication remains a separate operation.
+- **Current development source:** the authorized Core/environment separation
+  migration uses `v5.0.0-alpha.1`, with Python metadata `5.0.0a1`; see the
+  [v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md). Its Core generation
+  increases from 4 to 5 and resets minor/patch to zero. This source candidate
+  is not a stable-release declaration or proof of package publication.
+  The last published GitHub pre-release observed on 2026-11-07 remains
+  `v4.0.0-beta.1`. Historical tags remain unchanged; publication and live
+  adoption are separate operations.
 - **Validation:** use the documentation-only scope in
   [Testing Policy](TESTING_POLICY.md): local link checks, `git diff --check`,
   and the protected-Core guard. Record actual results with the change; no

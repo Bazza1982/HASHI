@@ -88,7 +88,7 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
     )
     loaded = load_gateway_context(context_path)
     rebuilt = loaded.build_registry()
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.workbench_api_base_url == base_url
     assert rebuilt.audit_context["workbench_api_base_url"] == base_url
     assert "_runtime" not in loaded.audit
@@ -193,6 +193,50 @@ async def test_mcp_lists_hashi_browser_tools_and_validates_arguments(tmp_path):
     )
     assert invalid["result"]["isError"] is True
     assert "invalid arguments" in invalid["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_preserves_safe_authoritative_error_details(tmp_path, monkeypatch):
+    gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
+
+    async def denied(*args, **kwargs):
+        return ToolResult(
+            tool_call_id="runtime-denial",
+            output="Error: installed runtime protection could not be verified; use controlled recovery.",
+            is_error=True,
+            details={
+                "control_disposition": "denied",
+                "tool_executed": False,
+                "error_code": "runtime_integrity_failed",
+                "retryable": False,
+                "runtime_protection": {
+                    "execution_role": "functions",
+                    "qualification_scope": "core_and_functions",
+                    "instance_id": "HASHI6",
+                    "agent_id": "lin_yueru",
+                    "request_id": "request-1",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "recovery": "controlled_installation_maintenance",
+                },
+                "secret": "must-not-cross-mcp",
+            },
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", denied)
+    result = await gateway.call(
+        "hashi_file_read", {"path": str(tmp_path / "note.txt")}, "runtime-denial"
+    )
+
+    projected = result["structuredContent"]["hashi"]["details"]
+    assert result["_meta"]["hashi/toolResultDetails"] == projected
+    assert projected["error_code"] == "runtime_integrity_failed"
+    assert projected["tool_executed"] is False
+    assert projected["retryable"] is False
+    assert projected["runtime_protection"]["instance_id"] == "HASHI6"
+    assert projected["runtime_protection"]["run_id"] == "run-1"
+    assert "secret" not in projected
+    assert any("runtime_integrity_failed" in block.get("text", "") for block in result["content"])
 
 
 @pytest.mark.asyncio
@@ -305,6 +349,8 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
 
     async def fake_request(method, url, *, payload=None):
         calls.append((method, url, payload))
+        if method == "GET" and "/scheduler/status?" in url:
+            return 200, {"ok": True, "status": {"deletion_revision": "a" * 64}}
         return 200, {"ok": True, "state_changed": True}
 
     monkeypatch.setattr("tools.hashi_scheduler._request_json", fake_request)
@@ -383,6 +429,11 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
         "delete-1",
     )
     assert deleted["isError"] is False
+    assert calls[-2] == (
+        "GET",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/status?kind=heartbeat&job_id=momo-loop-1",
+        None,
+    )
     assert calls[-1] == (
         "DELETE",
         "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs/momo-loop-1",
@@ -390,6 +441,7 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
             "kind": "heartbeat",
             "requested_by": "hashi_tool_gateway",
             "authorization": "explicit_user_authorization",
+            "expected_revision": "a" * 64,
         },
     )
 
@@ -705,3 +757,4 @@ async def test_gateway_allows_repeated_browser_side_effect_when_state_changes(tm
     for number in range(gateway.context.max_identical_calls + 2):
         result = await gateway.call("browser_click", arguments, str(number))
         assert result["isError"] is False
+# HASHI-Fingerprint: hfp_cf66b29779af41f99a82f150ae5ef628

@@ -18,6 +18,13 @@ the authoritative rollout evidence and remaining gates are tracked in
 
 ## 1. Definition
 
+A registered ingress transport retains its identity when PAO selects an Agent
+activity Session. In particular, `backend_api` remains the Backend API
+Connector after a command-derived background Run moves to `agent-activity`.
+The original Conversation is a read-only origin reference; it cannot override
+the activity Session or its generation. Business source labels still describe
+the internal work, and missing or unknown transport identities fail closed.
+
 Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.
@@ -465,8 +472,13 @@ public command is discovered from the shared RuntimeCommand registry; it is not
 a Telegram command implementation or a Backend/API special case. All
 command-capable Connectors may invoke it through their existing command adapter.
 
-When enabled, PAO freezes AgentPresence as an optional media destination at Run
-admission. Canonical reply voice then receives its own outbox task and receipt;
+When enabled, PAO freezes AgentPresence as an optional destination at Run
+admission. It accepts public caption text and media through the existing durable
+outbox, as specified by [native captions](HASHI_AGENTPRESENCE_INPUT_FEEDBACK.md#native-captions-2026-11-05).
+Caption projection still requires the selected default Agent, primary Session
+and current generation; it excludes commands, reasoning, tools and private
+content. Opting out affects future Run routes while existing routes remain
+frozen. Canonical reply voice receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The
@@ -1494,6 +1506,13 @@ owns renditions and endpoint receipts. These changes stay in Functions.
 - A valid explicit Session wins over shared-primary routing for both published
   and already-delivered text. Owner/Agent and context-generation checks still
   fail closed; invalid bindings never fall back into another conversation.
+- A command may deliberately select an owned successor Session, such as the
+  fresh Session created by `/forget`. Only after PAO's durable binding succeeds,
+  the local command adapter projects completion into that selected Session and
+  its current generation. The original invocation metadata remains immutable.
+  This is an explicit command transition, not a retry or a stale-binding
+  fallback: foreign owner/Agent bindings and later generation changes still
+  fail closed, and an uncertain operation is never re-executed for display.
 - Typed command admission atomically records centrally redacted user input in
   the existing SessionStore transaction. Actions do not invent user input.
   Unified ingress also redacts invocation arguments before reservation and
@@ -1596,3 +1615,33 @@ The isolated HASHI1 Workbench consumes authoritative creation/Provider views,
 keeps future avatars by authenticated instance/Agent identity and stores the
 complete selected roster. Its private source/build/live evidence is separate
 from adoption of a shared Workbench.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 010 Attachment descriptions and guarded PCM edits
+
+- 附件说明可换行/制表，长度/身份限制不变；桌面/通话等失败保留步骤/安全原因/诊断号，回执不明先核对。[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)；Agent.md/HCC 409：[PCM](HASHI_PCM_SYSTEM_DESIGN.md)。
+
+### FYI v1 034 Atomic non-voice attachments and retention
+
+Non-voice attachments commit atomically to the Agent's ignored
+`.attachments/{session}/{message}/`; only its home reads them, and Session
+retention deletes them. Access failures differ from integrity mismatches;
+diagnostics omit paths.
+
+### FYI v1 040 Telegram access gates and bidirectional activation
+
+Telegram local/global gates differ; legacy grants remain. [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+Telegram须用户及Bot绑定的双向证据；单Agent启用空闲等待≤15m，校验凭据/创建/stop。
+回执或未知即停自动提交；状态只读、重试不重存，保留待收更新。
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+### FYI v1 051 Redacted commands, notices and preserved history
+
+Command history redacts args; originals execute. PAO notices keep Session/locale
+without Workers; scope-check and retry delivery only. Remote pages fairly;
+closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+`/new` preserves history; PAO owns Agent deletion.

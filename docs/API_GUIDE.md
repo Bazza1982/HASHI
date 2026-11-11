@@ -247,7 +247,7 @@ Example:
 
 ```python
 client = OpenAI(
-    base_url="http://10.255.255.254:18801/v1",
+    base_url="http://127.0.0.1:18801/v1",
     api_key="EMPTY",
 )
 response = client.chat.completions.create(
@@ -260,7 +260,7 @@ Standard media routes use the same gateway host, without the `/v1` suffix in
 the configured base URL when using raw HTTP:
 
 ```bash
-curl http://10.255.255.254:18801/v1/images/generations \
+curl http://127.0.0.1:18801/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
     "model": "grok-imagine-image",
@@ -268,7 +268,7 @@ curl http://10.255.255.254:18801/v1/images/generations \
     "n": 1
   }'
 
-curl http://10.255.255.254:18801/v1/videos/generations \
+curl http://127.0.0.1:18801/v1/videos/generations \
   -H "Content-Type: application/json" \
   -d '{
     "model": "grok-imagine-video",
@@ -494,7 +494,7 @@ Claw sent the matching tool result back through the Gateway, and the model
 produced the requested final answer on iteration two. No Claw tool was executed
 by HASHI's Gateway.
 
-`10.255.255.254` may be a host-virtual address that works only from the HASHI
+A deployment-specific host-virtual address may work only from the HASHI
 host. A Claw instance on another machine must use a Gateway address reachable
 from that machine, with an appropriate firewall, reverse proxy, or tunnel.
 
@@ -688,7 +688,7 @@ tool locally and include the assistant `tool_calls` plus matching
 
 - **No request authentication** — depending on the host configuration, the
   gateway may bind to `127.0.0.1`, a configured address, or the WSL
-  host-virtual address `10.255.255.254`. Use a firewall, authenticated reverse
+  host-virtual address. Use a firewall, authenticated reverse
   proxy, or private tunnel before exposing it beyond a trusted local boundary.
 - **Session cache** is in-memory only; it resets when HASHI restarts.
 - **Request timeout** is 300 seconds per request.

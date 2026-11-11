@@ -65,7 +65,8 @@ DRY_RUN=0
 
 # State file for resuming
 STATE_FILE="$BRIDGE_HOME/.bridge_u_last_agents.txt"
-BRIDGE_AUDIT_LOG="$SCRIPT_DIR/logs/bridge.log"
+BRIDGE_AUDIT_LOG="$BRIDGE_HOME/logs/bridge.log"
+EXPLICIT_BRIDGE_HOME=""
 
 # Agent arrays
 declare -a ACTIVE_AGENTS=()
@@ -92,6 +93,7 @@ SECRETS_EXIST="no"
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --bridge-home) EXPLICIT_BRIDGE_HOME="$2"; shift 2 ;;
         --resume-last) AUTO_RESUME_LAST=1; shift ;;
         --force) FORCE_LAUNCH=1; shift ;;
         --api-gateway|-a) API_GATEWAY_LAUNCH=1; shift ;;
@@ -100,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: $0 [options]"
             echo "Options:"
+            echo "  --bridge-home PATH  Use this instance data home with this program"
             echo "  --resume-last       Automatically resume last selected agents"
             echo "  --api-gateway, -a   Enable API Gateway on the configured port"
             echo "  --agents NAME       Start specific agent(s)"
@@ -110,6 +113,14 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Inherited shell state never selects another instance. A fixed controller or
+# installer may bind a separate data home through this explicit path argument.
+if [[ -n "$EXPLICIT_BRIDGE_HOME" ]]; then
+    export BRIDGE_HOME="$(cd "$EXPLICIT_BRIDGE_HOME" && pwd)"
+fi
+STATE_FILE="$BRIDGE_HOME/.bridge_u_last_agents.txt"
+BRIDGE_AUDIT_LOG="$BRIDGE_HOME/logs/bridge.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -125,7 +136,7 @@ print_banner() {
 
 check_system_info() {
     # Python version
-    PYTHON_VERSION=$(python3 --version 2>/dev/null | cut -d' ' -f2 || echo "unknown")
+    PYTHON_VERSION=$("$FUNCTIONS_PYTHON" -B --version 2>/dev/null | cut -d' ' -f2 || echo "unknown")
     
     # CLI tools
     command -v gemini &>/dev/null && CLI_GEMINI="ok"
@@ -148,7 +159,7 @@ load_agents() {
     
     # Parse all info using Python helper script
     local output
-    output=$(python3 "$helper_script" 2>&1)
+    output=$("$FUNCTIONS_PYTHON" -B "$helper_script" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${C_WARN}Failed to parse agents.json!${C_RESET}"
         echo "$output"
@@ -197,7 +208,7 @@ is_in_last() {
 render_menu() {
     clear || true
     
-    local api_label="OFF"
+    local api_label="SAVED"
     [[ "$API_GATEWAY_LAUNCH" == "1" ]] && api_label="ON"
     
     print_banner "HASHI LAUNCHER" "Multi-agent orchestrator"
@@ -391,47 +402,30 @@ choose_agents() {
 }
 
 ensure_env() {
-    local venv_dir="${HASHI_VENV_DIR:-.venv}"
-    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
-        venv_dir="${HASHI_VENV_DIR:-.venv-wsl}"
+    local bootstrap_python=""
+    if command -v python3.12 >/dev/null 2>&1; then
+        bootstrap_python="$(command -v python3.12)"
+    elif command -v python3 >/dev/null 2>&1; then
+        bootstrap_python="$(command -v python3)"
     fi
-    if [[ ! -d "$venv_dir" ]]; then
-        local bootstrap_python=""
-        if command -v python3.12 >/dev/null 2>&1; then
-            bootstrap_python="$(command -v python3.12)"
-        elif command -v python3 >/dev/null 2>&1; then
-            bootstrap_python="$(command -v python3)"
-        fi
-        if [[ -z "$bootstrap_python" ]] || ! "$bootstrap_python" \
-            "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-            --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
-            echo -e "${C_ERR}HASHI requires the approved CPython Core version to create its environment.${C_RESET}"
-            exit 78
-        fi
-        echo -e "${C_MUTED}Creating virtual environment...${C_RESET}"
-        "$bootstrap_python" -m venv "$venv_dir"
+    if [[ -z "$bootstrap_python" ]]; then
+        echo -e "${C_ERR}Run node postinstall.js with the approved CPython version before launching.${C_RESET}"
+        exit 78
     fi
-    
-    # Put user-installed CLIs on PATH before activation. Activating last keeps
-    # the Core interpreter first and prevents PATH drift to system Python.
+    if ! FUNCTIONS_PYTHON=$("$bootstrap_python" -B "$SCRIPT_DIR/scripts/resolve_launch_runtime.py" \
+        --code-root "$SCRIPT_DIR" --field functions-executable); then
+        echo -e "${C_ERR}No qualified runtime pair is installed. Run node postinstall.js first.${C_RESET}"
+        exit 78
+    fi
+    if ! CORE_PYTHON=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_launch_runtime.py" \
+        --code-root "$SCRIPT_DIR" --field core-executable); then
+        exit 78
+    fi
     if [[ -d "$HOME/.local/bin" ]]; then
         export PATH="$HOME/.local/bin:$PATH"
     fi
-    source "$venv_dir/bin/activate"
-    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-        --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
-        echo -e "${C_ERR}Existing HASHI environment violates the Core runtime contract.${C_RESET}"
-        echo -e "${C_MUTED}Rebuild $venv_dir with the approved CPython version; /reboot cannot replace Python.${C_RESET}"
-        exit 78
-    fi
-
-    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-        --code-root "$SCRIPT_DIR" >/dev/null; then
-        echo -e "${C_WARN}Installing the approved dependency generation...${C_RESET}"
-        python3 -m pip install --quiet -r "$SCRIPT_DIR/constraints/standard-py312.lock"
-        python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
-            --code-root "$SCRIPT_DIR" >/dev/null || exit 78
-    fi
+    export PATH="$(dirname "$FUNCTIONS_PYTHON"):$PATH"
+    export PYTHONDONTWRITEBYTECODE=1
 }
 
 preflight_check() {
@@ -439,9 +433,9 @@ preflight_check() {
     # another HASHI instance on the same computer.
     local pid_file
     local instance_id
-    pid_file=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    pid_file=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
         --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field pid-path)
-    instance_id=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    instance_id=$("$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
         --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field instance-id)
     local existing_pid=""
     
@@ -511,25 +505,12 @@ preflight_check() {
     echo -e "  ${C_MUTED}Stopping existing instance...${C_RESET}"
     log_launcher_event "preflight: sending SIGTERM to PID=$existing_pid"
     
-    # Try graceful kill first
-    kill "$existing_pid" 2>/dev/null || true
-    
-    # Wait up to 5 seconds
-    local waited=0
-    while kill -0 "$existing_pid" 2>/dev/null && [[ $waited -lt 5 ]]; do
-        sleep 1
-        ((waited++)) || true
-    done
-    log_launcher_event "preflight: waited ${waited}s for PID=$existing_pid to exit after SIGTERM"
-    
-    # Force kill if still running
-    if kill -0 "$existing_pid" 2>/dev/null; then
-        echo -e "  ${C_WARN}Force killing...${C_RESET}"
-        log_launcher_event "preflight: PID=$existing_pid still alive; escalating to SIGKILL"
-        kill -9 "$existing_pid" 2>/dev/null || true
-        sleep 1
-    else
-        log_launcher_event "preflight: PID=$existing_pid exited cleanly after SIGTERM"
+    # Capture old descendants before Core exits; waiting for Core alone can
+    # leave its detached shared Functions alive and duplicate background work.
+    if ! "$FUNCTIONS_PYTHON" -B "$SCRIPT_DIR/scripts/stop_instance_runtime.py" \
+        --pid "$existing_pid" --bridge-home "$BRIDGE_HOME"; then
+        log_launcher_event "preflight: captured runtime shutdown was not verified"
+        return 1
     fi
     
     # Clean up files
@@ -562,7 +543,7 @@ launch() {
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"
         py_args="$py_args --api-gateway"
     else
-        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_MUTED}disabled${C_RESET}"
+        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_MUTED}saved instance setting${C_RESET}"
     fi
     
     if [[ "$WHATSAPP_ENABLED" == "yes" ]]; then
@@ -573,7 +554,7 @@ launch() {
 
     # Browser Bridge (CDP) status probe
     local cdp_status
-    cdp_status=$(python3 -c "
+    cdp_status=$("$FUNCTIONS_PYTHON" -B -c "
 from tools.browser_bridge import probe_cdp, detect_wsl_host_ip, is_wsl
 port = 9222
 if probe_cdp('localhost', port):
@@ -598,7 +579,7 @@ else:
     
     if [[ "$DRY_RUN" == "1" ]]; then
         echo -e "${C_WARN}DRY RUN - would execute:${C_RESET}"
-        echo "  python3 main.py --bridge-home $BRIDGE_HOME $py_args"
+        echo "  $CORE_PYTHON -I -B main.py --bridge-home $BRIDGE_HOME $py_args"
         exit 0
     fi
     
@@ -623,7 +604,7 @@ else:
                 if curl -sf --max-time 2 "$hashi_api/api/health" >/dev/null 2>&1; then
                     sleep 1  # reduced grace: let agent fully register
                     log_launcher_event "wakeup-injector: sending prompt"
-                    json_body=$(python3 -c "
+                    json_body=$("$FUNCTIONS_PYTHON" -B -c "
 import json, sys
 prompt = open(sys.argv[1], encoding='utf-8').read()
 print(json.dumps({'agent': 'hashiko', 'text': prompt}))
@@ -641,8 +622,8 @@ print(json.dumps({'agent': 'hashiko', 'text': prompt}))
     fi
     # ────────────────────────────────────────────────────────────────────────
 
-    log_launcher_event "launching: python3 main.py --bridge-home $BRIDGE_HOME $py_args"
-    python3 main.py --bridge-home "$BRIDGE_HOME" $py_args
+    log_launcher_event "launching: $CORE_PYTHON -I -B main.py --bridge-home $BRIDGE_HOME $py_args"
+    "$CORE_PYTHON" -I -B main.py --bridge-home "$BRIDGE_HOME" $py_args
     local py_exit=$?
     log_launcher_event "main.py exited: code=$py_exit"
 
@@ -674,7 +655,7 @@ _onboarding_complete() {
     if [[ ! -f "$agents_file" ]]; then
         return 1
     fi
-    python3 -c "
+    "$FUNCTIONS_PYTHON" -B -c "
 import json, sys
 try:
     # Windows editors and config updaters may preserve a UTF-8 BOM.  The
@@ -693,7 +674,7 @@ if ! _onboarding_complete; then
     echo -e "${C_WARN}Onboarding not complete. Starting onboarding...${C_RESET}"
     echo ''
     sleep 1
-    HASHI_BRIDGE_PORT=$BRIDGE_PORT python3 onboarding/onboarding_main.py
+    HASHI_BRIDGE_PORT=$BRIDGE_PORT "$FUNCTIONS_PYTHON" -B onboarding/onboarding_main.py
     exit 0
 fi
 # ---------------------------------------------------------------------------

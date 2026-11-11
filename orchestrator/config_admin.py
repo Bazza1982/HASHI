@@ -10,13 +10,14 @@ import stat
 from typing import Any
 import uuid
 
+from orchestrator.agent_config_json import write_agent_config_json as write_config_json
+
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDocument,
     ConfigDurabilityError,
     file_write_lock,
     read_config_json,
-    write_config_json,
 )
 
 from orchestrator.pathing import BridgePaths
@@ -28,6 +29,11 @@ from orchestrator.agent_incarnation import (
 )
 
 logger = logging.getLogger("BridgeU.ConfigAdmin")
+
+
+def normalize_new_agent_name(name: str) -> str:
+    """Canonicalize an ordinary new Agent ID without rewriting existing Agents."""
+    return name.lower()
 
 
 class AgentWorkspaceConflictError(RuntimeError):
@@ -55,13 +61,12 @@ def _agent_rows(document: dict) -> list[dict]:
 
 
 def _agent_name_collides(rows: list[dict], name: str) -> bool:
-    normalize = str.casefold if os.name == "nt" else lambda value: value
-    wanted = normalize(name)
-    return any(normalize(row["name"]) == wanted for row in rows)
+    wanted = normalize_new_agent_name(name)
+    return any(normalize_new_agent_name(row["name"]) == wanted for row in rows)
 
 
 def _agent_creation_lock_target(config_path: Path, name: str) -> Path:
-    normalized_name = name.casefold() if os.name == "nt" else name
+    normalized_name = normalize_new_agent_name(name)
     name_digest = hashlib.sha256(normalized_name.encode("utf-8")).hexdigest()[:24]
     return config_path.resolve().parent / f"agent-create-{name_digest}"
 
@@ -553,6 +558,8 @@ class ConfigAdmin:
         paths pass a display-name string and optional token and expect (ok, msg).
         Keep both shapes for compatibility.
         """
+        requested_name = agent_name
+        agent_name = normalize_new_agent_name(agent_name)
         wants_message = isinstance(agent_cfg, str) or token is not None
         display_name = (
             agent_cfg
@@ -575,11 +582,14 @@ class ConfigAdmin:
                 "telegram_token_key": agent_name if not token else f"{agent_name}_telegram_token",
             }
         new_entry.setdefault("name", agent_name)
+        new_entry["name"] = normalize_new_agent_name(new_entry["name"])
         # Ordinary creation is a new incarnation even if a caller supplied a
         # stale row copied from a deleted Agent. Move has its own narrow import
         # path and is the only operation allowed to preserve this identity.
         new_entry[AGENT_LIFECYCLE_FIELD] = new_agent_lifecycle_id()
         new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
+        if new_entry["workspace_dir"] == f"workspaces/{requested_name}":
+            new_entry["workspace_dir"] = f"workspaces/{agent_name}"
         new_entry.pop("system_md", None)
         new_entry.setdefault("is_active", True)
         new_entry.setdefault("type", "flex")

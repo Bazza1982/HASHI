@@ -63,5 +63,6 @@ if ($PythonArgsBase64) {
 # Windows PowerShell turns native stderr (including normal server logs) into
 # error records. Keep it in the log without aborting a healthy child process.
 $ErrorActionPreference = "Continue"
-& $Python @ArgumentList *>> $LogPath
+# Legacy registrations must also preserve the sealed interpreter file closure.
+& $Python -B @ArgumentList *>> $LogPath
 exit $LASTEXITCODE

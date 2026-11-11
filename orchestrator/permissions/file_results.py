@@ -7,6 +7,8 @@ from orchestrator.permissions.windows_file_supervisor import _render_read
 from orchestrator.permissions.network_worker import NETWORK_TOOLS
 
 
+PRESTART_BINDING_FAILURE = "File could not be opened safely; no action started."
+
 def render_helper_result(descriptor, arguments, result):
     data = base64.b64decode(result["data"], validate=True)
     if result.get("outcome") == "failed":
@@ -21,3 +23,4 @@ def render_helper_result(descriptor, arguments, result):
     if descriptor.tool_name not in ({"file_list", "file_search", "apply_patch", "run_script"} | NETWORK_TOOLS) or len(data) > 1024 * 1024:
         raise ValueError("invalid fixed helper result")
     return data.decode("utf-8", errors="strict")
+# HASHI-Fingerprint: hfp_ed6121046af14fa3b350c3aae4417e80

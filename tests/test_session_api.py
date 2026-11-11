@@ -469,6 +469,7 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
     # Recovery does not consult next-call configuration before PCM is assembled.
     from unittest.mock import patch
     runtime.phone_manager.set_language("en")
+    runtime.phone_manager.set_provider("hy-simulmt")
     with patch.object(runtime.phone_manager, "_read", side_effect=AssertionError("next-call settings were read")):
         recovered = server._resolve_live_voice_phone_session(
             "lily", owner_id=owner_id, session_id=session["session_id"],
@@ -476,6 +477,7 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
             frozen_selection=resolved["selection"],
         )
     assert recovered["public"]["language"] == resolved["public"]["language"]
+    assert recovered["public"]["provider"] == resolved["public"]["provider"]
     assert "GLOBAL_SYS_PHONE_SENTINEL" in recovered["instructions"]
     assert "MEMORY_PLUS_PHONE_SENTINEL" in json.dumps(recovered["input"], ensure_ascii=False)
 
@@ -3192,3 +3194,4 @@ async def test_session_patch_archives_and_restores_without_deleting_records(tmp_
         message["text"]
         for message in server.session_store.messages(session["session_id"], owner_id=owner)
     ] == ["Persistent message"]
+# HASHI-Fingerprint: hfp_e8fcaf14d72b4d6bba89c5a6777a3203

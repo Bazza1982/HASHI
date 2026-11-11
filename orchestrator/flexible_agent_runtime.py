@@ -114,6 +114,7 @@ from orchestrator.runtime_common import (
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from orchestrator.agent_fyi import build_agent_fyi_primer
+from orchestrator.agent_documentation import documentation_root
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -312,7 +313,7 @@ class FlexibleAgentRuntime:
         # Hashi Remote subprocess
         self._remote_process: asyncio.subprocess.Process | None = None
         self.skill_manager = skill_manager
-        self.agent_fyi_path = self.global_config.project_root / "docs" / "AGENT_FYI.md"
+        self.agent_fyi_path = documentation_root(self.global_config.project_root) / "docs" / "AGENT_FYI.md"
         self._pending_session_primer: str | None = None
         self._pending_session_primer_session_id: str | None = None
         self._pending_auto_recall_context: str | None = None
@@ -394,6 +395,8 @@ class FlexibleAgentRuntime:
             project_root=Path(self.global_config.project_root),
         )
         self.phone_manager = PhoneManager(self.workspace_dir)
+        from orchestrator.translate_manager import TranslateManager
+        self.translate_manager = TranslateManager(self.workspace_dir)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
         self._channel_gate = self._build_channel_gate()
@@ -3135,7 +3138,10 @@ class FlexibleAgentRuntime:
             not getattr(self, "_pending_session_primer_session_id", None)
             or self._pending_session_primer_session_id == item_session_id
         ):
-            sections.append(self._pending_session_primer)
+            # Explicit /fyi already contains the current catalogue and common guidance.
+            # Consume the armed primer once without injecting that reference twice.
+            if not item.prompt.startswith("--- AGENT FYI ---\n"):
+                sections.append(self._pending_session_primer)
             self._pending_session_primer = None
             self._pending_session_primer_session_id = None
         if self._pending_auto_recall_context and (
@@ -5472,6 +5478,10 @@ class FlexibleAgentRuntime:
         from orchestrator.frontend_call.settings import callback
         await callback(self, update, context)
 
+    async def callback_translate(self, update: Update, context: Any):
+        from orchestrator.translate_settings import callback
+        await callback(self, update, context)
+
     async def callback_phone(self, update: Update, context: Any):
         query = update.callback_query
         if not self._is_authorized_user(query.from_user.id):
@@ -5492,6 +5502,8 @@ class FlexibleAgentRuntime:
             return
         try:
             if action == "provider":
+                if value in self.phone_manager.PROVIDERS and value not in dict(self.phone_manager.provider_options()):
+                    raise PhoneConfigError("phone_translation_moved", ui_language.tr("translate.phone_moved"))
                 self.phone_manager.set_provider(value)
             elif action == "model":
                 self.phone_manager.set_model(value)
@@ -6736,6 +6748,10 @@ class FlexibleAgentRuntime:
         from orchestrator.frontend_call.settings import command
         await command(self, update, context)
 
+    async def cmd_translate(self, update: Update, context: Any):
+        from orchestrator.translate_settings import command
+        await command(self, update, context)
+
     async def cmd_phone(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -6761,6 +6777,8 @@ class FlexibleAgentRuntime:
             return
         try:
             if action == "provider" and len(args) == 2:
+                if args[1] in self.phone_manager.PROVIDERS and args[1] not in dict(self.phone_manager.provider_options()):
+                    raise PhoneConfigError("phone_translation_moved", ui_language.tr("translate.phone_moved"))
                 self.phone_manager.set_provider(args[1])
             elif action == "model" and len(args) == 2:
                 self.phone_manager.set_model(args[1])
@@ -14117,3 +14135,4 @@ class FlexibleAgentRuntime:
 
     async def shutdown(self):
         await runtime_lifecycle.shutdown(self)
+# HASHI-Fingerprint: hfp_7b4e0374060c4f4db74dab02d8cba9b8

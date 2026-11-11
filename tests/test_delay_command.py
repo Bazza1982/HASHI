@@ -18,6 +18,9 @@ class _FakeRuntime:
         self.workspace_dir.mkdir()
         self.global_config = SimpleNamespace(authorized_id=1)
         self.queue = asyncio.Queue()
+        from orchestrator import runtime_session
+
+        runtime_session.initialize_runtime_sessions(self)
         scheduler = TaskScheduler(
             tasks_path=tmp_path / "tasks.json",
             state_path=tmp_path / "scheduler_state.json",
@@ -90,3 +93,4 @@ async def test_delay_command_rejects_invalid_request_without_persisting(tmp_path
 
     assert "positive whole number" in result["messages"][0]["text"]
     assert await runtime.orchestrator.scheduler.list_delayed_messages("zelda") == []
+# HASHI-Fingerprint: hfp_ccc4f2aedd07408fb43a31de0d512b87

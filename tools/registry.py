@@ -28,7 +28,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list"],
+    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
@@ -105,6 +105,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "process_list",
         "request_diagnostics",
         "wiki_search",
+        "documentation_read",
         "web_fetch",
         "web_search",
         "windows_info",
@@ -873,14 +874,32 @@ class ToolRegistry:
             policy_cache_key,
         )
 
+        from orchestrator.runtime_contract import RuntimeContractError
         runtime_prefix = context.get("live_runtime_prefix")
-        cache_key = policy_cache_key(global_config, runtime_prefix)
-        if cache_key != self._live_runtime_policy_cache_key:
-            self._live_runtime_policy_cache = load_live_runtime_policy(
-                global_config,
-                runtime_prefix=runtime_prefix,
+        owner = getattr(context.get("_runtime"), "orchestrator", None)
+        try:
+            core_runtime = getattr(owner, "core_runtime_fingerprint", None)
+            cache_key = policy_cache_key(global_config, runtime_prefix, core_runtime=core_runtime)
+            if cache_key != self._live_runtime_policy_cache_key:
+                self._live_runtime_policy_cache = load_live_runtime_policy(
+                    global_config, runtime_prefix=runtime_prefix, core_runtime=core_runtime,
+                    previous_policy=self._live_runtime_policy_cache,
+                )
+                self._live_runtime_policy_cache_key = cache_key
+        except (OSError, ValueError, RuntimeContractError):
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output="Error: installed runtime protection could not be verified; use controlled recovery.",
+                is_error=True,
+                details={"control_disposition": "denied", "reason": "live_runtime_protection",
+                         "operation": "runtime_qualification_unavailable", "retryable": False,
+                         "error_code": "runtime_integrity_failed", "tool_executed": False,
+                         "runtime_protection": self._runtime_protection_diagnostic(
+                             qualification="failed_before_policy_projection",
+                             error_code="runtime_integrity_failed",
+                             protection_complete=False,
+                         )},
             )
-            self._live_runtime_policy_cache_key = cache_key
         if tool_name == "file_search":
             for root in arguments.get("roots") or []:
                 denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)
@@ -900,6 +919,39 @@ class ToolRegistry:
             is_error=True,
             details=decision.details(),
         )
+
+    def _runtime_protection_diagnostic(
+        self,
+        *,
+        qualification: str,
+        error_code: str,
+        protection_complete: bool,
+    ) -> dict[str, Any]:
+        context = self._effective_audit_context()
+        global_config = context.get("global_config")
+        diagnostic: dict[str, Any] = {
+            "qualification": qualification,
+            "error_code": error_code,
+            "protection_complete": protection_complete,
+            "new_process_admission": "strict_qualification_required",
+            "execution_role": "functions",
+            "qualification_scope": "core_and_functions",
+            "recovery": "controlled_installation_maintenance",
+        }
+        identity = {
+            "instance_id": context.get("instance_id")
+                or getattr(global_config, "instance_id", None),
+            "agent_id": context.get("agent_name"),
+            "request_id": context.get("request_id"),
+            "session_id": context.get("hashi_session_id"),
+            "run_id": context.get("hashi_run_id"),
+        }
+        diagnostic.update({
+            key: str(value)
+            for key, value in identity.items()
+            if value is not None and str(value).strip()
+        })
+        return diagnostic
 
     def _check_system_exchange_loop_gate(
         self,
@@ -1012,6 +1064,23 @@ class ToolRegistry:
         try:
             from orchestrator.execution_resources import tool_resource
             async with tool_resource(self, tool_name, arguments) as resource_wait_ms:
+                guard = self._effective_audit_context().get("_tool_dispatch_guard")
+                if callable(guard):
+                    # Never hold a PAO database transaction across an await.
+                    # Recheck after any resource wait, immediately before dispatch.
+                    from orchestrator.session_store import SessionConflict
+                    try:
+                        with guard():
+                            pass
+                    except SessionConflict:
+                        result = ToolResult(
+                            tool_call_id=effective_call_id, is_error=True,
+                            output="Error: owner_run_not_current; this call did not execute.",
+                            details={"control_disposition":"denied", "tool_executed":False,
+                                     "error_code":"owner_run_not_current", "retryable":False})
+                        result = self._finalize_tool_result(tool_name, arguments, result, started)
+                        self._record_tool_audit(tool_name, arguments, result, started)
+                        return result
                 from orchestrator.fingerprint.execution import dispatch_controlled
                 dispatched = await dispatch_controlled(
                     self, tool_name, arguments, tool_call_id=effective_call_id,
@@ -1040,6 +1109,26 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             raise
         except Exception as e:
+            from orchestrator.session_store import SessionConflict
+            if isinstance(e, SessionConflict):
+                details = dict(getattr(e, "hashi_tool_details", {}) or {})
+                details.update({
+                    "control_disposition": "denied",
+                    "tool_executed": False,
+                    "error_code": "owner_run_not_current",
+                    "retryable": False,
+                })
+                result = ToolResult(
+                    tool_call_id=effective_call_id,
+                    output="Error: owner_run_not_current; this call did not execute.",
+                    is_error=True,
+                    details=details,
+                )
+                result = self._finalize_tool_result(
+                    tool_name, arguments, result, started
+                )
+                self._record_tool_audit(tool_name, arguments, result, started)
+                return result
             remote = getattr(e, "error", None)
             broker_error = (
                 type(e).__name__ == "CapabilityBrokerError"
@@ -1200,6 +1289,17 @@ class ToolRegistry:
         """Apply the optional five-field contract and append one ledger row."""
         from tools.effect_receipts import observe_tool_effect
 
+        policy = self._live_runtime_policy_cache
+        if policy is not None and policy.qualification_error:
+            error_code = ("runtime_protection_context_unavailable"
+                if policy.qualification_error == "missing_core_receipt"
+                else "runtime_integrity_failed")
+            result.details = {**(result.details or {}), "runtime_protection":
+                self._runtime_protection_diagnostic(
+                    qualification="failed_at_boundary_refresh",
+                    error_code=error_code,
+                    protection_complete=policy.protection_complete,
+                )}
         try:
             receipt = (result.details or {}).get("effect_receipt")
             if "fingerprint" not in (result.details or {}):
@@ -1748,6 +1848,13 @@ class ToolRegistry:
         *,
         tool_call_id: str = "",
     ) -> str | StructuredToolOutput:
+        guard = self._effective_audit_context().get("_tool_dispatch_guard")
+        if callable(guard):
+            # Fingerprint and other evidence preparation may await after the
+            # resource-level check. Recheck at the actual business executor
+            # entry, with no await before selecting the tool implementation.
+            with guard():
+                pass
         from tools.builtins import (
             execute_bash,
             execute_shell,
@@ -2016,6 +2123,18 @@ class ToolRegistry:
             except (ValueError, MemorySearchAuthorizationError) as exc:
                 return f"Error: {exc}"
 
+        if tool_name == "documentation_read":
+            from tools.documentation_read import execute_documentation_read
+
+            output = await execute_documentation_read(
+                arguments,
+                global_config=self._effective_audit_context().get("global_config"),
+            )
+            result = json.loads(output)
+            if not result["ok"]:
+                return f"Error: {result['error']}: {result['message']}"
+            return output
+
         if tool_name == "wiki_search":
             from tools.wiki_search import execute_wiki_search
 
@@ -2025,21 +2144,24 @@ class ToolRegistry:
             )
 
         if tool_name.startswith("hashi_scheduler_"):
-            from tools.hashi_scheduler import execute_hashi_scheduler_tool
+            from tools.hashi_scheduler import execute_hashi_scheduler_tool, scheduler_tool_credential
 
             return await execute_hashi_scheduler_tool(
                 tool_name,
                 arguments,
                 audit_context=self._effective_audit_context(),
+                credential=scheduler_tool_credential(self.secrets, self._effective_audit_context(), {tool_name}),
             )
 
         if tool_name.startswith("hashi_superloop_"):
             from tools.hashi_superloop import execute_hashi_superloop_tool
+            from tools.hashi_scheduler import scheduler_tool_credential
 
             return await execute_hashi_superloop_tool(
                 tool_name,
                 arguments,
                 audit_context=self._effective_audit_context(),
+                credential=scheduler_tool_credential(self.secrets, self._effective_audit_context(), {tool_name}),
             )
 
         if tool_name.startswith("browser_"):
@@ -2218,3 +2340,4 @@ class ToolRegistry:
             return await self._obsidian.dispatch(tool_name, arguments)
 
         return f"Error: no executor for tool '{tool_name}'"
+# HASHI-Fingerprint: hfp_dc7e0236d6584d39abab159f44531a64

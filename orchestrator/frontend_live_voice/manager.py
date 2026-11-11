@@ -49,6 +49,12 @@ PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
 PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
 MAX_CONSECUTIVE_RESUME_ATTEMPTS = 5
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
+INVALID_PROVIDER_CREDENTIALS = frozenset({"live_provider_key_expired", "live_provider_key_invalid"})
+PROVIDER_AVAILABILITY_ERRORS = INVALID_PROVIDER_CREDENTIALS | {
+    "live_provider_authentication_failed", "live_provider_access_denied",
+    "live_provider_quota_exceeded", "live_provider_rate_limited", "live_provider_unavailable",
+    "live_provider_request_rejected",
+}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 TERMINAL_PROVIDER_CLOSE_ERRORS = {
     "content": "live_provider_content_filtered",
@@ -256,6 +262,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self.secrets = dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
         self._connection_providers: dict[str, VoiceProvider] = {}
+        self._provider_availability: dict[str, str] = {}
         self._provider_native_delegations: dict[tuple[str, int], set[str]] = {}
         self.instance_id = str(getattr(global_config, "instance_id", "HASHI") or "HASHI").upper()
         self.instance_generation = str(getattr(global_config, "instance_generation", "1") or "1")
@@ -320,6 +327,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     def available(self, value: bool) -> None:
         self._availability_override = bool(value)
 
+    def available_for(self, entrypoint: str) -> bool:
+        if self._availability_override is not None:
+            return self._availability_override
+        return self._feature_enabled and any(
+            (adapter.capabilities.mode == "interpretation") == (entrypoint == "translate")
+            and adapter.is_available(self.secrets)
+            for adapter in self.providers.values()
+        )
+
     def _provider_for(self, binding: CallBinding | None = None, *, provider_session_id: str = "") -> VoiceProvider:
         identity = provider_session_id or (binding.provider_session_id if binding else "")
         if identity in self._connection_providers:
@@ -350,7 +366,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         context_generation: int | None = None,
         frozen_public: Mapping[str, Any] | None = None,
         frozen_selection: Mapping[str, Any] | None = None,
+        entrypoint: str = "phone",
     ) -> dict[str, Any]:
+        frozen = frozen_public or frozen_selection or {}
+        entrypoint = str(frozen.get("entrypoint") or (
+            "translate" if frozen.get("mode") == "interpretation" else entrypoint
+        ))
+        if entrypoint not in {"phone", "translate"}:
+            raise LiveVoiceError("live_entrypoint_invalid")
         if not callable(self._resolve_phone_session):
             raise LiveVoiceError("live_phone_configuration_unavailable", 503)
         try:
@@ -364,6 +387,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 for key in ("owner_id", "session_id", "context_generation")
             )
             selection_kwargs = {}
+            if "entrypoint" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ):
+                selection_kwargs["entrypoint"] = entrypoint
             if frozen_selection is not None and (
                 "frozen_selection" in parameters
                 or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
@@ -401,6 +429,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         public = value.get("public")
         adapter = select_provider(self.providers, provider)
         adapter.validate_selection(model, voice)
+        interpretation = adapter.capabilities.mode == "interpretation"
+        if interpretation != (entrypoint == "translate"):
+            raise LiveVoiceError("live_translate_required" if interpretation else "live_translation_provider_required", 409)
         if not isinstance(instructions, str) or not instructions:
             raise LiveVoiceError("live_instructions_invalid", 503)
         input_messages = value.get("input", [])
@@ -426,10 +457,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 "revision", "provider", "provider_label", "model", "model_label",
                 "voice", "voice_label", "voice_presentation", "language", "language_label", "style",
                 "style_label", "custom_style", "persona_projected", "adapter_version", "interface_language", "mode",
+                "direction", "entrypoint",
             )
             if key in public
         }
         allowed_public["adapter_version"] = adapter.capabilities.version
+        allowed_public["entrypoint"] = entrypoint
         billing_descriptor = getattr(adapter, "billing_descriptor", None)
         if callable(billing_descriptor):
             billing = billing_descriptor(model)
@@ -447,7 +480,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "public": allowed_public,
             "selection": {
                 key: value["selection"][key]
-                for key in ("schema_version", "provider", "model", "voice", "language", "style", "style_instructions", "interface_language")
+                for key in ("schema_version", "provider", "model", "voice", "language", "style", "style_instructions", "interface_language", "entrypoint")
                 if isinstance(value.get("selection"), Mapping) and key in value["selection"]
             },
         }
@@ -1126,6 +1159,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return event
 
     def _ensure_foreground_router(self, binding: CallBinding) -> None:
+        if not self._provider_for(binding).capabilities.context_updates:
+            return
         existing = self._foreground_call_tasks.get(binding.call_id)
         if existing is not None and not existing.done():
             return
@@ -2904,10 +2939,70 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         owner_id = authority.get("owner_id") if isinstance(authority, Mapping) else str(authority or "")
         if not owner_id:
             raise LiveVoiceError("live_not_authenticated", 401)
+        entrypoint = str(payload.get("entrypoint") or "phone")
+        if entrypoint not in {"phone", "translate"}:
+            raise LiveVoiceError("live_entrypoint_invalid")
+        # One media owner enforces foreground exclusion for both products. A
+        # route can only inspect/control attempts and calls from its own entry.
+        record = None
+        with self.session_store._lock, self.session_store._connection() as connection:
+            if payload.get("call_id"):
+                record = connection.execute(
+                    "SELECT phone_config_json FROM live_calls WHERE call_id=? AND owner_id=?",
+                    (str(payload["call_id"]), owner_id),
+                ).fetchone()
+            elif payload.get("attempt_id"):
+                record = connection.execute(
+                    "SELECT phone_config_json FROM live_call_attempts WHERE attempt_id=? AND owner_id=?",
+                    (str(payload["attempt_id"]), owner_id),
+                ).fetchone()
+        if record is not None:
+            public = self._stored_phone_public(record) or {}
+            actual = public.get("entrypoint") or (
+                "translate" if public.get("mode") == "interpretation" else "phone"
+            )
+            if actual != entrypoint:
+                raise LiveVoiceError("live_entrypoint_conflict", 409)
         handler = getattr(self, f"_op_{operation}", None)
         if not callable(handler):
             raise LiveVoiceError("live_operation_unsupported", 404)
         return await handler(owner_id, payload)
+
+
+    @staticmethod
+    def _provider_availability_key(phone: Mapping[str, Any], key: str) -> str:
+        # In-memory only. Never publish or persist a credential or its digest.
+        return stable_digest({"provider": phone["provider"], "model": phone["model"],
+                              "revision": phone["public"]["revision"], "credential": key})
+
+    def _remember_provider_availability(self, phone: Mapping[str, Any], key: str, code: str = "") -> None:
+        if code and code not in PROVIDER_AVAILABILITY_ERRORS:
+            return  # Input/content failures and uncertain outcomes do not prove service unavailability.
+        identity = self._provider_availability_key(phone, key)
+        self._provider_availability.pop(identity, None)
+        self._provider_availability[identity] = code
+        while len(self._provider_availability) > 16:
+            self._provider_availability.pop(next(iter(self._provider_availability)))
+
+    def _phone_availability(self, phone: Mapping[str, Any] | None, configuration_error: str | None) -> dict[str, Any]:
+        enabled = self._feature_enabled if self._availability_override is None else self._availability_override
+        reason = configuration_error
+        if not enabled:
+            reason = "live_not_enabled"
+        elif phone and not phone["adapter"].is_available(self.secrets):
+            reason = "live_credential_unavailable"
+        elif phone and not reason:
+            identity = self._provider_availability_key(phone, phone["adapter"].credential(self.secrets))
+            if identity not in self._provider_availability:
+                return {"available": True, "availability": {"state": "unverified", "reason": None},
+                        "unavailable_reason": None}
+            reason = self._provider_availability[identity] or None
+            return {"available": reason not in INVALID_PROVIDER_CREDENTIALS,
+                    "availability": {"state": "unavailable" if reason else "available", "reason": reason},
+                    "unavailable_reason": reason}
+        return {"available": False, "availability": {"state": "unavailable",
+                "reason": reason or "live_phone_configuration_unavailable"},
+                "unavailable_reason": reason or "live_phone_configuration_unavailable"}
 
     async def _op_context(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         session_id = identifier(payload.get("session_id"))
@@ -2921,6 +3016,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         if int(session["context_generation"]) != generation:
             raise LiveVoiceError("live_scope_changed", 409)
         phone = None
+        resolved_phone = None
         configuration_error = None
         try:
             resolved_phone = self._phone_session(
@@ -2928,6 +3024,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 owner_id=owner_id,
                 session_id=session_id,
                 context_generation=generation,
+                entrypoint=str(payload.get("entrypoint") or "phone"),
             )
             phone = resolved_phone["public"]
         except LiveVoiceError as exc:
@@ -2955,7 +3052,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "binding": {"instance_id": self.instance_id, "instance_generation": self.instance_generation,
                         "agent_id": agent_id, "session_id": session_id, "context_generation": generation},
             "foreground_call": foreground_call,
-            "capability": {"protocol_version": "1.0", "available": bool(self.available and phone and resolved_phone["adapter"].is_available(self.secrets)),
+            "capability": {"protocol_version": "1.0", **self._phone_availability(resolved_phone, configuration_error),
                            "phone": phone, "configuration_error": configuration_error,
                            "media": resolved_phone["media"] if phone else None,
                            "heartbeat_interval_seconds": 10, "lease_expiry_seconds": 45,
@@ -2997,6 +3094,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             owner_id=owner_id,
             session_id=expected["session_id"],
             context_generation=expected["context_generation"],
+            entrypoint=str(payload.get("entrypoint") or "phone"),
         )
         adapter = phone_session["adapter"]
         if not adapter.is_available(self.secrets):
@@ -3135,6 +3233,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         input_token_count_exact=exact_audit["input_tokens_exact"],
                 )
         except LiveVoiceError as exc:
+            self._remember_provider_availability(phone_session, key, exc.code)
             state = "unknown" if exc.code == "live_provider_create_unknown" else "failed"
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
@@ -3148,6 +3247,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 error_code=exc.code,
             )
             raise
+        self._remember_provider_availability(phone_session, key)
         provider_id, answer = provider["provider_session_id"], provider["sdp_answer"]
         self._connection_providers[provider_id] = adapter
         self.audit.record_attempt(
@@ -3527,6 +3627,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         input_token_count_exact=exact_audit["input_tokens_exact"],
                 )
         except LiveVoiceError as exc:
+            self._remember_provider_availability(phone_session, key, exc.code)
             self._mark_recovering(binding, reason=exc.code,
                                   summary="Provider replacement failed; logical phone remains open")
             with self.session_store._lock, self.session_store._connection() as connection:
@@ -3547,6 +3648,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self.audit.record(binding, "transport.resume_failed",
                               error_code="live_provider_replacement_failed", **exception_evidence(exc))
             raise LiveVoiceError("live_provider_replacement_failed", 502) from exc
+        self._remember_provider_availability(phone_session, key)
         provider_id, answer = provider["provider_session_id"], provider["sdp_answer"]
         self._connection_providers[provider_id] = adapter
         new_epoch = binding.call_epoch
@@ -3991,10 +4093,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         try:
             with self.session_store._lock, self.session_store._connection() as connection:
                 call = connection.execute(
-                    "SELECT started_at, ended_at FROM live_calls WHERE call_id = ?",
+                    "SELECT started_at, ended_at, phone_config_json FROM live_calls WHERE call_id = ?",
                     (binding.call_id,),
                 ).fetchone()
             if call is None:
+                return
+            if (self._stored_phone_public(call) or {}).get("mode") == "interpretation":
+                # Translation fragments remain in their dedicated live session;
+                # they are not automatically published as an Agent chat reply.
                 return
             if self.session_store.has_pending_live_provider_fragments(binding.call_id):
                 self.audit.record(
@@ -4647,3 +4753,4 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 self._mark_recovering(binding, reason="sideband_disconnected",
                                       summary="Phone sideband disconnected; logical call remains open",
                                       provider_close_state="unconfirmed")
+# HASHI-Fingerprint: hfp_345458db68304f9489f5e1ae016d064b

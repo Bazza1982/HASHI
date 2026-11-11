@@ -32,6 +32,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -110,7 +111,7 @@ from ..security.shared_token import (
     build_response_auth,
     load_shared_token,
 )
-from ..terminal.executor import AuthLevel, TerminalExecutor
+from ..terminal.executor import TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,7 @@ _protocol_manager = None
 _exchange_transport = None
 _hashi_root: Optional[str] = None
 _control_hashi_root: Optional[str] = None
+_control_code_root: Optional[str] = None
 _workbench_port: int = DEFAULT_WORKBENCH_PORT
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
@@ -332,7 +334,9 @@ TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 # Covers normal service stop/start and product readiness, not Agent turn work.
-RESTART_VERIFICATION_TIMEOUT_SECONDS = 240.0
+# Independent Core/Functions qualification and all Workers can exceed four
+# minutes on Windows. Keep a bounded cold-start window and all terminal checks.
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 600.0
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -1663,23 +1667,20 @@ def _status_kernel_pid(status: dict[str, Any]) -> int | None:
 
 
 def _restart_runtime_contract_mismatches(
-    expected: dict[str, Any], actual: dict[str, Any]
+    expected: dict[str, Any], actual: dict[str, Any], *, qualified_target: bool = False
 ) -> list[str]:
-    """Compare the stable Core contract while allowing cold adoption changes.
+    """Match a qualified destination exactly; retain legacy baseline tolerance.
 
-    A cold restart may intentionally adopt the approved dependency lock and a
-    newly qualified Function generation. The restarted Core has already
-    enforced its dependency contract before publishing health, so the complete
-    installed-set digest is diagnostic rather than an equality gate here.
+    A qualified target is the admitted destination B, not the old runtime A.
+    Its dependency digest must match too. Only a legacy pre-restart baseline
+    may tolerate a dependency change during cold adoption.
     """
-
-    if not expected:
-        return []
+    fields = _RUNTIME_VERSION_FIELDS if qualified_target else _RESTART_STABLE_RUNTIME_FIELDS
     return [
         field
-        for field in _RESTART_STABLE_RUNTIME_FIELDS
-        if expected.get(field) not in (None, "")
-        and actual.get(field) != expected.get(field)
+        for field in fields
+        if (qualified_target or expected.get(field) not in (None, ""))
+        and (expected.get(field) in (None, "") or actual.get(field) != expected.get(field))
     ]
 
 
@@ -1705,15 +1706,18 @@ def _restart_evidence(
     target_instance: str,
     expected_runtime: dict[str, Any],
     expected_generation: str,
+    previous_runtime: dict[str, Any] | None = None,
+    qualified_target: bool = False,
 ) -> dict[str, Any]:
     health = status.get("workbench_health") or {}
     new_pid = _status_kernel_pid(status)
     actual_instance = str(health.get("instance_id") or "").strip().upper()
     runtime_version = _runtime_version(status)
+    previous = expected_runtime if previous_runtime is None else previous_runtime
     generation_id = _function_generation_id(status)
     backend_health_ok, backend_health_state = _restart_backend_health(status)
     runtime_contract_mismatches = _restart_runtime_contract_mismatches(
-        expected_runtime, runtime_version
+        expected_runtime, runtime_version, qualified_target=qualified_target
     )
     issues = (
         list(
@@ -1745,7 +1749,7 @@ def _restart_evidence(
             runtime_version and not runtime_contract_mismatches
         ),
         "runtime_version_changed": bool(
-            expected_runtime and runtime_version != expected_runtime
+            previous and runtime_version != previous
         ),
         "runtime_contract_mismatches": runtime_contract_mismatches,
         "generation_id": generation_id or None,
@@ -1774,9 +1778,17 @@ def _restart_evidence_complete(evidence: dict[str, Any]) -> bool:
 def _hashi_start_command() -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
-    root = Path(_control_hashi_root)
+    root = Path(_control_code_root or _control_hashi_root)
     system = platform.system().lower()
     if system == "windows":
+        actuator = root / "bin" / "hashi_restart_ctl.ps1"
+        if actuator.exists():
+            return [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(actuator), "start",
+                "-Python", sys.executable, "-HashiRoot", str(_control_hashi_root),
+                "-CodeRoot", str(root),
+            ]
         bat = root / "bin" / "bridge-u.bat"
         if bat.exists():
             return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
@@ -1789,13 +1801,14 @@ def _hashi_start_command() -> list[str]:
                 "Bypass",
                 "-File",
                 str(ctl),
+                "-BridgeHome", str(_control_hashi_root),
                 "-Action",
                 "start",
                 "-Resume",
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
-        return [str(launcher), "--resume-last", "--api-gateway"]
+        return [str(launcher), "--bridge-home", str(_control_hashi_root), "--resume-last", "--api-gateway"]
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
@@ -1808,19 +1821,29 @@ def _launch_hashi_process(
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
     log_handle = log_path.open("ab")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.update(
+        BRIDGE_HOME=str(root),
+        BRIDGE_CODE_ROOT=str(code_root),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
     kwargs: dict[str, Any] = {
-        "cwd": str(root),
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+        "cwd": str(code_root),
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
     }
     if platform.system().lower() == "windows":
-        env = os.environ.copy()
         env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
-        kwargs["env"] = env
         if detach_on_windows:
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
                 subprocess,
@@ -1857,22 +1880,9 @@ def _hashi_restart_command() -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
     if platform.system().lower() == "windows":
-        service_target = _configured_windows_service_target()
-        service_ctl = root / "bin" / "hashi_service_ctl.ps1"
-        if service_target and service_ctl.exists():
-            return [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(service_ctl),
-                "-ServiceName",
-                service_target,
-            ]
-        restart_ctl = root / "bin" / "hashi_restart_ctl.ps1"
+        restart_ctl = code_root / "bin" / "hashi_restart_ctl.ps1"
         if restart_ctl.exists():
             return [
                 "powershell.exe",
@@ -1883,10 +1893,14 @@ def _hashi_restart_command() -> list[str]:
                 "-File",
                 str(restart_ctl),
                 "trigger",
+                "-Python",
+                sys.executable,
                 "-HashiRoot",
                 str(root),
+                "-CodeRoot",
+                str(code_root),
             ]
-        ctl = root / "bin" / "bridge_ctl.ps1"
+        ctl = code_root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
                 "powershell.exe",
@@ -1895,14 +1909,17 @@ def _hashi_restart_command() -> list[str]:
                 "Bypass",
                 "-File",
                 str(ctl),
+                "-BridgeHome", str(root),
                 "-Action",
                 "restart",
                 "-Resume",
+                "-ApiGateway",
             ]
-    launcher = root / "bin" / "bridge-u.sh"
+    launcher = code_root / "bin" / "bridge-u.sh"
     if launcher.exists():
         return [
             str(launcher),
+            "--bridge-home", str(root),
             "--resume-last",
             "--api-gateway",
             "--force",
@@ -1910,34 +1927,10 @@ def _hashi_restart_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
 
 
-def _configured_windows_service_target() -> str | None:
-    """Return only an exact service target published by platform policy."""
+def _qualified_restart_runtime() -> dict[str, Any] | None:
+    from remote.restart_runtime import qualified_restart_runtime
 
-    if not _control_hashi_root:
-        return None
-    path = (
-        Path(_control_hashi_root)
-        / "state"
-        / "platform"
-        / "live-runtime-protection.json"
-    )
-    try:
-        if path.stat().st_size > 64 * 1024:
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    values = payload.get("service_targets") if isinstance(payload, dict) else None
-    if not isinstance(values, list):
-        return None
-    controlled = _controlled_instance_id({})
-    matches = {
-        str(value).strip()
-        for value in values
-        if str(value).strip().upper() == controlled
-        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(value).strip())
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+    return qualified_restart_runtime(Path(_control_code_root or _control_hashi_root))
 
 
 def _restart_hashi_process() -> dict[str, Any]:
@@ -2512,26 +2505,12 @@ def _restart_failure_notice(record: dict[str, Any]) -> tuple[str, str]:
     return phase, "restart verification did not confirm the new process"
 
 
-def _restart_warning_notice(record: dict[str, Any]) -> str:
-    health = ((record.get("status") or {}).get("workbench_health") or {})
-    for issue in health.get("issues") or ():
-        if not isinstance(issue, dict):
-            continue
-        summary = str(issue.get("summary") or "").strip()
-        if summary:
-            return summary[:500]
-    return "The restart completed with a non-blocking service warning."
-
-
 def _restart_notice_fallback_text(
     message_key: str, message_args: dict[str, str]
 ) -> str:
     instance = message_args.get("instance") or "HASHI"
     if message_key == "api.restart.completed":
         return f"✅ {instance} restarted and is back online."
-    if message_key == "api.restart.completed_degraded":
-        warning = message_args.get("warning") or "A non-blocking warning remains."
-        return f"✅ {instance} restarted. Local services are online. ⚠️ {warning}"
     stage = message_args.get("stage") or "unknown stage"
     reason = message_args.get("reason") or "restart verification failed"
     return f"❌ {instance} restart failed during {stage}: {reason}"
@@ -2551,12 +2530,9 @@ def _notify_restart_result(
         "instance": str(record.get("target_instance") or "HASHI"),
     }
     if record.get("state") == "completed":
-        health = ((record.get("status") or {}).get("workbench_health") or {})
-        if health.get("degraded") is True:
-            message_key = "api.restart.completed_degraded"
-            message_args["warning"] = _restart_warning_notice(record)
-        else:
-            message_key = "api.restart.completed"
+        # Report the verified Core restart. Optional connector snapshots remain
+        # in the receipt and health diagnostics, not in the completion notice.
+        message_key = "api.restart.completed"
     else:
         message_key = "api.restart.failed_detail"
         stage, reason = _restart_failure_notice(record)
@@ -2848,11 +2824,12 @@ def create_app(
     workbench_port: int = DEFAULT_WORKBENCH_PORT,
     hashi_root: str = None,
     control_hashi_root: str = None,
+    control_code_root: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _control_hashi_root, _protocol_manager, _exchange_transport, _attachment_store
+    global _workbench_port, _hashi_root, _control_hashi_root, _control_code_root, _protocol_manager, _exchange_transport, _attachment_store
 
     _instance_info = instance_info
     _peer_registry = peer_registry
@@ -2863,6 +2840,7 @@ def create_app(
     _workbench_port = workbench_port
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
+    _control_code_root = control_code_root or _control_hashi_root
     _attachment_store = AttachmentStore(
         root=Path(hashi_root) if hashi_root else Path.cwd(),
         instance_id=str(instance_info.get("instance_id") or "hashi"),
@@ -2904,7 +2882,10 @@ def create_app(
         discovery_status = dict(protocol_status_view.get("discovery") or {})
         health_state = (
             "ready"
-            if not discovery_status or discovery_status.get("state") in {"ready", "ready_empty", "disabled"}
+            # Foreign advertisements can fail authentication without disabling
+            # this local service. Keep peer trust failures in discovery.state;
+            # readiness still requires every configured discovery backend.
+            if not discovery_status or discovery_status.get("readiness") in {"ready", "disabled"}
             else "degraded"
         )
         if not authenticated:
@@ -3179,7 +3160,7 @@ def create_app(
         if _protocol_manager is None:
             return {"ok": False, "error": "protocol manager unavailable"}
         authenticated = try_authenticate_request(request, allow_loopback=True)
-        rescue_start_enabled = bool(_terminal_executor and _terminal_executor.allows_level(AuthLevel.L3_RESTART))
+        rescue_start_enabled = True  # Fixed lifecycle APIs use their existing authentication.
         if not authenticated:
             return {
                 "ok": True,
@@ -3187,7 +3168,7 @@ def create_app(
                 "rescue_start_enabled": rescue_start_enabled,
                 "rescue_restart_enabled": rescue_start_enabled,
                 "rescue_reboot_enabled": rescue_start_enabled,
-                "rescue_start_requirement": "L3_RESTART",
+                "rescue_start_requirement": "authenticated_instance_control",
             }
         return {
             "ok": True,
@@ -3202,7 +3183,7 @@ def create_app(
             "rescue_start_enabled": rescue_start_enabled,
             "rescue_restart_enabled": rescue_start_enabled,
             "rescue_reboot_enabled": rescue_start_enabled,
-            "rescue_start_requirement": "L3_RESTART",
+            "rescue_start_requirement": "authenticated_instance_control",
             "trusted_view": True,
         }
 
@@ -4332,25 +4313,30 @@ def create_app(
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
+    @app.get("/control/hashi/qualification")
+    async def hashi_control_qualification(request: Request):
+        """Inspect the fixed restart destination without stopping or starting Core."""
+        _authenticate_rescue_control(request)
+        root = str(_control_code_root or _control_hashi_root or "")
+        try:
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={
+                "ok": False, "phase": "runtime_qualification", "code_root": root,
+                "error": str(exc),
+            })
+        return {"ok": True, "code_root": root, "runtime": qualified}
+
     @app.post("/control/hashi/start")
     async def hashi_control_start(request: Request, payload: HashiStartPayload):
         """
         Start the local HASHI core through a fixed launcher command.
 
-        This is intentionally not a generic shell endpoint. It is gated by
-        L3_RESTART because it is a rescue operation that creates a long-lived
-        local process.
+        Authentication and a fixed instance-bound launcher authorize this
+        operation. Generic terminal command levels do not gate lifecycle APIs.
         """
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
-        if not _terminal_executor or not _terminal_executor.allows_level(AuthLevel.L3_RESTART):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI start requires max_terminal_level=L3_RESTART",
-                },
-            )
 
         reason_meta = _sanitize_rescue_reason(payload.reason)
         current = _hashi_control_status()
@@ -4442,16 +4428,6 @@ def create_app(
                     raise ValueError("invalid restart notification identity")
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not _terminal_executor or not _terminal_executor.allows_level(
-            AuthLevel.L3_RESTART
-        ):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI restart requires max_terminal_level=L3_RESTART",
-                },
-            )
         before = await asyncio.to_thread(_hashi_control_status)
         reason_meta = _sanitize_rescue_reason(payload.reason)
         restart_id = _new_restart_id()
@@ -4515,14 +4491,29 @@ def create_app(
                 failure_stage="target_validation",
             )
             return JSONResponse(status_code=409, content=record)
+        phase = "runtime_qualification"
+        record["phase"] = phase
+        record = _write_restart_record(record)
         try:
+            # Freeze the installer-qualified destination before any destructive
+            # action. A cold restart can adopt an approved new Core generation;
+            # comparing it to the still-running old generation is incorrect.
+            qualified = await asyncio.to_thread(_qualified_restart_runtime)
+            if qualified is not None:
+                record["expected"]["runtime_version"] = {
+                    key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
+                }
+                record["expected"]["runtime_source"] = "installer-qualified-target"
+            record["phase"] = "launch"
+            record = _write_restart_record(record)
+            phase = "launch"
             started = _restart_hashi_process()
         except Exception as exc:
             logger.exception("HASHI rescue restart failed")
             record.update(
                 {
                     "state": "failed",
-                    "phase": "launch",
+                    "phase": phase,
                     "completed_at": _utc_timestamp(),
                     "error": str(exc),
                 }
@@ -4542,7 +4533,7 @@ def create_app(
                 requester_agent=record["requester_agent"],
                 request_source=record["request_source"],
                 old_pid=old_pid,
-                failure_stage="launch",
+                failure_stage=phase,
             )
             return JSONResponse(
                 status_code=500,
@@ -4570,6 +4561,8 @@ def create_app(
             target_instance=target_instance,
             expected_runtime=record["expected"]["runtime_version"] or {},
             expected_generation=record["expected"]["generation_id"] or "",
+            previous_runtime=_runtime_version(before),
+            qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
         )
         while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
@@ -4580,6 +4573,8 @@ def create_app(
                 target_instance=target_instance,
                 expected_runtime=record["expected"]["runtime_version"] or {},
                 expected_generation=record["expected"]["generation_id"] or "",
+                previous_runtime=_runtime_version(before),
+                qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
             )
         completed = _restart_evidence_complete(evidence)
         record.update(
@@ -4652,16 +4647,6 @@ def create_app(
 
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
-        if not _terminal_executor or not _terminal_executor.allows_level(
-            AuthLevel.L3_RESTART
-        ):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "HASHI reboot rescue requires max_terminal_level=L3_RESTART",
-                },
-            )
         reason_meta = _sanitize_rescue_reason(payload.reason)
         try:
             status_code, command_result = await asyncio.to_thread(
@@ -5350,3 +5335,4 @@ def create_app(
         return _agent_move_response(request, result)
 
     return app
+# HASHI-Fingerprint: hfp_2147e26bcc4b4ed6b4d22f8ab591809b

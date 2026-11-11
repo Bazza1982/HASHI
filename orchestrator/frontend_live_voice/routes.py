@@ -23,7 +23,8 @@ ROUTES = (
 
 
 def register_live_voice_routes(app: Any, service: LiveApplicationPort,
-                               authorize: Callable[[Any, str, dict], Awaitable[Any]], *, qualified: bool = False):
+                               authorize: Callable[[Any, str, dict], Awaitable[Any]], *, qualified: bool = False,
+                               root: str = ROOT, entrypoint: str = "phone"):
     from aiohttp import web
     if not callable(authorize) or not callable(getattr(service, "invoke", None)):
         raise TypeError("existing authority resolver and fully implemented application port required")
@@ -32,12 +33,16 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
         # Even capabilities use the existing authority boundary.
         try:
             await authorize(request, "capabilities", {})
+            availability = getattr(service, "available_for", None)
+            available = availability(entrypoint) if callable(availability) else service.available
             return web.json_response({"ok": True, "capability": {"protocol_version": "1.0",
-                "available": bool(qualified and service.available)}}, headers={"Cache-Control": "no-store"})
+                "available": bool(qualified and available)}}, headers={"Cache-Control": "no-store"})
         except LiveVoiceError as exc:
             return web.json_response({"ok": False, "error_code": exc.code}, status=exc.status, headers={"Cache-Control": "no-store"})
 
-    app.router.add_get(ROOT + "/capabilities", capability)
+    if entrypoint not in {"phone", "translate"}:
+        raise ValueError("Unsupported live audio entrypoint")
+    app.router.add_get(root + "/capabilities", capability)
 
     def make_handler(operation):
         async def handler(request):
@@ -65,6 +70,9 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
                     payload[key] = value
                 if "owner_id" in payload or "provider_session_id" in payload:
                     raise LiveVoiceError("live_authority_field_forbidden")
+                if "entrypoint" in payload and payload["entrypoint"] != entrypoint:
+                    raise LiveVoiceError("live_entrypoint_conflict")
+                payload["entrypoint"] = entrypoint
                 authority = await authorize(request, operation, payload)
                 # Implementation MUST validate operation-specific fields, convert numeric GET
                 # expectations strictly, and compare stored CallBinding with this authority.
@@ -79,4 +87,4 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
         return handler
 
     for method, path, operation in ROUTES:
-        app.router.add_route(method, ROOT + path, make_handler(operation))
+        app.router.add_route(method, root + path, make_handler(operation))

@@ -233,6 +233,18 @@ no separate per-instance opt-in. Frontends derive availability from the
 authenticated capability response and hide the action when the capability is
 absent. Active or running Agents and other reported blockers remain protected.
 
+Deleting an Agent removes only its unshared credentials. Atomic publication of
+the remaining credential document must retain the registered instance Remote
+principal through the existing private-file publisher, as well as the writer
+and system administrators. Deletion resolves the registered principal using
+the canonical instance home, including when the credential document falls back
+to a legacy location outside that home. It must not copy arbitrary inherited
+access or grant broad users access. Unrelated shared/network and loopback credentials
+remain unchanged. Principal resolution or credential publication failure is
+reported as cleanup_pending; secrets_cleaned is recorded only after a
+successful publication. A source fix prevents recurrence after adoption; it
+does not repair an already inaccessible production file or prove live recovery.
+
 Agent creation is also a PAO-owned lifecycle operation. Its explicit Instance
 Configuration template and effective selection/publication contract are defined
 in [Agent creation policy](HASHI_AGENT_CREATION_POLICY.md). Creating an Agent with
@@ -695,11 +707,81 @@ retried. Older backends lack this operation and must not be treated as guarded.
 The Backend API requires authenticated owner credentials, Agent visibility,
 and, in Governed mode, management authority. Its legacy DELETE route uses the
 same confirmation and revision checks. Read projections omit deletion revisions
-without an authenticated, visible owner. The current Agent Scheduler tool does
-not yet supply those credentials, so its deletion request is rejected.
-The user authorized a small HASHI Function change for Workbench on 2026-10-28.
-Implementation and focused offline checks are in HASHI3 `debug-issues-oct`;
-running adoption and external-frontend verification remain separate and pending.
+without an authenticated, visible owner or the matching personal-profile
+Scheduler capability. Agent Scheduler calls delegate a short-lived credential
+bound to instance, Agent, Run, local API audience and the allowed tool names.
+The administrative key stays inside the trusted runtime and is never written
+to a CLI/MCP context. The capability cannot authenticate owner, lifecycle or
+other Agent APIs; Governed deletion retains its management-authority checks.
+The delete tool reads the authenticated definition immediately before calling
+the same conditional-delete writer with its opaque revision. A concurrent edit
+returns conflict without replay.
+
+**Run-bound tool approval (2026-11-07).** The Agent-supplied
+`explicit_user_authorization` string is only a request/intent marker. It is
+never proof of a human decision. A scoped tool deletion first creates an
+idempotent PAO `run_approvals` request for the exact
+`activity.scheduler.delete` operation: Agent, task kind, job ID, full deletion
+revision and optional disabled-only condition. It returns
+`403 approval_required`, the approval ID and the existing decision path;
+`approval.requested` is published through the normal PAO event/outbox stream.
+The authenticated owner decides through the existing
+`POST /api/v1/approvals/{approval_id}` endpoint. Neither a scoped Scheduler token,
+an anonymous request, model text, nor an ordinary clarification answer can
+decide an approval. A denied or consumed decision cannot be changed into a
+fresh authorization by retrying the tool. A pending exact request reuses its ID.
+
+A later tool call may consume only the approved, exact-scope record from the
+same Run attempt. Consumption is durable before dispatch and is not refunded
+after a conflict, failure or unknown outcome. The existing `hold_active_run`
+fence is then reacquired and held through the short compare-and-delete effect.
+Stop between reservation and dispatch prevents deletion; stop concurrent with
+an admitted effect serializes behind that effect. Signed tokens bind the Run
+ID and fencing token as well as the request ID; the server checks the live PAO
+Run, worker, owner, active Session and context generation. Cancelled, stopped,
+completed, interrupted/revoked or superseded Runs cannot use an unexpired token
+to delete. Legacy request-only tokens cannot perform a scoped deletion.
+
+This reuses the existing PAO decision API/events, not a second approval UI or
+the L1/L2 permission service. Personal L0 listing, creation and editing remain
+unchanged. Authenticated frontend settings retain their explicit confirmation
+and revision-safe deletion; Governed management checks remain in force.
+Focused coverage includes real HTTP ToolRegistry and serialized gateway
+approved deletion, forged approval, owner-only decisions, stopped-Run replay,
+attempt/generation revocation, one-use decisions, concurrent stop, foreign
+Agent/instance/audience, expiry, tampering, stale revision and absence of
+administrative credentials in MCP. Source verification and running adoption
+remain separate.
+
+#### Backend mutation authentication (2026-11-07)
+
+Scheduler create/update, immediate run/recovery and Superloop create/update/delete
+authenticate before reading the body. A body-supplied gateway or authorization
+marker never grants access. Workbench owners retain the existing strict
+credentials, Agent visibility and Governed management checks. Personal-profile
+Agent tools use the existing signed capability, bounded to instance, Agent,
+API audience, allowed tools and the exact live PAO Run attempt. CLI/MCP delegates
+that scoped capability; it never receives the administrative signing key.
+A supplied invalid capability cannot fall back to owner authentication.
+
+Ordinary creation, editing, Superloop control and recovery do not acquire a new
+approval requirement. The existing explicit-authorization policies for an
+immediate single-job rerun and Superloop deletion use PAO's existing owner
+decision endpoint and one-use Run approval. Their exact scopes are respectively
+`activity.scheduler.run` (Agent, kind, job ID and current definition revision)
+and `activity.superloop.delete` (Agent and loop ID). Model strings cannot approve
+either action. Confirmed Scheduler deletion above retains its existing writer,
+ownership and revision checks unchanged.
+
+Short local effects reacquire and hold the Run fence through the write, including
+after body parsing. Async queue/Worker operations validate admission without
+holding a SQLite transaction across an await. An accepted scheduled child has
+its own lifecycle. Recovery additionally checks after its lock wait and before
+each additional dispatch. If the source Run stops midway, no further occurrences
+start; accepted effects are durably accounted and the unstarted remainder is
+skipped in a terminal resolution. Retrying that batch cannot duplicate work.
+Stopped, cancelled, completed, revoked or superseded Run credentials cannot
+initiate further mutations.
 
 #### Scheduler recovery conversation contract (2026-09-30)
 
@@ -1218,3 +1300,52 @@ workspace mutations without serializing independent file writes or model work.
 Failed attachment intake uses owner-scoped atomic unbound discard; uncertain
 admission keeps the existing idempotency identity and assets. See the nightly
 repair record for limits, focused red/green and separate adoption evidence.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 004 Private history search and nonblocking reads
+
+- 历史搜索用私有POST/绑定游标，FC仍补旧记录并核验显示；读I/O不能阻塞HTTP。[PAO](HASHI_PAO_SYSTEM_DESIGN.md)。
+
+### FYI v1 014 Internal envelopes and deliverable output
+
+- PAO strips internal control envelopes before delivery checks. Memory+-only
+  results fail terminally; typed audio remains deliverable.
+
+### FYI v1 027 Revisioned Agent display identity
+
+Agent name/Emoji use revisioned config; refresh cannot undo a durable save.
+
+### FYI v1 029 Portable credentials and Run-frozen Workzones
+
+Portable无凭据，PAO启动Workers。通配符只授权限不授能力，路径不增权。
+前端Workzone按Agent/版本修改；Run冻结快照，已存状态仍可见。Windows拒绝POSIX Workzone，浏览器断连保留共享命名管道监听。
+实验、秘密、媒体及远端路径不进PCM/日志/聊天/Git。
+
+### FYI v1 030 Stopped, offline and inactive are distinct
+
+Agent stop is `stopped`; Worker outage `offline`; config deactivation `inactive`.
+Shared Functions retain stop until restart; Frontends never rewrite `is_active`.
+
+### FYI v1 033 Canonical conversations and truthful operation outcomes
+
+PAO管Conversation/Message/Run，Engine管Session/Turn；前端历史以PAO为准，缓存匹配owner/代理/会话。
+保留顺序、原子附件及失败/取消附件隔离；Telegram保留部分送达的不确定性，关联工具/任务诊断。
+会话/后端/代理操作保留阶段/原因/诊断号；如实区分已创建与启动不明；已写入不回滚、不重放，禁止清理可能已选中的新会话；退役失败不改变新后端已启用的事实。
+/credit仅查OpenRouter，其他后端不借继承发送凭据；鉴权/限流/连接/响应失败分别提示，不显示凭据或原始响应。
+语言/提问/备用设置区分冲突、存储与保存不明，按钮显示完整原因；回读实际值，不拿默认值冒充已保存。
+
+### FYI v1 037 Frozen destinations and delivery evidence
+
+PAO freezes destinations before PCM and owns ingress/routing/idempotency. FC owns
+presentation/receipts. Sent needs a receipt; failure wins. Prose grants nothing;
+replay only saved non-action completions.
+
+### FYI v1 038 Fresh ingress and durable confirmation
+
+Keep frontend send times. PAO admits Workbench/Telegram within 30/60 seconds;
+stale input needs durable confirmation. TUI exemptions need signed local proof,
+`/hchat` reverse-route correlation. HASHI3 is not production.

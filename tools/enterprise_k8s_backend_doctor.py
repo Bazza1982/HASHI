@@ -32,7 +32,13 @@ def run_doctor(
             line.startswith("kubernetes") for line in standard_requirements
         ),
         "docker_build_arg": 'ARG HASHI_ENTERPRISE_EXTRAS=""' in dockerfile,
-        "docker_installs_extra": 'pip install --no-cache-dir ".[${HASHI_ENTERPRISE_EXTRAS}]"' in dockerfile,
+        "docker_installs_extra": all(token in dockerfile for token in (
+            "scripts/compile_enterprise_functions.py",
+            '--extras "$HASHI_ENTERPRISE_EXTRAS"',
+            "--require-hashes --target /opt/hashi-build/functions-site",
+            "-r /opt/hashi-build/functions.hashes.lock",
+            "--extra-lock /opt/hashi-build/functions.hashes.lock",
+        )) and (root / "scripts/compile_enterprise_functions.py").is_file(),
         "module_installed": module_installed,
     }
     required = [
@@ -79,3 +85,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_b5b12abf23174494962d85310b88f5ce

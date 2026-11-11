@@ -201,6 +201,7 @@ class EnterpriseAuditLedger:
         request_id: str | None = None,
         correlation_id: str | None = None,
         limit: int = 100,
+        after_chain_index: int | None = None,
     ) -> list[LedgerEvent]:
         clauses = ["org_id = ?"]
         params: list = [self.org_id]
@@ -216,12 +217,19 @@ class EnterpriseAuditLedger:
                 continue
             clauses.append(f"{column} = ?")
             params.append(str(value))
+        order = "ts ASC, id ASC"
+        if after_chain_index is not None:
+            # Live export checkpoints refer to durable chain order, never clock
+            # order. Apply the cursor before LIMIT so later pages remain reachable.
+            clauses.append("chain_index > ?")
+            params.append(max(0, int(after_chain_index)))
+            order = "chain_index ASC"
         params.append(max(1, min(int(limit), 1000)))
         sql = f"""
             SELECT *
             FROM audit_events
             WHERE {' AND '.join(clauses)}
-            ORDER BY ts ASC, id ASC
+            ORDER BY {order}
             LIMIT ?
         """
         with self.store.connect() as con:

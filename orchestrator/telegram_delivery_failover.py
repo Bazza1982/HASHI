@@ -16,6 +16,7 @@ from orchestrator import telegram_stream_policy
 from orchestrator.process_resources import async_path_lock
 from orchestrator.telegram_delivery_errors import (
     TelegramDeliveryError,
+    TelegramRateLimitRecoveryError,
     classify_telegram_delivery_error,
 )
 from orchestrator.telegram_delivery_state import (
@@ -511,6 +512,7 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
             retryable=True,
             permanent=False,
             reason="runtime_has_no_frontend_connector_sender",
+            request_not_submitted=True,
         )
     except Exception as exc:
         raise classify_telegram_delivery_error(exc) from exc
@@ -721,17 +723,28 @@ async def _prepare_warning(
     request_id: str | None,
     response_path: Path | None,
     exclude_names: set[str] | None = None,
-) -> tuple[Any, str] | None:
+    expected: dict[str, Any] | None = None,
+) -> tuple[Any, str, dict[str, Any]] | None:
     if chat_id is None:
         return None
     async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
 
         def mutation(state):
-            record, changed = _owned_record_or_quarantine(state, source_runtime)
+            if expected is not None:
+                record = owned_record(state, source_runtime.name, expected["owner"])
+                changed = False
+                if (not record or record.get("incident_id") != expected["incident_id"]
+                        or owner_for_runtime(source_runtime) != expected["owner"]):
+                    return None, False
+            else:
+                record, changed = _owned_record_or_quarantine(state, source_runtime)
             if not record or not _record_has_active_block(record):
                 return None, changed
             entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+            # A prior process may have sent before its result was recorded.
+            if entry.get("warning_attempt_id") or entry.get("warning_stopped_at"):
+                return None, changed
             now = _now()
             last_warned_at = _parse_iso(entry.get("last_warned_at"))
             if last_warned_at is not None and (
@@ -769,7 +782,17 @@ async def _prepare_warning(
                 failover_agent=chosen.name,
                 status=str(record.get("status") or "blocked"),
             )
-            return (chosen, warning_text), changed
+            claim = {
+                "agent_name": source_runtime.name,
+                "owner": dict(record_owner(record)),
+                "incident_id": record["incident_id"],
+                "chat_id": str(chat_id),
+                "attempt_id": uuid4().hex,
+                "request_id": request_id,
+            }
+            entry["warning_attempt_id"] = claim["attempt_id"]
+            entry["warning_attempt_started_at"] = _iso(now)
+            return (chosen, warning_text, claim), True
 
         return mutate_state(path, mutation)
 
@@ -780,17 +803,24 @@ async def _record_warning_result(
     chat_id: int,
     request_id: str | None,
     failover_agent: str | None,
+    claim: dict[str, Any],
     success: bool,
     error: Exception | None = None,
-) -> None:
+) -> bool:
     async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
 
         def mutation(state):
-            record, changed = _owned_record_or_quarantine(state, source_runtime)
-            if not record:
-                return None, changed
-            entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+            # A stale result must not quarantine a newer incarnation or incident.
+            record = owned_record(state, claim["agent_name"], claim["owner"])
+            if not record or record.get("incident_id") != claim["incident_id"]:
+                return False, False
+            entry = (record.get("per_chat") or {}).get(str(chat_id))
+            if (not isinstance(entry, dict) or str(chat_id) != claim["chat_id"]
+                    or entry.get("warning_attempt_id") != claim["attempt_id"]):
+                return False, False
+            entry.pop("warning_attempt_id", None)
+            entry.pop("warning_attempt_started_at", None)
             if success:
                 now = _now()
                 record["active_failover_agent"] = failover_agent
@@ -798,16 +828,22 @@ async def _record_warning_result(
                 record.pop("last_failover_error", None)
                 entry.setdefault("first_warned_at", _iso(now))
                 entry["last_warned_at"] = _iso(now)
-                entry["last_warning_request_id"] = request_id
+                entry["last_warning_request_id"] = claim["request_id"]
             else:
                 classified = classify_telegram_delivery_error(
                     error or RuntimeError("failover warning failed")
                 )
                 record["failover_failed"] = True
                 record["last_failover_error"] = classified.code
-            return None, True
+                entry["last_warning_error_code"] = classified.code
+                if classified.code != "retry_after" and not classified.request_not_submitted:
+                    entry["warning_stopped_at"] = _iso(_now())
+                    entry["warning_stop_reason"] = (
+                        classified.code if classified.permanent else "delivery_outcome_unknown"
+                    )
+            return True, True
 
-        mutate_state(path, mutation)
+        return mutate_state(path, mutation)
 
 
 async def _maybe_send_warning(
@@ -818,82 +854,62 @@ async def _maybe_send_warning(
     request_id: str | None,
     response_path: Path | None,
 ) -> None:
+    # Operational notifications must not replace a committed RetryAfter window
+    # or abort/replay the business Run when preparation or result recording fails.
+    try:
+        await _send_warning(
+            source_runtime, chat_id=chat_id, record=record,
+            request_id=request_id, response_path=response_path,
+        )
+    except Exception:
+        logger.exception(
+            "Telegram rate-limit notification unavailable agent=%s request_id=%s; "
+            "the recorded wait remains active",
+            getattr(source_runtime, "name", "unknown"), request_id,
+        )
+
+
+async def _send_warning(
+    source_runtime: Any,
+    *,
+    chat_id: int | None,
+    record: dict[str, Any],
+    request_id: str | None,
+    response_path: Path | None,
+) -> None:
     if chat_id is None:
         return
-    prepared = await _prepare_warning(
-        source_runtime,
-        chat_id=chat_id,
-        request_id=request_id,
-        response_path=response_path,
-    )
-    if prepared is None:
+    expected = {"owner": record_owner(record), "incident_id": record.get("incident_id")}
+    if not expected["owner"] or not expected["incident_id"]:
         return
-    chosen, warning_text = prepared
-    try:
-        await _send_direct(chosen, chat_id=chat_id, text=warning_text)
-        await _record_warning_result(
-            source_runtime,
-            chat_id=chat_id,
-            request_id=request_id,
-            failover_agent=chosen.name,
-            success=True,
+    excluded: set[str] = set()
+    for _ in range(2):
+        prepared = await _prepare_warning(
+            source_runtime, chat_id=chat_id, request_id=request_id,
+            response_path=response_path, exclude_names=excluded, expected=expected,
         )
-    except TelegramDeliveryError as delivery_error:
-        if delivery_error.code != "retry_after":
-            await _record_warning_result(
-                source_runtime,
-                chat_id=chat_id,
-                request_id=request_id,
-                failover_agent=chosen.name,
-                success=False,
-                error=delivery_error,
-            )
+        if prepared is None:
             return
-        alternate_prepared = await _prepare_warning(
-            source_runtime,
-            chat_id=chat_id,
-            request_id=request_id,
-            response_path=response_path,
-            exclude_names={chosen.name},
-        )
-        if alternate_prepared is None:
-            await _record_warning_result(
-                source_runtime,
-                chat_id=chat_id,
-                request_id=request_id,
-                failover_agent=None,
-                success=False,
-                error=RuntimeError("failover runtime flood-limited and no alternate runtime available"),
-            )
-            return
-        alternate, alternate_warning_text = alternate_prepared
+        chosen, warning_text, claim = prepared
         try:
-            await _send_direct(alternate, chat_id=chat_id, text=alternate_warning_text)
-            await _record_warning_result(
-                source_runtime,
-                chat_id=chat_id,
-                request_id=request_id,
-                failover_agent=alternate.name,
-                success=True,
-            )
+            await _send_direct(chosen, chat_id=chat_id, text=warning_text)
         except Exception as exc:
-            await _record_warning_result(
-                source_runtime,
-                chat_id=chat_id,
-                request_id=request_id,
-                failover_agent=alternate.name,
-                success=False,
-                error=exc,
+            current = await _record_warning_result(
+                source_runtime, chat_id=chat_id, request_id=request_id,
+                failover_agent=chosen.name, claim=claim, success=False, error=exc,
             )
-    except Exception as exc:
-        await _record_warning_result(
-            source_runtime,
-            chat_id=chat_id,
-            request_id=request_id,
-            failover_agent=chosen.name,
-            success=False,
-            error=exc,
-        )
+            # Telegram's explicit rejection permits a different sender.
+            if not current or classify_telegram_delivery_error(exc).code != "retry_after":
+                return
+            excluded.add(chosen.name)
+        else:
+            # Storage failure is not a transport rejection. Leave the claim
+            # unconfirmed, rather than treating an acknowledged send as unsent.
+            await _record_warning_result(
+                source_runtime, chat_id=chat_id, request_id=request_id,
+                failover_agent=chosen.name, claim=claim, success=True,
+            )
+            return
 
 
 async def handle_blocked_send(
@@ -998,6 +1014,11 @@ async def handle_retry_after(
             else:
                 for entry in (record.get("per_chat") or {}).values():
                     for key in (
+                        "warning_attempt_id",
+                        "warning_attempt_started_at",
+                        "warning_stopped_at",
+                        "warning_stop_reason",
+                        "last_warning_error_code",
                         "first_warned_at",
                         "last_warned_at",
                         "last_warning_request_id",
@@ -1043,7 +1064,17 @@ async def handle_retry_after(
                     requests.append(request_id)
             return (dict(record), response_path), True
 
-        saved_record, response_path = mutate_state(path, mutation)
+        try:
+            saved_record, response_path = mutate_state(path, mutation)
+        except Exception:
+            logger.exception(
+                "Telegram RetryAfter recovery unavailable agent=%s request_id=%s "
+                "retry_after_s=%s; no automatic request replay",
+                runtime_name, request_id, retry_after_s,
+            )
+            raise TelegramRateLimitRecoveryError(
+                retry_after_s=retry_after_s,
+            ) from exc
     await _maybe_send_warning(
         runtime,
         chat_id=chat_id,
@@ -1066,12 +1097,12 @@ async def delivery_health_watcher(kernel: Any) -> None:
 
 
 async def _tick_recovery(kernel: Any) -> None:
-    notices: list[tuple[str, Any, int, str | None, dict[str, str], str]] = []
     async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
         runtimes = {getattr(rt, "name", None): rt for rt in getattr(kernel, "runtimes", [])}
 
         def claim_mutation(state):
+            notices = []
             changed = False
             now = _now()
             for agent_name, record in list((state.get("agents") or {}).items()):
@@ -1208,9 +1239,9 @@ async def _tick_recovery(kernel: Any) -> None:
                 _normalize_recovery_status(record)
                 if str(record.get("status") or "") != status_before_normalize:
                     changed = True
-            return None, changed
+            return notices, changed
 
-        mutate_state(path, claim_mutation)
+        notices = mutate_state(path, claim_mutation)
     if not notices:
         return
     results: list[tuple[str, int, str | None, dict[str, str], str, str, TelegramDeliveryError | None]] = []
@@ -1309,6 +1340,14 @@ async def _tick_recovery(kernel: Any) -> None:
                         chat_id,
                         error.code,
                     )
+                elif error is None or not error.request_not_submitted:
+                    chat_state["recovery_stopped_at"] = _iso(now)
+                    chat_state["recovery_stop_reason"] = "delivery_outcome_unknown"
+                    chat_state["last_recovery_error_code"] = (
+                        error.code if error else "delivery_not_confirmed"
+                    )
+                    record["recovery_failed"] = True
+                    record["last_recovery_error"] = chat_state["last_recovery_error_code"]
                 else:
                     attempts = int(chat_state.get("recovery_attempts") or 0) + 1
                     chat_state["recovery_attempts"] = attempts
@@ -1370,3 +1409,4 @@ def _normalize_recovery_status(record: dict[str, Any]) -> None:
     record["failover_failed"] = False
     record.pop("recovery_failed", None)
     record.pop("last_recovery_error", None)
+# HASHI-Fingerprint: hfp_e897c6ee353741f29e16941b7a18695e

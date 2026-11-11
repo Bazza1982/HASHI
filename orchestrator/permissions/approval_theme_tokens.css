@@ -1,0 +1,266 @@
+/* Generated approval snapshot from Workbench theme tokens; run scripts/export_approval_theme.mjs. */
+:root {
+  --ui-font-family-mono: "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --ui-font-family-sans: Inter, "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-6: 24px;
+}
+:root {
+  color-scheme: dark;
+  --ui-border-normal: #3A4758;
+  --ui-brand-primary: #FF5968;
+  --ui-focus-ring: #91A7FF;
+  --ui-font-ui: var(--ui-font-family-sans);
+  --ui-on-brand: #0E141D;
+  --ui-radius-control: 10px;
+  --ui-radius-panel: 12px;
+  --ui-shadow-3: 0 20px 56px rgba(0, 0, 0, .48);
+  --ui-status-warning: #F2B84B;
+  --ui-surface-app: #0E141D;
+  --ui-surface-card: #171F2A;
+  --ui-surface-control: #1B2531;
+  --ui-surface-warning: #352B18;
+  --ui-text-primary: #F3F6FA;
+  --ui-text-secondary: #A4AFBD;
+}
+.app.theme-bright {
+  color-scheme: light;
+  --ui-border-normal: #C8D0DC;
+  --ui-brand-primary: #C9363E;
+  --ui-focus-ring: #4F6BED;
+  --ui-font-ui: var(--ui-font-family-sans);
+  --ui-on-brand: #FFFFFF;
+  --ui-radius-control: 10px;
+  --ui-radius-panel: 12px;
+  --ui-shadow-3: 0 18px 48px rgba(16, 24, 40, .16);
+  --ui-status-warning: #8A5700;
+  --ui-surface-app: #F6F7FA;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #162033;
+  --ui-text-secondary: #647081;
+}
+.app.theme-dark {
+  color-scheme: dark;
+  --ui-border-normal: #3A4758;
+  --ui-brand-primary: #FF5968;
+  --ui-focus-ring: #91A7FF;
+  --ui-font-ui: var(--ui-font-family-sans);
+  --ui-on-brand: #0E141D;
+  --ui-radius-control: 10px;
+  --ui-radius-panel: 12px;
+  --ui-shadow-3: 0 20px 56px rgba(0, 0, 0, .48);
+  --ui-status-warning: #F2B84B;
+  --ui-surface-app: #0E141D;
+  --ui-surface-card: #171F2A;
+  --ui-surface-control: #1B2531;
+  --ui-surface-warning: #352B18;
+  --ui-text-primary: #F3F6FA;
+  --ui-text-secondary: #A4AFBD;
+}
+.app.theme-cli {
+  color-scheme: dark;
+  --ui-border-normal: #164758;
+  --ui-brand-primary: #58F4D4;
+  --ui-focus-ring: #58F4D4;
+  --ui-font-ui: var(--ui-font-family-mono);
+  --ui-on-brand: #04131E;
+  --ui-radius-control: 2px;
+  --ui-radius-panel: 2px;
+  --ui-shadow-3: none;
+  --ui-status-warning: #F6C85F;
+  --ui-surface-app: #04131E;
+  --ui-surface-card: #08212C;
+  --ui-surface-control: #092530;
+  --ui-surface-warning: #332B18;
+  --ui-text-primary: #D9FFF8;
+  --ui-text-secondary: #8ED4D4;
+}
+.app.theme-apple2 {
+  color-scheme: dark;
+  --ui-border-normal: #2B8045;
+  --ui-brand-primary: #51FF88;
+  --ui-focus-ring: #51FF88;
+  --ui-font-ui: var(--ui-font-family-mono);
+  --ui-on-brand: #001006;
+  --ui-radius-control: 2px;
+  --ui-radius-panel: 2px;
+  --ui-shadow-3: none;
+  --ui-status-warning: #BCFFD0;
+  --ui-surface-app: #001006;
+  --ui-surface-card: #00240E;
+  --ui-surface-control: #002B11;
+  --ui-surface-warning: #1C2E16;
+  --ui-text-primary: #73FF9E;
+  --ui-text-secondary: #51FF88;
+}
+.app.theme-nintendo {
+  color-scheme: light;
+  --ui-border-normal: #C79D6B;
+  --ui-brand-primary: #9A201B;
+  --ui-focus-ring: #AC2119;
+  --ui-font-ui: var(--ui-font-family-sans);
+  --ui-on-brand: #FFF8E8;
+  --ui-radius-control: 6px;
+  --ui-radius-panel: 8px;
+  --ui-shadow-3: 0 18px 48px rgba(36, 25, 16, .22);
+  --ui-status-warning: #784800;
+  --ui-surface-app: #FFF1D1;
+  --ui-surface-card: #F0D6AC;
+  --ui-surface-control: #FFF8E8;
+  --ui-surface-warning: #FEEED1;
+  --ui-text-primary: #241910;
+  --ui-text-secondary: #583F2D;
+}
+.app.theme-win32 {
+  color-scheme: light;
+  --ui-border-normal: #808080;
+  --ui-brand-primary: #000080;
+  --ui-focus-ring: #000080;
+  --ui-font-ui: var(--ui-font-family-sans);
+  --ui-on-brand: #FFFFFF;
+  --ui-radius-control: 0px;
+  --ui-radius-panel: 0px;
+  --ui-shadow-3: 3px 3px 0px #000000;
+  --ui-status-warning: #765000;
+  --ui-surface-app: #C0C0C0;
+  --ui-surface-card: #EEEEEE;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF8E6;
+  --ui-text-primary: #101010;
+  --ui-text-secondary: #303030;
+}
+.app.theme-atm {
+  color-scheme: dark;
+  --ui-border-normal: #47749B;
+  --ui-brand-primary: #A7CFF1;
+  --ui-focus-ring: #D2E8FF;
+  --ui-font-ui: var(--ui-font-family-mono);
+  --ui-on-brand: #031A32;
+  --ui-radius-control: 4px;
+  --ui-radius-panel: 4px;
+  --ui-shadow-3: 0 16px 40px rgba(0, 10, 20, .6);
+  --ui-status-warning: #FFE0A3;
+  --ui-surface-app: #031A32;
+  --ui-surface-card: #123551;
+  --ui-surface-control: #153F62;
+  --ui-surface-warning: #3E3218;
+  --ui-text-primary: #E3F1FF;
+  --ui-text-secondary: #BED3E5;
+}
+.app.theme-whatsapp {
+  color-scheme: light;
+  --ui-border-normal: #D8DEE1;
+  --ui-brand-primary: #008069;
+  --ui-focus-ring: #075E54;
+  --ui-on-brand: #FFFFFF;
+  --ui-status-warning: #8A5700;
+  --ui-surface-app: #F0F2F5;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #111B21;
+  --ui-text-secondary: #54656F;
+}
+.app.theme-wechat {
+  color-scheme: light;
+  --ui-border-normal: #D8D8D8;
+  --ui-brand-primary: #07C160;
+  --ui-focus-ring: #04783B;
+  --ui-on-brand: #191919;
+  --ui-status-warning: #945600;
+  --ui-surface-app: #EDEDED;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #191919;
+  --ui-text-secondary: #435149;
+}
+.app.theme-telegram {
+  color-scheme: light;
+  --ui-border-normal: #DDE5EB;
+  --ui-brand-primary: #3390EC;
+  --ui-focus-ring: #0B6FA4;
+  --ui-on-brand: #182533;
+  --ui-status-warning: #8A5A00;
+  --ui-surface-app: #F4F7FA;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #182533;
+  --ui-text-secondary: #536779;
+}
+.app.theme-teams {
+  color-scheme: light;
+  --ui-border-normal: #E1DFDD;
+  --ui-brand-primary: #5B5FC7;
+  --ui-focus-ring: #6264A7;
+  --ui-on-brand: #FFFFFF;
+  --ui-status-warning: #776000;
+  --ui-surface-app: #F5F5F7;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #242424;
+  --ui-text-secondary: #616161;
+}
+.app.theme-jp-green {
+  color-scheme: light;
+  --ui-border-normal: #D8DFDB;
+  --ui-brand-primary: #06C755;
+  --ui-focus-ring: #00512A;
+  --ui-on-brand: #111111;
+  --ui-status-warning: #805B00;
+  --ui-surface-app: #F5F7F6;
+  --ui-surface-card: #FFFFFF;
+  --ui-surface-control: #FFFFFF;
+  --ui-surface-warning: #FFF4D6;
+  --ui-text-primary: #111111;
+  --ui-text-secondary: #3F5047;
+}
+.simple-mode {
+  --simple-bg: #f6f9fb;
+  --simple-surface: rgba(255, 255, 255, 0.94);
+  --simple-surface-solid: #ffffff;
+  --simple-text: #102031;
+  --simple-muted: #536579;
+  --simple-border: #788e9c;
+  --simple-accent: #1699a3;
+  --simple-send-text: #102031;
+  --ui-surface-app: var(--simple-bg);
+  --ui-surface-card: var(--simple-surface-solid);
+  --ui-surface-control: var(--simple-surface);
+  --ui-text-primary: var(--simple-text);
+  --ui-text-secondary: var(--simple-muted);
+  --ui-border-normal: var(--simple-border);
+  --ui-brand-primary: var(--simple-accent);
+  --ui-focus-ring: var(--simple-accent);
+}
+.simple-theme-bright {
+  color-scheme: light;
+}
+.simple-theme-dark {
+  color-scheme: dark;
+  --simple-bg: #0c1823;
+  --simple-surface: rgba(14, 31, 44, 0.94);
+  --simple-surface-solid: #0e1f2c;
+  --simple-text: #edf5f8;
+  --simple-muted: #9db0bf;
+  --simple-border: #648293;
+  --simple-accent: #69c7d2;
+  --simple-send-text: #111820;
+}
+.simple-theme-cli {
+  color-scheme: dark;
+  --simple-bg: #001b1d;
+  --simple-surface: rgba(0, 32, 34, 0.96);
+  --simple-surface-solid: #002022;
+  --simple-text: #50ead8;
+  --simple-muted: #36a99f;
+  --simple-border: #1db6aa;
+  --simple-accent: #4cf0d8;
+  --simple-send-text: #001416;
+}

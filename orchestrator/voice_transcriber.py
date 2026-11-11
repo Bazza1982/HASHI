@@ -262,6 +262,7 @@ class VoiceTranscriber:
         process = await asyncio.create_subprocess_exec(
             python,
             "-I",
+            "-B",
             str(worker_path),
             "--serve",
             stdin=asyncio.subprocess.PIPE,
@@ -382,3 +383,4 @@ def get_transcriber(model_size: str = DEFAULT_MODEL_SIZE, language: str | None =
     if _instance is None:
         _instance = VoiceTranscriber(model_size=model_size, language=language)
     return _instance
+# HASHI-Fingerprint: hfp_30e2062c3f004366a351403e47b9d094

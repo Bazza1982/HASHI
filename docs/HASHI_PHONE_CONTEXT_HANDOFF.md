@@ -1,12 +1,16 @@
 # Phone Session context and action handoff
 
-Phone speech is ordinary Session conversation history. PCM owns its projection,
+Conversational Phone speech is ordinary Session history. PCM owns its projection,
 budgeting and compaction exactly as it owns typed chat history. PAO owns Session
 attribution, action authorization cutoffs, admission and durable
-handoff/consumption facts. This shared Functions behavior applies to every Phone
-provider and text Engine; the front-end intent judge is not a substitute for the
+handoff/consumption facts. This shared Functions behavior applies to Phone
+providers that support Agent conversation/delegation and every text Engine; the front-end intent judge is not a substitute for the
 acting Agent's context. It supplements `HASHI_PCM_SYSTEM_DESIGN.md` and
 `HASHI_PAO_SYSTEM_DESIGN.md`.
+
+## Translation discovery
+
+For a translation task, read [Phone simultaneous interpretation](HASHI_PHONE_INTERPRETATION.md), then its Compute transport contract. Interpretation sends no Agent Persona, conversation history or task delegation to its speech model. Conversational handoff below and interpretation have distinct responsibilities; an isolated canary does not prove live adoption.
 
 ## Freeze before action admission
 
@@ -294,3 +298,24 @@ identities match. Genuine missing identities and scope mismatches still preserve
 the original section instead of discarding history. Offline regressions exercise
 the materialized HERV3 prompt and the read-only incident state; a committed
 source change and actual Worker adoption remain separate facts.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 046 Phone defaults and opt-in local cascade
+
+Local cascade is opt-in; synthetic proof is not physical acceptance. Live Phone
+defaults on; missing key blocks and appears in `/phone`; opt-out remains valid;
+settings/PCM do not prove provider readiness.
+
+### FYI v1 050 Phone context handoff and recovery
+
+Phone绑定owner前台Conversation。轮次HCC取绑定PCM/Conversation/job证据，不用原始metadata/计划提示；查询不建Run。
+重连保快照/约束/epoch权限，handoff仅冻结ID/顺序；挂断恢复历史，清理匹配event ID，耗尽保上下文且允许Turn。
+PCM限制到达，HERV3按时间排序并跳过未用历史；Functions管设置。
+PCM刷新失败只准stop/inspect，fence/挂断优先；保留原因，最多恢复5次，不重试不明写入。
+受理、执行、播放、监听、源码、采用、设备分别验收。
+See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md) and
+[cascade](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).

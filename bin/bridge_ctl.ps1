@@ -33,7 +33,9 @@ param(
     
     [switch]$Quiet,
     [switch]$Force,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$ApiGateway,
+    [string]$BridgeHome
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,13 +43,15 @@ $ErrorActionPreference = "Stop"
 # Constants
 $ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
 $ProjectDir = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..")).TrimEnd('\')
-$BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
+if (-not $BridgeHome) {
+    $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
+}
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
 $MainScript = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
-if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
+if (-not (Test-Path $AgentsJson)) { throw "Missing HASHI instance configuration: $AgentsJson" }
 $SecretsJson = Join-Path $BridgeHome "secrets.json"
-if (-not (Test-Path $SecretsJson)) { $SecretsJson = Join-Path $ProjectDir "secrets.json" }
+# Never borrow another instance's credentials from the program directory.
 $WorkbenchPort = 18800
 $PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
     Join-Path $ProjectDir "python\python.exe"
@@ -58,9 +62,9 @@ $PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
 }
 $PathResolver = Join-Path $ProjectDir "scripts\resolve_instance_runtime.py"
 try {
-    $LockFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
-    $PidFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
-    $InstanceId = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
+    $LockFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
+    $PidFile = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
+    $InstanceId = (& $PythonExe -B $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
     if (-not $LockFile -or -not $PidFile) {
         throw "empty instance runtime path"
     }
@@ -422,7 +426,14 @@ function Start-Bridge {
     # Clean up any stale files
     Remove-StaleFiles
     
+    $RoleResolver = Join-Path $ProjectDir "scripts\resolve_launch_runtime.py"
+    $CorePythonExe = (& $PythonExe -B $RoleResolver --code-root $ProjectDir --field core-executable)
+    if ($LASTEXITCODE -ne 0 -or -not $CorePythonExe) {
+        throw "Runtime setup is incomplete; install the verified release before starting."
+    }
+    $CorePythonExe = ([string]$CorePythonExe).Trim()
     $LaunchArguments = @(
+        "-I", "-B",
         $MainScript,
         "--bridge-home", $BridgeHome
     )
@@ -454,7 +465,7 @@ function Start-Bridge {
         $env:PYTHONPATH = $ProjectDir
         $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
         $Launcher = Start-Process `
-            -FilePath $PythonExe `
+            -FilePath $CorePythonExe `
             -ArgumentList $ArgumentString `
             -WorkingDirectory $ProjectDir `
             -WindowStyle Hidden `
@@ -558,13 +569,13 @@ switch ($Action) {
         exit $(if ($success) { 0 } else { 1 })
     }
     "start" {
-        $success = Start-Bridge -ResumeMode:$Resume
+        $success = Start-Bridge -ResumeMode:$Resume -ApiGateway:$ApiGateway
         exit $(if ($success) { 0 } else { 1 })
     }
     "restart" {
         Write-Log "=== Restarting bridge-u-f ==="
         $RestartProcesses = Get-BridgeProcesses
-        $RestartApiGateway = Test-ApiGatewayWasEnabled -Processes $RestartProcesses
+        $RestartApiGateway = $ApiGateway -or (Test-ApiGatewayWasEnabled -Processes $RestartProcesses)
         $stopOk = Stop-BridgeProcesses -ForceImmediate:$Force
         if ($stopOk) {
             Remove-StaleFiles

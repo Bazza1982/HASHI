@@ -367,12 +367,14 @@ async def _agent_projection(stack) -> dict:
 async def _wait_for_projection(stack, predicate, *, timeout: float = 0.75) -> dict:
     deadline = asyncio.get_running_loop().time() + timeout
     last = await _agent_projection(stack)
-    while asyncio.get_running_loop().time() < deadline:
-        if predicate(last):
-            return last
+    # A cold projection may finish at the deadline already in the correct
+    # state. Inspect that completed observation before deciding to poll again.
+    while not predicate(last):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"Worker list projection did not converge: {last!r}")
         await asyncio.sleep(0.01)
         last = await _agent_projection(stack)
-    raise AssertionError(f"Worker list projection did not converge: {last!r}")
+    return last
 
 
 async def _close_stack(stack, process_task: asyncio.Task | None = None) -> None:
@@ -633,3 +635,4 @@ async def test_real_request_cancellation_clears_worker_list_projection(
         assert cancelled["current_request_meta"] == {}
     finally:
         await _close_stack(stack, process_task)
+# HASHI-Fingerprint: hfp_296da2898592479ca078e3a633b8ff97

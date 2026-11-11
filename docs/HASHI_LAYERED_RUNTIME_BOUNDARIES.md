@@ -63,7 +63,7 @@ Current authoritative owners include:
 | Instance model/effort opt-ins, explicit restrictions and effective Function-side choices | ignored `allowed_backends` configuration, resolved by `orchestrator/runtime_effort_options.py`; [model availability](HASHI_MODEL_AVAILABILITY.md) |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | shared Function manager construction | `orchestrator/manager_registry.py` |
-| Python, ABI, dependency and protected-Core identity | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
+| Independently qualified Core-host/Functions Python, ABI, dependency and protected-Core identities | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
 | Function generation qualification and manifests | `orchestrator/function_generation.py` |
 | per-Agent Worker lifecycle, IPC routing and crash recovery | `orchestrator/function_worker_supervisor.py` |
 | transactional target switching and rollback | `orchestrator/reboot_manager.py` |
@@ -112,7 +112,9 @@ Rules:
   migration; ordinary fixes, refactors, reboots, or broad approval do not count.
 - One migration pull request must raise the product major version, reset minor
   and patch to zero, carry the `core-change-approved` label, and add a matching
-  independent review record before merge. Its implementer and reviewer differ.
+  truthful owner-approved or independent-human review record before merge.
+  A sole owner can approve with recorded technical evidence; a second human
+  is not mandatory. See [review records](core-reviews/README.md).
 - Core changes require a focused plan and lightweight tests before review.
 - Core should not know about product ports, terminal rendering, Windows/WSL
   product policy, or instance names. OS process/lock/stdio primitives stay here.
@@ -177,7 +179,13 @@ python scripts/check_protected_core_changes.py \
 The command-scoped `HASHI_CORE_EDIT_AUTHORIZED=1` records the same authorization
 but cannot waive any release gate. CI validates the manifest and requires the
 label, major-version increment, and matching added review record whenever
-protected paths change.
+protected source or the versioned Core wire-contract metadata changes.
+Changing a Core contract requires an exact project-metadata review seal as
+well as the protected-source digest; unchanged source cannot hide an ABI change.
+An independent Core-host/Functions interpreter or dependency revision requires
+its owning runtime qualification and adoption, not another Core code major.
+Dependency lock paths remain bounded, but those locks are not Core approval
+inputs. See [dependency maintenance](HASHI_CORE_DEPENDENCY_GENERATION_5.md).
 
 ## Layer 2: HASHI Functions
 
@@ -326,7 +334,8 @@ explicit; malformed or targeted input never widens into a shared handoff:
 1. Resolve the requested lifecycle scope once; targeted modes contain exactly
    one immutable target and malformed input never falls back to all.
 2. Compile and hash the complete functional source/asset closure.
-3. Import and validate it in an isolated probe with the exact Core runtime.
+3. Import and validate it in an isolated probe using the selected qualified
+   Functions runtime, checking its binding to the admitted Core contract.
 4. Materialise a content-addressed immutable artifact.
 5. Spawn one candidate Worker per selected Agent and require a READY receipt.
 6. Fence only selected routes at admission so new messages cannot enter old
@@ -514,3 +523,23 @@ Changes that touch these boundaries require focused checks:
 - instance config touched: migration test preserving existing local values;
 - port allocation touched: collision, persistence, and legacy migration tests.
 - every pull request: `.github/workflows/architecture-boundaries.yml`.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 021 Functional ownership and immutable Core
+
+PCM管Persona/Context/Memory；PAO管Agent/Session/Run/Job/Workzone/交付；
+HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
+功能放在最窄的Function/配置owner。Core不含产品策略或导入；改动须获准major迁移、
+升版本、加标签并独立复核。标志不授予权限。
+
+### FYI v1 023 Reboot scopes and separate adoption evidence
+
+源码、Worker采用、交付分别验证。工具不能改Core/Python、读秘密或授予权限。
+代码采用需reboot，文档无需；`min|same`限单Worker，`max`含共享Functions/Workers，不动Core/Remote。
+保留`AGENT_BUSY`，只在持久回执前重试；`target_busy`保持pending，`max`在fencing期间拒绝共享API/后台工作。
+[reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
+[fail-fast](HASHI_REBOOT_RECEIPTS.md).

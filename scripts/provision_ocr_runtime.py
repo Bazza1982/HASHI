@@ -14,6 +14,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (  # noqa: E402 -- standalone checkout root above
     read_config_json,
     new_config_json,
@@ -75,7 +76,7 @@ def probe(python):
         "'packages':{n:m.version(n) for n in ('paddleocr','paddlepaddle')}}))"
     )
     output = run(
-        [str(python), "-I", "-c", source], timeout=90, action="native import check"
+        [str(python), "-I", "-B", "-c", source], timeout=90, action="native import check"
     )
     result = next(
         (
@@ -164,7 +165,7 @@ def prepare(*, bridge_home, runtime_dir, base_python, check=False):
                 "packages": qualified["packages"],
             }
         )
-        write_config_json(config_path, config)
+        write_agent_config_json(config_path, config)
     return {
         "status": "ready",
         "python": str(python),
@@ -203,3 +204,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_7217ea365a6946259e0fae1654f9e07e

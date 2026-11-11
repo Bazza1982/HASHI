@@ -8,6 +8,7 @@ from orchestrator.fingerprint.models import FingerprintPolicy
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_incarnation import project_lifecycle_identity
 from orchestrator.agent_delivery_policy import (
     TELEGRAM_MIRROR_INHERIT,
     normalize_telegram_mirror_policy,
@@ -16,10 +17,10 @@ from orchestrator.enterprise.profile import (
     parse_profile_context,
     validate_profile_context,
 )
+from orchestrator.agent_config_json import write_agent_config_json as write_config_json
 from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
-    write_config_json,
 )
 from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_path_value
 from orchestrator.pcm import (
@@ -181,7 +182,7 @@ class GlobalConfig:
     # still determine which input/output path can actually run.
     persistent_session_v1: bool = True
     native_audio_chat_v1: bool = True
-    desktop_enabled: bool = False
+    desktop_enabled: bool = True
     live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
     # Stable PAO owner scope.  Telegram account replacement must not fork the
@@ -346,6 +347,7 @@ class ConfigManager:
             if not isinstance(row, dict):
                 raise ValueError(f"Agent row {index} must be an object.")
             name = str(row.get("name") or f"agent-{index}")
+            project_lifecycle_identity(name, row, row.get("extra"))
             agent_type = row.get("type")
             if agent_type is None:
                 raise ValueError(
@@ -756,7 +758,7 @@ class ConfigManager:
             persistent_session_v1=_truthy(
                 g_raw.get("persistent_session_v1", True)
             ),
-            desktop_enabled=_truthy(g_raw.get("desktop_enabled", False)),
+            desktop_enabled=_truthy(g_raw.get("desktop_enabled", True)),
             native_audio_chat_v1=_truthy(
                 g_raw.get("native_audio_chat_v1", True)
             ),
@@ -845,6 +847,7 @@ class ConfigManager:
                     permission_settings_present = True
                     permission_settings = nested_settings
                 extra = extra or None
+            extra = project_lifecycle_identity(name, a_raw, extra)
             cfg = FlexibleAgentConfig(
                 name=name, workspace_dir=workspace_dir, system_md=system_md,
                 telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
@@ -862,3 +865,4 @@ class ConfigManager:
             from orchestrator.workbench_auth import ensure_local_api_credential
             secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
         return global_cfg, agents, secrets
+# HASHI-Fingerprint: hfp_0c64bda3dc654ffabe8cf0faabcaf9fb

@@ -21,6 +21,39 @@ def _ledger(tmp_path) -> EnterpriseAuditLedger:
     return EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
 
 
+
+@pytest.mark.parametrize("scenario", ["same-time", "clock-reversed", "long-chain"])
+def test_live_export_pages_in_chain_order_without_skipping_records(tmp_path, scenario):
+    ledger = _ledger(tmp_path)
+    count = 1002 if scenario == "long-chain" else 3
+    events = []
+    for index in range(count):
+        timestamp = ("2026-01-02T00:00:00+00:00" if index == 0
+                     else "2026-01-01T00:00:00+00:00") if scenario == "clock-reversed" else "2026-01-01T00:00:00+00:00"
+        events.append(ledger.append(
+            event_id=f"audit-{count - index:06d}", event_type="policy",
+            action="allow", status="success", ts=timestamp))
+    exported = []
+
+    def transport(_url, body, _headers, _timeout):
+        exported.extend(json.loads(line) for line in body.decode("utf-8").splitlines())
+        return 200, "ok"
+
+    exporter = AuditLiveExporter(ledger, transport=transport)
+    endpoint = AuditLiveExportEndpoint(
+        url="https://siem.example.com/ingest", format="ledger",
+        batch_size=137 if scenario == "long-chain" else 1)
+    checkpoint = 0
+    for _ in range(count + 1):
+        result = exporter.export_since(endpoint, checkpoint_chain_index=checkpoint)
+        if result.sent == 0:
+            break
+        checkpoint = result.last_chain_index
+    assert [row["id"] for row in exported] == [event.id for event in events]
+    assert [row["chain_index"] for row in exported] == list(range(1, count + 1))
+    assert checkpoint == count
+
+
 def test_live_export_pushes_siem_ndjson_and_returns_checkpoint(tmp_path):
     ledger = _ledger(tmp_path)
     first = ledger.append(event_type="policy", action="file.write", status="denied", actor_id="usr-1")

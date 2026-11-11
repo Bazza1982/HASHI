@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.bridge_protocol import required_scope_for_intent
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import ConfigDurabilityError, read_config_json, write_config_json
 from orchestrator.pathing import resolve_bridge_home, resolve_path_value
 from orchestrator.process_resources import path_lock
@@ -166,7 +167,7 @@ class AgentDirectory:
             yield groups
             if groups != original:
                 try:
-                    write_config_json(self.config_path, document)
+                    write_agent_config_json(self.config_path, document)
                 except ConfigDurabilityError:
                     # Replacement already happened. Keep the committed view but
                     # propagate the error; never restore a stale snapshot.
@@ -302,3 +303,4 @@ class AgentDirectory:
             return False, f"target {to_agent} may not receive from {from_agent}"
 
         return True, "allowed"
+# HASHI-Fingerprint: hfp_7dab8c6695e442608606d80cb0b04568

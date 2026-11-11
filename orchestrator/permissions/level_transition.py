@@ -126,7 +126,9 @@ class RemoteLevelTransition:
     def review(self, subject, snapshot, requested):
         if requested.requested_level.value not in (*self.levels, "L0"):
             raise PermissionDenied("the requested level is not installed and qualified")
-        preview = self.policies.preview(subject.agent_id, subject.owner_id)
+        preview = self.policies.preview(
+            subject.agent_id, subject.owner_id, requested_level=requested.requested_level,
+        )
         digest = sha256(_json({
             "subject": asdict(subject), "config_revision": snapshot.revision,
             "requested": asdict(requested), "preview": preview, "generation": self.generation,

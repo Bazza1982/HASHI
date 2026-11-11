@@ -221,9 +221,9 @@ try {
     $mainArguments = @(
         '--distribution', $Distro,
         '--cd', $LinuxRoot,
-        '--', $LinuxPython,
-        'main.py',
-        '--bridge-home', $LinuxRoot
+        '--', $LinuxPython, '-I', '-B', '-c',
+        'import os,sys; from pathlib import Path; modern=Path("constraints/core-host-py312.lock").is_file(); target="scripts/run_qualified_core.py" if modern else "main.py"; os.execv(sys.executable, [sys.executable, "-I", "-B", target, "--bridge-home", sys.argv[1]] if modern else [sys.executable, target, "--bridge-home", sys.argv[1]])',
+        $LinuxRoot
     )
 
     Write-LauncherLog "Starting $InstanceId from WSL distribution $Distro as $identity."

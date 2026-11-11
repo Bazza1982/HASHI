@@ -715,3 +715,12 @@ opt-in and restore only this profile's saved capacity/memory fields, then an
 Agent6-only supported hot reboot. Do not restore an old whole configuration
 document, replay the old business request, kill unrelated GPU users, modify
 model weights, or cold-restart Core/Ollama as a testing shortcut.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 001 Ollama capacity and readable history
+
+- Ollama：精确模型/端点容量同时检查编码字符与native tokens；直接路径按预算折叠已完成历史为摘录/可回读索引，保留权威PCM与完整来源，小上下文关闭余量按容量派生，完整结果可容纳且native准入时保留后续工具；其他模型不变。短对话通过不代表多轮历史及引用回读通过，采用与实测独立记录。[HERV3](HERV3_OLLAMA_CONTEXT_PILOT.md)。

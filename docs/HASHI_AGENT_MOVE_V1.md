@@ -304,7 +304,9 @@ alone. Preview remains read-only; actual preparation revision-safely assigns a
 missing lifecycle ID. Move preserves that ID and carries no raw Bot token in
 delivery state. The receiver validates the transferred credential, rebinds only
 the instance component, and publishes the state before activation. Clone always
-creates a fresh lifecycle ID, excludes Telegram credentials, pending recovery
+creates a fresh lifecycle ID and removes any inherited nested lifecycle shadow
+from its target configuration, retaining other settings and the source row.
+It excludes Telegram credentials, pending recovery
 state, and `undelivered/` content. A Move with referenced undelivered business
 responses must use full-workspace mode; identity-memory mode fails before
 source mutation. Rollback and verified source cleanup retire only the exact
@@ -713,3 +715,14 @@ HASHI4 target lifecycle IDs are proven equal. The eight HASHI2-origin histories
 remain in place and are excluded by user decision because their old packages do
 not provide lifecycle-strength provenance; package hashes or matching names do
 not authorize a legacy bypass.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 017 Move confirmation and Clone retry boundaries
+
+- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
+  snapshots, resumable retries; no Move-only gates/source lifecycle writes.
+  [Move/Clone](HASHI_AGENT_MOVE_V1.md).

@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$HashiRoot,
 
+    [string]$CodeRoot,
+
     [Parameter(Mandatory = $true)]
     [string]$LogPath,
 
@@ -11,7 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ResolvedRoot = ([System.IO.Path]::GetFullPath($HashiRoot)).TrimEnd('\')
-$Controller = Join-Path $ResolvedRoot "bin\bridge_ctl.ps1"
+$ResolvedCodeRoot = if ($CodeRoot) { [System.IO.Path]::GetFullPath($CodeRoot) } else { Join-Path $PSScriptRoot ".." }
+$Controller = Join-Path $ResolvedCodeRoot "bin\bridge_ctl.ps1"
 if (-not (Test-Path -LiteralPath $Controller -PathType Leaf)) {
     throw "Missing fixed HASHI restart controller: $Controller"
 }
@@ -23,6 +26,8 @@ if (-not (Test-Path -LiteralPath $AgentsPath -PathType Leaf)) {
     throw "Missing HASHI instance configuration: $AgentsPath"
 }
 $AgentsConfig = Get-Content -LiteralPath $AgentsPath -Raw | ConvertFrom-Json
+$ExpectedInstance = [string]$AgentsConfig.global.instance_id
+if (-not $ExpectedInstance) { throw "Missing HASHI instance identity" }
 $WorkbenchPort = [int]$AgentsConfig.global.workbench_port
 if ($WorkbenchPort -lt 1 -or $WorkbenchPort -gt 65535) {
     throw "Invalid HASHI Backend port: $WorkbenchPort"
@@ -34,12 +39,14 @@ $Timestamp = [DateTimeOffset]::Now.ToString("o")
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "$Timestamp fixed restart task started for $ResolvedRoot"
 
 $env:BRIDGE_HOME = $ResolvedRoot
+$env:BRIDGE_CODE_ROOT = $ResolvedCodeRoot
 $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
 $ControllerOutput = @(& powershell.exe `
     -NoProfile `
     -NonInteractive `
     -ExecutionPolicy Bypass `
     -File $Controller `
+    -BridgeHome $ResolvedRoot `
     -Action stop *>&1)
 $Result = $LASTEXITCODE
 $ControllerOutput | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
@@ -72,11 +79,21 @@ Start-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Triggered fixed HASHI runtime task $RuntimeTaskName"
 
 $HealthUri = "http://127.0.0.1:$WorkbenchPort/api/health"
-for ($Attempt = 0; $Attempt -lt 90; $Attempt++) {
+# Full independent-runtime preparation and multi-Agent startup can outlast
+# the old window. The registered task still has a ten-minute execution limit.
+for ($Attempt = 0; $Attempt -lt 300; $Attempt++) {
     Start-Sleep -Seconds 1
     try {
         $Health = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 1
-        if ($Health.ready -eq $true -and [string]$Health.status -eq "ready") {
+        $LocalReady = (
+            $Health.startup.services_ready -eq $true -and
+            [int]$Health.startup.failed_agents -eq 0
+        )
+        if (
+            $Health.ok -eq $true -and
+            $ExpectedInstance.Equals([string]$Health.instance_id, [System.StringComparison]::OrdinalIgnoreCase) -and
+            ($Health.ready -eq $true -or $LocalReady)
+        ) {
             Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI restart completed; Backend ready on port $WorkbenchPort"
             exit 0
         }

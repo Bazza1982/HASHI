@@ -20,9 +20,9 @@ shared-token, rescue-capable Remote sidecar.
 1. Confirm each instance has a unique `remote_port` when it can run on the same
    host as another HASHI instance.
 2. Pick one long random shared token for trusted peers.
-3. Decide whether this machine should allow remote HASHI start:
-   - default: `L2_WRITE`, rescue start disabled;
-   - opt-in: `L3_RESTART`, rescue start enabled.
+3. Install the exact-instance fixed lifecycle launcher. Authenticated
+   start/restart work with the default `L2_WRITE` terminal policy; no additional
+   restart feature switch is required.
 
 ## Shared Token Setup
 
@@ -130,15 +130,10 @@ Windows:
 Windows uses the same isolation rule with scheduled-task names such as
 `HashiRemote-hashi1`. An explicit `-TaskName` still overrides the derived name.
 
-Keep `security.max_terminal_level: "L2_WRITE"` unless you intentionally want
-remote HASHI start. To enable rescue start:
-
-```yaml
-security:
-  max_terminal_level: "L3_RESTART"
-```
-
-Only use `L3_RESTART` on trusted LAN/Tailscale machines.
+Keep the default `security.max_terminal_level: "L2_WRITE"`. Authenticated fixed
+start/restart/reboot are independent of generic terminal permission levels.
+Windows setup prepares the fixed actuator during installation. For separate
+program and data roots, supply both `-CodeRoot` and `-HashiRoot`.
 
 ## Verification
 
@@ -180,7 +175,8 @@ HASHI2 `8767`.
 - peer still offline after upgrade: test both the Remote port and Backend API port
   from another machine. If both timeout, this is a host/firewall/service outage,
   not a stale registry bug.
-- rescue start forbidden: `max_terminal_level` is not `L3_RESTART`.
+- rescue start rejected: inspect authentication, target identity and fixed
+  launcher readiness; changing terminal permission levels is not a remedy.
 
 ## Rollback
 

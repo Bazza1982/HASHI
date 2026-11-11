@@ -44,9 +44,11 @@ from orchestrator.kernel_import_guard import candidate_import_guard as stable_im
 from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
 from orchestrator.post_turn_registry import declared_observer_modules
 from orchestrator.runtime_contract import (
+    RuntimeContractError,
     RuntimeFingerprint,
     compare_runtime_fingerprints,
     current_runtime_fingerprint,
+    enforce_runtime_contract,
     load_runtime_policy,
     validate_standard_dependencies,
 )
@@ -614,7 +616,20 @@ def _asset_entries(
                 continue
             append_asset(source, relative_text)
 
-    for package in (*_ROOT_PACKAGES, "locales"):
+    # Documentation is an on-demand Function resource, never automatic prompt
+    # inclusion. Keep the same clean-Git publication rule as other assets.
+    from orchestrator.agent_documentation import ROOT_DOCUMENTS
+
+    for relative_text in sorted(ROOT_DOCUMENTS):
+        source = root / relative_text
+        if not source.is_file():
+            continue
+        if publishable is not None and relative_text not in publishable:
+            skipped_optional += 1
+            continue
+        append_asset(source, relative_text)
+
+    for package in (*_ROOT_PACKAGES, "locales", "docs"):
         package_root = root / package
         if not package_root.is_dir():
             continue
@@ -814,13 +829,24 @@ def verify_manifest_source_commit(
     """Require every qualified source/asset byte to belong to clean Git HEAD."""
 
     root = Path(code_root).resolve()
-    checkout = _git_output(root, "rev-parse", "--show-toplevel").decode(
-        "utf-8", errors="replace"
-    ).strip()
+    try:
+        checkout = _git_output(root, "rev-parse", "--show-toplevel").decode(
+            "utf-8", errors="replace"
+        ).strip()
+    except FunctionGenerationError:
+        if (root / ".git").exists() or (root / ".git").is_symlink():
+            raise  # A broken/unavailable checkout can never become a package.
+        checkout = ""
     if not checkout or Path(checkout).resolve() != root:
-        raise FunctionGenerationError(
-            "Function generation must be qualified from a Git repository root"
-        )
+        from orchestrator.function_source_publication import verify_published_manifest
+        from orchestrator.runtime_contract import RuntimeContractError
+        try:
+            return verify_published_manifest(manifest, root)
+        except (OSError, ValueError, RuntimeContractError) as exc:
+            raise FunctionGenerationError(
+                "Function generation must be qualified from a Git repository root "
+                "or an installer-published sealed source: " + str(exc)
+            ) from exc
     commit = _git_output(root, "rev-parse", "--verify", "HEAD").decode(
         "ascii", errors="replace"
     ).strip().lower()
@@ -930,45 +956,21 @@ def run_candidate_probe(
         "code_root": str(Path(code_root).resolve()),
         "module_names": list(module_names),
         "expected_runtime": expected_runtime.to_dict(),
+        "probe_entrypoint": json.loads(
+            (Path(code_root) / "runtime-entry.json").read_text(encoding="utf-8"))["candidate_probe"],
     }
-    command = [sys.executable, "-I", str(Path(code_root).resolve() / "orchestrator" / "function_generation.py"), "--probe"]
+    from orchestrator.runtime_process import run_protected_call
     try:
-        completed = subprocess.run(
-            command,
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            cwd=Path(code_root).resolve(),
-            timeout=timeout_seconds,
-            check=False,
-            env=os.environ.copy(),
-        )
-    except subprocess.TimeoutExpired as exc:
+        result = run_protected_call(
+            {**payload, "runtime": enforce_runtime_contract(Path(code_root)).to_dict()},
+            purpose="candidate-probe", timeout=timeout_seconds)
+    except TimeoutError as exc:
         raise FunctionGenerationError(
-            f"Candidate staging Worker exceeded {timeout_seconds:.1f}s"
-        ) from exc
-    result_line = next(
-        (
-            line[len(PROBE_RESULT_PREFIX) :]
-            for line in reversed(completed.stdout.splitlines())
-            if line.startswith(PROBE_RESULT_PREFIX)
-        ),
-        None,
-    )
-    if result_line is None:
-        detail = (completed.stderr or completed.stdout or "no diagnostic output").strip()
-        raise FunctionGenerationError(
-            "Candidate staging Worker returned no receipt "
-            f"(exit={completed.returncode}): {detail[-2000:]}"
-        )
-    try:
-        result = json.loads(result_line)
-    except json.JSONDecodeError as exc:
-        raise FunctionGenerationError(
-            "Candidate staging Worker returned invalid JSON"
-        ) from exc
-    if completed.returncode != 0 or not result.get("ok"):
-        detail = str(result.get("error") or completed.stderr or "candidate rejected")
+            f"Candidate staging Worker exceeded {timeout_seconds:.1f}s") from exc
+    except RuntimeContractError as exc:
+        raise FunctionGenerationError(f"Candidate staging Worker rejected generation: {exc}") from exc
+    if not result.get("ok"):
+        detail = str(result.get("error") or "candidate rejected")
         probe_traceback = str(result.get("traceback") or "").strip()
         if probe_traceback:
             detail = f"{detail}\n{probe_traceback}"
@@ -1090,7 +1092,7 @@ def probe_function_generation(
     return generation
 
 
-def _probe_main() -> int:
+def probe_candidate_payload(payload: dict) -> dict:
     stage_timings_ms: dict[str, float] = {}
 
     def timed(name, function, *args, **kwargs):
@@ -1103,7 +1105,6 @@ def _probe_main() -> int:
             )
 
     try:
-        payload = json.loads(sys.stdin.read())
         code_root = Path(payload["code_root"]).resolve()
         sys.path.insert(0, str(code_root))
         policy = load_runtime_policy(code_root)
@@ -1149,8 +1150,7 @@ def _probe_main() -> int:
             "source_commit": source_commit,
             "stage_timings_ms": stage_timings_ms,
         }
-        print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
-        return 0
+        return result
     except Exception as exc:
         result = {
             "ok": False,
@@ -1159,8 +1159,13 @@ def _probe_main() -> int:
             "probe_pid": os.getpid(),
             "stage_timings_ms": stage_timings_ms,
         }
-        print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
-        return 1
+        return result
+
+
+def _probe_main() -> int:
+    result = probe_candidate_payload(json.loads(sys.stdin.read()))
+    print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
+    return 0 if result.get("ok") else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1175,3 +1180,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_ace9e962fbdc4b788ef579b2d372d163

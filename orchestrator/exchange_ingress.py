@@ -259,6 +259,7 @@ class ExchangeInbox:
         except OSError:
             pass
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS exchange_inbox (
@@ -288,6 +289,38 @@ class ExchangeInbox:
                     connection.execute(
                         f"ALTER TABLE exchange_inbox ADD COLUMN {column_name} TEXT"
                     )
+            if "acceptance_order" not in columns:
+                connection.execute(
+                    "ALTER TABLE exchange_inbox ADD COLUMN acceptance_order INTEGER"
+                )
+            # Keep the legacy committed insertion order; wall time can tie or regress.
+            last_order = int(connection.execute(
+                "SELECT COALESCE(MAX(acceptance_order), 0) FROM exchange_inbox"
+            ).fetchone()[0])
+            legacy = connection.execute(
+                "SELECT inbox_key FROM exchange_inbox WHERE acceptance_order IS NULL ORDER BY rowid"
+            ).fetchall()
+            connection.executemany(
+                "UPDATE exchange_inbox SET acceptance_order=? WHERE inbox_key=?",
+                ((last_order + offset, row["inbox_key"]) for offset, row in enumerate(legacy, 1)),
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS exchange_inbox_acceptance_order "
+                "ON exchange_inbox(acceptance_order)"
+            )
+            # Assign in the INSERT transaction, including in-flight legacy writers.
+            connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS exchange_inbox_assign_acceptance_order
+                AFTER INSERT ON exchange_inbox WHEN NEW.acceptance_order IS NULL
+                BEGIN
+                    UPDATE exchange_inbox
+                    SET acceptance_order=(SELECT COALESCE(MAX(acceptance_order), 0) + 1
+                                          FROM exchange_inbox)
+                    WHERE inbox_key=NEW.inbox_key;
+                END
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS exchange_inbox_pending
@@ -659,7 +692,7 @@ class ExchangeInbox:
                 SELECT * FROM exchange_inbox
                 WHERE state='accepted'
                    OR (state='scheduling' AND (? OR updated_at <= ?))
-                ORDER BY accepted_at, inbox_key
+                ORDER BY acceptance_order
                 LIMIT ?
                 """,
                 (
@@ -676,7 +709,7 @@ class ExchangeInbox:
                 """
                 SELECT * FROM exchange_inbox
                 WHERE state='scheduled' AND delivery_json!='{}'
-                ORDER BY accepted_at, inbox_key
+                ORDER BY acceptance_order
                 LIMIT ?
                 """,
                 (max(1, min(int(limit), 100)),),
@@ -689,7 +722,7 @@ class ExchangeInbox:
                 """
                 SELECT * FROM exchange_inbox
                 WHERE state='pending_confirmation'
-                ORDER BY accepted_at, inbox_key
+                ORDER BY acceptance_order
                 LIMIT ?
                 """,
                 (max(1, min(int(limit), 100)),),

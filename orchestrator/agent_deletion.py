@@ -13,15 +13,12 @@ Orchestrates the safe, destructive removal of an Agent and its managed workspace
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
-import os
 import shutil
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,15 +29,15 @@ from orchestrator.agent_incarnation import (
     valid_agent_lifecycle_id,
 )
 from orchestrator.telegram_delivery_state import retire_agent_state
+from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
-    ConfigConflictError,
     ConfigDocument,
-    ConfigDurabilityError,
     read_config_json,
     write_config_json,
 )
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.pathing import BridgePaths
+from orchestrator.workbench_auth import resolve_remote_runtime_sids
 
 logger = logging.getLogger("BridgeU.AgentDeletion")
 
@@ -557,7 +554,7 @@ class AgentDeletionService:
                     if not (isinstance(r, dict) and str(r.get("name") or r.get("id") or "") == agent_name)
                 ]
             AgentDirectory.remove_local_memberships(config_doc, agent_name)
-            write_config_json(self.paths.config_path, config_doc)
+            write_agent_config_json(self.paths.config_path, config_doc)
             journal["steps_completed"].append("config_removed")
             journal["status"] = "config_removed"
             self._write_journal(operation_id, journal)
@@ -763,9 +760,18 @@ class AgentDeletionService:
                         removed_any = True
 
             if removed_any:
-                write_config_json(self.paths.secrets_path, secrets_doc)
+                write_config_json(
+                    self.paths.secrets_path,
+                    secrets_doc,
+                    private_full_control_sids=resolve_remote_runtime_sids(
+                        self.paths.bridge_home
+                    ),
+                )
         except Exception as exc:
             logger.warning("Secrets cleanup warning for agent=%s: %s", agent_id, exc)
+            # The outer transaction records cleanup_pending. Never claim that
+            # credentials were cleaned if identity resolution/publication failed.
+            raise
 
     def _archive_conversations(self, agent_id: str) -> None:
         if self.session_store is None:
@@ -783,3 +789,4 @@ class AgentDeletionService:
         target = self.quarantine_root / f"{agent_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         shutil.move(str(ws_path), str(target))
         return target
+# HASHI-Fingerprint: hfp_aba00c7a0edf4d3d9309e9a5d7741f9a

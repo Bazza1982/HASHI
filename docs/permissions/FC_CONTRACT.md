@@ -10,6 +10,8 @@
 
 本文中的 **FC 指 Frontend Connector**。模型工具的 function-calling JSON schema 与 FC 是两类接口，不混用术语。本文以固定 SHA 源码为事实依据；“必须”“应”描述待实现契约，“基线已有”描述当前代码。已有架构将权限、Session、Run、Workzone 的权威状态交给 PAO，外部客户端只负责呈现；历史名 `workbench_api.py` 实际是 HASHI Backend API。[架构与所有权][S-ARCH] [兼容命名][S-NAMES]
 
+**2026-11-05 源码增量：** [正式人类批准入口](GOVERNED_HUMAN_APPROVAL.md) 增加可选 HASHI 自有登录/审阅页，通过既有通用 URL 按钮从 Workbench 打开。页面验证真实人类密码登录、原请求/会话及动作，个人 L1 和实例凭据不能冒充 L2。外部 Workbench 源码、公开 FC schema 与 Core 均不因此改变；自动化联调、真人验收、独立 OS L2 隔离仍分别记证，生产启用继续待正式验收。
+
 **统一类型名：** `AccessRequest` 对应旧稿的 `PermissionRequest`，`PermissionLease` 对应旧稿的 `Grant / Lease`；服务端私有类型统一为 `VerifiedPrincipal` 与 `DecisionReceipt`（旧稿分别简称 Principal、称 PermissionDecisionReceipt / Receipt）。这些是同义名称，不是不同对象，不得据此另建一套表、服务或状态机。
 
 ## 1. 范围与不可突破的约束
@@ -558,3 +560,12 @@ opaque `act` 没有明文 `/safety`，需从服务登记 action 解析；不能�
 [S-CMD-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interactions.py
 [S-CMD-ADAPTER-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interaction_adapters.py
 [S-CMD-TRANSPORT-TEST]: https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/tests/test_command_interaction_transport.py
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 022 Permission outcome presentation and unknown commits
+
+权限页面保留安全阶段/原因/编号；私密拒绝不泄漏对象，提交不明不谎称未授权，不重放；原认证和审批检查不变。

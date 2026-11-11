@@ -5,6 +5,7 @@ HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 
 from orchestrator.hchat_attachment_contract import HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
 from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
+from tools.documentation_schema import DOCUMENTATION_READ_SCHEMA
 
 _ATTACHMENT_SCHEMA_MAX_ITEMS = max(
     SESSION_ATTACHMENT_LIMITS.count, HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
@@ -2138,8 +2139,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
                         "description": (
-                            "Required assertion that the current user request explicitly "
-                            "authorized this exact single-job rerun."
+                            "Intent marker for this exact rerun; not proof of approval. "
+                            "Scoped Agent execution also requires the existing trusted PAO owner decision."
                         ),
                     },
                 },
@@ -2254,7 +2255,10 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_delete",
             "description": (
                 "Delete one cron, heartbeat, or nudge owned by the current Agent. "
-                "Call only after the user explicitly requests deleting that task."
+                "Call only after the user explicitly requests deleting that task. "
+                "Deletion also requires an exact PAO owner decision and a currently active Run. "
+                "If approval_required is returned, keep the pending approval ID for the trusted "
+                "owner decision flow; do not approve it yourself or treat clarification text as approval."
             ),
             "parameters": {
                 "type": "object",
@@ -2264,7 +2268,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                     "authorization": {
                         "type": "string",
                         "enum": ["explicit_user_authorization"],
-                        "description": "Required when the current user explicitly authorized this deletion.",
+                        "description": "Intent marker only; never substitutes for the trusted PAO owner decision.",
                     },
                 },
                 "required": ["kind", "job_id", "authorization"],
@@ -2354,7 +2358,9 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
             "name": "hashi_superloop_delete",
             "description": (
                 "Delete an owned Superloop. The loop is retained as a deleted audit record "
-                "and will no longer advance. Call only after explicit user authorization."
+                "and will no longer advance. Call only after explicit user authorization. "
+                "The authorization string is an intent marker; scoped Agent execution "
+                "also requires the existing trusted PAO owner decision."
             ),
             "parameters": {
                 "type": "object",
@@ -2468,6 +2474,7 @@ TOOL_SCHEMAS.extend(
                 },
             },
         },
+        DOCUMENTATION_READ_SCHEMA,
         {
             "type": "function",
             "function": {
@@ -2641,4 +2648,4 @@ for _schema in TOOL_SCHEMAS:
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())
-# HASHI-Fingerprint: hfp_0db73fd1075d4483ad739f32a94f1a35
+# HASHI-Fingerprint: hfp_3903542f06f0421c9d644955e87b9629

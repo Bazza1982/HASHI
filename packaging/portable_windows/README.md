@@ -4,6 +4,25 @@ This builder produces an allowlisted, self-contained Windows installation
 bundle for a USB drive whose total capacity is 957,000,000 bytes. It does not
 write to or format a USB device.
 
+Core v5 bundles independently qualified Core and Functions interpreters. The
+Functions interpreter, speech resources, OCR resources and runtime tools travel
+in lossless LZMA ZIP payloads. Core uses a native-supported Deflate ZIP: the
+Windows installer verifies the archive and every extracted Core file before
+using Python, with streaming SHA-256 independent of PowerShell module discovery.
+Then the canonical qualifier verifies/expands the remaining
+payloads. No runtime selection is published at this stage. The executable
+Function catalogue stays expanded.
+The capsule retains every uncompressed file hash and runtime identity. Before
+changing an existing installation, staging verifies archive bytes and the full
+expanded file sets. Missing, extra, redirected, altered or unsafe members fail
+closed. Qualification requires completely expanded files at the final path;
+archives alone cannot select or start a runtime. No environment is upgraded in
+place. Payloads preserve the existing speech model and package versions.
+
+The transfer image keeps the same 957 MB hard limit and 32 KiB allocation check.
+The destination PC needs additional space for expanded payloads, staging and
+the complete previous installation; the installer checks that budget first.
+
 The USB is installation and transfer media, not the runtime disk. The user
 runs `Install_HASHI_On_This_PC.bat`, approves Windows administrator access, and
 the installer copies and verifies the complete program, private Python runtime,

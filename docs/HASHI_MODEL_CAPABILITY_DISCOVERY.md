@@ -155,3 +155,13 @@ Offline tests prove source and consumer behavior. A real attachment response
 proves live Provider use only after the target Worker generation is adopted
 and the attachment is observed on that instance; source, cache, running
 generation, and Provider acceptance are reported separately.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 028 Verified capabilities and pricing freshness
+
+Verified capabilities survive lookup failure until identity/source changes;
+pricing freshness stays separate. [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).

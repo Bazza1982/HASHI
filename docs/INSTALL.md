@@ -20,10 +20,11 @@
 - [Nagare developer install](#nagare-core-developer-install)
 
 Check [release and package selection](RELEASES.md) before choosing an archive
-or npm version. At the 2026-09-21 documentation review, npm latest was still
-1.0.1 and GitHub stable Latest was v2.0.0; neither represented the current
-v4.0.0-beta.1 source Beta. Registry and installer publication remain separate
-steps.
+or npm version. The 2026-11-07 publication check still found npm latest 1.0.1,
+GitHub stable Latest v2.0.0, and the published v4 Beta pre-release; none is the
+v5.0.0-alpha.1 development source. Registry and installer publication remain
+separate steps. Read [the v5 migration notes](RELEASE_NOTES_v5.0.0-alpha.1.md)
+before replacing an existing coupled v4 environment.
 
 ---
 
@@ -52,12 +53,12 @@ Use Node.js 18+ and npm 9+ as declared in the package metadata, plus the
 approved CPython 3.12.13 interpreter in the same OS environment.
 For the unreleased source candidate, follow [Source install](#source-install).
 
-Post-install prepares a versioned, user-scoped Python 3.12.13 virtual
-environment from `constraints/standard-py312.lock`. It prints “runtime is
-ready” only after the complete runtime contract passes. If Python, network, or
-dependency preparation fails, npm leaves the program entry installed but
-reports **runtime setup is incomplete**; the failed build is not adopted and
-no instance data is touched.
+Post-install prepares a versioned, user-scoped pair of independent Core and
+Functions environments using the approved CPython policies. It copies a fresh
+build/sidecar base first, installs only hashed Function wheels into a new
+directory, and seals the zero-application-dependency Core separately. It prints
+ready only after both qualified roles pass. Existing environments and instance
+data are not upgraded or changed; failed candidates are never selected.
 
 Post-install also prepares the HERV3 Level 2 privacy detector in a **separate**
 user-scoped environment from `requirements-privacy.txt`. The `hashi` launcher
@@ -82,6 +83,10 @@ The default locations are:
 primarily for managed deployments and tests. They do not make a Windows
 registry visible to WSL or vice versa. Both roots must remain outside the npm
 program directory so a later package uninstall cannot remove instance data.
+
+On Windows, keep a custom data root short (for example `C:\HASHIData`). Native
+third-party DLL loading can fail in very deep paths. Full Function import
+qualification must succeed before the installer publishes the runtime selection.
 
 ### Commands
 
@@ -204,53 +209,36 @@ python --version
 the Windows `py -3.12` launcher instead if needed, after verifying its exact
 patch version.
 
-On Linux/macOS, create and activate a new virtual environment:
+The v5 source candidate uses the same canonical preparation as npm. Install
+Node.js 18+ as well, keep the approved Python available, and run from the clean
+committed repository root:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+node postinstall.js
 ```
 
-On WSL, use `.venv-wsl` so a shared checkout does not reuse a Windows venv:
+Preparation creates fresh versioned runtimes outside the program, including
+separate privacy and speech helpers. It does not start Core or migrate an
+existing instance. Do not install application dependencies into a running
+interpreter or reuse an old coupled environment as Core. Windows and native
+Linux qualification are required; macOS acceptance remains a separate gate.
+
+The optional Level 2 detector is prepared independently. It is never enabled
+automatically; a failed preparation leaves Level 2 unavailable. Explicit
+media opt-outs are reported as partial installations, not complete readiness.
+
+Open the connection setup through the qualified Functions launcher from the
+repository root:
 
 ```bash
-python -m venv .venv-wsl
-source .venv-wsl/bin/activate
-```
-
-On Windows PowerShell:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-If activation is blocked by local shell policy, invoke the environment's
-Python directly; do not change machine-wide execution policy for this guide.
-Install and check the standard runtime using that environment:
-
-```bash
-python -m pip install -r constraints/standard-py312.lock
-python scripts/check_runtime_contract.py --json
-python scripts/provision_privacy_runtime.py
-python scripts/provision_privacy_runtime.py --check
-```
-
-The last two commands prepare and verify the optional Level 2 detector in
-`.venv-privacy`, separate from the active HASHI interpreter. They need network
-access to download Presidio, spaCy, and the hash-pinned English model. If they
-fail, keep Level 1 and do not send sensitive content under a Level 2 claim.
-
-Open the local connection page from the repository root:
-
-```bash
-python -m onboarding.onboarding_main
+node cli.js onboard
 ```
 
 Choose a detected CLI engine or a HERV3 Model Provider, enter any required
 credentials in the masked local page, and confirm the minimal connection
 check. Telegram is optional. After setup, launch with the platform helper
-below, or run `python main.py` from the activated environment.
+below. The launcher resolves the installer-owned role pair; direct startup
+must use that qualified Core interpreter with -I -B, not the Functions Python.
 
 This runs the checked-out source. A GitHub source archive uses the same setup
 steps after extraction; it is not a portable installation bundle.
@@ -260,8 +248,9 @@ steps after extraction; it is not a portable installation bundle.
 ### Prerequisites
 - Windows 10/11
 - CPython 3.12.13 (approved Core; source compatibility is 3.12)
-- Node.js + npm for npm installation or Nagare visual editor development;
-  the direct Python source runtime does not require them
+- Node.js + npm for the supported source/npm environment preparation or
+  Nagare visual editor development; a prepared Core process does not itself
+  require Node.js unless a selected engine or tool does
 
 ### Install
 Follow [Source install](#source-install) or the explicit npm version path.
@@ -269,7 +258,11 @@ Follow [Source install](#source-install) or the explicit npm version path.
 For a self-contained Windows handoff, use the allowlisted Portable Windows
 builder described in the [Portable Windows guide](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md).
 The resulting USB is verified installation media; HASHI runs from the local
-copy installed on the recipient PC.
+copy installed on the recipient PC. Core v5 keeps Core and Functions in separate
+qualified runtimes. Lossless transfer payloads preserve all runtime and speech
+files; the installer verifies and expands them before final-path qualification.
+The destination needs space for the expanded copy, staging and complete rollback
+version, beyond the transfer image's capacity. No active interpreter is patched.
 
 The Portable Windows image has a strict 957 MB capacity and does not contain
 the Level 2 detector packages or model. After installation on the PC, run
@@ -319,8 +312,8 @@ transaction behavior, and verification boundaries.
 
 ### Install
 Follow [Source install](#source-install). Homebrew alone does not guarantee
-the exact approved Python patch. Install Node.js/npm when using the npm
-command path or working on the Nagare editor.
+the exact approved Python patch. Install Node.js/npm for the supported
+source/npm environment preparation or work on the Nagare editor.
 
 For an offline handoff image, start from a clean checkout on a connected Mac:
 
@@ -342,7 +335,8 @@ native dependencies.
 ### Prerequisites
 - Ubuntu 22.04+ recommended
 - CPython 3.12.13 + venv
-- Node.js + npm for npm installation or Nagare editor work
+- Node.js + npm for the supported source/npm environment preparation or
+  Nagare editor work
 
 Follow [Source install](#source-install) before launching.
 
@@ -353,11 +347,16 @@ Follow [Source install](#source-install) before launching.
 
 ## Python dependency profiles
 
-For a normal local HASHI installation, use the standard source profile:
+For a normal local HASHI installation, use the canonical role preparation:
 
 ```bash
-python -m pip install -r constraints/standard-py312.lock
+node postinstall.js
 ```
+
+The Functions version authority is constraints/standard-py312.lock; installation
+uses its derived constraints/functions-py312.hashes.lock. Core has a separate
+empty application lock. Test/development environments are disposable tools,
+not production Core or Functions environments.
 
 `requirements.txt` is the human-maintained dependency input; launch and
 deployment use the generated lock above. The standard profile includes the
@@ -506,16 +505,17 @@ The default scheduled-task name is also per instance (for example,
 `HashiRemote-hashi1`). Pass `-TaskName` only when an explicit override is
 required.
 
-Keep the default `security.max_terminal_level: "L2_WRITE"` unless you
-intentionally want remote HASHI rescue start. To enable rescue start before a
-core outage, set:
+Keep the default `security.max_terminal_level: "L2_WRITE"`. The authenticated
+fixed start/restart/reboot endpoints are installed with normal lifecycle
+support; they require no extra feature enablement. Windows setup verifies the
+exact-instance restart and runtime tasks while the network Remote stays
+Limited. Split installations pass `-HashiRoot <private-home>` and
+`-CodeRoot <program-root>`. Existing credentials and task principals are retained.
 
-```yaml
-security:
-  max_terminal_level: "L3_RESTART"
-```
-
-Only use `L3_RESTART` on trusted LAN/Tailscale machines.
+New personal installations prepare separate private Remote and local API keys.
+The API gateway and authenticated desktop interface are available by default.
+An explicit owner opt-out remains effective. See
+[default function readiness](DEFAULT_FUNCTION_READINESS.md).
 
 ### Opt out
 

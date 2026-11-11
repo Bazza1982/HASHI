@@ -12,7 +12,155 @@ HASHI2 evidence is [this migration record](HASHI2_MINIMAL_CORE_2026-09-07.md).
 Earlier API 2 implementation and verification status is recorded in
 [`HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 
-## Decision
+## Core v5 role-qualified source candidate
+
+The approved [architecture](CORE_RUNTIME_DECOUPLING_ARCHITECTURE_20261105.md),
+[implementation order](CORE_RUNTIME_DECOUPLING_IMPLEMENTATION_20261105.md) and
+[acceptance gates](CORE_RUNTIME_DECOUPLING_ACCEPTANCE_20261105.md) govern the
+authorized v5 source candidate. This is not adoption of that candidate by any
+installed instance. The coupled v4 baseline below remains historical evidence.
+
+The existing runtime-contract owner now distinguishes protected code/protocol C,
+the immutable Core-host environment CR, the immutable Functions environment FR,
+and the Function-source artifact FG. CR permits zero application distributions;
+FR must satisfy its complete exact lock. CPython/ABI/build policy is qualified
+independently for each role. Current canonical inputs remain
+`[tool.hashi.runtime]`, its `core-host-lock` and its Functions `standard-lock`;
+there is no second package catalogue.
+
+Exact equality remains mandatory within a role. The cross-role boundary
+explicitly validates trusted role, source/protocol/API/schema compatibility and
+the selected exact FR. It does not require CR and FR to share executable,
+prefix, package set or policy digest. Both installations seal their environment
+and base bytes and reject ambient distributions, startup injection, changed
+packages and redirected paths. The existing unsealed v4 diagnostic treatment of
+unrelated extra packages is not an exception to v5 sealed-role admission.
+
+One protected launcher selects the absolute qualified interpreter for shared
+Functions, Agent Workers, qualification and recovery. Private JSON IPC binds
+nonce, OS-observed executable/parent/PID, runtime identity and FG before product
+execution. Windows creates the owned Job and restricted handle list atomically
+with the child. No active environment is upgraded in place. The operator-owned
+selector is fixed relative to the Core prefix; it is not an Agent, Workzone,
+environment-variable or prompt override. Platform installers materialize independent roles and re-observe relocated
+Portable environments at the final target. Independent review and complete
+artifact/OS acceptance still require Gate 5; source code alone is not that evidence.
+
+A later compatible FR update or rollback changes FR and its admitted Functions
+processes while C, CR and Core PID remain fixed. A CPython/stdlib/ABI change in
+CR requires a separately qualified Core-runtime replacement and approved cold
+cutover; unchanged protected source need not consume a Core-code major. Protected
+source or Core wire-contract changes still require an authorized major migration
+and matching owner-approved or independent-human review. Existing wire versions do not change merely to name a role.
+
+Actual CR/FR IDs are projected separately in topology and detailed `/version`,
+alongside the existing product/source/FG facts. Missing Core receipts remain
+unknown. Public version facts omit interpreter and installation paths. Source,
+prepared candidate, active route and live acceptance remain separate states.
+
+After an independent FR replacement, pair qualification runs from the fixed
+qualified Core interpreter. The management checker validates that caller against
+the Core-anchored selector and probes Functions through the existing qualified
+private child channel. It retains the original co-located FR caller when that
+installation is still selected. A standalone FR cannot invent a Core selector;
+no environment or executable override is added.
+
+Shared Functions candidates leave Remote untouched while preparing. After
+the prior owner retires, commit restores the configured Remote through its
+existing lifecycle owner inside the pending connector boundary. A healthy OS
+supervisor is reused; a missing bundled child starts in the selected qualified
+FR. Failure remains degraded and retries through connector activation. A
+Worker-only success cannot qualify the complete Workbench connection chain.
+
+The canonical installer also offers build-functions through
+scripts/build_runtime_roles.py. It accepts a frozen reference and the existing
+qualified Core manifest/digest, creates only a new FR in a fresh destination,
+and revalidates the original CR unchanged. It returns a candidate descriptor;
+it never writes the fixed selector, adopts the candidate, starts/stops Core,
+or installs a service. Existing environments and program-source directories
+are not valid output destinations.
+
+The complete original-dependency business scope passed at source 030689c4
+on native Windows and its push/PR CI. The independent-FR builder is exercised
+by actual same-Core fixture-package replacement, rejection and rollback with
+the existing durable-counter/no-replay assertions. This mechanism is not
+PR137 security acceptance. Final role/build qualification, the five security
+upgrades, independent review, complete packaging and operator adoption remain
+separate gates. See the [Windows source checkpoint](CORE_RUNTIME_DECOUPLING_WINDOWS_CHECKPOINT_20261105.md)
+for exact tested scope and retained failures.
+
+### Functions security maintenance on the split architecture
+
+The Functions version authority selectively adopts aiohttp 3.14.4, certifi
+2026.10.19, multidict 6.9.1, Pillow 13.0.0 and yarl 1.25.1 from PR137.
+Core's empty application lock, protected source, APIs and runtime stay unchanged.
+constraints/functions-py312.hashes.lock and Portable's requirements.lock are
+derived by scripts/compile_functions_locks.py; their exact 50/55 package closures
+must match the canonical Functions pins. Installation requires wheel hashes and
+builds a fresh directory, never upgrades a running interpreter.
+
+scripts/qualify_functions_dependency_handoff.py accepts an existing qualified
+pair and a Functions-only builder candidate. It launches one new isolated
+zero-application-dependency Core controller, checks real package ownership,
+performs upgrade, failed-candidate rollback, downgrade and a second upgrade,
+and preserves the same synthetic durable effect counter. --prepare-product
+also qualifies and prepares the complete identical FG under both FRs without
+activating connectors, real providers or services. Its evidence is independent
+of business tests and production adoption; the installed selector is untouched.
+
+### Complete distribution and installer trust
+
+Standard npm/source preparation uses a new copied CPython build/sidecar base,
+a disposable pip tool environment, hash-required empty-target Functions install,
+and the canonical role builder. Nothing is installed in an existing Core/FR.
+Sidecar preparation precedes role sealing and cannot create caches in a running
+or sealed Core base. The installer catalogue selects the management FR; initial
+Core launch accepts only the paired, qualified Core interpreter. An Agent's
+management-Python environment variable is not Core selection authority.
+
+Portable carries separate independently pinned runtime/core and runtime/functions
+trees. The public relative capsule binds observed CR/FR IDs, full file closures,
+the complete FG, public committed-source evidence and independent sidecar
+closures. It contains no build-machine interpreter or receipt paths. The
+installer verifies the complete existing SHA256SUMS coverage, copies atomically,
+preserves data permissions and data lineage, protects program/runtime/selector
+trust roots, then re-observes final paths before success. Generated absolute
+qualification records live outside both immutable interpreters. A failure
+restores the previous complete installation; relocation never rewrites sealed
+environment bytes to make an old receipt appear valid.
+
+A Git checkout still requires its exact clean committed source. A Git-less
+package requires a privately bound FR plus the fixed installer-owned
+hashi-function-publication.json beside that FR. Every requested source/asset
+must match its published bytes and executable mode. A package-local self-asserted
+FUNCTION_SOURCE.json alone grants no runtime authority. The tool write-denial
+policy covers both publication records and the installation selector. No
+fallback to a package record is allowed for a dirty or broken Git checkout.
+Publication stays outside the interpreter seal so FG and FR remain independent.
+
+Every process launched from a sealed FR, including the bundled Remote sidecar,
+per-invocation MCP tool server and generated native Python hooks,
+must disable runtime bytecode writes with the interpreter's `-B` contract (or
+an equivalent qualified launcher guarantee). Python caches belong to disposable
+build work before sealing; a live process must not add `__pycache__` or `.pyc`
+files to the immutable FR closure. Runtime verification remains strict.
+
+Enterprise images build through scripts/build_enterprise_image.py: only a clean
+committed public export enters the context. Standard and optional Functions
+packages receive an exact platform wheel hash lock. Sidecars are prepared with
+a disposable build interpreter before the CR/FR copies are sealed. Main uses
+the absolute Core -I -B command, management/health uses FR, and installed source
+and runtime trees are read-only. The image workflow probes both actual roles
+with networking disabled; a successful source check is not a production canary.
+
+## Core v4 coupled baseline
+
+The remaining sections describe the installed v4 coupling and its historical
+acceptance. Their same-interpreter/full-fingerprint and Core-dependency-lock
+statements do not override the role-qualified v5 candidate above. Historical
+restart permissions below grant no authority for the current migration.
+
+### Decision
 
 HASHI Core owns one mandatory runtime. Functional code runs in replaceable,
 shared Function and per-Agent Worker processes supervised by that Core. Functional code may use the
@@ -44,7 +192,7 @@ Source compatibility covers the 3.12 minor line. A deployed Core starts only
 on the approved patch and exact standard dependency lock. Changing even the
 patch version changes the runtime fingerprint and is a planned Core migration.
 
-## Non-negotiable invariant
+### Non-negotiable invariant
 
 > A Function generation can either become READY and replace the selected
 > Worker, or be discarded. It must never modify the running Core or the active
@@ -66,7 +214,7 @@ A Core process can still fail because of an operating-system failure, hardware
 failure, or a defect in Core itself. That is a Core incident, not a Function
 reboot recovery mechanism.
 
-## Runtime identity
+### Runtime identity
 
 Before importing functional code, Core records an immutable fingerprint:
 
@@ -114,9 +262,9 @@ therefore installs the hash-locked `tzdata` package on Windows only, so
 timezone-sensitive Scheduler and Wiki evidence uses the same named zones as
 Linux/WSL without embedding a fixed-offset fallback in Core.
 
-## Ownership boundary
+### Ownership boundary
 
-### Stable Core and replaceable Functions
+#### Stable Core and replaceable Functions
 
 Core retains runtime enforcement, its OS instance lock, generic process lifetime,
 verified immutable artifact loading and versioned JSON transport. It does not
@@ -129,7 +277,7 @@ The import boundary is checked including lazy dependencies. Changing a model,
 UI renderer or provider policy cannot require Core protection to be bypassed.
 The full process contract and handoff limits are in the Minimal Core decision.
 
-## Worker protocol
+### Worker protocol
 
 Core/shared-Functions and shared-Functions/Agent-Worker links use private duplex
 byte pipes carrying UTF-8 JSON envelopes:
@@ -166,7 +314,7 @@ converted to JSON and delivered through the stable handle. While a route gate
 is closed, the shared poller holds the update until commit or rollback; a
 candidate cannot fetch, acknowledge or process it early.
 
-## Transactional `/reboot`
+### Transactional `/reboot`
 
 For `min`, a number, `same`, or an explicit group, the shared Function supervisor performs:
 
@@ -209,7 +357,7 @@ an independent Worker and stable handle. Different Agents may intentionally
 run different generation IDs during a staged rollout; health output reports
 that aggregate state as `mixed`.
 
-## Failure and recovery rules
+### Failure and recovery rules
 
 - Candidate import, contract, construction or readiness failure: discard it;
   reopen selected routes to their unchanged old Workers.
@@ -230,7 +378,7 @@ that aggregate state as `mixed`.
 No failure silently expands a target set, changes another Agent, or turns an
 unknown state into a claimed rollback.
 
-## Core migration
+### Core migration
 
 These require a new Core rather than `/reboot`:
 
@@ -239,12 +387,13 @@ These require a new Core rather than `/reboot`:
 - any protected Core source;
 - Core API, Function API, Worker protocol or generation schema.
 
-On HASHI3, one controlled cold restart is permitted to load this architecture.
-Production should use an external supervisor and a blue/green handoff when
-zero downtime is required. A Core migration is planned deployment work, never
-the fallback for a failed Function generation.
+The historical HASHI3 v4 adoption allowed one controlled cold restart for that
+specific migration. It grants no restart or cutover permission for v5 or any
+current instance. Production adoption requires separate operator approval and a
+complete verified rollback pair. A Core migration is planned deployment work,
+never the fallback for a failed Function generation.
 
-## Test contract
+### Test contract
 
 Tests protect outcomes rather than the retired implementation. Required
 assertions include:
@@ -277,7 +426,7 @@ Tests of `importlib.reload()` order, partial module replacement, rebuilt Core
 Managers, warm-service recreation or legacy mixed-class repair are obsolete
 and must be removed with those APIs.
 
-## Promotion gate
+### Promotion gate
 
 `scripts/check_function_worker_runtime.py` may be given a validated live
 service-endpoint snapshot with `--service-endpoints` when a configured CLI

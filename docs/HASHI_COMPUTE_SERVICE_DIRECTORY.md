@@ -284,3 +284,14 @@ catalogue. Configure the instance `default_profile` for future owner/Agent
 pairs; saved profile choices remain independent and must be deliberately
 migrated when changing existing Agents. Input camera frames retain existing
 call/session and camera-off fences.
+
+
+## FYI v1 migration clarifications
+
+The following operational constraints were relocated intact from the prior bootstrap during the FYI v2 migration. They remain within this document's existing ownership and authority; they are not a new state owner or proof of deployment. Future behavior changes update their owning contract and tests, not the bootstrap or this migration checklist.
+
+### FYI v1 019 Compute discovery and saved speech choices
+
+- Compute：PAO[目录](HASHI_COMPUTE_SERVICE_DIRECTORY.md)精确选择local/LAN服务，转写设置逐请求重读，失败不静默跨网或回退本地。
+  TTS `default_voice`仅补未保存选择，不启用语音、不改已存策略；服务输入上限约束实际请求。Call独立profile共享[TTS目录](HASHI_VOICE_TTS_CATALOG.md)。
+  属Functions/实例配置；Core、源地址和运行采用独立验收。

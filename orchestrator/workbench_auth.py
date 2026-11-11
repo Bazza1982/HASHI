@@ -1,10 +1,12 @@
-"""FC loopback credential bootstrap for an already authenticated Remote bridge."""
+"""Private instance credentials prepared during personal Functions startup."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
 import subprocess
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -12,10 +14,22 @@ from orchestrator.config_json import ConfigDocument, write_config_json
 
 
 _WINDOWS_SID = re.compile(r"S-1(?:-\d+)+", re.IGNORECASE)
+_WINDOWS_REMOTE_QUERY_TIMEOUT = 30
+_WINDOWS_QUERY_PHASE = re.compile(r"HASHI_REMOTE_QUERY_PHASE:([a-z_]{1,40}):(\d{1,12})")
+
+
+def _windows_query_phase(stderr: str | bytes | None) -> tuple[str, int]:
+    text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
+    phase, elapsed_ms = "powershell_startup", 0
+    for line in text.splitlines():
+        match = _WINDOWS_QUERY_PHASE.fullmatch(line.strip())
+        if match:
+            phase, elapsed_ms = match.group(1), int(match.group(2))
+    return phase, elapsed_ms
 
 
 def _windows_remote_runtime_sids(root: Path) -> tuple[str, ...]:
-    """Resolve the registered instance Remote principal without guessing identity."""
+    """Resolve the exact registered Remote task without machine-wide enumeration."""
 
     if os.name != "nt":
         return ()
@@ -31,49 +45,90 @@ def _windows_remote_runtime_sids(root: Path) -> tuple[str, ...]:
     )
     script = r"""
 $ErrorActionPreference = 'Stop'
-$tasks = @(
-    Get-ScheduledTask -ErrorAction Stop |
-        Where-Object { $_.TaskName -eq $env:HASHI_REMOTE_PRINCIPAL_QUERY_TASK }
-)
-if ($tasks.Count -eq 0) {
+$queryClock = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-QueryPhase([string]$Phase) {
+    [Console]::Error.WriteLine(
+        'HASHI_REMOTE_QUERY_PHASE:' + $Phase + ':' + $queryClock.ElapsedMilliseconds
+    )
+}
+Write-QueryPhase 'script_ready'
+# The installer registers one instance task in the scheduler root. Accessing
+# that exact task through COM avoids loading ScheduledTasks/CIM and enumerating
+# every task during cold startup.
+$service = New-Object -ComObject 'Schedule.Service'
+Write-QueryPhase 'service_created'
+$service.Connect()
+Write-QueryPhase 'connected'
+$folder = $service.GetFolder('\')
+Write-QueryPhase 'folder_opened'
+try {
+    $task = $folder.GetTask($env:HASHI_REMOTE_PRINCIPAL_QUERY_TASK)
+} catch {
+    $failure = $_.Exception
+    while ($failure.InnerException) { $failure = $failure.InnerException }
+    # Only ERROR_FILE_NOT_FOUND means the exact task is not installed. Access,
+    # scheduler, and other failures must abort before publishing credentials.
+    if ($failure.HResult -ne -2147024894) { throw }
+    Write-QueryPhase 'task_missing'
     [Console]::Out.WriteLine('ABSENT')
     exit 0
 }
-if ($tasks.Count -ne 1) {
-    throw 'Remote task identity is ambiguous'
+Write-QueryPhase 'task_found'
+if ($task.Path -ne ('\' + $env:HASHI_REMOTE_PRINCIPAL_QUERY_TASK)) {
+    throw 'Remote task registration path does not match this instance'
 }
-$principal = [string]$tasks[0].Principal.UserId
+$principal = [string]$task.Definition.Principal.UserId
 if ([string]::IsNullOrWhiteSpace($principal)) {
     throw 'Remote task has no principal'
 }
+Write-QueryPhase 'principal_read'
 try {
-    $account = New-Object System.Security.Principal.NTAccount($principal)
+    $sid = [System.Security.Principal.SecurityIdentifier]::new($principal).Value
+} catch {
+    $account = [System.Security.Principal.NTAccount]::new($principal)
     $sid = [string]$account.Translate(
         [System.Security.Principal.SecurityIdentifier]
     ).Value
-} catch {
-    $sid = [string](New-Object System.Security.Principal.SecurityIdentifier($principal)).Value
 }
+Write-QueryPhase 'sid_resolved'
 [Console]::Out.WriteLine("SID:$sid")
 """
     environment = dict(os.environ)
     environment["HASHI_REMOTE_PRINCIPAL_QUERY_TASK"] = task_name
-    result = subprocess.run(
-        [
-            str(powershell),
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env=environment,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                str(powershell),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_WINDOWS_REMOTE_QUERY_TIMEOUT,
+            env=environment,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as error:
+        phase, elapsed_ms = _windows_query_phase(error.stderr)
+        raise RuntimeError(
+            "Timed out resolving the registered Remote runtime principal "
+            f"({_WINDOWS_REMOTE_QUERY_TIMEOUT} seconds; stage={phase}, "
+            f"script_elapsed_ms={elapsed_ms})"
+        ) from error
+    elapsed = time.monotonic() - started
+    if result.returncode == 0 and elapsed >= 10:
+        _phase, script_elapsed_ms = _windows_query_phase(result.stderr)
+        script_elapsed = script_elapsed_ms / 1000
+        logging.getLogger(__name__).warning(
+            "Windows Remote principal query took %.3fs "
+            "(PowerShell startup/exit %.3fs, scheduler query %.3fs)",
+            elapsed, max(0, elapsed - script_elapsed), script_elapsed,
+        )
     output = result.stdout.strip()
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip().splitlines()
@@ -90,17 +145,28 @@ try {
     return (sid.upper(),)
 
 
+def resolve_remote_runtime_sids(root: Path) -> tuple[str, ...]:
+    """Return the registered Remote consumers for private config publication.
+
+    Credential writers must carry these principals onto atomic candidates;
+    otherwise a writer running under a different account can strand Remote.
+    Resolution failures deliberately propagate before publication.
+    """
+    return _windows_remote_runtime_sids(root)
+
+
 def ensure_local_api_credential(
     document: ConfigDocument,
     *,
     profile: str,
     remote_runtime_sids: Iterable[str] | None = None,
 ) -> ConfigDocument:
-    """Retain existing credentials; publish a missing personal loopback key once.
+    """Prepare missing personal instance keys without replacing existing secrets.
 
-    Remote already reads this canonical key before each loopback request.  A
-    private, revision-checked publication lets that existing hop authenticate
-    without accepting anonymous question reads or exposing the network key.
+    The local API and authenticated Remote lifecycle hop are installed together.
+    Publish both keys privately in one revision-checked transaction so a normal
+    installation never needs a separate feature-enablement step. Enterprise
+    credentials remain owned by the configured authentication provider.
     """
     if profile != "personal":
         return document
@@ -108,17 +174,21 @@ def ensure_local_api_credential(
     if current is not None and not isinstance(current, str):
         raise ValueError("workbench_admin_token must be a string")
     network = document.get("hashi_remote_shared_token")
-    if not ((isinstance(network, str) and network.strip())
-            or os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()):
-        return document
+    if network is not None and not isinstance(network, str):
+        raise ValueError("hashi_remote_shared_token must be a string")
+    needs_network = not (
+        (isinstance(network, str) and network.strip())
+        or os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()
+    )
+    needs_local = not (isinstance(current, str) and current.strip())
     if isinstance(remote_runtime_sids, (str, bytes)):
         raise TypeError("remote_runtime_sids must be an iterable of SIDs")
     runtime_sids = (
         tuple(remote_runtime_sids)
         if remote_runtime_sids is not None
-        else _windows_remote_runtime_sids(document.source.parent)
+        else resolve_remote_runtime_sids(document.source.parent)
     )
-    if isinstance(current, str) and current.strip():
+    if not needs_local and not needs_network:
         if runtime_sids:
             from tools.private_files import protect_private_file
 
@@ -128,10 +198,77 @@ def ensure_local_api_credential(
             )
         return document
     updated = document.copy()
-    updated["workbench_admin_token"] = secrets.token_urlsafe(48)
+    if needs_network:
+        updated["hashi_remote_shared_token"] = secrets.token_urlsafe(48)
+    if needs_local:
+        updated["workbench_admin_token"] = secrets.token_urlsafe(48)
     updated.revision = write_config_json(
         updated.source,
         updated,
         private_full_control_sids=runtime_sids,
     )
     return updated
+
+
+def issue_scheduler_tool_token(secret, *, instance_id, agent_id, request_id, audience, tools,
+                               run_id=None, fencing_token=None, now=None):
+    """Delegate Scheduler calls to one signed Run attempt, never API administration."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not all(isinstance(value, str) and value.strip()
+               for value in (secret, instance_id, agent_id, request_id, audience)):
+        raise ValueError("Scheduler tool credential requires a complete Run identity")
+    claims = {"purpose": "hashi-scheduler-tool-v1", "instance": instance_id,
+              "agent": agent_id, "request": request_id, "audience": audience,
+              "tools": sorted(set(tools)), "expires": int(time.time() if now is None else now) + 3600}
+    if run_id is not None or fencing_token is not None:
+        if not isinstance(run_id, str) or not run_id.strip() or type(fencing_token) is not int or fencing_token <= 0:
+            raise ValueError("Scheduler tool credential requires a valid Run attempt")
+        claims.update(run_id=run_id, fencing_token=fencing_token)
+    body = base64.urlsafe_b64encode(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + signature
+
+
+def scheduler_tool_token_claims(secret, token, *, instance_id, agent_id, audience, tool, now=None):
+    """Return authenticated claims only; PAO must separately fence the live effect."""
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    if not secret or not isinstance(token, str) or len(token) > 8192:
+        return None
+    try:
+        body, signature = token.split(".")
+        expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if not isinstance(claims, dict):
+            return None
+        current = time.time() if now is None else now
+        valid = (
+            claims.get("purpose") == "hashi-scheduler-tool-v1"
+            and claims.get("instance") == instance_id
+            and claims.get("agent") == agent_id
+            and claims.get("audience") == audience
+            and isinstance(claims.get("request"), str) and claims["request"]
+            and isinstance(claims.get("tools"), list) and tool in claims["tools"]
+            and type(claims.get("expires")) is int
+            and current < claims["expires"] <= current + 3600
+        )
+        return claims if valid else None
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return None
+
+
+def verify_scheduler_tool_token(secret, token, **bindings):
+    """Compatibility predicate; destructive callers must also validate PAO liveness."""
+    return scheduler_tool_token_claims(secret, token, **bindings) is not None
+# HASHI-Fingerprint: hfp_639484c6271d473aa7a60c75fdeb69b3

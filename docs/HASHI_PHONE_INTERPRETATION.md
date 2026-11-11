@@ -1,7 +1,8 @@
-# Phone simultaneous interpretation
+# Simultaneous interpretation transport
 
-Status: experimental implementation, qualified in an isolated real-model canary.
-No live instance or external frontend installation has been switched by this work.
+Status: qualified transport; the independent product entry is specified by
+[/translate](HASHI_TRANSLATE.md). Earlier Phone-provider canaries are transport
+evidence, not qualification of the new entry or an external frontend installation.
 
 ## Ownership
 
@@ -12,7 +13,7 @@ Protected Core and the browser's microphone/playback implementation are unchange
 
 ## Selection and behavior
 
-The existing Phone provider/model menus expose HY-SimulMT and two directions:
+The independent Translate entry exposes HY-SimulMT and two directions:
 `hy-simulmt-en-zh` and `hy-simulmt-zh-en`. Selecting the language also changes
 the direction; unsupported languages and conversational speaking styles are
 rejected. The first implementation has one fixed CPU voice per target language.
@@ -39,7 +40,7 @@ This does not claim to implement GPT-Live's conversational or delegation model.
 
 The configured Compute service advertises `hashi.phone.webrtc` and
 `hashi.phone.sideband`. The adapter resolves an exact configured
-node/service/model through the existing Compute directory. It freezes the
+node/service/model through the existing [Compute service directory](HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness). It freezes the
 resolved sideband endpoint for that provider session; browser fields cannot
 choose a provider URL. Credential headers come from the canonical Compute client.
 
@@ -59,9 +60,10 @@ another configuration writer. The provider is unavailable without this selection
 
 The node uses the deployed Compute origin and the formal discovery path
 `/v1/translation/manifest`; health path is `/health`. It can be local or LAN.
-No cloud fallback is selected. Choose `/phone provider hy-simulmt`, then the
-direction with `/phone model hy-simulmt-en-zh` or
-`/phone model hy-simulmt-zh-en`.
+No cloud fallback is selected. Choose the direction through
+`/translate direction en-zh` or `/translate direction zh-en` and connect through
+the external frontend's simultaneous interpretation control. Conversational
+Phone no longer offers interpretation in its provider menu.
 
 Activation uses the existing qualified Functions lifecycle at its actual shared
 owner scope. A committed source generation is required. Neither a source edit
@@ -85,3 +87,7 @@ These tests use synthetic microphone input. Physical microphone/speaker use,
 multiple simultaneous calls, a 30-minute call and speaker cloning are outside
 this qualification. Exact receipts, waveforms, source hashes and deployment notes
 belong to the instance evidence bundle, not this source repository.
+
+## FYI catalogue migration
+
+- Phone [同传](HASHI_PHONE_INTERPRETATION.md)：模型锁定方向；无Agent上下文/委托；隔离实测≠在线采用。

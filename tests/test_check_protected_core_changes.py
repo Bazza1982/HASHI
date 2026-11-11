@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+import pytest
 
 from scripts import check_protected_core_changes as checker
 
@@ -94,3 +97,47 @@ def test_validate_manifest_fails_for_missing_path(monkeypatch, tmp_path, capsys)
 
     assert result == 3
     assert "manifest: invalid" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("path_type", [PurePosixPath, PureWindowsPath])
+@pytest.mark.parametrize("field", ["standard-lock", "core-host-lock"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "../outside.lock",
+        r"..\outside.lock",
+        r"nested\..\outside.lock",
+        r"nested/..\outside.lock",
+        r"nested\../outside.lock",
+        r"nested\deeper/..\..\outside.lock",
+    ],
+)
+def test_lock_parent_traversal_is_rejected_under_both_path_flavours(
+    monkeypatch, path_type, field, value
+):
+    # TOML decoding precedes validation, including escaped Windows separators.
+    source = "[tool.hashi.runtime]\n" + field + " = " + json.dumps(value) + "\n"
+    monkeypatch.setattr(checker, "Path", path_type)
+    with pytest.raises(ValueError, match="inside the repository"):
+        checker._runtime_declarations(source)
+
+
+@pytest.mark.parametrize("path_type", [PurePosixPath, PureWindowsPath])
+@pytest.mark.parametrize("field", ["standard-lock", "core-host-lock"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "profile.lock",
+        "constraints/nested/profile.lock",
+        r"constraints\nested\profile.lock",
+        r"constraints\nested/profile.lock",
+        "constraints/release..lock",
+    ],
+)
+def test_valid_relative_locks_are_accepted_under_both_path_flavours(
+    monkeypatch, path_type, field, value
+):
+    source = "[tool.hashi.runtime]\n" + field + " = " + json.dumps(value) + "\n"
+    monkeypatch.setattr(checker, "Path", path_type)
+    checker._runtime_declarations(source)
+# HASHI-Fingerprint: hfp_df6e1b14e1724365a4f5dacb3a867d52

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import asyncio
 from contextvars import ContextVar, Token
 import os
@@ -80,6 +81,30 @@ def current_hashi_mcp_invocation(adapter: Any) -> HashiMcpInvocation | None:
     return _descriptor_context(adapter).get()
 
 
+def _qualified_mcp_parent(adapter, registry, audit_context):
+    from orchestrator.runtime_contract import (
+        FUNCTIONS_ROLE, RuntimeContractError, current_process_runtime,
+        qualified_runtime_from_reference, compare_runtime_fingerprints,
+    )
+    admitted = current_process_runtime()
+    if admitted is None:
+        audit = audit_context if audit_context is not None else registry.audit_context
+        facade = getattr((audit or {}).get("_runtime"), "orchestrator", None)
+        if type(facade).__module__ == "orchestrator.function_worker_host":
+            raise RuntimeContractError("runtime_protection_context_unavailable: private Functions receipt missing")
+        return None  # Existing standalone developer/legacy embedding, not an installed Worker.
+    try:
+        current = qualified_runtime_from_reference(
+            {"path":str(admitted.manifest_path), "digest":admitted.manifest_digest},
+            code_root=Path(adapter.global_config.project_root).resolve(), role=FUNCTIONS_ROLE)
+        compare_runtime_fingerprints(admitted.fingerprint, current.fingerprint)
+    except RuntimeContractError as exc:
+        raise RuntimeContractError(
+            "runtime_integrity_failed: current Functions installation needs controlled recovery"
+        ) from exc
+    return current
+
+
 def prepare_hashi_mcp(
     adapter: Any,
     *,
@@ -90,6 +115,7 @@ def prepare_hashi_mcp(
     if registry is None or not registry.allowed_tool_names():
         adapter._hashi_mcp_enabled = False
         return None
+    qualified_parent = _qualified_mcp_parent(adapter, registry, audit_context)
     active = getattr(adapter, "_active_hashi_mcp_invocations", None)
     if not isinstance(active, dict):
         active = {}
@@ -103,25 +129,29 @@ def prepare_hashi_mcp(
         audit_context if audit_context is not None else registry.audit_context or {}
     )
     request_audit.pop("browser_gateway_proxy", None)
+    request_audit.pop("tool_gateway_proxy", None)
     runtime = request_audit.get("_runtime")
     facade = getattr(runtime, "orchestrator", None)
+    from orchestrator.runtime_contract import current_process_runtime
+    owner_required = bool(getattr(facade, "is_function_worker_facade", False)
+                          or current_process_runtime() is not None)
     proxy = None
     proxy_descriptor = None
-    if (
-        any(name.startswith("browser_") for name in registry.allowed_tool_names())
-        and bool(getattr(facade, "is_function_worker_facade", False))
-        and callable(getattr(facade, "invoke_capability", None))
-    ):
-        from tools.browser_gateway_proxy import BrowserGatewayProxy
-
-        proxy = getattr(adapter, "_browser_gateway_proxy", None)
-        if proxy is None:
-            proxy = BrowserGatewayProxy(registry, asyncio.get_running_loop())
-            adapter._browser_gateway_proxy = proxy
-        proxy_descriptor = proxy.issue(request_audit)
-        request_audit["browser_gateway_proxy"] = proxy_descriptor
-    else:
-        request_audit.pop("browser_gateway_proxy", None)
+    if owner_required:
+        request_audit["tool_gateway_required"] = True
+        # Adapter initialization prepares a catalogue without a PAO Run. Only
+        # the refreshed actual invocation receives an executable capability.
+        if request_audit.get("hashi_run_id"):
+            from tools.browser_gateway_proxy import BrowserGatewayProxy
+            proxy = getattr(adapter, "_browser_gateway_proxy", None)
+            if proxy is not None and proxy.registry is not registry:
+                proxy.close()
+                proxy = None
+            if proxy is None:
+                proxy = BrowserGatewayProxy(registry, asyncio.get_running_loop())
+                adapter._browser_gateway_proxy = proxy
+            proxy_descriptor = proxy.issue(request_audit, all_tools=True)
+            request_audit["tool_gateway_proxy"] = proxy_descriptor
     descriptor: HashiMcpInvocation | None = None
     try:
         workbench_url = live_workbench_api_base_url(
@@ -145,10 +175,21 @@ def prepare_hashi_mcp(
                 "name": SERVER_NAME,
                 "command": sys.executable,
                 "args": [
+                    "-B",
                     "-m",
                     "tools.gateway.mcp_stdio",
                     "--context",
                     str(context_path),
+                    *(
+                        ["--owner-proxy-required", "--context-digest",
+                         hashlib.sha256(context_path.read_bytes()).hexdigest()]
+                        if owner_required else []
+                    ),
+                    *(
+                        ["--runtime-manifest", str(qualified_parent.manifest_path),
+                         "--runtime-manifest-digest", qualified_parent.manifest_digest]
+                        if qualified_parent is not None else []
+                    ),
                 ],
                 "cwd": str(project_root),
                 "context_path": str(context_path),
@@ -226,3 +267,4 @@ __all__ = [
     "prepare_hashi_mcp",
     "write_claude_mcp_config",
 ]
+# HASHI-Fingerprint: hfp_0313e7726fc74118817eb4bf1ca8c245

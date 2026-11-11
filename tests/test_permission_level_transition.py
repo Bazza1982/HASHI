@@ -74,7 +74,7 @@ async def test_level_change_reviews_then_quiesces_before_cas_and_never_writes_af
 
     transition = RemoteLevelTransition(
         Loopback(), run_service=service.runs, generation="service-generation", levels=("L1",),
-        policies=SimpleNamespace(preview=lambda *args: {"baseline_scopes": [], "requestable_scopes": [],
+        policies=SimpleNamespace(preview=lambda *args, **kwargs: {"baseline_scopes": [], "requestable_scopes": [],
                                                        "installation_revision": "base-1", "native_tools": []}),
     )
     manager = PermissionManagement(
