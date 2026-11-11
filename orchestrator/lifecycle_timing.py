@@ -103,6 +103,8 @@ def _process_birth():
         from ctypes import wintypes
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel.GetProcessTimes.restype = wintypes.BOOL
         created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
         if kernel.GetProcessTimes(kernel.GetCurrentProcess(), ctypes.byref(created),
                                   ctypes.byref(exited), ctypes.byref(system), ctypes.byref(user)):
@@ -125,7 +127,11 @@ def configure(home):
         except (OSError, ValueError, TypeError):
             pass
     if _monitor_enabled:
-        _install_observers()
+        try:
+            _install_observers()
+        except Exception as exc:
+            _monitor_enabled = False
+            emit("diagnostic.observer_failed", exception_type=type(exc).__name__)
 
 def _call_key(code):
     try:
@@ -174,6 +180,9 @@ def _install_observers():
         monitoring.register_callback(_monitor_id, monitoring.events.PY_START, _started)
         monitoring.register_callback(_monitor_id, monitoring.events.PY_RETURN, _ended)
         monitoring.register_callback(_monitor_id, monitoring.events.PY_UNWIND, _ended)
+        # CPython permits PY_UNWIND globally, not in the local event mask.
+        # The callback records only code objects selected below.
+        monitoring.set_events(_monitor_id, monitoring.events.PY_UNWIND)
     for module_name, names in _OBSERVERS.items():
         module = sys.modules.get(module_name)
         if module is None:
@@ -182,12 +191,12 @@ def _install_observers():
             value = module
             for part in name.split("."):
                 value = getattr(value, part, None)
-            code = getattr(value, "__code__", None)
+            code = getattr(inspect.unwrap(value), "__code__", None)
             if code is not None and code not in _observed:
                 _observed[code] = f"{module_name}.{name}"
                 monitoring.set_local_events(
                     _monitor_id, code,
-                    monitoring.events.PY_START | monitoring.events.PY_RETURN | monitoring.events.PY_UNWIND,
+                    monitoring.events.PY_START | monitoring.events.PY_RETURN,
                 )
 
 @contextlib.contextmanager
