@@ -35,10 +35,19 @@ param(
     [switch]$Force,
     [switch]$Resume,
     [switch]$ApiGateway,
-    [string]$BridgeHome
+    [string]$BridgeHome,
+    [string]$RuntimeDataRoot
 )
 
 $ErrorActionPreference = "Stop"
+if ($RuntimeDataRoot) {
+    if (-not [IO.Path]::IsPathRooted($RuntimeDataRoot)) {
+        throw "RuntimeDataRoot must be an absolute installation catalogue path."
+    }
+    # Task Scheduler does not inherit the registering Remote's environment.
+    # This retains its catalogue; role and integrity qualification still apply.
+    $env:HASHI_DATA_ROOT = [IO.Path]::GetFullPath($RuntimeDataRoot)
+}
 
 # Constants
 $ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
