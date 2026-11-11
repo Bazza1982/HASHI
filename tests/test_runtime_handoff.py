@@ -413,11 +413,20 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     host = RuntimeAppHost(None, {})
     host.app = app
     host.task = asyncio.create_task(asyncio.Event().wait())
+    activated = asyncio.Event()
+    original_activate = host._activate_connectors
+    async def observe_activation():
+        try:
+            return await original_activate()
+        finally:
+            activated.set()
+    host._activate_connectors = observe_activation
     try:
         result = await host.commit()
         assert result["committed"] and result["degraded"]
         assert app._shared_replacement_candidate is False
         assert app._shared_replacement_continuity is True
+        await asyncio.wait_for(activated.wait(), timeout=1)
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
         assert flaky.is_running and flaky.calls == 2
