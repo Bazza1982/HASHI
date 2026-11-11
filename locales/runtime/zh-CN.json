@@ -1483,11 +1483,11 @@
     "wrapper.status_effect": "在包装模式中，模型更改立即生效；角色与风格槽位的更改会持久保存。",
     "wrapper.slots_heading": "角色 / 风格槽位",
     "wrapper.status_action": "请选择下方模型页面，或使用 <code>/wrapper set &lt;slot&gt; &lt;text&gt;</code>。",
-    "advanced.require_wrapper": "`/{command}` 仅适用于**包装模式**。\n请先使用 `/mode wrapper`。",
+    "advanced.require_wrapper": "`/{command}` 属于已退役的包装模式。\n请使用 `/mode` 查看当前支持的固定与 Flex 模式。",
     "advanced.require_managed": "`/{command}` 仅适用于**包装模式**或**审计模式**。\n请先使用 `/mode wrapper` 或 `/mode audit`。",
     "advanced.require_audit": "`/audit` 仅适用于**审计模式**。\n请先使用 `/mode audit`。",
     "advanced.require_audit_controls": "审计控件需要先启用 /mode audit。",
-    "advanced.require_wrapper_controls": "包装控件需要先启用 /mode wrapper。",
+    "advanced.require_wrapper_controls": "包装控件已退役。请使用 /mode 查看当前支持的固定与 Flex 模式。",
     "advanced.backend_not_allowed": "当前代理不允许使用此后端：{backend}\n允许的后端：{allowed}",
     "advanced.unknown_model": "{backend} 没有注册模型：{model}",
     "advanced.core_already_active": "该核心后端已在使用。",
@@ -3172,6 +3172,8 @@
     "safety.human_scope_note": "以下选项会延长授权范围或时间，请核对后再选择。"
   },
   "commands": {
+    "phone": "语音通话设置",
+    "call": "视频通话设置",
     "standby": "查看待命状态与准备情况",
     "safety": "查看权限状态",
     "askme": "控制提问卡片",

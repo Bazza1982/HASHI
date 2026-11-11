@@ -7,6 +7,17 @@
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
+### 2026-11-12 Fresh context command completion
+
+After `/fresh` returns a confirmed new context generation from the Session
+store, only that local command adapter's presentation binding advances to the
+returned Session/generation before activation cleanup and acknowledgement.
+The typed invocation retains its original identity. Its acknowledgement is
+published through the ordinary outbox in the new generation. Other in-flight
+updates keep their original generation fence and their late output is rejected.
+A failed or uncertain store commit never guesses a new generation or retries
+the reset. This is a Functions-side completion fix, not runtime adoption proof.
+
 ### 2026-11-03 Nonblocking history reads and bounded search candidates
 
 PAO remains the sole history owner. Session list/get/messages/run/event and

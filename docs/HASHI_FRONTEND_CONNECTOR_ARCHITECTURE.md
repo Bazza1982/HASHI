@@ -16,6 +16,23 @@ configured external destination or physical device has passed live acceptance;
 the authoritative rollout evidence and remaining gates are tracked in
 [the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
+### Quoted Workbench commands (2026-11-12)
+
+The existing command-UI transport accepts a bounded `reply_reference` only
+for an open operation. It is untrusted quoted content, not an actor, route or
+Session selector. The Worker validates its shape independently; authentication,
+current selected Session/generation and original invocation identity remain
+mandatory. The reference remains part of the operation fingerprint so an
+identical retry replays only its saved result and a changed quote cannot reuse
+the same request identity. No new endpoint or Core RPC is introduced.
+
+Command recognition uses the new reply body, never quoted source text. The PAO
+`/delay` owner serializes the existing `HASHI_QUOTE_V1` envelope around the
+scheduled message after validating minutes/message through its normal parser.
+It preserves the original schedule, frozen route and idempotency policy. Other
+control commands keep their existing meaning. Older Functions reject this
+optional field; the paired Workbench change does not fall back to a model Run.
+
 ## 1. Definition
 
 A registered ingress transport retains its identity when PAO selects an Agent
