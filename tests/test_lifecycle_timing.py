@@ -10,6 +10,8 @@ from orchestrator import lifecycle_timing as timing
 async def test_concurrent_lifecycle_intervals_preserve_identity_and_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(timing, "_home", tmp_path)
     monkeypatch.setattr(timing, "_monitor_enabled", False)
+    clock = [1_000_000]
+    monkeypatch.setattr(timing.time, "perf_counter_ns", lambda: clock[0])
 
     class Host:
         def __init__(self, agent):
@@ -18,7 +20,8 @@ async def test_concurrent_lifecycle_intervals_preserve_identity_and_failures(tmp
 
         @timing.timed("worker.prepare")
         async def prepare(self, fail=False, secret="do-not-record"):
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
+            clock[0] += 20_000_000
             if fail:
                 raise ValueError(secret)
             return self.agent_name
@@ -30,7 +33,7 @@ async def test_concurrent_lifecycle_intervals_preserve_identity_and_failures(tmp
     ends = [r for r in rows if r["event"] == "end"]
     assert {r["agent"]: r["outcome"] for r in ends} == {"a": "ok", "b": "error"}
     assert len({r["span_id"] for r in ends}) == 2
-    assert all(r["duration_ms"] >= 8 for r in ends)
+    assert {r["agent"]: r["duration_ms"] for r in ends} == {"a": 20, "b": 40}
     assert all(r["generation_id"] == "generation-1" for r in ends)
     assert "do-not-record" not in text
 
