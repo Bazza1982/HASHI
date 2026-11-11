@@ -1376,7 +1376,8 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     new_kernel._shared_replacement_continuity = True
     new_kernel.shared_generation_id = generation.manifest.generation_id
-    new_kernel.startup_status = {"ready": remote_available, "degraded": not remote_available,
+    new_kernel.startup_status = {"services_ready": True, "failed_agents": 0,
+                                 "ready": remote_available, "degraded": not remote_available,
                                  "remote": {"enabled": True, "available": remote_available}}
     new_kernel.function_release_adoption = {
         "status": "fallback",
@@ -1412,23 +1413,8 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
 
     record = successor.receipts.get(pending["id"])
     if not remote_available:
-        assert record["status"] not in {"succeeded", "unconfirmed", "failed"}
-        assert record["phase"] == "verifying"
-        assert record["reason"] == "shared_services_unready"
-        if not recover:
-            from orchestrator.reboot_manager import SHARED_REPLACEMENT_TIMEOUT_SECONDS
-            await successor.reconcile_shared_replacements(
-                now=pending["shared_replacement"]["requested_at"] + SHARED_REPLACEMENT_TIMEOUT_SECONDS + 1)
-            failed = successor.receipts.get(pending["id"])
-            assert failed["status"] == "unconfirmed"
-            assert failed["committed"] is True
-            assert failed["reason"] == "shared_services_unready"
-            return
-        # A connector retry can recover before the existing handoff deadline.
-        new_kernel.startup_status.update(ready=True, degraded=False)
-        new_kernel.startup_status["remote"]["available"] = True
-        await successor.reconcile_shared_replacements(now=pending["shared_replacement"]["requested_at"] + 2)
-        record = successor.receipts.get(pending["id"])
+        assert record["outcome"] == "succeeded_with_warning"
+        assert "connectors_unavailable" in record["warnings"]
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
     assert record["shared_replacement"]["adoption"] == new_kernel.function_release_adoption

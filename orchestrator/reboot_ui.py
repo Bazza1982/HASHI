@@ -166,6 +166,7 @@ def render_notice(
             "reboot.observation_unconfirmed", locale=language
         )
     warning_keys = {
+        "connectors_unavailable",
         "old_worker_exit_pending",
         "topology_publish_failed",
         "generation_state_publish_failed",
@@ -301,3 +302,4 @@ def render_menu_status(record, *, locale=None):
         ]
     )
     return "\n".join(lines)
+# HASHI-Fingerprint: hfp_206525d64e1b40b5ae12c6c86a5e772d

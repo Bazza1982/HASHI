@@ -2987,6 +2987,8 @@
     "reboot.warning.old_worker_exit_pending": "Cleanup warning: an old Worker is still exiting in the background; the new route is online.",
     "reboot.warning.topology_publish_failed": "Follow-up warning: the topology update was not published; the new Agent route remains online.",
     "reboot.warning.generation_state_publish_failed": "Follow-up warning: generation-state publication did not complete; the new Agent route remains online.",
+    "reboot.warning.connectors_unavailable": "External connections are still recovering. Local services are online; retries continue.",
+    "reboot.reason.shared_services_unready": "Local services or Workers did not pass readiness checks after the switch.",
     "reboot.warning.followup_incomplete": "Follow-up warning: a non-disruptive post-switch step did not complete.",
     "reboot.check.identity_mismatch": "Worker identity does not match",
     "reboot.check.generation_mismatch": "generation does not match",

@@ -261,6 +261,8 @@ def _qualified_generation_cache_path(bridge_home: Path) -> Path:
 def _read_qualified_generation_cache(
     bridge_home: Path,
     code_root: Path,
+    *,
+    verify_artifact_bytes: bool = True,
 ) -> tuple[VerifiedFunctionGeneration, Path] | None:
     cache_path = _qualified_generation_cache_path(bridge_home)
     if not cache_path.is_file():
@@ -287,7 +289,8 @@ def _read_qualified_generation_cache(
     # The artifact is content-addressed.  Its stored commit records when those
     # exact bytes were first materialized; a later equivalent qualification
     # can legitimately bind the same bytes to a newer checkout commit.
-    verify_generation_artifact(artifact, generation)
+    if verify_artifact_bytes:
+        verify_generation_artifact(artifact, generation)
     return generation, artifact
 
 
@@ -330,11 +333,14 @@ def load_qualified_generation_cache(
     """Load a prior probe receipt only when runtime and every byte still match."""
 
     try:
-        cached = _read_qualified_generation_cache(bridge_home, code_root)
+        cached = _read_qualified_generation_cache(bridge_home, code_root, verify_artifact_bytes=False)
         if cached is None:
             return None
         generation, artifact = cached
         refreshed = generation.refresh_qualification_seal(expected_runtime)
+        # A changed checkout cannot reuse this artifact. Reject it before reading
+        # every old artifact byte; fallback loading still verifies it independently.
+        verify_generation_artifact(artifact, refreshed)
         if refreshed is not generation:
             try:
                 persist_qualified_generation_cache(

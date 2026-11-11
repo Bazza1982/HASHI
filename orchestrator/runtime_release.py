@@ -21,7 +21,7 @@ from orchestrator.function_worker_supervisor import (
 )
 from orchestrator.runtime_contract import RuntimeFingerprint
 from orchestrator.pathing import build_bridge_paths
-from orchestrator.lifecycle_timing import timed
+from orchestrator.lifecycle_timing import timed, emit
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 
@@ -34,6 +34,7 @@ def qualify_release(payload: dict) -> dict:
 
     def record_phase(name: str, elapsed_ms: float) -> None:
         phases_ms[name] = round(elapsed_ms, 1)
+        emit("qualification.phase", "summary", phase=name, duration_ms=elapsed_ms)
 
     def timed(name: str, function, *args, **kwargs):
         phase_started = time.perf_counter()

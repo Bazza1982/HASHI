@@ -1589,7 +1589,8 @@ def _restart_record_path(restart_id: str) -> Path:
 
 
 def _write_restart_record(record: dict[str, Any]) -> dict[str, Any]:
-    value = dict(record)
+    from remote.restart_timing import advance_restart_timing
+    value = advance_restart_timing(record)
     value["updated_at"] = _utc_timestamp()
     path = _restart_record_path(str(value.get("restart_id") or ""))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4409,6 +4410,8 @@ def create_app(
     async def hashi_control_restart(request: Request, payload: HashiRestartPayload):
         """Recover a stuck HASHI core through the independent Remote service."""
 
+        from remote.restart_timing import start_restart_timing
+        request_timing = start_restart_timing("admission_and_status_before")
         body_bytes = await request.body()
         client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
         if payload.notify_origin is not None:
@@ -4437,6 +4440,7 @@ def create_app(
         record = _write_restart_record(
             {
                 "schema_version": 1,
+                "lifecycle_timing": request_timing,
                 "ok": False,
                 "restart_id": restart_id,
                 "state": "accepted",

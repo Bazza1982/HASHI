@@ -21,11 +21,14 @@ import uuid
 
 _context = contextvars.ContextVar("lifecycle_timing", default={})
 _home: Path | None = None
+_log_directory: Path | None = None
 _write_lock = threading.Lock()
 _monitor_id: int | None = None
 _observed: dict = {}
 _calls: dict = {}
 _monitor_enabled = False
+_monitor_expires_at = 0.0
+_last_config_check = 0.0
 
 # Observe selected code objects, without replacing functions or changing Core.
 _OBSERVERS = {
@@ -76,6 +79,7 @@ def _identity(args):
     return home, {key: value for key, value in identity.items() if value}
 
 def emit(stage, event="point", **fields):
+    global _log_directory
     if _home is None:
         return
     record = {
@@ -88,7 +92,9 @@ def emit(stage, event="point", **fields):
         line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         with _write_lock:
             directory = _home / "logs" / "lifecycle"
-            directory.mkdir(parents=True, exist_ok=True)
+            if _log_directory != directory:
+                directory.mkdir(parents=True, exist_ok=True)
+                _log_directory = directory
             with (directory / f"{os.getpid()}.jsonl").open("ab") as stream:
                 stream.write(line)
     except (OSError, TypeError, ValueError):
@@ -115,7 +121,7 @@ def _process_birth():
     return None
 
 def configure(home):
-    global _home, _monitor_enabled
+    global _home, _monitor_enabled, _monitor_expires_at
     if home is not None and _home is None:
         _home = Path(home)
         birth = _process_birth()
@@ -123,7 +129,8 @@ def configure(home):
              pre_observation_ms=(time.time_ns() - birth) / 1e6 if birth else None)
         try:
             cfg = json.loads((_home / "state" / "instance" / "lifecycle-timing.json").read_text("utf-8"))
-            _monitor_enabled = cfg.get("observe_calls") is True and float(cfg.get("expires_at", 0)) > time.time()
+            _monitor_expires_at = float(cfg.get("expires_at", 0))
+            _monitor_enabled = cfg.get("observe_calls") is True and _monitor_expires_at > time.time()
         except (OSError, ValueError, TypeError):
             pass
     if _monitor_enabled:
@@ -141,7 +148,21 @@ def _call_key(code):
     return threading.get_ident(), id(task) if task else 0, code
 
 def _started(code, offset):
+    global _last_config_check, _monitor_enabled, _monitor_id
     try:
+        now = time.time()
+        if now - _last_config_check >= 1:
+            _last_config_check = now
+            if now >= _monitor_expires_at or not (_home / "state/instance/lifecycle-timing.json").is_file():
+                _monitor_enabled = False
+                if _monitor_id is not None:
+                    for selected_code in _observed:
+                        sys.monitoring.set_local_events(_monitor_id, selected_code, 0)
+                    sys.monitoring.set_events(_monitor_id, 0)
+                    sys.monitoring.free_tool_id(_monitor_id)
+                    _monitor_id = None
+                emit("diagnostic.observer_stopped", unfinished_calls=sum(len(v) for v in _calls.values()))
+                return
         key = _call_key(code)
         span = uuid.uuid4().hex
         _calls.setdefault(key, []).append((time.perf_counter_ns(), time.thread_time_ns(), span))
@@ -150,6 +171,8 @@ def _started(code, offset):
         pass
 
 def _ended(code, offset, result):
+    if code not in _observed:
+        return
     try:
         stack = _calls.get(_call_key(code), [])
         if stack:

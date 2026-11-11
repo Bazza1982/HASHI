@@ -308,20 +308,38 @@ class RuntimeAppHost:
         # Checkpoint before opening external connectors: recovery must know the
         # exact installed set even if a connector crashes during activation.
         runtime_handoff.persist(app)
-        errors = await self._activate_connectors()
-        if errors and (self.connector_task is None or self.connector_task.done()):
+        # Local activation is already verified. External network initialization
+        # must never hold Core's commit RPC or the lifecycle completion receipt.
+        app._connector_activation_pending = True
+        app.startup_manager.reconcile_connector_status(pending=True, publish=False)
+        if self.connector_task is None or self.connector_task.done():
             self.connector_task = asyncio.create_task(
-                self._retry_connectors(), name="connector-activation-retry"
+                self._start_committed_connectors(), name="connector-activation"
             )
-        runtime_handoff.persist(app)
+        errors = dict(app.startup_status.get("connector_errors") or {})
         # Starting an ingress schedules its own connection/retry loop. A clean
         # activation call is not evidence of a successful poll; use the health
         # owner's reconciled state for the commit receipt as well.
         return {
             "committed": True,
-            "degraded": bool(errors or app.startup_status.get("degraded")),
+            "degraded": bool(errors or app.startup_status.get("degraded") or app._connector_activation_pending),
             "connector_errors": errors,
         }
+
+    async def _start_committed_connectors(self):
+        try:
+            errors = await self._activate_connectors()
+            runtime_handoff.persist(self.app)
+            if errors:
+                await self._retry_connectors()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Preserve local availability and let the normal retry owner recover.
+            import logging
+            logging.getLogger("BridgeU.Orchestrator").exception(
+                "Committed connector activation failed; local services remain online")
+            await self._retry_connectors()
 
     @staticmethod
     def _shared_drain_blockers(app):
