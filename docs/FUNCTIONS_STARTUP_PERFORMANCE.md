@@ -7,3 +7,5 @@ Core v5 admission, runtime qualification, artifact verification and per-Worker i
 Normal lifecycle logs now separate Worker contract checks, runtime module imports, configuration loading, runtime construction, handler binding, backend initialization and ready-event publication. Backend initialization also records adapter loading, construction, tool attachment and adapter initialization separately. Logs contain timing and lifecycle identity, never configuration bodies or credentials. Nested and parallel durations must not be added to claim an end-to-end saving.
 
 No startup validation is bypassed. Core v5 is not part of this change.
+
+The per-Worker runtime fingerprint freshness scan now runs in a background thread, retaining every policy and installed-metadata check. It is timed as worker.runtime_fingerprint. This keeps synchronous metadata I/O off the Functions control and IPC event loop. Cancellation before that read completes cannot launch a late Worker; read failures still fail closed.
