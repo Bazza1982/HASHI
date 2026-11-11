@@ -10,6 +10,8 @@ from typing import Any
 import json
 import re
 import time
+import os
+from contextlib import contextmanager
 
 RESTART_ID_RE = re.compile(r"^rst_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{12}$")
 
@@ -50,6 +52,35 @@ def verified_restart_receipt(
     return True, "ok"
 
 
+@contextmanager
+def open_restart_receipt(path):
+    """A bounded reader closes its snapshot promptly; Windows writers retry briefly."""
+    with Path(path).open("rb") as stream:
+        yield stream
+
+
+def read_restart_receipt_text(path, *, limit=1048576):
+    with open_restart_receipt(path) as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("restart receipt exceeds read limit")
+    return raw.decode("utf-8")
+
+
+def replace_restart_receipt(temporary, path):
+    # Brief external readers/antivirus may still deny delete sharing. Never
+    # publish a partial file, silently drop progress, or retry indefinitely.
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
 def _epoch(value):
     if value is None:
         return None
@@ -88,7 +119,8 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
         "duration_ms": timing.get("total_ms"), "latest_sequence": sequence,
         "kernel_pid": evidence.get("new_pid") if succeeded else None,
         "shared_generation_id": evidence.get("generation_id") if succeeded else None,
-        "progress": [{"sequence": sequence, "phase": phase}], "warnings": [],
+        "progress": [{"sequence": sequence, "phase": phase}],
+        "warnings": ["restart_notification_failed"] if (record.get("notification") or {}).get("state") == "failed" else [],
     }
 
 
@@ -105,7 +137,7 @@ class RestartReceiptReader:
         try:
             if path.is_symlink() or self.directory.is_symlink() or path.stat().st_size > 1048576:
                 return None
-            record = json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+            record = json.loads(read_restart_receipt_text(path), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
             if not isinstance(record, dict) or record.get("restart_id") != operation_id:
                 return None
             return project_restart(record, instance_id=self.instance_id, owner_id=owner_id, agent_id=agent_id)

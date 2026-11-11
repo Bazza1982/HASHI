@@ -42,6 +42,10 @@ the surviving executor, rejects overlapping launches, records terminal proof and
 then attempts notification. Legacy synchronous and trusted-peer paths remain.
 The existing owner-scoped operation API projects Remote's public receipt contract;
 it cannot execute a restart or disclose another owner, Agent or instance's record.
+Once terminal proof is persisted, follow-up notification/audit errors cannot
+reverse it; they only add a warning. Receipt readers use bounded, short-lived
+snapshots. Atomic Windows replacement retries brief sharing denials for at most
+250 ms; persistent storage failures remain explicit and never publish partial data.
 Malformed terminal evidence does not project success. Exact receipt reads survive
 the recent-completion discovery window.
 

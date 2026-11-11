@@ -1602,14 +1602,16 @@ def _write_restart_record(record: dict[str, Any]) -> dict[str, Any]:
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    os.replace(temporary, path)
+    from remote.restart_receipts import replace_restart_receipt
+    replace_restart_receipt(temporary, path)
     return value
 
 
 def _read_restart_record(restart_id: str) -> dict[str, Any]:
     path = _restart_record_path(restart_id)
+    from remote.restart_receipts import read_restart_receipt_text
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(read_restart_receipt_text(path))
     except FileNotFoundError:
         raise
     except (OSError, ValueError) as exc:
@@ -4505,8 +4507,9 @@ def create_app(
                 failure_stage="target_validation",
             )
             return JSONResponse(status_code=409, content=record)
+        terminal_persisted = False
         async def execute():
-            nonlocal record
+            nonlocal record, terminal_persisted
             phase = "runtime_qualification"
             record["phase"] = phase
             record = _write_restart_record(record)
@@ -4535,6 +4538,7 @@ def create_app(
                     }
                 )
                 record = _write_restart_record(record)
+                terminal_persisted = True
                 _append_rescue_audit(
                     requester=client_id,
                     reason=reason_meta["reason"],
@@ -4607,6 +4611,7 @@ def create_app(
                 }
             )
             record = _write_restart_record(record)
+            terminal_persisted = True
             _append_rescue_audit(
                 requester=client_id,
                 reason=reason_meta["reason"],
@@ -4654,7 +4659,16 @@ def create_app(
             try:
                 await execute()
             except Exception:
-                logger.exception("Detached restart observation failed")
+                logger.exception("Detached restart observation or follow-up failed")
+                if terminal_persisted:
+                    # Delivery/audit errors cannot reverse a persisted outcome.
+                    record["notification"] = {**(record.get("notification") or {}),
+                        "state": "failed", "error_code": "restart_notification_failed"}
+                    try:
+                        _write_restart_record(record)
+                    except Exception:
+                        logger.exception("Could not persist restart follow-up warning")
+                    return
                 record.update(state="failed", phase="terminal_verification",
                     completed_at=_utc_timestamp(), error="restart_observation_failed")
                 _write_restart_record(record)
