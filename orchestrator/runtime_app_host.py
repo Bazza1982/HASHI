@@ -19,6 +19,7 @@ from orchestrator.function_worker_protocol import JsonConnectionPeer
 from orchestrator.kernel_artifact import verify_artifact
 from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError, RuntimeFingerprint
 from orchestrator import runtime_handoff
+from orchestrator.lifecycle_timing import timed
 
 
 CONNECTOR_RETRY_SECONDS = 5
@@ -39,6 +40,7 @@ class RuntimeAppHost:
         self.onboarding_paths = None
         self.onboarding_done = False
 
+    @timed("shared.prepare")
     async def prepare(self):
         core_receipt = self.bootstrap.get("core_runtime")
         core_runtime = (
@@ -155,6 +157,7 @@ class RuntimeAppHost:
             "bridge_home": str(paths.bridge_home),
         }
 
+    @timed("shared.activate")
     async def activate(self, handoff):
         if self.onboarding_paths is not None:
             from orchestrator.onboarding_gate import run_onboarding_gate
@@ -209,6 +212,7 @@ class RuntimeAppHost:
         await self.task
         raise RuntimeError("shared Functions stopped before services became ready")
 
+    @timed("shared.activate_connectors")
     async def _activate_connectors(self):
         app = self.app
         errors = {}
@@ -278,6 +282,7 @@ class RuntimeAppHost:
                 runtime_handoff.persist(self.app)
                 return
 
+    @timed("shared.commit")
     async def commit(self):
         if self.onboarding_done:
             await self.peer.emit("application.stopped", {})

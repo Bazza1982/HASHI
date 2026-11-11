@@ -21,10 +21,12 @@ from orchestrator.function_worker_supervisor import (
 )
 from orchestrator.runtime_contract import RuntimeFingerprint
 from orchestrator.pathing import build_bridge_paths
+from orchestrator.lifecycle_timing import timed
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 
 
+@timed("release.qualification")
 def qualify_release(payload: dict) -> dict:
     started_at = datetime.now().astimezone().isoformat()
     started = time.perf_counter()
@@ -131,3 +133,4 @@ def qualify_release(payload: dict) -> dict:
             "phases_ms": phases_ms,
         },
     }
+# HASHI-Fingerprint: hfp_493e71dd32934e90a186c382a5aff422

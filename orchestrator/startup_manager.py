@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.bootstrap_logging import AnimMute
+from orchestrator.lifecycle_timing import timed
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -143,6 +144,7 @@ class StartupManager:
         )
         self._startup_header_shown = True
 
+    @timed("startup.initial_agents")
     async def start_initial_agents(self, global_cfg, agent_configs, secrets) -> tuple[bool, dict]:
         selected_configs = [
             cfg for cfg in agent_configs
@@ -469,6 +471,7 @@ class StartupManager:
         main_logger.info(message)
         bridge_logger.info(message)
 
+    @timed("startup.agents_and_services")
     async def _run_startup_banner(self, initial_agent_names, global_cfg, wa_cfg, skipped, inactive_agent_names):
         boot_state = {name: "pending" for name in initial_agent_names}
         boot_reason = {}

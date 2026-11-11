@@ -44,6 +44,7 @@ from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+from orchestrator.lifecycle_timing import timed, span
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -1872,6 +1873,7 @@ class FunctionWorkerSupervisor:
             reconcile()
         return not failed
 
+    @timed("supervisor.prepare_worker")
     async def prepare_worker(
         self,
         agent_name: str,
@@ -1908,7 +1910,8 @@ class FunctionWorkerSupervisor:
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
-        process, parent_connection = await launch_function_process_async(bootstrap)
+        with span("worker.launch_and_admission", agent=agent_name):
+            process, parent_connection = await launch_function_process_async(bootstrap)
         client = FunctionWorkerClient(
             supervisor=self,
             agent_name=agent_name,
@@ -1921,7 +1924,8 @@ class FunctionWorkerSupervisor:
         self._candidates.add(client)
         client.start()
         try:
-            await client.wait_ready()
+            with span("worker.wait_ready", agent=agent_name, worker_pid=getattr(client, "pid", None)):
+                await client.wait_ready()
         except (Exception, asyncio.CancelledError):
             await client.shutdown(force=True)
             self._candidates.discard(client)
@@ -1932,6 +1936,7 @@ class FunctionWorkerSupervisor:
         )
         return client
 
+    @timed("supervisor.activate_worker")
     async def activate_new_worker(
         self,
         client: FunctionWorkerClient,

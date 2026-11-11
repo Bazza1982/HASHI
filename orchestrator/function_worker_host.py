@@ -37,6 +37,7 @@ from orchestrator.runtime_contract import (
     enforce_runtime_contract,
 )
 from orchestrator.service_endpoints import endpoint_from_snapshot
+from orchestrator.lifecycle_timing import timed
 
 logger = logging.getLogger("BridgeU.FunctionWorker")
 
@@ -814,6 +815,7 @@ class FunctionWorkerHost:
         self.command_menu_task: asyncio.Task[Any] | None = None
         self.generation_finder: _GenerationModuleFinder | None = None
 
+    @timed("worker.prepare")
     async def prepare(self) -> None:
         if not self.agent_name or not self.nonce:
             raise FunctionWorkerStateError("worker bootstrap identity is incomplete")
@@ -1245,6 +1247,7 @@ class FunctionWorkerHost:
             )
         return list(reconciled)
 
+    @timed("worker.activate")
     async def activate(self) -> dict[str, Any]:
         if self.phase != "READY":
             raise FunctionWorkerStateError(
