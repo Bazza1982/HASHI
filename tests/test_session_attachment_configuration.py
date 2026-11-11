@@ -176,4 +176,66 @@ def test_invalid_instance_attachment_document_is_not_treated_as_defaults(tmp_pat
     target.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError):
         load_session_attachment_limits({}, config_path=target)
+
+@pytest.mark.parametrize("session_count", [2, 24])
+def test_attachment_schemas_match_each_frozen_route_and_enforced_count(tmp_path, session_count):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", r"""
+import asyncio
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("tests").resolve()))
+from test_frontend_attachment_tool import _registry, _running_session
+from tools.schemas import TOOL_SCHEMA_MAP
+from orchestrator.hchat_attachment_contract import HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
+
+async def exercise():
+    root, session_count = Path(sys.argv[1]), int(sys.argv[2])
+    tools = ("frontend_send_attachments", "frontend_publish_deliverable")
+    for source, count in (("session-api", session_count),
+                          ("bridge:hchat-draft", HCHAT_MAX_ATTACHMENTS_PER_MESSAGE)):
+        for name in tools:
+            directory = root / source.replace(":", "-") / name
+            directory.mkdir(parents=True)
+            store, owner, session, _ = _running_session(directory)
+            registry = _registry(directory, store, owner, session,
+                                 request_source=source, allowed_tools=list(tools))
+            definitions = {item["function"]["name"]: item["function"]
+                           for item in registry.get_tool_definitions()}
+            assert definitions[name]["parameters"]["properties"]["attachments"]["maxItems"] == count
+            assert TOOL_SCHEMA_MAP[name]["function"]["parameters"]["properties"]["attachments"]["maxItems"] == session_count
+            args = {"attachments": [{"path": "never-read"}] * (count + 1)}
+            if name == "frontend_publish_deliverable":
+                args["publication_id"] = "route-boundary"
+            overflow = await registry.execute(name, args, tool_call_id="overflow")
+            assert overflow.is_error and "count" in overflow.output, overflow.output
+            # HChat intentionally makes the first selection outcome terminal.
+            # Exercise a successful selection in a fresh invocation registry.
+            registry = _registry(directory, store, owner, session,
+                                 request_source=source, allowed_tools=list(tools))
+            paths = []
+            for i in range(count):
+                path = directory / f"part-{i}.txt"
+                path.write_bytes(b"x")
+                paths.append({"path": str(path)})
+            args["attachments"] = paths
+            accepted = await registry.execute(name, args, tool_call_id="boundary")
+            assert not accepted.is_error, accepted.output
+            if name == "frontend_publish_deliverable":
+                replay = await registry.execute(name, args, tool_call_id="replay")
+                assert not replay.is_error, replay.output
+            assert len(store.run_output_attachment_content("request-frontend-output")) == count
+            # Projecting an HChat definition must never mutate shared Session schemas.
+            assert TOOL_SCHEMA_MAP[name]["function"]["parameters"]["properties"]["attachments"]["maxItems"] == session_count
+asyncio.run(exercise())
+""", str(tmp_path), str(session_count)],
+        cwd=root, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                       "BRIDGE_HOME": str(tmp_path / "instance"),
+                       "HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE": str(session_count),
+                       "HASHI_SESSION_MAX_ATTACHMENT_BYTES": "4",
+                       "HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES": "64"},
+        text=True, capture_output=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 # HASHI-Fingerprint: hfp_79b8319d2b9043b981c3335f0560d9d1

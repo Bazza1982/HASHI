@@ -140,6 +140,16 @@ def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
     raise ValueError("unknown attachment policy")
 
 
+def frontend_attachment_limits(request_source: object) -> tuple[str, tuple[int, int, int]]:
+    """Resolve the frozen Run's output policy for both tool declaration and preflight."""
+    policy = (
+        "hchat"
+        if str(request_source or "").strip().casefold() == "bridge:hchat-draft"
+        else "standard"
+    )
+    return policy, _attachment_policy_limits(policy)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

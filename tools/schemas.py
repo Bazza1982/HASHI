@@ -3,13 +3,10 @@ Tool JSON Schema definitions in model-provider function-calling format.
 HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
-from orchestrator.hchat_attachment_contract import HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
 from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
 from tools.documentation_schema import DOCUMENTATION_READ_SCHEMA
 
-_ATTACHMENT_SCHEMA_MAX_ITEMS = max(
-    SESSION_ATTACHMENT_LIMITS.count, HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
-)
+_ATTACHMENT_SCHEMA_MAX_ITEMS = SESSION_ATTACHMENT_LIMITS.count
 TOOL_SCHEMAS = [
     {'function': {'description': 'Ask a clarification or preference question in this active Run. '
                              'Returns immediately with question_id. Continue independent work, '

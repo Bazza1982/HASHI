@@ -739,6 +739,13 @@ HChat keeps its separate versioned 10-file/1-GiB streaming contract. Connector
 transport limits, such as Telegram media groups, remain connector-owned;
 they do not determine the standard Session attachment count.
 
+Both attachment tools project their per-Run schemas from the same frozen
+request-source policy used by preflight and Session storage. Standard catalog
+schemas use the configured Session count; HChat draft Runs advertise exactly
+the HChat count and byte budgets, never the larger of the two policies.
+Projection changes only copied definitions, preserves Session isolation, and
+does not select a policy from a client-controlled display surface.
+
 The public `frontend_connector` capability snapshot includes the
 connector-neutral registry and versioned FC contract families. The standard
 `frontend_send_attachments` tool accepts any active Session delivery route,
