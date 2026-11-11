@@ -19,6 +19,7 @@ from orchestrator.function_worker_protocol import JsonConnectionPeer
 from orchestrator.kernel_artifact import verify_artifact
 from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError, RuntimeFingerprint
 from orchestrator import runtime_handoff
+from orchestrator.lifecycle_timing import timed
 
 
 CONNECTOR_RETRY_SECONDS = 5
@@ -39,6 +40,7 @@ class RuntimeAppHost:
         self.onboarding_paths = None
         self.onboarding_done = False
 
+    @timed("shared.prepare")
     async def prepare(self):
         core_receipt = self.bootstrap.get("core_runtime")
         core_runtime = (
@@ -155,6 +157,7 @@ class RuntimeAppHost:
             "bridge_home": str(paths.bridge_home),
         }
 
+    @timed("shared.activate")
     async def activate(self, handoff):
         if self.onboarding_paths is not None:
             from orchestrator.onboarding_gate import run_onboarding_gate
@@ -209,6 +212,7 @@ class RuntimeAppHost:
         await self.task
         raise RuntimeError("shared Functions stopped before services became ready")
 
+    @timed("shared.activate_connectors")
     async def _activate_connectors(self):
         app = self.app
         errors = {}
@@ -248,6 +252,7 @@ class RuntimeAppHost:
                             errors["remote"] = str(remote.get("action") or "unavailable")
                     except Exception as exc:
                         errors["remote"] = f"{type(exc).__name__}: {exc}"
+                await app.function_workers.broadcast_topology()
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)
@@ -278,6 +283,7 @@ class RuntimeAppHost:
                 runtime_handoff.persist(self.app)
                 return
 
+    @timed("shared.commit")
     async def commit(self):
         if self.onboarding_done:
             await self.peer.emit("application.stopped", {})
@@ -293,30 +299,46 @@ class RuntimeAppHost:
         )
         app._shared_replacement_candidate = False
         app.shared_adopted_at = datetime.now().astimezone().isoformat()
-        broadcast_topology = getattr(
-            app.function_workers, "broadcast_topology", None
-        )
-        if callable(broadcast_topology):
-            await broadcast_topology()
+        schedule_topology = getattr(app.function_workers, "schedule_topology", None)
+        if callable(schedule_topology):
+            schedule_topology()
         if app.api_gateway:
             app.api_gateway._accepting_requests = True
         # Checkpoint before opening external connectors: recovery must know the
         # exact installed set even if a connector crashes during activation.
         runtime_handoff.persist(app)
-        errors = await self._activate_connectors()
-        if errors and (self.connector_task is None or self.connector_task.done()):
+        # Local activation is already verified. External network initialization
+        # must never hold Core's commit RPC or the lifecycle completion receipt.
+        app._connector_activation_pending = True
+        app.startup_manager.reconcile_connector_status(pending=True, publish=False)
+        if self.connector_task is None or self.connector_task.done():
             self.connector_task = asyncio.create_task(
-                self._retry_connectors(), name="connector-activation-retry"
+                self._start_committed_connectors(), name="connector-activation"
             )
-        runtime_handoff.persist(app)
+        errors = dict(app.startup_status.get("connector_errors") or {})
         # Starting an ingress schedules its own connection/retry loop. A clean
         # activation call is not evidence of a successful poll; use the health
         # owner's reconciled state for the commit receipt as well.
         return {
             "committed": True,
-            "degraded": bool(errors or app.startup_status.get("degraded")),
+            "degraded": bool(errors or app.startup_status.get("degraded") or app._connector_activation_pending),
             "connector_errors": errors,
         }
+
+    async def _start_committed_connectors(self):
+        try:
+            errors = await self._activate_connectors()
+            runtime_handoff.persist(self.app)
+            if errors:
+                await self._retry_connectors()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Preserve local availability and let the normal retry owner recover.
+            import logging
+            logging.getLogger("BridgeU.Orchestrator").exception(
+                "Committed connector activation failed; local services remain online")
+            await self._retry_connectors()
 
     @staticmethod
     def _shared_drain_blockers(app):
@@ -326,7 +348,14 @@ class RuntimeAppHost:
             "_monitor_tasks",
             {},
         )
+        api = getattr(app, "workbench_api", None)
+        media_calls = sum(
+            service.active_call_count() for service in (
+                getattr(api, "call_service", None), getattr(api, "live_voice_manager", None)
+            ) if service is not None
+        )  # A failed activity read fails quiescence closed.
         return {
+            "media_calls": media_calls,
             "backend_requests": max(
                 0, int(getattr(app, "_handoff_requests", 0) or 0)
             ),

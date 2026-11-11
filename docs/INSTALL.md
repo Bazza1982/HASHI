@@ -86,6 +86,12 @@ program directory so a later package uninstall cannot remove instance data.
 
 On Windows, keep a custom data root short (for example `C:\HASHIData`). Native
 third-party DLL loading can fail in very deep paths. Full Function import
+Native Windows fixed restart tasks retain an explicitly selected
+`HASHI_DATA_ROOT` in their runtime action through `-RuntimeDataRoot`. The
+controller restores that catalogue root before runtime resolution because
+Task Scheduler does not inherit the registering Remote's environment.
+Core/Functions role qualification and installation integrity checks still run.
+
 qualification must succeed before the installer publishes the runtime selection.
 
 ### Commands

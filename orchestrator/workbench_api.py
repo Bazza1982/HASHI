@@ -15657,6 +15657,11 @@ class WorkbenchApiServer:
         status = 404 if reason == "not_found" else 400 if reason.startswith("invalid_") else 409
         return web.json_response({"ok": False, "error_code": reason}, status=status)
 
+    def _cold_restart_receipts(self):
+        from remote.restart_receipts import RestartReceiptReader
+        return RestartReceiptReader(self.global_config.bridge_home,
+            instance_id=str(self.global_config.instance_id))
+
     async def handle_reboot_operations(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
@@ -15664,7 +15669,10 @@ class WorkbenchApiServer:
         manager = getattr(self.orchestrator, "reboot_manager", None)
         if manager is None:
             return web.json_response({"ok": False, "error_code": "reboot_unavailable"}, status=503)
-        response = web.json_response({"ok": True, "operations": manager.visible_operations(owner_id=owner)})
+        operations = manager.visible_operations(owner_id=owner)
+        operations.extend(await asyncio.to_thread(self._cold_restart_receipts().visible_operations, owner_id=owner))
+        operations.sort(key=lambda row: (not row.get("terminal"), float(row.get("created_at") or 0)), reverse=True)
+        response = web.json_response({"ok": True, "operations": operations})
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -15719,10 +15727,13 @@ class WorkbenchApiServer:
             agent = str(request.query.get("agent_id") or "").strip()
             if not agent or after < 0:
                 raise ValueError("agent_id and non-negative after_sequence are required")
-            operation = manager.operation(
-                request.match_info["operation_id"], owner_id=owner, agent_id=agent,
-                after_sequence=after,
-            )
+            operation_id = request.match_info["operation_id"]
+            if operation_id.startswith("rst_"):
+                operation = await asyncio.to_thread(self._cold_restart_receipts().operation,
+                    operation_id, owner_id=owner, agent_id=agent)
+            else:
+                operation = manager.operation(operation_id, owner_id=owner, agent_id=agent,
+                    after_sequence=after)
         except ValueError as exc:
             return self._v1_error(exc)
         if operation is None:

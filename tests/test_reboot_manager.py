@@ -153,6 +153,10 @@ def _metadata(
 
 
 class _FunctionWorkers:
+    schedule_topology = FunctionWorkerSupervisor.schedule_topology
+    _refresh_topology = FunctionWorkerSupervisor._refresh_topology
+    retire_workers = FunctionWorkerSupervisor.retire_workers
+
     def __init__(self, kernel, events: list[str]) -> None:
         self.kernel = kernel
         self.events = events
@@ -163,6 +167,10 @@ class _FunctionWorkers:
         self.prepared: list[str] = []
         self.published = 0
         self.broadcasts = 0
+        self._topology_task = None
+        self._topology_revision = 0
+        self._retirement_tasks = {}
+        self._shutting_down = False
 
     def queue_round(self, generation: _Generation, candidates: dict[str, _Client]):
         self.rounds.append((generation, candidates))
@@ -1237,23 +1245,21 @@ async def test_source_change_after_drain_resumes_previous_worker():
 
 
 @pytest.mark.asyncio
-async def test_candidate_cannot_silently_drop_a_working_telegram_transport():
+async def test_candidate_local_ready_commits_while_telegram_reconnects():
     kernel = _Kernel(names=("zelda",))
-    old = kernel.runtimes[0]
+    old_client = kernel.runtimes[0].client
     candidates = kernel.queue_generation(
-        "a",
-        names=("zelda",),
-        telegram_for={"zelda": False},
+        "a", names=("zelda",), telegram_for={"zelda": False},
     )
     manager = RebootManager(kernel, None)
 
-    result = await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
-
-    assert result is False
-    assert kernel.runtimes[0] is old
-    assert old.client.process.is_alive()
-    assert any(event.endswith("worker.resume") for event in kernel.events)
-    assert candidates["zelda"].shutdown_calls == 1
+    assert await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+    assert kernel.runtimes[0].client is candidates["zelda"]
+    assert not kernel.runtimes[0].telegram_connected
+    assert candidates["zelda"].metadata["worker_accepting"]
+    assert not any(event.endswith("worker.resume") for event in kernel.events)
+    assert old_client.shutdown_calls == 1
+    assert candidates["zelda"].shutdown_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1382,8 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     new_kernel._shared_replacement_continuity = True
     new_kernel.shared_generation_id = generation.manifest.generation_id
-    new_kernel.startup_status = {"ready": remote_available, "degraded": not remote_available,
+    new_kernel.startup_status = {"services_ready": True, "failed_agents": 0,
+                                 "ready": remote_available, "degraded": not remote_available,
                                  "remote": {"enabled": True, "available": remote_available}}
     new_kernel.function_release_adoption = {
         "status": "fallback",
@@ -1412,23 +1419,8 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
 
     record = successor.receipts.get(pending["id"])
     if not remote_available:
-        assert record["status"] not in {"succeeded", "unconfirmed", "failed"}
-        assert record["phase"] == "verifying"
-        assert record["reason"] == "shared_services_unready"
-        if not recover:
-            from orchestrator.reboot_manager import SHARED_REPLACEMENT_TIMEOUT_SECONDS
-            await successor.reconcile_shared_replacements(
-                now=pending["shared_replacement"]["requested_at"] + SHARED_REPLACEMENT_TIMEOUT_SECONDS + 1)
-            failed = successor.receipts.get(pending["id"])
-            assert failed["status"] == "unconfirmed"
-            assert failed["committed"] is True
-            assert failed["reason"] == "shared_services_unready"
-            return
-        # A connector retry can recover before the existing handoff deadline.
-        new_kernel.startup_status.update(ready=True, degraded=False)
-        new_kernel.startup_status["remote"]["available"] = True
-        await successor.reconcile_shared_replacements(now=pending["shared_replacement"]["requested_at"] + 2)
-        record = successor.receipts.get(pending["id"])
+        assert record["outcome"] == "succeeded_with_warning"
+        assert "connectors_unavailable" in record["warnings"]
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
     assert record["shared_replacement"]["adoption"] == new_kernel.function_release_adoption
@@ -1918,9 +1910,14 @@ async def test_post_commit_health_decides_receipt_without_false_rollback(
     record = manager.receipts.records()[-1]
     assert record["status"] == ("succeeded" if ready else "unconfirmed")
     assert record["lifecycle_state"] == ("online" if ready else "unconfirmed")
-    assert record["outcome"] == ("succeeded_with_warning" if ready else "failed")
+    assert record["outcome"] == ("succeeded" if ready else "failed")
     assert record["observation_confidence"] == "confirmed"
-    assert record["warnings"] == ["topology_publish_failed"]
+    # A background diagnostic publication cannot change the durable terminal.
+    assert record["warnings"] == []
+    task = kernel.function_workers._topology_task
+    assert task is not None and not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     if not ready:
         assert record["workers"]["zelda"]["failed_checks"] == [
             "backend_not_ready"

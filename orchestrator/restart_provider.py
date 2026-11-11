@@ -323,6 +323,7 @@ def restart_via_provider(
     timeout: int = remote_rescue.RESTART_REQUEST_TIMEOUT_SECONDS,
     notify_origin: dict[str, Any] | None = None,
     notify_locale: str | None = None,
+    detached: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     """Revalidate the provider immediately before issuing the destructive request."""
 
@@ -363,6 +364,7 @@ def restart_via_provider(
         target,
         reason=reason,
         extra_payload={
+            **({"detached": True} if detached else {}),
             "requester_agent": str(requester_agent or "").strip() or None,
             "request_source": str(request_source or "").strip() or None,
             "notify_agent": str(requester_agent or "").strip() or None,

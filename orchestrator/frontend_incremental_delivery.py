@@ -19,6 +19,7 @@ async def dispatch_incremental_telegram_event(
     owner_id: str,
     request_id: str,
     event_id: str,
+    delivery_route: Any = None,
 ) -> bool:
     """Claim one frozen endpoint and use the canonical Telegram FC renderer."""
     if (
@@ -27,8 +28,10 @@ async def dispatch_incremental_telegram_event(
         or getattr(getattr(runtime, "app", None), "bot", None) is None
     ):
         return False
-    run = store.get_run_by_request(request_id, owner_id=owner_id)
-    destination = route_destination(run.get("delivery_route"), "telegram")
+    if delivery_route is None:
+        run = store.get_run_by_request(request_id, owner_id=owner_id)
+        delivery_route = run.get("delivery_route")
+    destination = route_destination(delivery_route, "telegram")
     if destination is None:
         return False
     channel_key = str(destination["channel_key"])
@@ -86,7 +89,11 @@ async def dispatch_pending_telegram_deliverables(
     questions.refresh_pending(agent_id=runtime.name)
     candidates = [*questions.pending_telegram_deliveries(agent_id=runtime.name, limit=limit), *candidates]
     dispatched = 0
+    seen = set()
     for candidate in candidates:
+        if candidate["event_id"] in seen:
+            continue
+        seen.add(candidate["event_id"])
         if await dispatch_incremental_telegram_event(
             store,
             runtime,
@@ -94,6 +101,7 @@ async def dispatch_pending_telegram_deliverables(
             owner_id=str(candidate["owner_id"]),
             request_id=str(candidate["request_id"]),
             event_id=str(candidate["event_id"]),
+            delivery_route=candidate.get("delivery_route"),
         ):
             dispatched += 1
     await refresh_telegram_question_renditions(runtime, store)
@@ -121,3 +129,4 @@ def start_incremental_telegram_delivery(runtime: Any) -> None:
         incremental_telegram_delivery_loop(runtime),
         name=f"incremental-telegram-delivery-{runtime.name}",
     )
+# HASHI-Fingerprint: hfp_e304672c47da4171bc6240e6c3ed2182

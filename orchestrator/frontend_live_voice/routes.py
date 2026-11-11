@@ -11,7 +11,7 @@ from .protocol import LiveVoiceError
 
 ROOT = "/api/v1/live-voice"
 ROUTES = (
-    ("POST", "/context", "context"), ("POST", "/calls", "start"),
+    ("GET", "/context", "context"), ("POST", "/context", "context"), ("POST", "/calls", "start"),
     ("POST", "/attempts/{attempt_id}/cancel", "cancel_start"),
     ("GET", "/attempts/{attempt_id}", "attempt"),
     ("GET", "/calls/{call_id}", "snapshot"),
@@ -49,6 +49,12 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
             try:
                 if not qualified or (operation != "context" and not service.available):
                     raise LiveVoiceError("live_not_enabled", 503)
+                if request.method == "GET" and operation == "context":
+                    allowed = {"agent_id", "session_id", "context_generation", "instance_id",
+                               "instance_generation", "call_epoch"}
+                    if (set(request.query) - allowed
+                            or any(len(request.query.getall(k)) != 1 for k in request.query)):
+                        raise LiveVoiceError("live_field_invalid")
                 payload = dict(request.query)
                 if request.method != "GET":
                     if request.content_type != "application/json":

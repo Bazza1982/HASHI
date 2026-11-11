@@ -844,3 +844,23 @@ def test_desktop_is_ready_by_default_and_keeps_explicit_owner_choice(tmp_path):
         config_path.write_text(json.dumps(payload), encoding="utf-8")
         assert manager.load()[0].desktop_enabled is enabled
 # HASHI-Fingerprint: hfp_54bead7bca6d4bc6b9bea37b725d6e53
+
+
+@pytest.mark.parametrize("value", [1, 8, 12, 16])
+def test_startup_concurrency_loads_as_bounded_functions_setting(tmp_path, value):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    document = json.loads(config_path.read_text("utf-8"))
+    document["global"]["startup_agent_concurrency"] = value
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    assert cfg.startup_agent_concurrency == value
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 17, 2.5, "12", None])
+def test_startup_concurrency_rejects_invalid_value(tmp_path, value):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    document = json.loads(config_path.read_text("utf-8"))
+    document["global"]["startup_agent_concurrency"] = value
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="startup_agent_concurrency"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()

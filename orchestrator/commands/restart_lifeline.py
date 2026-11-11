@@ -181,6 +181,26 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         ui_language.tr("api.restart.requested", instance=target),
     )
     reason = f"{request_source} /restart {target} via trusted Hashi Remote"
+    if target == local_instance:
+        try:
+            code, receipt = await asyncio.to_thread(
+                restart_via_provider, provider, reason=reason, requester_agent=runtime.name,
+                request_source=request_source, notify_origin=origin, notify_locale=locale,
+                detached=True, timeout=25,
+            )
+            if code != 0 or receipt.get("state") not in {"accepted", "verifying", "completed"}:
+                raise RestartProviderError("Remote did not accept the restart")
+            from remote.restart_receipts import project_restart
+            operation = project_restart(receipt, instance_id=local_instance,
+                owner_id=origin["owner_id"], agent_id=runtime.name)
+            if operation is None:
+                raise RestartProviderError("Remote restart receipt identity mismatch")
+            return {**legacy_restart._cold_restart_result(accepted=True), "operation": operation}
+        except Exception:
+            logger.exception("Remote restart admission could not be confirmed")
+            return legacy_restart._cold_restart_result(accepted=False, reason="restart_admission_unconfirmed")
+        finally:
+            setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, False)
     asyncio.create_task(
         _dispatch_remote_restart(
             runtime,
@@ -201,3 +221,4 @@ COMMANDS = [
         callback=restart_command,
     )
 ]
+# HASHI-Fingerprint: hfp_652f0a732cbb4596bbbb55f8b5e530fb

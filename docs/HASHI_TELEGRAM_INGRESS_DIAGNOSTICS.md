@@ -80,3 +80,46 @@ Before any POST, failure is 503 `local_workbench_identity_unverified`,
 transport loss is 502 `request_outcome_unknown`, `accepted=null`,
 `retryable=false`; the input is never replayed to another address. The caller
 must inspect the actual desktop outcome before another action.
+
+## Processing acknowledgement and independent readiness
+
+A Worker whose Telegram handlers are not initialized refuses delivery without
+acknowledging the update. PTB handler errors propagate into the Functions
+processing acknowledgement. Denied actors are a completed policy decision,
+not a retryable business failure. Registered handlers complete synchronously.
+
+The poller advances its in-memory offset only after the selected Worker
+acknowledges processing and the durable checkpoint succeeds. A failed checkpoint
+retains the processing acknowledgement and retries that checkpoint instead of
+dispatching the update again. Canonical request idempotency remains the recovery
+fence across process interruption. Bot identity and route gates still apply.
+
+Trusted per-Agent extra.telegram_api_url optionally selects an official Bot
+API server for both Worker egress and shared ingress. It accepts an HTTPS origin
+or an HTTP loopback origin without credentials, path, query or fragment. The
+default remains Telegram's public endpoint. A loopback test server allows
+contained offline/reconnect acceptance without blocking other instances.
+Frontend requests cannot supply this setting. Never log URL token paths.
+
+Session schema 36 marks completion of the full migration before later Workers
+use its read-only version fast path. Older versions still migrate completely.
+A missing foreground-call index or pending legacy voice inbox also invokes the
+existing ordered migration; the current version marker alone is insufficient.
+Audio retention and legacy scalar Workzone recovery remain active; future
+schemas are rejected instead of downgraded. HERV3 does not enumerate historical
+ledger files for an explicitly empty canonical recovery set. Unfiltered legacy
+and nonempty recovery retain their original integrity rules.
+
+### Failed checkpoint handoff and initialization retry
+
+A processing acknowledgement retained during a checkpoint failure is included
+in the durable shared handoff, even if the normal offset file remains stale.
+Recovery merges cursors monotonically only for the same Bot fingerprint.
+Transport replacement also retains that acknowledgement. Local handoff cancels
+idle login/polling/checkpoint retries; only a dispatched update drains its ACK.
+
+Failed or cancelled Worker application initialization marks its client state
+for reset. Before retry, stop/shutdown the application and explicitly close
+the Bot clients, including the partial-initialization case that PTB's
+Application.shutdown skips. This cleanup belongs to background connector work;
+quiesce need not wait for it.

@@ -24,6 +24,7 @@ from orchestrator.memory_plus_mode import (
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+from orchestrator.lifecycle_timing import timed, span
 RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 # python-telegram-bot's default getUpdates request timeout is also 5 seconds.
 # Updater.stop() performs one final, non-long-polling getUpdates request, so a
@@ -138,6 +139,7 @@ async def _run_shutdown_step(
     )
 
 
+@timed("agent.initialize")
 async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
     permission_settings = getattr(runtime.backend_manager, "_agent_permission_settings", None)
@@ -147,7 +149,8 @@ async def initialize(runtime: Any) -> bool:
             from orchestrator.permissions.bootstrap import bind_agent
 
             await bind_agent(runtime)
-    result = await runtime.backend_manager.initialize_active_backend()
+    with span("agent.backend_initialize", agent=runtime.name):
+        result = await runtime.backend_manager.initialize_active_backend()
     if result:
         if str(getattr(runtime.config, "active_backend", "")) == "her-v2":
             from orchestrator.context_compaction import ensure_route_state
@@ -165,7 +168,8 @@ async def initialize(runtime: Any) -> bool:
                 "Migrated legacy memory+ mode to mode=%s with continuity enabled",
                 runtime.backend_manager.agent_mode,
             )
-    runtime.reload_post_turn_observers()
+    with span("agent.reload_observers", agent=runtime.name):
+        runtime.reload_post_turn_observers()
     if result:
         from orchestrator.runtime_model_selection import (
             schedule_current_model_metadata,
