@@ -2839,4 +2839,6 @@ class CallService:
                 call.tts_error_code = call.speech_errors[index]
                 if call.output is not None and call.output.video_enabled:
                     call.output.connector.error_code = call.tts_error_code
+
+
 # HASHI-Fingerprint: hfp_46202f185af641a39ac53d0f2bc2c1ea

@@ -159,8 +159,11 @@ def register_call_api(api):
             if request.method == "GET":
                 operation = request.path.rsplit("/", 1)[-1]
                 allowed = {"client_id", "agent_id", "session_id", "context_generation"}
-                if (operation not in {"route", "context"} or set(request.query) - allowed
-                        or any(len(request.query.getall(k)) != 1 for k in request.query)):
+                if (
+                    operation not in {"route", "context"}
+                    or set(request.query) - allowed
+                    or any(len(request.query.getall(k)) != 1 for k in request.query)
+                ):
                     raise CallError("call_unknown_field")
                 body = dict(request.query, operation=operation)
                 value = body.get("context_generation", "")
