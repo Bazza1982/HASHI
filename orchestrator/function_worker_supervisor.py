@@ -44,11 +44,12 @@ from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
-from orchestrator.lifecycle_timing import timed, span
+from orchestrator.lifecycle_timing import timed, span, emit
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 
+DEFAULT_WORKER_LAUNCH_CONCURRENCY = 8
 WORKER_READY_TIMEOUT_SECONDS = 240.0
 WORKER_REQUEST_TIMEOUT_SECONDS = 180.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
@@ -1330,6 +1331,8 @@ class FunctionWorkerSupervisor:
         self._recovery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._qualification_lock = asyncio.Lock()
         self._artifact_lock = asyncio.Lock()
+        self._worker_launch_slots: asyncio.Semaphore | None = None
+        self._worker_launch_limit = DEFAULT_WORKER_LAUNCH_CONCURRENCY
         self._cached_generation: VerifiedFunctionGeneration | None = None
         self._cached_artifact: tuple[str, Path] | None = None
         self.last_qualification_stats: dict[str, Any] = {}
@@ -1343,6 +1346,19 @@ class FunctionWorkerSupervisor:
         self._last_telegram_status_warning: (
             tuple[tuple[tuple[str, str], ...], float] | None
         ) = None
+
+    def _launch_semaphore(self) -> asyncio.Semaphore:
+        # The Functions configuration is loaded after this supervisor is built.
+        # Freeze one bound on first use; never resize a pool with live waiters.
+        if self._worker_launch_slots is None:
+            configured = getattr(getattr(self.kernel, "global_cfg", None),
+                                 "worker_launch_concurrency",
+                                 DEFAULT_WORKER_LAUNCH_CONCURRENCY)
+            if type(configured) is not int or not 1 <= configured <= 16:
+                raise ValueError("worker_launch_concurrency must be an integer from 1 to 16")
+            self._worker_launch_limit = configured
+            self._worker_launch_slots = asyncio.Semaphore(configured)
+        return self._worker_launch_slots
 
     def qualify_generation(self) -> VerifiedFunctionGeneration:
         started = time.perf_counter()
@@ -1916,8 +1932,13 @@ class FunctionWorkerSupervisor:
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
-        with span("worker.launch_and_admission", agent=agent_name):
-            process, parent_connection = await launch_function_process_async(bootstrap)
+        queued_at = time.perf_counter()
+        async with self._launch_semaphore():
+            emit("worker.launch_queue_wait", agent=agent_name,
+                 concurrency=self._worker_launch_limit,
+                 duration_ms=(time.perf_counter() - queued_at) * 1000)
+            with span("worker.launch_and_admission", agent=agent_name):
+                process, parent_connection = await launch_function_process_async(bootstrap)
         client = FunctionWorkerClient(
             supervisor=self,
             agent_name=agent_name,
