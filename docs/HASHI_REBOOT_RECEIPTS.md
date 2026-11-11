@@ -410,3 +410,22 @@ adoption status. The full curated Core gate passed (725 tests), plus the
 Function/Worker/reboot minimum (170 tests). A cold `/restart` fallback was
 verified offline through the health and notification contracts, not by a live
 cold restart.
+
+## Local recovery and background follow-up
+
+Single-Agent and max recovery are confirmed from verified Worker identity,
+Function generation, Backend readiness and the installed local route. Telegram
+availability is a warning. An old Telegram connection does not require a new
+Worker to connect before its route may commit. Global health reports local
+readiness independently of connector warnings and pending retries.
+
+After the verified atomic route exchange, topology fan-out is coalesced and
+supervisor-owned. Already-QUIESCED old Workers are retained by bounded retirement
+tasks. Neither unrelated topology RPCs nor old process cleanup delays local
+confirmation. Exit pending remains a warning; actual local Backend, identity,
+generation or route failures remain failures.
+
+Measurements distinguish local Workbench usability, the persisted operation's
+terminal confirmation, browser presentation, and Telegram API connectivity.
+Qualification of a new source is recorded separately from steady state time.
+Offline time does not consume a confirmation send budget.

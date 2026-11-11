@@ -576,6 +576,12 @@ class RebootManager:
                     or delivery["next_attempt_at"] > moment
                 ):
                     continue
+                origin = record.get("origin") or {}
+                if origin.get("surface", "telegram") == "telegram":
+                    runtimes = self.kernel._runtime_map()
+                    if runtimes and not any(getattr(handle, "telegram_connected", False)
+                                            for handle in runtimes.values()):
+                        continue  # Keep the confirmation durable throughout an outage.
                 if delivery["attempts"] >= MAX_DELIVERY_ATTEMPTS:
                     delivery["status"] = "exhausted"
                     self.receipts.update(record["id"], delivery=delivery)
@@ -1811,12 +1817,6 @@ class RebootManager:
                     )
                 else:
                     activation[name] = dict(result)
-                    if handles[name].telegram_connected and not bool(
-                        activation[name].get("telegram_connected")
-                    ):
-                        activation_failures.append(
-                            f"{name}: candidate lost the active Telegram transport"
-                        )
             if activation_failures:
                 raise FunctionWorkerError(
                     "candidate Worker activation failed: "
@@ -1917,16 +1917,19 @@ class RebootManager:
                 exc,
             )
         try:
-            await self.kernel.function_workers.broadcast_topology()
+            self.kernel.function_workers.schedule_topology()
         except Exception:
             warnings.append("topology_publish_failed")
             bridge_logger.exception("Topology notification failed after reboot commit")
-        shutdown_results = await asyncio.gather(
-            *(client.shutdown(force=True) for client in old_clients.values()),
-            return_exceptions=True,
-        )
-        if any(isinstance(result, BaseException) for result in shutdown_results):
-            warnings.append("old_worker_exit_pending")
+        # All old routes are fenced and every old Worker is QUIESCED. Their
+        # bounded teardown is owned by the supervisor, outside local readiness.
+        self.kernel.function_workers.retire_workers(old_clients.values())
+        if any(
+            bool(activation[name].get("telegram_bot_fingerprint"))
+            and not bool(activation[name].get("telegram_connected"))
+            for name in selected_targets
+        ):
+            warnings.append("connectors_unavailable")
         worker_summary = ", ".join(
             f"{name}=pid:{handles[name].worker_pid}/{handles[name].generation_id[7:19]}"
             for name in selected_targets

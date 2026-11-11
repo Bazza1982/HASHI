@@ -153,6 +153,10 @@ def _metadata(
 
 
 class _FunctionWorkers:
+    schedule_topology = FunctionWorkerSupervisor.schedule_topology
+    _refresh_topology = FunctionWorkerSupervisor._refresh_topology
+    retire_workers = FunctionWorkerSupervisor.retire_workers
+
     def __init__(self, kernel, events: list[str]) -> None:
         self.kernel = kernel
         self.events = events
@@ -163,6 +167,10 @@ class _FunctionWorkers:
         self.prepared: list[str] = []
         self.published = 0
         self.broadcasts = 0
+        self._topology_task = None
+        self._topology_revision = 0
+        self._retirement_tasks = {}
+        self._shutting_down = False
 
     def queue_round(self, generation: _Generation, candidates: dict[str, _Client]):
         self.rounds.append((generation, candidates))
@@ -1237,23 +1245,21 @@ async def test_source_change_after_drain_resumes_previous_worker():
 
 
 @pytest.mark.asyncio
-async def test_candidate_cannot_silently_drop_a_working_telegram_transport():
+async def test_candidate_local_ready_commits_while_telegram_reconnects():
     kernel = _Kernel(names=("zelda",))
-    old = kernel.runtimes[0]
+    old_client = kernel.runtimes[0].client
     candidates = kernel.queue_generation(
-        "a",
-        names=("zelda",),
-        telegram_for={"zelda": False},
+        "a", names=("zelda",), telegram_for={"zelda": False},
     )
     manager = RebootManager(kernel, None)
 
-    result = await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
-
-    assert result is False
-    assert kernel.runtimes[0] is old
-    assert old.client.process.is_alive()
-    assert any(event.endswith("worker.resume") for event in kernel.events)
-    assert candidates["zelda"].shutdown_calls == 1
+    assert await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+    assert kernel.runtimes[0].client is candidates["zelda"]
+    assert not kernel.runtimes[0].telegram_connected
+    assert candidates["zelda"].metadata["worker_accepting"]
+    assert not any(event.endswith("worker.resume") for event in kernel.events)
+    assert old_client.shutdown_calls == 1
+    assert candidates["zelda"].shutdown_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1904,9 +1910,14 @@ async def test_post_commit_health_decides_receipt_without_false_rollback(
     record = manager.receipts.records()[-1]
     assert record["status"] == ("succeeded" if ready else "unconfirmed")
     assert record["lifecycle_state"] == ("online" if ready else "unconfirmed")
-    assert record["outcome"] == ("succeeded_with_warning" if ready else "failed")
+    assert record["outcome"] == ("succeeded" if ready else "failed")
     assert record["observation_confidence"] == "confirmed"
-    assert record["warnings"] == ["topology_publish_failed"]
+    # A background diagnostic publication cannot change the durable terminal.
+    assert record["warnings"] == []
+    task = kernel.function_workers._topology_task
+    assert task is not None and not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     if not ready:
         assert record["workers"]["zelda"]["failed_checks"] == [
             "backend_not_ready"

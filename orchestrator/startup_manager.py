@@ -896,6 +896,8 @@ class StartupManager:
                     reasons.pop(name, None)
                 elif pending:
                     connecting.append(name)
+                    states[name] = "local"
+                    reasons[name] = "Telegram connecting in background"
                 else:
                     unavailable.append(name)
                     states[name] = "local"
@@ -924,11 +926,21 @@ class StartupManager:
         order = [name for name in status.get("agent_order", states) if name not in removed]
         order.extend(name for name in states if name not in order)
         ready_agents = sum(state in {"online", "local"} for state in states.values())
+        # Local readiness is an independent projection of installed Workers
+        # and services. Connector warnings remain visible without vetoing it.
+        local_ready = bool(status.get("services_ready")) and not status.get("failed_agents") and all(
+            self._runtime_is_online(runtimes.get(name), state)
+            for name, state in states.items()
+        ) and not any(
+            issue.get("severity") in {"error", "critical"}
+            and issue.get("component") not in {"telegram", "connectors"}
+            for issue in issues
+        )
         status.update(agent_order=order, total=len(states), ready_agents=ready_agents,
             completed=ready_agents + sum(state == "failed" for state in states.values()),
             issues=issues, connector_errors=errors, degraded=degraded,
-            ready=not pending and not degraded,
-            phase="connecting" if pending else "degraded" if degraded else "ready",
+            ready=local_ready, connectors_pending=bool(pending or connecting),
+            phase="degraded" if degraded else "ready" if local_ready else "connecting",
             agent_states=states, agent_reasons=reasons,
             connecting_agents=len(connecting),
             local_agents=sum(state == "local" for state in states.values()),

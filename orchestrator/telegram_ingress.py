@@ -66,6 +66,7 @@ class CoreTelegramIngress:
             self.diagnostics.failure(exc, stage="bot_initialization", retry_seconds=None)
             raise TelegramIngressInitializationError(type(exc).__name__) from None
         self.offset: int | None = None
+        self._pending_checkpoint: int | None = None
         self.task: asyncio.Task[None] | None = None
         self.connected = False
         self._stopping = False
@@ -107,6 +108,7 @@ class CoreTelegramIngress:
         while not self._stopping:
             stage = "route_lookup"
             try:
+                await self._checkpoint_processed_update()
                 if not self._initialized:
                     try:
                         stage = "bot_initialization"
@@ -177,12 +179,16 @@ class CoreTelegramIngress:
                     stage = "worker_delivery"
                     self._check_bot_identity(handle)
                     self.diagnostics.stage(stage)
-                    await handle.deliver_telegram_update(update.to_dict())
-                    self.offset = int(update.update_id) + 1
-                    if self.checkpoint_callback is not None:
-                        stage = "offset_checkpoint"
-                        self.diagnostics.stage(stage)
-                        self.checkpoint_callback(self.offset)
+                    accepted = await handle.deliver_telegram_update(update.to_dict())
+                    if accepted is not True:
+                        raise RuntimeError("Worker did not acknowledge Telegram processing")
+                    # Retain the processing ACK while retrying a failed durable
+                    # checkpoint. Never process the same batch again merely
+                    # because the checkpoint filesystem was temporarily busy.
+                    self._pending_checkpoint = int(update.update_id) + 1
+                    stage = "offset_checkpoint"
+                    self.diagnostics.stage(stage)
+                    await self._checkpoint_processed_update()
                 if status_ok and not self._stopping:
                     self.diagnostics.recovered()
             except asyncio.CancelledError:
@@ -192,6 +198,17 @@ class CoreTelegramIngress:
                 await self._set_connected(False)
                 if not self._stopping:
                     await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
+
+    async def _checkpoint_processed_update(self) -> None:
+        offset = self._pending_checkpoint
+        if offset is None:
+            return
+        if self.checkpoint_callback is not None:
+            result = self.checkpoint_callback(offset)
+            if inspect.isawaitable(result):
+                await result
+        self.offset = offset
+        self._pending_checkpoint = None
 
     async def pause(self) -> None:
         """Finish the accepted batch and retain its offset before handoff.
@@ -258,3 +275,4 @@ class CoreTelegramIngress:
 
     def read_diagnostics(self, *, limit: int = 20) -> dict[str, Any]:
         return self.diagnostics.read(limit=limit)
+# HASHI-Fingerprint: hfp_ec6c04493c0e40f7abadabe22e80f6d0

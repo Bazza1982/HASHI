@@ -59,6 +59,7 @@ async def test_first_validated_poll_is_immediate_then_normal_long_poll_resumes()
     delivered = []
     async def deliver(payload):
         delivered.append(payload)
+        return True
 
     bot.get_updates = poll
     ingress = CoreTelegramIngress(agent_name="alpha", token="token",
@@ -88,6 +89,7 @@ async def test_inflight_old_bot_poll_cannot_deliver_to_new_bot_worker():
 
     async def deliver(payload):
         delivered.append(payload)
+        return True
 
     handle = SimpleNamespace(
         metadata={"telegram_bot_fingerprint": telegram_bot_fingerprint("old-token")},
@@ -157,6 +159,7 @@ async def test_ingress_supervises_initial_connection_failure(monkeypatch, failur
 
     async def deliver(_payload):
         accepted.set()
+        return True
 
     ingress = CoreTelegramIngress(
         agent_name="alpha",
@@ -658,3 +661,4 @@ def test_recovered_quiet_poller_expires_owned_logs_without_another_failure(tmp_p
     diagnostic.recovered()
     assert all(r["event"]!="failure" for r in diagnostic.read()["records"])
     assert diagnostic.snapshot()["last_success_at"]
+# HASHI-Fingerprint: hfp_6001901d737c45c9801a7c2be2c574ea

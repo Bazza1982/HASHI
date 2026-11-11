@@ -1,5 +1,9 @@
 # Proposed Core verification optimization — not implemented
 
+> Deferred historical proposal: Core v5 is frozen by the current owner decision.
+> This proposal is not authorized and is not the current implementation plan.
+> Local-readiness optimisations are confined to Functions/platform code.
+
 Owner: Core runtime / installer. This is a reviewable proposal only, independent
 of the Functions, platform and Workbench candidate. No protected Core source,
 version, qualification policy or production runtime is changed.

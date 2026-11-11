@@ -252,6 +252,7 @@ class RuntimeAppHost:
                             errors["remote"] = str(remote.get("action") or "unavailable")
                     except Exception as exc:
                         errors["remote"] = f"{type(exc).__name__}: {exc}"
+                await app.function_workers.broadcast_topology()
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)
@@ -298,11 +299,9 @@ class RuntimeAppHost:
         )
         app._shared_replacement_candidate = False
         app.shared_adopted_at = datetime.now().astimezone().isoformat()
-        broadcast_topology = getattr(
-            app.function_workers, "broadcast_topology", None
-        )
-        if callable(broadcast_topology):
-            await broadcast_topology()
+        schedule_topology = getattr(app.function_workers, "schedule_topology", None)
+        if callable(schedule_topology):
+            schedule_topology()
         if app.api_gateway:
             app.api_gateway._accepting_requests = True
         # Checkpoint before opening external connectors: recovery must know the

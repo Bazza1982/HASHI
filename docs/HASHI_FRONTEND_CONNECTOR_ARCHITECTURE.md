@@ -1607,3 +1607,25 @@ Command history redacts args; originals execute. PAO notices keep Session/locale
 without Workers; scope-check and retry delivery only. Remote pages fairly;
 closed cards keep text. [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 `/new` preserves history; PAO owns Agent deletion.
+
+## Local activation and asynchronous Telegram ownership
+
+Worker ACTIVE means its Backend and local request queue are available. Telegram
+initialization, retries, menu publication and confirmation restoration are not
+part of activation. Shared Functions grants connector ownership through the
+existing Functions RPC lane only after publishing/committing the stable route.
+The grant carries the exact Worker nonce and Function generation; stale grants
+and non-ACTIVE Workers fail closed. This adds no protected Core protocol.
+
+One Worker-owned connector task retries with bounded backoff. Quiesce cancels
+connector/menu effects before route retirement; slow client teardown remains
+owned by the retiring runtime. Rollback resumes only that Worker's connector.
+A proven pre-write outage schedules independent reconnect. Metadata publication
+failure cannot turn a successful connection or handled update into a replay.
+
+The existing FC outbox owns queued answers and notices. Offline connectors
+leave frozen endpoints pending. On reconnect the same lease-fenced dispatcher
+drains terminal results, incremental deliverables and routed notices. Only
+typed connection evidence proving no request was submitted permits retry.
+Partial effects, expired claims and unknown responses remain unknown and are
+not automatically resent. Business Runs never replay.

@@ -809,6 +809,8 @@ class FunctionWorkerHost:
         self.started_wall_time = time.time()
         self.adopted_at: str | None = None
         self.was_telegram_connected = False
+        self.connector_task: asyncio.Task[Any] | None = None
+        self.connector_owner = False
         self.stop_event = asyncio.Event()
         self.audio_transcript_tasks: set[asyncio.Task[Any]] = set()
         self.legacy_reboot_bridge_task: asyncio.Task[Any] | None = None
@@ -1011,6 +1013,7 @@ class FunctionWorkerHost:
             {
                 "startup_success": bool(runtime.startup_success),
                 "backend_ready": bool(runtime.backend_ready),
+                "telegram_async_connectors": True,
                 "telegram_connected": bool(runtime.telegram_connected),
                 # Only application preparation owns outbound readiness. Receiver
                 # connectivity arrives independently over worker.telegram_status.
@@ -1172,53 +1175,47 @@ class FunctionWorkerHost:
         if runtime.token == LOCAL_MODE_TOKEN:
             runtime.telegram_connected = False
             return False
-        last_error: Exception | None = None
-        last_stage = "initialize"
-        for attempt in range(1, 4):
-            try:
-                last_stage = "initialize"
+        try:
+            if not getattr(runtime.app, "running", False):
                 await runtime.app.initialize()
-                last_stage = "start"
                 await runtime.app.start()
-                # Restore delayed-message cards only after the Telegram bot is
-                # initialized, but before this Worker reports the connector as
-                # ready. Pending expiry therefore survives a worker reload.
-                from orchestrator.telegram_freshness_gate import (
-                    restore_telegram_confirmation_state,
-                )
+            else:
+                # Reconnect a previously started application only after an
+                # actual successful API request, not a cached Bot identity.
+                await runtime.app.bot.get_me()
+            from orchestrator.telegram_freshness_gate import restore_telegram_confirmation_state
 
-                await restore_telegram_confirmation_state(runtime)
-                runtime.telegram_connected = True
-                self.command_menu_task = asyncio.create_task(
-                    self._sync_telegram_command_menus(runtime),
-                    name=f"telegram-command-menu:{self.agent_name}",
-                )
-                return True
-            except Exception as exc:
-                last_error = exc
-                try:
-                    if getattr(runtime.app, "running", False):
-                        await runtime.app.stop()
-                    await runtime.app.shutdown()
-                except Exception:
-                    pass
-                if attempt < 3:
-                    await asyncio.sleep(5)
-        runtime.telegram_connected = False
-        from orchestrator.telegram_delivery_errors import (
-            classify_telegram_delivery_error,
-        )
+            await restore_telegram_confirmation_state(runtime)
+            runtime.telegram_connected = True
+            self.command_menu_task = asyncio.create_task(
+                self._sync_telegram_command_menus(runtime),
+                name=f"telegram-command-menu:{self.agent_name}",
+            )
+            return True
+        except asyncio.CancelledError:
+            # Quiesce fences effects immediately. The retiring runtime owns
+            # potentially slow client cleanup; local cutover never awaits it.
+            runtime.telegram_connected = False
+            raise
+        except Exception:
+            runtime.telegram_connected = False
+            # initialize/start/restoration can fail halfway through.
+            # Close partially opened clients before retrying or retiring.
+            try:
+                if getattr(runtime.app, "running", False):
+                    await asyncio.wait_for(runtime.app.stop(), timeout=5)
+                await asyncio.wait_for(runtime.app.shutdown(), timeout=5)
+            except Exception:
+                logger.warning("Telegram client cleanup deferred for %s", self.agent_name)
+            raise
 
-        failure = classify_telegram_delivery_error(last_error)
-        logger.warning(
-            "Telegram application unavailable for %s; entering local mode: "
-            "stage=%s code=%s error_type=%s",
-            self.agent_name,
-            last_stage,
-            failure.code,
-            failure.error_type,
-        )
-        return False
+    def _start_connector_task(self) -> None:
+        from orchestrator.telegram_worker_lifecycle import start_connector_task
+        start_connector_task(self)
+
+    async def _cancel_connector_tasks(self) -> None:
+        from orchestrator.telegram_worker_lifecycle import cancel_connector_tasks
+        await cancel_connector_tasks(self)
 
     async def _reconcile_interrupted_session_runs(self, runtime: Any) -> list[dict]:
         """Fence only this Worker's Agent Runs before accepting new work."""
@@ -1263,7 +1260,9 @@ class FunctionWorkerHost:
         runtime = self._require_runtime()
         self.phase = "ACTIVATING"
         await self._reconcile_interrupted_session_runs(runtime)
-        telegram_connected = await self._prepare_telegram_application()
+        # External connectors start only after the stable route is committed.
+        runtime.telegram_connected = False
+        runtime._telegram_reconnect = self._start_connector_task
         runtime.startup_success = True
         if hasattr(runtime, "prepare_post_start_state"):
             runtime.prepare_post_start_state()
@@ -1283,7 +1282,7 @@ class FunctionWorkerHost:
         self._start_legacy_reboot_bridge()
         return {
             "ok": True,
-            "local_mode": not telegram_connected,
+            "local_mode": not bool(runtime.telegram_connected),
             "metadata": self.metadata(),
         }
 
@@ -1333,6 +1332,7 @@ class FunctionWorkerHost:
         self.accepting = False
         self.was_telegram_connected = bool(runtime.telegram_connected)
         runtime.telegram_connected = False
+        await self._cancel_connector_tasks()
         runtime_background_status.cancel_for_quiesce(runtime)
         # Let cooperative optional tasks settle without waiting for a Provider.
         await asyncio.sleep(0)
@@ -1372,6 +1372,8 @@ class FunctionWorkerHost:
             runtime.telegram_connected = True
         self.accepting = True
         self.phase = "ACTIVE"
+        if getattr(self, "connector_owner", False):
+            self._start_connector_task()
         await self.emit_metadata()
         return {"ok": True, "metadata": self.metadata()}
 
@@ -1380,6 +1382,7 @@ class FunctionWorkerHost:
             return {"ok": True}
         self.phase = "STOPPING"
         self.accepting = False
+        await self._cancel_connector_tasks()
         command_menu_task = getattr(self, "command_menu_task", None)
         if command_menu_task is not None:
             command_menu_task.cancel()
@@ -1435,6 +1438,14 @@ class FunctionWorkerHost:
             if self.facade is not None:
                 self.facade.update_topology(params)
             return self.metadata()
+        if method == "worker.connectors_start":
+            if (self.phase != "ACTIVE" or not self.accepting
+                    or params.get("worker_nonce") != self.nonce
+                    or params.get("generation_id") != self.manifest.generation_id):
+                raise FunctionWorkerStateError("Connector owner is not the current active Worker")
+            self.connector_owner = True
+            self._start_connector_task()
+            return {"ok": True}
         if method == "worker.activate":
             return await self.activate()
         if method == "worker.quiesce":
@@ -1511,15 +1522,17 @@ class FunctionWorkerHost:
                 raise FunctionWorkerStateError(
                     "runtime.telegram_update requires an update object"
                 )
+            if not runtime.telegram_connected:
+                raise FunctionWorkerStateError("Telegram handlers are not ready; retain the update")
             update = Update.de_json(dict(update_payload), runtime.app.bot)
-            from orchestrator.telegram_actor_scope import scoped_access_enabled
-            if scoped_access_enabled(runtime):
-                from orchestrator.telegram_actor_scope import process_telegram_update
-
-                await process_telegram_update(runtime, update)
-            else:
-                await runtime.app.process_update(update)
-            await self.emit_metadata()
+            from orchestrator.telegram_update_ack import dispatch_update
+            await dispatch_update(runtime, update)
+            # Metadata is diagnostic. Its failure must not replay an already
+            # processed update after the canonical admission has succeeded.
+            try:
+                await self.emit_metadata()
+            except Exception:
+                logger.warning("Telegram metadata publication deferred for %s", self.agent_name)
             return True
         if method == "runtime.enqueue_api_text":
             result = await runtime.enqueue_api_text(

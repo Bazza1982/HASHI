@@ -664,7 +664,8 @@ async def test_detached_gateway_incremental_telegram_is_delivered_by_worker(
     runtime.name = "another-agent"
     assert await dispatch_pending_telegram_deliverables(runtime) == 0
     runtime.name = "agent1"
-    assert await dispatch_pending_telegram_deliverables(runtime) == 1
+    # The same durable sweep now also restores an unsent terminal answer.
+    assert await dispatch_pending_telegram_deliverables(runtime) == (2 if finish_before_dispatch else 1)
     assert len(runtime.app.bot.media) == 1
     assert runtime.app.bot.media[0]["payload"] == b"available before final"
     assert await dispatch_pending_telegram_deliverables(runtime) == 0

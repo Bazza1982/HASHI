@@ -146,6 +146,7 @@ async def test_scoped_updates_create_distinct_real_sessions_and_honor_revocation
         observations[telegram_update.effective_user.id] = (session["session_id"], owner)
 
     runtime.app = SimpleNamespace(bot=object(), process_update=process)
+    runtime.telegram_connected = True
     host = FunctionWorkerHost.__new__(FunctionWorkerHost)
     host.runtime = runtime
     host.phase = "ACTIVE"
