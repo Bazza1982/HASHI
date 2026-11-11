@@ -62,6 +62,15 @@ function Write-LifecycleTiming {
 Write-LifecycleTiming "platform.initialize" "end" $LifecycleClock.Elapsed.TotalMilliseconds
 Write-LifecycleTiming "platform.restart_task" "start"
 
+# Keep one exact registered-task handle. Its State/LastTaskResult properties
+# are live Scheduler RPC reads; do not reopen the CIM provider on every poll.
+# Resolve read access before stopping any running process.
+$TaskOpenStarted = $LifecycleClock.Elapsed.TotalMilliseconds
+$Scheduler = New-Object -ComObject 'Schedule.Service'
+$Scheduler.Connect()
+$RuntimeTask = $Scheduler.GetFolder('\').GetTask($RuntimeTaskName)
+Write-LifecycleTiming "platform.task_handle_open" "end" ($LifecycleClock.Elapsed.TotalMilliseconds - $TaskOpenStarted)
+
 $Timestamp = [DateTimeOffset]::Now.ToString("o")
 Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "$Timestamp fixed restart task started for $ResolvedRoot"
 
@@ -85,22 +94,22 @@ if ($Result -ne 0) {
 }
 
 $TaskSettleStarted = $LifecycleClock.Elapsed.TotalMilliseconds
-$RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
-for ($Attempt = 0; $Attempt -lt 20 -and [string]$RuntimeTask.State -eq "Running"; $Attempt++) {
+$RuntimeState = [int]$RuntimeTask.State
+for ($Attempt = 0; $Attempt -lt 20 -and $RuntimeState -eq 4; $Attempt++) {
     Start-Sleep -Milliseconds 250
-    $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
+    $RuntimeState = [int]$RuntimeTask.State
 }
-if ([string]$RuntimeTask.State -eq "Running") {
+if ($RuntimeState -eq 4) {
     Stop-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
     for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
         Start-Sleep -Milliseconds 250
-        $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
-        if ([string]$RuntimeTask.State -ne "Running") {
+        $RuntimeState = [int]$RuntimeTask.State
+        if ($RuntimeState -ne 4) {
             break
         }
     }
 }
-if ([string]$RuntimeTask.State -eq "Running") {
+if ($RuntimeState -eq 4) {
     Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI runtime task did not stop cleanly"
     exit 1
 }
@@ -138,12 +147,12 @@ for ($Attempt = 0; $Attempt -lt 300; $Attempt++) {
         Write-LifecycleTiming "platform.health_poll" "end" ($LifecycleClock.Elapsed.TotalMilliseconds - $HealthStarted) $Attempt
     }
     $TaskQueryStarted = $LifecycleClock.Elapsed.TotalMilliseconds
-    $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
+    $RuntimeState = [int]$RuntimeTask.State
     Write-LifecycleTiming "platform.task_status_query" "end" ($LifecycleClock.Elapsed.TotalMilliseconds - $TaskQueryStarted) $Attempt
-    if ([string]$RuntimeTask.State -ne "Running") {
-        $RuntimeInfo = Get-ScheduledTaskInfo -TaskName $RuntimeTaskName -ErrorAction SilentlyContinue
-        if ($null -eq $RuntimeInfo -or [int64]$RuntimeInfo.LastTaskResult -ne 0) {
-            Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI runtime task failed before readiness; result=$($RuntimeInfo.LastTaskResult)"
+    if ($RuntimeState -ne 4) {
+        $RuntimeResult = [int64]$RuntimeTask.LastTaskResult
+        if ($RuntimeResult -ne 0) {
+            Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI runtime task failed before readiness; result=$RuntimeResult"
             exit 1
         }
     }

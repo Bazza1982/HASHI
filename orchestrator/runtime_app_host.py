@@ -349,7 +349,14 @@ class RuntimeAppHost:
             "_monitor_tasks",
             {},
         )
+        api = getattr(app, "workbench_api", None)
+        media_calls = sum(
+            service.active_call_count() for service in (
+                getattr(api, "call_service", None), getattr(api, "live_voice_manager", None)
+            ) if service is not None
+        )  # A failed activity read fails quiescence closed.
         return {
+            "media_calls": media_calls,
             "backend_requests": max(
                 0, int(getattr(app, "_handoff_requests", 0) or 0)
             ),

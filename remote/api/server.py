@@ -451,6 +451,7 @@ class HashiStartPayload(BaseModel):
 
 
 class HashiRestartPayload(BaseModel):
+    detached: bool = False
     reason: Optional[str] = None
     target_instance: Optional[str] = None
     requester_agent: Optional[str] = None
@@ -4431,7 +4432,16 @@ def create_app(
                     raise ValueError("invalid restart notification identity")
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if payload.detached and payload.notify_origin is None:
+            raise HTTPException(status_code=400, detail="Detached restart requires a bound origin")
+        def already_active():
+            current = getattr(app.state, "current_restart", None)
+            return bool(current and not current[0].done() and not current[1]().get("completed_at"))
+        if already_active():
+            raise HTTPException(status_code=409, detail="Restart already in progress")
         before = await asyncio.to_thread(_hashi_control_status)
+        if already_active():
+            raise HTTPException(status_code=409, detail="Restart already in progress")
         reason_meta = _sanitize_rescue_reason(payload.reason)
         restart_id = _new_restart_id()
         target_instance = str(payload.target_instance or "").strip().upper()
@@ -4495,81 +4505,71 @@ def create_app(
                 failure_stage="target_validation",
             )
             return JSONResponse(status_code=409, content=record)
-        phase = "runtime_qualification"
-        record["phase"] = phase
-        record = _write_restart_record(record)
-        try:
-            # Freeze the installer-qualified destination before any destructive
-            # action. A cold restart can adopt an approved new Core generation;
-            # comparing it to the still-running old generation is incorrect.
-            qualified = await asyncio.to_thread(_qualified_restart_runtime)
-            if qualified is not None:
-                record["expected"]["runtime_version"] = {
-                    key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
-                }
-                record["expected"]["runtime_source"] = "installer-qualified-target"
-            record["phase"] = "launch"
+        async def execute():
+            nonlocal record
+            phase = "runtime_qualification"
+            record["phase"] = phase
             record = _write_restart_record(record)
-            phase = "launch"
-            started = _restart_hashi_process()
-        except Exception as exc:
-            logger.exception("HASHI rescue restart failed")
+            try:
+                # Freeze the installer-qualified destination before any destructive
+                # action. A cold restart can adopt an approved new Core generation;
+                # comparing it to the still-running old generation is incorrect.
+                qualified = await asyncio.to_thread(_qualified_restart_runtime)
+                if qualified is not None:
+                    record["expected"]["runtime_version"] = {
+                        key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
+                    }
+                    record["expected"]["runtime_source"] = "installer-qualified-target"
+                record["phase"] = "launch"
+                record = _write_restart_record(record)
+                phase = "launch"
+                started = _restart_hashi_process()
+            except Exception as exc:
+                logger.exception("HASHI rescue restart failed")
+                record.update(
+                    {
+                        "state": "failed",
+                        "phase": phase,
+                        "completed_at": _utc_timestamp(),
+                        "error": str(exc),
+                    }
+                )
+                record = _write_restart_record(record)
+                _append_rescue_audit(
+                    requester=client_id,
+                    reason=reason_meta["reason"],
+                    reason_truncated=reason_meta["truncated"],
+                    reason_original_length=reason_meta["original_length"],
+                    outcome="failed",
+                    status=before,
+                    error=str(exc),
+                    operation="restart",
+                    restart_id=restart_id,
+                    target_instance=target_instance,
+                    requester_agent=record["requester_agent"],
+                    request_source=record["request_source"],
+                    old_pid=old_pid,
+                    failure_stage=phase,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content=record,
+                )
             record.update(
                 {
-                    "state": "failed",
-                    "phase": phase,
-                    "completed_at": _utc_timestamp(),
-                    "error": str(exc),
+                    "state": "verifying",
+                    "phase": "terminal_verification",
+                    "launcher": {
+                        "pid": started["pid"],
+                        "command": started["command"],
+                        "log_path": started["log_path"],
+                        "launcher_kind": started.get("launcher_kind"),
+                        "platform": started.get("platform"),
+                    },
                 }
             )
             record = _write_restart_record(record)
-            _append_rescue_audit(
-                requester=client_id,
-                reason=reason_meta["reason"],
-                reason_truncated=reason_meta["truncated"],
-                reason_original_length=reason_meta["original_length"],
-                outcome="failed",
-                status=before,
-                error=str(exc),
-                operation="restart",
-                restart_id=restart_id,
-                target_instance=target_instance,
-                requester_agent=record["requester_agent"],
-                request_source=record["request_source"],
-                old_pid=old_pid,
-                failure_stage=phase,
-            )
-            return JSONResponse(
-                status_code=500,
-                content=record,
-            )
-        record.update(
-            {
-                "state": "verifying",
-                "phase": "terminal_verification",
-                "launcher": {
-                    "pid": started["pid"],
-                    "command": started["command"],
-                    "log_path": started["log_path"],
-                    "launcher_kind": started.get("launcher_kind"),
-                    "platform": started.get("platform"),
-                },
-            }
-        )
-        record = _write_restart_record(record)
-        deadline = time.monotonic() + RESTART_VERIFICATION_TIMEOUT_SECONDS
-        status = await asyncio.to_thread(_hashi_control_status)
-        evidence = _restart_evidence(
-            status,
-            old_pid=old_pid,
-            target_instance=target_instance,
-            expected_runtime=record["expected"]["runtime_version"] or {},
-            expected_generation=record["expected"]["generation_id"] or "",
-            previous_runtime=_runtime_version(before),
-            qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
-        )
-        while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
-            await asyncio.sleep(0.5)
+            deadline = time.monotonic() + RESTART_VERIFICATION_TIMEOUT_SECONDS
             status = await asyncio.to_thread(_hashi_control_status)
             evidence = _restart_evidence(
                 status,
@@ -4580,52 +4580,89 @@ def create_app(
                 previous_runtime=_runtime_version(before),
                 qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
             )
-        completed = _restart_evidence_complete(evidence)
-        record.update(
-            {
-                "ok": completed,
-                "state": "completed" if completed else "failed",
-                "phase": "completed" if completed else "terminal_verification",
-                "completed_at": _utc_timestamp(),
-                "status": status,
-                "evidence": evidence,
-                "error": None
-                if completed
-                else "restart_terminal_verification_failed",
-            }
-        )
-        record = _write_restart_record(record)
-        _append_rescue_audit(
-            requester=client_id,
-            reason=reason_meta["reason"],
-            reason_truncated=reason_meta["truncated"],
-            reason_original_length=reason_meta["original_length"],
-            outcome="completed" if completed else "verification_failed",
-            command=started["command"],
-            pid=started["pid"],
-            log_path=started["log_path"],
-            status=status,
-            operation="restart",
-            restart_id=restart_id,
-            target_instance=target_instance,
-            requester_agent=record["requester_agent"],
-            request_source=record["request_source"],
-            old_pid=old_pid,
-            new_pid=evidence.get("new_pid"),
-            failure_stage=None if completed else "terminal_verification",
-        )
-        if payload.notify_origin:
-            record = await asyncio.to_thread(_retry_restart_notification, record)
-        elif payload.notify_agent:
-            record["notification"] = await asyncio.to_thread(
-                _notify_restart_result,
-                agent=payload.notify_agent,
-                record=record,
+            while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+                status = await asyncio.to_thread(_hashi_control_status)
+                evidence = _restart_evidence(
+                    status,
+                    old_pid=old_pid,
+                    target_instance=target_instance,
+                    expected_runtime=record["expected"]["runtime_version"] or {},
+                    expected_generation=record["expected"]["generation_id"] or "",
+                    previous_runtime=_runtime_version(before),
+                    qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
+                )
+            completed = _restart_evidence_complete(evidence)
+            record.update(
+                {
+                    "ok": completed,
+                    "state": "completed" if completed else "failed",
+                    "phase": "completed" if completed else "terminal_verification",
+                    "completed_at": _utc_timestamp(),
+                    "status": status,
+                    "evidence": evidence,
+                    "error": None
+                    if completed
+                    else "restart_terminal_verification_failed",
+                }
             )
             record = _write_restart_record(record)
-        if not completed:
-            return JSONResponse(status_code=503, content=record)
-        return record
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="completed" if completed else "verification_failed",
+                command=started["command"],
+                pid=started["pid"],
+                log_path=started["log_path"],
+                status=status,
+                operation="restart",
+                restart_id=restart_id,
+                target_instance=target_instance,
+                requester_agent=record["requester_agent"],
+                request_source=record["request_source"],
+                old_pid=old_pid,
+                new_pid=evidence.get("new_pid"),
+                failure_stage=None if completed else "terminal_verification",
+            )
+            if payload.notify_origin:
+                record = await asyncio.to_thread(_retry_restart_notification, record)
+            elif payload.notify_agent:
+                record["notification"] = await asyncio.to_thread(
+                    _notify_restart_result,
+                    agent=payload.notify_agent,
+                    record=record,
+                )
+                record = _write_restart_record(record)
+            if not completed:
+                return JSONResponse(status_code=503, content=record)
+            return record
+        tasks = getattr(app.state, "restart_tasks", None)
+        if tasks is None:
+            tasks = app.state.restart_tasks = set()
+        if not payload.detached:
+            task = asyncio.current_task()
+            tasks.add(task)
+            app.state.current_restart = (task, lambda: record)
+            try:
+                return await execute()
+            finally:
+                tasks.discard(task)
+        async def run_detached():
+            nonlocal record
+            try:
+                await execute()
+            except Exception:
+                logger.exception("Detached restart observation failed")
+                record.update(state="failed", phase="terminal_verification",
+                    completed_at=_utc_timestamp(), error="restart_observation_failed")
+                _write_restart_record(record)
+        task = asyncio.create_task(run_detached())
+        app.state.current_restart = (task, lambda: record)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return JSONResponse(status_code=202, content=record)
 
     @app.get("/control/hashi/restarts/{restart_id}")
     async def hashi_control_restart_record(request: Request, restart_id: str):

@@ -35,3 +35,19 @@ NP measurements and evidence are candidate-specific. Local commit, actual loaded
 version, test success, production deployment and user acceptance are separate facts.
 Repeated runtime-file verification inside protected Core requires its own reviewed
 Core-version migration; do not bypass admission checks from Functions.
+
+Cold self-restart uses Remote's authenticated detached admission. HTTP 202 returns
+one already-persisted restart ID; it is acceptance, never completion. Remote owns
+the surviving executor, rejects overlapping launches, records terminal proof and
+then attempts notification. Legacy synchronous and trusted-peer paths remain.
+The existing owner-scoped operation API projects Remote's public receipt contract;
+it cannot execute a restart or disclose another owner, Agent or instance's record.
+Malformed terminal evidence does not project success. Exact receipt reads survive
+the recent-completion discovery window.
+
+Windows restart opens one exact registered task before stopping the old process.
+Its live Scheduler COM State/LastTaskResult reads replace repeated CIM discovery;
+old-task retirement, health identity, crash detection and bounded polling remain.
+Idle media context/route use authenticated GET routes; state-changing controls
+retain POST. Shared quiescence separately counts live Calls and pending start
+reservations across owners, including when no HTTP request is in flight. Failure

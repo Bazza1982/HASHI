@@ -341,6 +341,10 @@ class CallService:
         )
         return result
 
+    def active_call_count(self) -> int:
+        """Read-only quiescence guard, independent of HTTP polling activity."""
+        return sum(call.phase == "active" for call in self.calls.values())
+
     def busy(self, owner):
         self.expire()
         return any(
@@ -2835,3 +2839,4 @@ class CallService:
                 call.tts_error_code = call.speech_errors[index]
                 if call.output is not None and call.output.video_enabled:
                     call.output.connector.error_code = call.tts_error_code
+# HASHI-Fingerprint: hfp_46202f185af641a39ac53d0f2bc2c1ea
