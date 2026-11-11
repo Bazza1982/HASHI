@@ -143,6 +143,8 @@ class GlobalConfig:
     bridge_home: Path = None
     config_path: Path = None
     secrets_path: Path = None
+    # Functions-only scheduling; every Worker still performs full Core admission.
+    startup_agent_concurrency: int = 8
     workbench_port: int = DEFAULT_WORKBENCH_PORT
     api_gateway_port: int = DEFAULT_API_GATEWAY_PORT
     claude_cmd: str = "claude"
@@ -571,6 +573,9 @@ class ConfigManager:
         _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
         _owner_scope_id = resolve_owner_scope_id(g_raw, _auth_id)
 
+        startup_agent_concurrency = g_raw.get("startup_agent_concurrency", 8)
+        if type(startup_agent_concurrency) is not int or not 1 <= startup_agent_concurrency <= 16:
+            raise ValueError("global.startup_agent_concurrency must be an integer from 1 to 16")
         workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
         enterprise_database_url = (
@@ -702,6 +707,7 @@ class ConfigManager:
             bridge_home=bridge_home,
             config_path=self.config_path,
             secrets_path=self.secrets_path,
+            startup_agent_concurrency=startup_agent_concurrency,
             workbench_port=workbench_port,
             api_gateway_port=api_gateway_port,
             claude_cmd=resolve_command_value(

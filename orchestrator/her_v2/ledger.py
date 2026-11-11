@@ -251,6 +251,8 @@ class LedgerStore:
         allowed = (
             None if request_refs is None else {str(value) for value in request_refs}
         )
+        if allowed is not None and not allowed:
+            return ()
         reconciled: list[ExecutionLedger] = []
         for ledger in self.all_ledgers():
             if ledger.is_terminal:
@@ -264,3 +266,4 @@ class LedgerStore:
             self.save(ledger)
             reconciled.append(ledger)
         return tuple(reconciled)
+# HASHI-Fingerprint: hfp_0bfe610f0cc746de971d53418c2aedbd

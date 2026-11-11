@@ -480,7 +480,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 35
+    SCHEMA_VERSION = 36
 
     def __init__(
         self,
@@ -550,6 +550,55 @@ class SessionStore:
             connection.close()
 
     def _initialize(self) -> None:
+        with self._lock, self._connection() as connection:
+            try:
+                row = connection.execute(
+                    "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
+                row = None
+            try:
+                version = int(row["value"]) if row else 0
+            except (TypeError, ValueError):
+                version = 0
+            if version > self.SCHEMA_VERSION:
+                raise RuntimeError("Session database requires a newer schema reader")
+            schema_ready = version == self.SCHEMA_VERSION
+            if schema_ready:
+                foreground_index = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                    "AND name = 'one_live_call_per_owner'"
+                ).fetchone()
+                # Legacy writers/restores can leave recovery work even when
+                # the version marker is current. Reuse the ordered migration.
+                schema_ready = (
+                    bool(foreground_index)
+                    and "foreground" in str(foreground_index["sql"] or "").lower()
+                    and connection.execute(
+                        "SELECT 1 FROM live_provider_fragment_inbox UNION ALL "
+                        "SELECT 1 FROM live_provider_delegation_inbox LIMIT 1"
+                    ).fetchone() is None
+                )
+        if schema_ready:
+            # Legacy writers can still set the scalar preference. This data
+            # projection is recovery, not a repeated schema migration.
+            with self._lock, self._connection() as connection:
+                connection.execute("""
+                    INSERT OR IGNORE INTO session_workzones(
+                        session_id, slot_id, path, enabled, label, created_at, updated_at)
+                    SELECT session_id, 'main', workzone, 1, '', created_at, updated_at
+                    FROM sessions
+                    WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
+                      AND NOT EXISTS (SELECT 1 FROM session_workzones AS w
+                                      WHERE w.session_id=sessions.session_id AND w.slot_id='main')
+                """)
+            self._repair_pending_audio_projections()
+            return
+        self._initialize_schema()
+
+    def _initialize_schema(self) -> None:
         with self._lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
@@ -4950,6 +4999,7 @@ class SessionStore:
                 summary="Frontend-visible message recorded",
                 detail={
                     "message_id": message_id,
+                    "delivery_route": dict(delivery_route or {}),
                     "source": normalized_source,
                     "presentation_channel": normalized_channel,
                     "content_modes": sorted(
@@ -6872,31 +6922,43 @@ class SessionStore:
 
     def pending_incremental_telegram_deliveries(
         self, *, agent_id: str, limit: int = 20
-    ) -> list[dict[str, str]]:
-        """Find this Agent's durable publication tasks needing FC dispatch.
+    ) -> list[dict[str, Any]]:
+        """Find durable Telegram results/notices, including offline deferrals.
 
-        Expired claims are included so the normal claim path can mark their
-        uncertain external outcome unknown without sending them again.
+        Only existing frozen endpoints are eligible. Unknown/expired claims
+        are never resent; the normal lease owner reconciles their uncertainty.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("incremental delivery limit must be between 1 and 100")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                """SELECT t.session_id, s.owner_id, r.request_id, p.event_id
-                   FROM run_deliverable_publications AS p
-                   JOIN runs AS r ON r.run_id=p.run_id
-                   JOIN sessions AS s ON s.session_id=r.session_id
-                   JOIN connector_delivery_tasks AS t ON t.event_id=p.event_id
-                   WHERE s.instance_id=? AND s.agent_id=? AND r.agent_id=?
-                     AND t.session_id=s.session_id AND t.run_id=r.run_id
+                """SELECT t.session_id, s.owner_id, COALESCE(r.request_id, '') AS request_id,
+                          t.event_id, r.delivery_route_json, e.detail_json
+                   FROM connector_delivery_tasks AS t
+                   JOIN sessions AS s ON s.session_id=t.session_id
+                   JOIN run_events AS e ON e.event_id=t.event_id
+                   LEFT JOIN runs AS r ON r.run_id=t.run_id
+                   WHERE s.instance_id=? AND s.agent_id=?
+                     AND (r.agent_id=? OR r.run_id IS NULL)
                      AND t.connector_id='telegram'
+                     AND e.kind IN ('run.completed','run.failed','run.cancelled',
+                                    'run.interrupted','assistant.output.available',
+                                    'frontend.message.recorded','run.question.created')
                      AND (t.state IN ('pending','retry') OR
                           (t.state='claimed' AND t.lease_expires_at<=?))
                    ORDER BY t.created_at, t.task_id LIMIT ?""",
                 (self.instance_id, str(agent_id).lower(), str(agent_id).lower(), now, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            detail = _json_object(row["detail_json"])
+            route = _json_object(row["delivery_route_json"] or "{}") or detail.get("delivery_route")
+            if not route:
+                continue  # Never infer a new destination for legacy notices.
+            result.append({**{key: row[key] for key in ("session_id","owner_id","request_id","event_id")},
+                           "delivery_route": route})
+        return result
 
     def run_deliverable_publication(
         self,

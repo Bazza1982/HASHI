@@ -37,7 +37,6 @@ REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
 # Qualification (240s), drain (180s), activation (360s), and commit (120s)
 # have independent bounded stages. Leave headroom before declaring a missing
 # Core receipt unconfirmed; this timeout never changes Core's own transaction.
-SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
 # Progress is durable before cutover. Optional chat delivery gets a bounded
 # head start, never a permission gate or a browser-render dependency.
 REBOOT_START_NOTICE_TIMEOUT_SECONDS = 2.0
@@ -308,7 +307,14 @@ class RebootManager:
             "action": "reboot",
             "mode": record["mode"],
             "status": status,
+            "phase": record.get("phase"),
             "terminal": terminal,
+            "shared_generation_id": (record.get("shared_replacement") or {}).get("generation_id"),
+            "outcome": record.get("outcome"),
+            "warnings": list(record.get("warnings") or ()),
+            "duration_seconds": record.get("duration_seconds"),
+            "created_at": record.get("created_at"),
+            "finished_at": record.get("finished_at"),
             "latest_sequence": latest_sequence,
             "progress": progress,
             "targets": list(record.get("targets") or ()),
@@ -570,6 +576,12 @@ class RebootManager:
                     or delivery["next_attempt_at"] > moment
                 ):
                     continue
+                origin = record.get("origin") or {}
+                if origin.get("surface", "telegram") == "telegram":
+                    runtimes = self.kernel._runtime_map()
+                    if runtimes and not any(getattr(handle, "telegram_connected", False)
+                                            for handle in runtimes.values()):
+                        continue  # Keep the confirmation durable throughout an outage.
                 if delivery["attempts"] >= MAX_DELIVERY_ATTEMPTS:
                     delivery["status"] = "exhausted"
                     self.receipts.update(record["id"], delivery=delivery)
@@ -755,24 +767,8 @@ class RebootManager:
             request_id = str(shared.get("request_id") or "")
             receipt_path = state_dir / f"replacement-{request_id}.json"
             if not receipt_path.exists():
-                requested_at = float(shared.get("requested_at") or 0.0)
-                request_path = state_dir / "kernel-requests" / f"{request_id}.json"
-                if (
-                    requested_at
-                    and moment - requested_at > SHARED_REPLACEMENT_TIMEOUT_SECONDS
-                    and not request_path.exists()
-                ):
-                    await self._release_reboot_fences(record)
-                    failed = {
-                        **shared,
-                        "status": "unconfirmed",
-                    }
-                    self._finish(
-                        record,
-                        "unconfirmed",
-                        reason="shared_replacement_unconfirmed",
-                        shared_replacement=failed,
-                    )
+                # Core owns preparation/activation budgets and its result receipt.
+                # A second wall-clock timer must not invent a failed transaction.
                 continue
             try:
                 if receipt_path.stat().st_size > 4096:
@@ -835,31 +831,18 @@ class RebootManager:
                 continue
 
             startup = dict(getattr(self.kernel, "startup_status", {}) or {})
-            remote = dict(startup.get("remote") or {})
+            # Local service readiness and Worker identity determine lifecycle
+            # completion. External connector recovery remains a health warning.
             shared_ready = (
-                startup.get("ready") is True
-                and not startup.get("degraded")
-                and not getattr(self.kernel, "_connector_activation_pending", False)
-                and (remote.get("enabled") is False or not remote or remote.get("available") is True)
+                startup.get("services_ready", startup.get("ready")) is True
+                and not startup.get("failed_agents", 0)
+                and not any(issue.get("severity") in {"error", "critical"}
+                            for issue in startup.get("issues") or ())
             )
-            if not shared_ready:
-                # Workers alone cannot confirm a broad handoff. Give the
-                # existing connector retry loop its bounded recovery window.
-                requested_at = float(shared.get("requested_at") or 0.0)
-                if requested_at and moment - requested_at <= SHARED_REPLACEMENT_TIMEOUT_SECONDS:
-                    self.receipts.update(
-                        record["id"], phase="verifying", lifecycle_state="committed",
-                        committed=True, reason="shared_services_unready",
-                    )
-                else:
-                    await self._release_reboot_fences(record)
-                    self._finish(
-                        record, "unconfirmed", committed=True,
-                        lifecycle_state="committed", reason="shared_services_unready",
-                        shared_replacement={**shared, "status": "unconfirmed",
-                                            "generation_id": generation_id},
-                    )
-                continue
+            connector_warnings = ["connectors_unavailable"] if (
+                startup.get("degraded")
+                or getattr(self.kernel, "_connector_activation_pending", False)
+            ) else []
 
             shared_result = {
                 **shared,
@@ -974,12 +957,13 @@ class RebootManager:
                 for name in record["targets"]
             )
             online_count = sum(online.values())
-            if online_count == len(record["targets"]):
+            if shared_ready and online_count == len(record["targets"]):
                 self._finish(
                     record,
                     "succeeded",
                     lifecycle_state="online",
-                    outcome="succeeded",
+                    outcome="succeeded_with_warning" if connector_warnings else "succeeded",
+                    warnings=connector_warnings,
                     observation_confidence="confirmed",
                     committed=True,
                     reason="",
@@ -997,7 +981,7 @@ class RebootManager:
                     lifecycle_state=("committed" if online_count else "unconfirmed"),
                     outcome=outcome,
                     observation_confidence="confirmed" if confirmed else "unconfirmed",
-                    reason="readiness",
+                    reason="shared_services_unready" if not shared_ready else "readiness",
                     online=online,
                     workers=evidence,
                     shared_replacement=shared_result,
@@ -1833,12 +1817,6 @@ class RebootManager:
                     )
                 else:
                     activation[name] = dict(result)
-                    if handles[name].telegram_connected and not bool(
-                        activation[name].get("telegram_connected")
-                    ):
-                        activation_failures.append(
-                            f"{name}: candidate lost the active Telegram transport"
-                        )
             if activation_failures:
                 raise FunctionWorkerError(
                     "candidate Worker activation failed: "
@@ -1939,16 +1917,19 @@ class RebootManager:
                 exc,
             )
         try:
-            await self.kernel.function_workers.broadcast_topology()
+            self.kernel.function_workers.schedule_topology()
         except Exception:
             warnings.append("topology_publish_failed")
             bridge_logger.exception("Topology notification failed after reboot commit")
-        shutdown_results = await asyncio.gather(
-            *(client.shutdown(force=True) for client in old_clients.values()),
-            return_exceptions=True,
-        )
-        if any(isinstance(result, BaseException) for result in shutdown_results):
-            warnings.append("old_worker_exit_pending")
+        # All old routes are fenced and every old Worker is QUIESCED. Their
+        # bounded teardown is owned by the supervisor, outside local readiness.
+        self.kernel.function_workers.retire_workers(old_clients.values())
+        if any(
+            bool(activation[name].get("telegram_bot_fingerprint"))
+            and not bool(activation[name].get("telegram_connected"))
+            for name in selected_targets
+        ):
+            warnings.append("connectors_unavailable")
         worker_summary = ", ".join(
             f"{name}=pid:{handles[name].worker_pid}/{handles[name].generation_id[7:19]}"
             for name in selected_targets

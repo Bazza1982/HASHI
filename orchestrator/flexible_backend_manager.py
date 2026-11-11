@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.backend_switch_result import BackendSwitchResult
+from orchestrator.lifecycle_timing import span
 from orchestrator.config_json import ConfigDurabilityError
 from orchestrator.operation_failures import OperationFailed, OperationRejected, operation_failure
 
@@ -1900,33 +1901,37 @@ class FlexibleBackendManager:
         backend = None
         initialized = False
         try:
-            from adapters.registry import get_backend_class
-            BackendClass = get_backend_class(engine)
+            with span("backend.load_adapter"):
+                from adapters.registry import get_backend_class
+                BackendClass = get_backend_class(engine)
             api_key = self._resolve_api_key(engine, backend_cfg_raw)
             self._attach_runtime_context(adapter_cfg)
 
-            backend = BackendClass(adapter_cfg, self.global_config, api_key)
-            backend.privacy_level = self.privacy_level
+            with span("backend.construct_adapter"):
+                backend = BackendClass(adapter_cfg, self.global_config, api_key)
+                backend.privacy_level = self.privacy_level
 
-            # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
-            # API adapters consume it directly; HER exposes it through the
-            # protocol-neutral HASHI Tool Gateway over MCP stdio.
-            if engine in (
-                "openrouter-api",
-                "deepseek-api",
-                "openai-compatible-api",
-                "hashi-api",
-                "ollama-api",
-                "xai-api",
-                "her-v2",
-                "codex-cli",
-                "claude-cli",
-            ):
-                tools_cfg = self._resolve_tools_config(backend_cfg_raw)
-                if tools_cfg:
-                    self._attach_tool_registry(tools_cfg, adapter_cfg, backend=backend)
+            with span("backend.attach_tools"):
+                # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
+                # API adapters consume it directly; HER exposes it through the
+                # protocol-neutral HASHI Tool Gateway over MCP stdio.
+                if engine in (
+                    "openrouter-api",
+                    "deepseek-api",
+                    "openai-compatible-api",
+                    "hashi-api",
+                    "ollama-api",
+                    "xai-api",
+                    "her-v2",
+                    "codex-cli",
+                    "claude-cli",
+                ):
+                    tools_cfg = self._resolve_tools_config(backend_cfg_raw)
+                    if tools_cfg:
+                        self._attach_tool_registry(tools_cfg, adapter_cfg, backend=backend)
 
-            initialized = bool(await backend.initialize())
+            with span("backend.initialize_adapter"):
+                initialized = bool(await backend.initialize())
             if not initialized:
                 return rejected(OperationRejected("backend_unavailable"), "initialize")
             return backend

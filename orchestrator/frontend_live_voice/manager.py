@@ -3059,6 +3059,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                            "provider_session_max_duration_seconds": (resolved_phone["adapter"].capabilities.max_session_seconds if phone else None)},
         }
 
+    def active_call_count(self) -> int:
+        """All owners' live Calls and unassociated start reservations block cutover."""
+        with self.session_store._lock, self.session_store._connection() as connection:
+            calls = connection.execute(
+                "SELECT COUNT(*) FROM live_calls WHERE "
+                "phase IN ('connecting','active','ending','recovering')"
+            ).fetchone()[0]
+            pending = connection.execute(
+                """SELECT COUNT(*) FROM live_call_attempts AS a
+                   LEFT JOIN live_calls AS c ON c.call_id = a.call_id
+                   WHERE a.state IN ('reserved','provider_created')
+                     AND (a.call_id IS NULL OR c.call_id IS NULL)"""
+            ).fetchone()[0]
+        return int(calls) + int(pending)
+
     def has_foreground_call(self, owner_id: str) -> bool:
         """Read-only admission interlock for other media Connectors."""
         with self.session_store._lock, self.session_store._connection() as connection:

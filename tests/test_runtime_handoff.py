@@ -361,6 +361,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     tmp_path, monkeypatch
 ):
     from orchestrator.runtime_app_host import RuntimeAppHost
+    from unittest.mock import AsyncMock
 
     monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
 
@@ -398,11 +399,12 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         shared_generation_id="generation-a",
         _handoff_draining=True,
         _shared_replacement_candidate=True,
-        startup_status={"issues": []},
+        startup_status={"services_ready": True, "issues": []},
         api_gateway=None,
         whatsapp=None,
         function_workers=SimpleNamespace(
-            _telegram_ingress={"alpha": flaky, "beta": healthy}
+            _telegram_ingress={"alpha": flaky, "beta": healthy},
+            broadcast_topology=AsyncMock()
         ),
         global_cfg=SimpleNamespace(authorized_id=1, bridge_home=tmp_path, project_root=tmp_path),
         _runtime_map=lambda: {},
@@ -413,11 +415,20 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     host = RuntimeAppHost(None, {})
     host.app = app
     host.task = asyncio.create_task(asyncio.Event().wait())
+    activated = asyncio.Event()
+    original_activate = host._activate_connectors
+    async def observe_activation():
+        try:
+            return await original_activate()
+        finally:
+            activated.set()
+    host._activate_connectors = observe_activation
     try:
         result = await host.commit()
         assert result["committed"] and result["degraded"]
         assert app._shared_replacement_candidate is False
         assert app._shared_replacement_continuity is True
+        await asyncio.wait_for(activated.wait(), timeout=1)
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
         assert flaky.is_running and flaky.calls == 2

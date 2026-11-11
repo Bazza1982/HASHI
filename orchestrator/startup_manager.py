@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.bootstrap_logging import AnimMute
+from orchestrator.lifecycle_timing import emit, timed
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -143,6 +144,7 @@ class StartupManager:
         )
         self._startup_header_shown = True
 
+    @timed("startup.initial_agents")
     async def start_initial_agents(self, global_cfg, agent_configs, secrets) -> tuple[bool, dict]:
         selected_configs = [
             cfg for cfg in agent_configs
@@ -469,6 +471,7 @@ class StartupManager:
         main_logger.info(message)
         bridge_logger.info(message)
 
+    @timed("startup.agents_and_services")
     async def _run_startup_banner(self, initial_agent_names, global_cfg, wa_cfg, skipped, inactive_agent_names):
         boot_state = {name: "pending" for name in initial_agent_names}
         boot_reason = {}
@@ -587,11 +590,16 @@ class StartupManager:
             _publish_progress()
             return generation, generation_root
 
+        configured_limit = getattr(global_cfg, "startup_agent_concurrency", INITIAL_AGENT_STARTUP_CONCURRENCY)
+        if type(configured_limit) is not int or not 1 <= configured_limit <= 16:
+            raise ValueError("startup_agent_concurrency must be an integer from 1 to 16")
         prepared_generation_task = asyncio.create_task(
             _prepare_initial_generation(),
             name="boot-function-generation",
         )
-        startup_limit = max(1, min(INITIAL_AGENT_STARTUP_CONCURRENCY, len(initial_agent_names) or 1))
+        startup_limit = max(1, min(configured_limit, len(initial_agent_names) or 1))
+        startup_progress["startup_concurrency"] = startup_limit
+        bridge_logger.info("Agent startup concurrency: %s for %s configured Agents", startup_limit, len(initial_agent_names))
         startup_sem = asyncio.Semaphore(startup_limit)
 
         async def _start_initial_agent(agent_name: str):
@@ -609,7 +617,9 @@ class StartupManager:
                     e,
                 )
                 return agent_name, (False, str(e))
+            queued_at = time.perf_counter()
             async with startup_sem:
+                emit("startup.agent_queue_wait", duration_ms=(time.perf_counter() - queued_at) * 1000, agent=agent_name, concurrency=startup_limit)
                 boot_state[agent_name] = "connecting"
                 bridge_logger.info("%s: pending -> connecting", agent_name)
                 _publish_progress()
@@ -886,6 +896,8 @@ class StartupManager:
                     reasons.pop(name, None)
                 elif pending:
                     connecting.append(name)
+                    states[name] = "local"
+                    reasons[name] = "Telegram connecting in background"
                 else:
                     unavailable.append(name)
                     states[name] = "local"
@@ -914,11 +926,30 @@ class StartupManager:
         order = [name for name in status.get("agent_order", states) if name not in removed]
         order.extend(name for name in states if name not in order)
         ready_agents = sum(state in {"online", "local"} for state in states.values())
+        # Local readiness is an independent projection of installed Workers
+        # and services. Telegram warnings cannot veto local readiness.
+        remote = dict(getattr(self.kernel, "remote_lifecycle_status", {}) or status.get("remote") or {})
+        route_unready = remote.get("enabled") is not False and (
+            remote.get("available") is False or (
+                pending and getattr(self.kernel, "_shared_replacement_continuity", False)
+                and not remote.get("available")
+            )
+        )
+        unrelated_connector_failure = any(name not in runtimes for name in errors)
+        local_ready = not route_unready and not unrelated_connector_failure and bool(status.get("services_ready")) and not status.get("failed_agents") and all(
+            self._runtime_is_online(runtimes.get(name), state)
+            for name, state in states.items()
+        ) and not any(
+            issue.get("severity") in {"warning", "error", "critical"}
+            and issue.get("component") != "telegram"
+            and issue.get("code") not in {"agent_telegram_unavailable", "connector_activation"}
+            for issue in issues
+        )
         status.update(agent_order=order, total=len(states), ready_agents=ready_agents,
             completed=ready_agents + sum(state == "failed" for state in states.values()),
             issues=issues, connector_errors=errors, degraded=degraded,
-            ready=not pending and not degraded,
-            phase="connecting" if pending else "degraded" if degraded else "ready",
+            ready=local_ready, connectors_pending=bool(pending or connecting),
+            phase="degraded" if degraded else "ready" if local_ready else "connecting",
             agent_states=states, agent_reasons=reasons,
             connecting_agents=len(connecting),
             local_agents=sum(state == "local" for state in states.values()),

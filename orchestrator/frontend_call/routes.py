@@ -156,21 +156,36 @@ def register_call_api(api):
             if not owner:
                 raise CallError("call_auth_required", 403)
             authenticated = True
-            stage = "content_type"
-            if request.content_type != "application/json":
-                raise CallError("call_json_required", 415)
-            stage = "body_read"
-            data, total = [], 0
-            async for chunk in request.content.iter_chunked(16384):
-                total += len(chunk)
-                if total > MAX_BODY:
-                    raise CallError("call_body_limit", 413)
-                data.append(chunk)
-            stage = "json"
-            try:
-                body = json.loads(b"".join(data))
-            except (ValueError, UnicodeError) as exc:
-                raise CallError("call_json_invalid") from exc
+            if request.method == "GET":
+                operation = request.path.rsplit("/", 1)[-1]
+                allowed = {"client_id", "agent_id", "session_id", "context_generation"}
+                if (
+                    operation not in {"route", "context"}
+                    or set(request.query) - allowed
+                    or any(len(request.query.getall(k)) != 1 for k in request.query)
+                ):
+                    raise CallError("call_unknown_field")
+                body = dict(request.query, operation=operation)
+                value = body.get("context_generation", "")
+                if not value.isascii() or not value.isdecimal() or len(value) > 16:
+                    raise CallError("call_invalid_number")
+                body["context_generation"] = int(value)
+            else:
+                stage = "content_type"
+                if request.content_type != "application/json":
+                    raise CallError("call_json_required", 415)
+                stage = "body_read"
+                data, total = [], 0
+                async for chunk in request.content.iter_chunked(16384):
+                    total += len(chunk)
+                    if total > MAX_BODY:
+                        raise CallError("call_body_limit", 413)
+                    data.append(chunk)
+                stage = "json"
+                try:
+                    body = json.loads(b"".join(data))
+                except (ValueError, UnicodeError) as exc:
+                    raise CallError("call_json_invalid") from exc
             # Disabled file prevents new work; end is still available for cleanup.
             if not isinstance(body, dict):
                 raise CallError("call_json_invalid")
@@ -263,6 +278,8 @@ def register_call_api(api):
         await service.close()
 
     api.app.router.add_post("/api/v1/call/operation", handle)
+    api.app.router.add_get("/api/v1/call/route", handle)
+    api.app.router.add_get("/api/v1/call/context", handle)
     api.app.on_startup.append(start)
     api.app.on_cleanup.append(close)
     return service

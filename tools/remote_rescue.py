@@ -412,7 +412,10 @@ def rescue_restart(
     payload.setdefault("base_url", base_url)
     if result.status in {401, 403}:
         return EXIT_FORBIDDEN, payload
-    return (0 if result.ok else EXIT_REMOTE_ERROR), payload
+    admitted = (isinstance(extra_payload, dict) and extra_payload.get("detached") is True
+                and result.status == 202 and payload.get("state") == "accepted"
+                and isinstance(payload.get("restart_id"), str))
+    return (0 if result.ok or admitted else EXIT_REMOTE_ERROR), payload
 
 
 def rescue_restart_status(
@@ -617,3 +620,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_d1fbe4a091854d039650ec013b8425c3

@@ -17,7 +17,8 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("foreign", [False, True])
-def test_split_home_fixed_tasks_upgrade_without_changing_owner_or_access(tmp_path, foreign):
+@pytest.mark.parametrize("isolated", [False, True])
+def test_split_home_fixed_tasks_upgrade_without_changing_owner_or_access(tmp_path, foreign, isolated):
     home = tmp_path / "private home with spaces"
     home.mkdir()
     (home / "agents.json").write_text(
@@ -27,6 +28,7 @@ def test_split_home_fixed_tasks_upgrade_without_changing_owner_or_access(tmp_pat
     ctl = ROOT / "bin/hashi_restart_ctl.ps1"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
+$env:HASHI_DATA_ROOT = {_ps_string(tmp_path / "isolated runtime with spaces") if isolated else "''"}
 $global:RegisteredTasks = @{{}}
 function New-ScheduledTaskAction {{
     param($Execute, $Argument, $WorkingDirectory)
@@ -100,6 +102,9 @@ $Status = (& {_ps_string(ctl)} status -HashiRoot {_ps_string(home)} -CodeRoot {_
             assert action["WorkingDirectory"] == str(home)
             assert str(ROOT / "bin") in action["Arguments"]
             assert str(home) in action["Arguments"]
+            if item["Name"].startswith("HashiRuntime-"):
+                assert ("-RuntimeDataRoot" in action["Arguments"]) is isolated
+                assert not isolated or str(tmp_path / "isolated runtime with spaces") in action["Arguments"]
             assert item["Task"]["Principal"]["RunLevel"] == "Highest"
     if not foreign:
         assert "RuntimeDefinitionMatches : True" in actual["Status"]

@@ -43,20 +43,23 @@ async def test_shared_functions_commit_restores_remote_and_gates_health(tmp_path
     host = RuntimeAppHost(None, {})
     host.app = app
     host.task = asyncio.create_task(asyncio.Event().wait())
+    activated = _first_connector_activation(host)
     commit = asyncio.create_task(host.commit())
     try:
         # Old shared Functions have retired, so bundled Remote is absent.
-        # The candidate must restore it before claiming local readiness.
+        # Commit is local; external restoration must not hold its RPC open.
         await asyncio.wait_for(started.wait(), timeout=.4)
+        assert commit.done() and commit.result()["committed"]
         pending = json.loads((await server.handle_health(_FakeRequest())).text)
         assert not pending["ready"]
         release.set()
         result = await commit
+        await asyncio.wait_for(activated.wait(), timeout=1)
         payload = json.loads((await server.handle_health(_FakeRequest())).text)
         assert payload["remote"]["available"] is remote_ok
         assert payload["ready"] is remote_ok
         assert payload["degraded"] is not remote_ok
-        assert result["degraded"] is not remote_ok
+        assert result["degraded"] is True  # Connections were still pending at commit.
     finally:
         release.set()
         host.stopping.set()
@@ -66,6 +69,17 @@ async def test_shared_functions_commit_restores_remote_and_gates_health(tmp_path
             host.connector_task.cancel()
         await asyncio.gather(commit, host.task, *([host.connector_task] if host.connector_task else []),
                              return_exceptions=True)
+
+def _first_connector_activation(host):
+    completed = asyncio.Event()
+    original = host._activate_connectors
+    async def observe():
+        try:
+            return await original()
+        finally:
+            completed.set()
+    host._activate_connectors = observe
+    return completed
 
 class _FakeRequest:
     pass
@@ -146,13 +160,16 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
                 return
             await asyncio.sleep(0.01)
         pytest.fail(f"{name} did not report a successful poll")
+    activated = _first_connector_activation(host)
     try:
         result = await host.commit()
-        assert result["degraded"] and reports
+        assert result["committed"] and result["degraded"]
+        await asyncio.wait_for(activated.wait(), timeout=1)
+        assert reports
         assert reports[0]["beta"]["running"]
         assert not reports[0]["alpha"]["connected"]
         payload = json.loads((await server.handle_health(_FakeRequest())).text)
-        assert payload["degraded"] and not payload["ready"]
+        assert payload["degraded"] and payload["ready"]
         affected = next(i for i in payload["issues"] if i["code"] == "agent_telegram_unavailable")
         assert "alpha" in affected["details"]["agents"]
         await wait_connected("beta")
@@ -162,7 +179,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
         assert affected["details"]["agents"] == ["alpha"]
         if persistent:
             await host._activate_connectors()
-            assert not app.startup_status["ready"]
+            assert app.startup_status["ready"]
             assert app.startup_status["degraded"]
         else:
             # The ingress owns connection recovery after nonblocking start;
@@ -175,14 +192,14 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             assert all(item["connected"] and item["running"] for item in reports[-1].values())
             # A subsequent real ingress transition must update the same health owner.
             await ingress["beta"]._set_connected(False)
-            assert app.startup_status["degraded"] and not app.startup_status["ready"]
+            assert app.startup_status["degraded"] and app.startup_status["ready"]
             await ingress["beta"]._set_connected(True)
             assert app.startup_status["ready"] and not app.startup_status["issues"]
             # Stale Worker metadata must not conceal an actual ingress failure.
             handles["beta"].client.fail_status = True
             await ingress["beta"]._set_connected(False)
             assert handles["beta"].telegram_connected  # IPC could not update the Worker.
-            assert app.startup_status["degraded"] and not app.startup_status["ready"]
+            assert app.startup_status["degraded"] and app.startup_status["ready"]
             handles["beta"].client.fail_status = False
             await ingress["beta"]._set_connected(True)
             assert app.startup_status["ready"] and not app.startup_status["issues"]

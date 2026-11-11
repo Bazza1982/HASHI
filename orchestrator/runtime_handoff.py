@@ -29,11 +29,11 @@ def snapshot(app) -> dict:
         "agent_generations": agents,
         "generations": generations,
         "telegram_offsets": {
-            name: ingress.offset
+            name: getattr(ingress, "acknowledged_offset", ingress.offset)
             for name, ingress in app.function_workers._telegram_ingress.items()
         },
         "telegram_bot_offsets": {
-            name: {"offset": ingress.offset, "bot_fingerprint": fingerprint}
+            name: {"offset": getattr(ingress, "acknowledged_offset", ingress.offset), "bot_fingerprint": fingerprint}
             for name, ingress in app.function_workers._telegram_ingress.items()
             if (fingerprint := telegram_bot_fingerprint(getattr(ingress, "token", None)))
         },
@@ -79,6 +79,11 @@ def checkpoint_offset(
         write_record(identities_path, identities)
 
 
+def _later_offset(left, right):
+    values = [value for value in (left, right) if type(value) is int]
+    return max(values) if values else None
+
+
 def load(app) -> dict:
     root = instance_runtime_dir(app.paths.bridge_home)
     record = json.loads((root / "function-topology.json").read_text())
@@ -92,12 +97,18 @@ def load(app) -> dict:
     handoff = record["handoff"]
     offset_path = root / "telegram-offsets.json"
     if offset_path.exists():
-        handoff["telegram_offsets"].update(json.loads(offset_path.read_text()))
+        for name, offset in json.loads(offset_path.read_text()).items():
+            prior = handoff["telegram_offsets"].get(name)
+            handoff["telegram_offsets"][name] = _later_offset(prior, offset)
     identities_path = root / "telegram-bot-offsets.json"
     if identities_path.exists():
-        handoff.setdefault("telegram_bot_offsets", {}).update(
-            json.loads(identities_path.read_text())
-        )
+        pairs = handoff.setdefault("telegram_bot_offsets", {})
+        for name, saved in json.loads(identities_path.read_text()).items():
+            prior = pairs.get(name) or {}
+            if prior.get("bot_fingerprint") == saved.get("bot_fingerprint"):
+                saved = {**saved, "offset": _later_offset(prior.get("offset"), saved.get("offset"))}
+            pairs[name] = saved
+            handoff["telegram_offsets"][name] = saved.get("offset")
     return handoff
 
 

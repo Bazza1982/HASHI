@@ -47,6 +47,11 @@ async def deliver_notice(
     endpoint = endpoint_id_for(
         "telegram", ingress_transport="telegram", channel_key=channel
     )
+    runtime_map = kernel._runtime_map()
+    if runtime_map and not any(getattr(handle, "telegram_connected", False)
+                               for handle in runtime_map.values()):
+        # Durable publication remains pending; offline time is not an attempt.
+        return {**result, "sent": False, "deferred": True}
     claims = store.claim_delivery_outbox(
         session_id=message["session_id"],
         owner_id=owner,
@@ -147,3 +152,4 @@ async def publish_runtime_notice(runtime, *, origin, text, publication_id):
             frontend_outbox=True,
         )
     return message
+# HASHI-Fingerprint: hfp_36e0621805784fe7ace28b8919e57000

@@ -841,6 +841,8 @@ async def _send_long_message_transport(
     )
 
     def record_frontend_receipt(status: str) -> None:
+        if outbox_outcome is not None and outbox_outcome.get("status") == "retry":
+            return  # No external effect was attempted/accepted.
         if not frontend_event_id or not frontend_session_id or not frontend_owner_id:
             return
         if status == "delivered" and not accepted_message_ids:
@@ -949,8 +951,9 @@ async def _send_long_message_transport(
             f"Telegram disconnected — skipping send for {request_id or 'unknown'} "
             f"(purpose={purpose}, text_len={len(text)})"
         )
-        record_delivery("skipped", disposition="telegram_disconnected", chunks=0)
-        record_frontend_receipt("skipped")
+        if outbox_outcome is not None:
+            outbox_outcome["status"] = "retry"
+        record_delivery("deferred", disposition="telegram_disconnected", chunks=0)
         return 0.0, 0
 
     send_started = monotonic()
@@ -1041,6 +1044,19 @@ async def _send_long_message_transport(
                 )
             return True
         except Exception as exc:
+            from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
+            if (outbox_outcome is not None and not accepted_message_ids
+                    and not outbox_outcome.get("accepted_effect_count")
+                    and telegram_request_not_submitted(exc)):
+                # Typed HTTPX connection evidence proves Telegram saw no
+                # request. Retain the same event; never rerun its business Run.
+                outbox_outcome["status"] = "retry"
+                runtime.telegram_connected = False
+                reconnect = getattr(runtime, "_telegram_reconnect", None)
+                if callable(reconnect):
+                    reconnect()
+                record_delivery("deferred", disposition="telegram_connect_unavailable")
+                return False
             retry_after = _retry_after_seconds(exc)
             if retry_after is not None:
                 await telegram_delivery_failover.handle_retry_after(
@@ -1342,6 +1358,7 @@ async def dispatch_claimed_telegram_event(
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
+                retry_safe=status == "retry",
                 error_code=None if status == "completed" else f"telegram_{status}",
             )
             claim_terminal = True
@@ -1371,10 +1388,17 @@ async def dispatch_claimed_telegram_event(
             if str(outcome.get("status") or "") != "completed":
                 raw_status = str(outcome.get("status") or "failed")
                 status = (
-                    "unknown"
-                    if raw_status == "unknown" or accepted_effects
+                    "unknown" if raw_status == "unknown" or accepted_effects
+                    else "retry" if raw_status == "retry"
                     else "suppressed" if raw_status == "suppressed" else "failed"
                 )
+                if status == "retry":
+                    store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
+                        status="retry", retry_safe=True, error_code="telegram_disconnected",
+                    )
+                    claim_terminal = True
+                    return 0.0, 0
                 _record_standard_telegram_receipt(
                     store,
                     session_id=str(claim["session_id"]),
@@ -1388,6 +1412,7 @@ async def dispatch_claimed_telegram_event(
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
                     status=status,
+                    retry_safe=status == "retry",
                     error_code=f"telegram_{status}",
                 )
                 claim_terminal = True
@@ -1406,6 +1431,13 @@ async def dispatch_claimed_telegram_event(
                     text="",
                 )
                 error_code = "telegram_delivery_blocked"
+            if blocked and not runtime.telegram_connected:
+                store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
+                    status="retry", retry_safe=True, error_code="telegram_disconnected",
+                )
+                claim_terminal = True
+                return 0.0, 0
             if blocked:
                 _record_standard_telegram_receipt(
                     store,
@@ -1443,6 +1475,19 @@ async def dispatch_claimed_telegram_event(
         except Exception as media_error:
             message_ids = list(outcome.get("accepted_message_ids") or ())
             accepted_effects = int(outcome.get("accepted_effect_count") or 0)
+            from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
+            if (not accepted_effects and not message_ids
+                    and telegram_request_not_submitted(media_error)):
+                store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
+                    status="retry", retry_safe=True, error_code="telegram_connect_unavailable",
+                )
+                claim_terminal = True
+                runtime.telegram_connected = False
+                reconnect = getattr(runtime, "_telegram_reconnect", None)
+                if callable(reconnect):
+                    reconnect()
+                return 0.0, 0
             revoked = isinstance(media_error, TelegramAccessRevoked)
             status = (
                 ("unknown" if accepted_effects else "suppressed")
@@ -1637,6 +1682,10 @@ async def send_long_message(
             ingress_transport="telegram",
             channel_key=str(chat_id),
         )
+        if not runtime.telegram_connected:
+            # The publication and its frozen outbox already exist. Do not
+            # claim an external effect until this connector can actually send.
+            return 0.0, 0
         claims = runtime.session_store.claim_delivery_outbox(
             session_id=str(publication["session_id"]),
             owner_id=str(publication["owner_id"]),
@@ -1674,6 +1723,7 @@ async def send_long_message(
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
+                retry_safe=status == "retry",
                 error_code=None if status == "completed" else f"telegram_{status}",
             )
             return duration, chunks
@@ -1715,6 +1765,9 @@ async def send_long_message(
         return 0.0, 1
 
     from orchestrator.runtime_session import claim_run_delivery_outbox, ensure_store, request_owner_id
+
+    if not runtime.telegram_connected:
+        return 0.0, 0  # Terminal Run event remains pending for its FC sweep.
 
     worker_id = f"fc-telegram-{getattr(runtime, 'name', 'agent')}-{uuid4().hex}"
     claim_result = claim_run_delivery_outbox(

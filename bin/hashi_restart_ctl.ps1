@@ -7,7 +7,8 @@ param(
     [string]$CodeRoot,
     [string]$Python,
     [string]$TaskUserId,
-    [string]$InstanceId
+    [string]$InstanceId,
+    [string]$RuntimeDataRoot = $env:HASHI_DATA_ROOT
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,6 +82,14 @@ $RuntimeArgs = @(
     "-Resume",
     "-ApiGateway"
 )
+if ($RuntimeDataRoot) {
+    if (-not [IO.Path]::IsPathRooted($RuntimeDataRoot)) {
+        throw "RuntimeDataRoot must be an absolute installation catalogue path."
+    }
+    $RuntimeDataRoot = [IO.Path]::GetFullPath($RuntimeDataRoot)
+    $env:HASHI_DATA_ROOT = $RuntimeDataRoot
+    $RuntimeArgs += @("-RuntimeDataRoot", ('"' + $RuntimeDataRoot + '"'))
+}
 $RuntimeArgumentString = $RuntimeArgs -join " "
 
 function Resolve-RestartTaskUser {

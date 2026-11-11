@@ -31,7 +31,7 @@ def instance(tmp_path):
             await asyncio.sleep(0)
 
     runtime = SimpleNamespace(
-        name="lily",
+        name="lily", telegram_connected=True,
         global_config=SimpleNamespace(
             config_path=config_path, secrets_path=secrets_path,
             owner_scope_id="user:42", authorized_id=42,
@@ -43,6 +43,7 @@ def instance(tmp_path):
 
 def update(user_id, chat_id=None, chat_type="private"):
     return SimpleNamespace(
+        update_id=user_id,
         effective_user=SimpleNamespace(id=user_id),
         effective_chat=SimpleNamespace(id=user_id if chat_id is None else chat_id, type=chat_type),
     )
@@ -176,3 +177,4 @@ async def test_legacy_grant_retains_original_session_and_group_access(tmp_path):
     write_config_json(config_path, config)
     assert not await process_telegram_update(runtime, update(200))
     assert len(observations) == 1
+# HASHI-Fingerprint: hfp_0cce378cf78e4963a17e28725cc971d3

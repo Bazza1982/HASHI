@@ -196,7 +196,7 @@ class AgentLifecycleManager:
                             agent_name,
                             False,
                         )
-                await self.kernel.function_workers.broadcast_topology()
+                self.kernel.function_workers.schedule_topology()
 
                 if handle.telegram_connected and (
                     self.kernel.function_workers.telegram_ingress_running(
@@ -429,3 +429,4 @@ class AgentLifecycleManager:
                 f"Review the preceding shutdown errors.{C_RESET}",
                 flush=True,
             )
+# HASHI-Fingerprint: hfp_69e494a1ef224ebf945acf9ecef9d0c7

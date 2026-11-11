@@ -255,41 +255,9 @@ def _build_restart_payload(
     }
 
 
-def _verified_restart_receipt(
-    payload: dict[str, Any], *, expected_target: str
-) -> tuple[bool, str]:
-    if payload.get("ok") is not True or payload.get("state") != "completed":
-        return False, str(
-            payload.get("error") or "restart did not reach a completed terminal state"
-        )
-    target = str(payload.get("target_instance") or "").strip().upper()
-    if target != str(expected_target or "").strip().upper():
-        return False, "restart terminal receipt target does not match the request"
-    evidence = payload.get("evidence") or {}
-    required = (
-        "old_pid_exited",
-        "new_pid_alive",
-        "new_pid_differs",
-        "backend_health_ok",
-        "instance_matches",
-        "runtime_version_verified",
-        "generation_verified",
-    )
-    missing = [key for key in required if evidence.get(key) is not True]
-    old_pid = evidence.get("old_pid")
-    new_pid = evidence.get("new_pid")
-    if missing or not isinstance(old_pid, int) or not isinstance(new_pid, int):
-        detail = ", ".join(missing) or "PID evidence"
-        return False, f"restart terminal evidence is incomplete: {detail}"
-    if old_pid == new_pid:
-        return False, "restart terminal evidence reused the old PID"
-    if not isinstance(evidence.get("runtime_version"), dict):
-        return False, "restart terminal evidence is missing the runtime version"
-    if not str(evidence.get("generation_id") or "").strip():
-        return False, "restart terminal evidence is missing the Function generation"
-    if str(evidence.get("actual_instance") or "").strip().upper() != target:
-        return False, "restart terminal evidence contains the wrong instance identity"
-    return True, "ok"
+def _verified_restart_receipt(payload: dict[str, Any], *, expected_target: str) -> tuple[bool, str]:
+    from remote.restart_receipts import verified_restart_receipt
+    return verified_restart_receipt(payload, expected_target=expected_target)
 
 
 def _restart_completed_text(payload: dict[str, Any]) -> str:

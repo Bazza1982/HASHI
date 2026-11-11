@@ -321,9 +321,12 @@ class FlexibleAgentRuntime:
 
         # Telegram control updates must not queue behind a long-running handler.
         # Agent work itself remains serialized by HASHI's request queue.
+        from orchestrator.telegram_transport import bot_api_kwargs
+        builder = ApplicationBuilder().token(self.token)
+        for setting, value in bot_api_kwargs(config).items():
+            builder = getattr(builder, setting)(value)
         self.app = (
-            ApplicationBuilder()
-            .token(self.token)
+            builder
             .get_updates_connection_pool_size(8)
             .concurrent_updates(16)
             .build()
@@ -4312,6 +4315,8 @@ class FlexibleAgentRuntime:
         runtime_command_binding.bind_flexible_runtime_handlers(self)
 
     async def handle_telegram_error(self, update: object, context):
+        from orchestrator.telegram_update_ack import record_handler_error
+        record_handler_error(update, context.error)
         update_summary = "<no update>"
         if isinstance(update, Update):
             chat_id = update.effective_chat.id if update.effective_chat else "unknown"
