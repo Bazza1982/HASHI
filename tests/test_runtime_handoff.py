@@ -361,6 +361,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     tmp_path, monkeypatch
 ):
     from orchestrator.runtime_app_host import RuntimeAppHost
+    from unittest.mock import AsyncMock
 
     monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
 
@@ -398,11 +399,12 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         shared_generation_id="generation-a",
         _handoff_draining=True,
         _shared_replacement_candidate=True,
-        startup_status={"issues": []},
+        startup_status={"services_ready": True, "issues": []},
         api_gateway=None,
         whatsapp=None,
         function_workers=SimpleNamespace(
-            _telegram_ingress={"alpha": flaky, "beta": healthy}
+            _telegram_ingress={"alpha": flaky, "beta": healthy},
+            broadcast_topology=AsyncMock()
         ),
         global_cfg=SimpleNamespace(authorized_id=1, bridge_home=tmp_path, project_root=tmp_path),
         _runtime_map=lambda: {},

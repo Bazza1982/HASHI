@@ -169,7 +169,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
         assert reports[0]["beta"]["running"]
         assert not reports[0]["alpha"]["connected"]
         payload = json.loads((await server.handle_health(_FakeRequest())).text)
-        assert payload["degraded"] and not payload["ready"]
+        assert payload["degraded"] and payload["ready"]
         affected = next(i for i in payload["issues"] if i["code"] == "agent_telegram_unavailable")
         assert "alpha" in affected["details"]["agents"]
         await wait_connected("beta")
@@ -179,7 +179,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
         assert affected["details"]["agents"] == ["alpha"]
         if persistent:
             await host._activate_connectors()
-            assert not app.startup_status["ready"]
+            assert app.startup_status["ready"]
             assert app.startup_status["degraded"]
         else:
             # The ingress owns connection recovery after nonblocking start;
@@ -192,14 +192,14 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             assert all(item["connected"] and item["running"] for item in reports[-1].values())
             # A subsequent real ingress transition must update the same health owner.
             await ingress["beta"]._set_connected(False)
-            assert app.startup_status["degraded"] and not app.startup_status["ready"]
+            assert app.startup_status["degraded"] and app.startup_status["ready"]
             await ingress["beta"]._set_connected(True)
             assert app.startup_status["ready"] and not app.startup_status["issues"]
             # Stale Worker metadata must not conceal an actual ingress failure.
             handles["beta"].client.fail_status = True
             await ingress["beta"]._set_connected(False)
             assert handles["beta"].telegram_connected  # IPC could not update the Worker.
-            assert app.startup_status["degraded"] and not app.startup_status["ready"]
+            assert app.startup_status["degraded"] and app.startup_status["ready"]
             handles["beta"].client.fail_status = False
             await ingress["beta"]._set_connected(True)
             assert app.startup_status["ready"] and not app.startup_status["issues"]

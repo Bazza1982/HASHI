@@ -927,13 +927,22 @@ class StartupManager:
         order.extend(name for name in states if name not in order)
         ready_agents = sum(state in {"online", "local"} for state in states.values())
         # Local readiness is an independent projection of installed Workers
-        # and services. Connector warnings remain visible without vetoing it.
-        local_ready = bool(status.get("services_ready")) and not status.get("failed_agents") and all(
+        # and services. Telegram warnings cannot veto local readiness.
+        remote = dict(getattr(self.kernel, "remote_lifecycle_status", {}) or status.get("remote") or {})
+        route_unready = remote.get("enabled") is not False and (
+            remote.get("available") is False or (
+                pending and getattr(self.kernel, "_shared_replacement_continuity", False)
+                and not remote.get("available")
+            )
+        )
+        unrelated_connector_failure = any(name not in runtimes for name in errors)
+        local_ready = not route_unready and not unrelated_connector_failure and bool(status.get("services_ready")) and not status.get("failed_agents") and all(
             self._runtime_is_online(runtimes.get(name), state)
             for name, state in states.items()
         ) and not any(
-            issue.get("severity") in {"error", "critical"}
-            and issue.get("component") not in {"telegram", "connectors"}
+            issue.get("severity") in {"warning", "error", "critical"}
+            and issue.get("component") != "telegram"
+            and issue.get("code") not in {"agent_telegram_unavailable", "connector_activation"}
             for issue in issues
         )
         status.update(agent_order=order, total=len(states), ready_agents=ready_agents,
