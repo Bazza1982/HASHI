@@ -11,10 +11,16 @@ name: Windows runtime contract
         type: boolean
         required: false
         default: true
+      live_voice_ack_only:
+        description: Re-run only the lost Live Voice continuation ACK regression on Windows
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 jobs:
   ci-plan:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.live_voice_ack_only) }}
     name: Select necessary checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -190,9 +196,33 @@ jobs:
     needs:
     - ci-plan
     if: ${{ needs.ci-plan.result == 'success' && needs.ci-plan.outputs.native == 'true' }}
+  live-voice-ack:
+    name: Live Voice continuation ACK (Windows)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_voice_ack_only }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v6
+    - name: Prepare the declared Python runtime
+      shell: pwsh
+      run: |
+        uv venv --seed --python "3.12.13" .venv
+        "$env:GITHUB_WORKSPACE/.venv/Scripts" >> $env:GITHUB_PATH
+    - name: Install the same locked runtime and test dependencies
+      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+    - name: Verify lost continuation ACK does not send a third request
+      run: python -B -m pytest -q tests/test_live_voice_provider_opening.py::TestPhoneProviderOpening::test_missing_continuation_ack_never_sends_a_third_request --junitxml="${{ runner.temp }}/live-voice-ack.xml"
+    - name: Retain the focused result
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: live-voice-continuation-ack
+        if-no-files-found: error
+        path: ${{ runner.temp }}/live-voice-ack.xml
   ci-result:
     name: Windows runtime contract result
-    if: ${{ always() }}
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.live_voice_ack_only) }}
     needs:
     - ci-plan
     - native-windows
