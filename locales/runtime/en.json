@@ -3201,6 +3201,7 @@
     "safety.human_scope_note": "These choices allow access for longer. Check their scope and expiry before choosing."
   },
   "commands": {
+    "getfile": "Get recent or named files",
     "standby": "Standby status and readiness",
     "safety": "View permission status",
     "askme": "Control question cards",

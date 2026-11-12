@@ -3201,6 +3201,7 @@
     "safety.human_scope_note": "以下选项会延长授权范围或时间，请核对后再选择。"
   },
   "commands": {
+    "getfile": "获取最近文件或指定路径的文件",
     "standby": "查看待命状态与准备情况",
     "safety": "查看权限状态",
     "askme": "控制提问卡片",
