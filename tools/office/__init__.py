@@ -1,8 +1,4 @@
-"""Office Toolkit Functions-layer starter modules.
-
-Intent signalling and schema validation are offline-only until the trusted
-ToolRegistry dispatcher and independently qualified Office sidecar are wired.
-"""
+"""Office Toolkit contracts and discovery; Office libraries stay in the sidecar."""
 from .contract import (
     OFFICE_READ_ONLY_TOOLS,
     OFFICE_TOOL_NAMES,

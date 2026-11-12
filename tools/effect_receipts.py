@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping
+from tools.office.contract import OFFICE_READ_ONLY_TOOLS
 
 
 # Only tools whose implementation is observational belong here.  In particular,
@@ -13,6 +14,7 @@ from collections.abc import Mapping
 _READ_EFFECT_TOOLS = frozenset(
     {
         "file_read",
+        *OFFICE_READ_ONLY_TOOLS,
         "log_query",
         "media_read",
         "vision_inspect",

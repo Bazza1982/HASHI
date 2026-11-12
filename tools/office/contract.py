@@ -1,8 +1,8 @@
 """Small-model-friendly Office tool contracts. No runtime imports or file I/O.
 
-This module is intentionally NOT registered in tools.schemas or tools.registry
-until the permission-checked Office gateway and isolated runtime are present.
-It provides one authoritative catalogue for the future HERV3 and CLI surfaces.
+This is the authoritative model-facing catalogue for HERV3 and CLI. Registry
+availability requires an independently qualified Office Runtime; this module
+never imports Office dependencies or acquires filesystem authority.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ OFFICE_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
         "Read only the required Excel range, Word section, or PowerPoint slide. Use file_id returned by office_inspect. Never read a large workbook in full.",
         {
             "file_id": _string("Office file ID returned by office_inspect.", 160),
-            "target": _string("Range or location, e.g. Sales!A1:D20, section heading, or slide 2.", 512),
+            "target": _string("Range/location: Sales!A1:D20, section heading, paragraph:1-20, table:1!1:30, slide:2, page:1-3.", 512),
             "view": {"type": "string", "enum": ["summary", "values", "formulas", "text", "structure"],
                      "description": "Default summary; values for cells, text for documents."},
         },
@@ -62,7 +62,7 @@ OFFICE_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
             "format": {"type": "string", "enum": ["xlsx", "docx", "pptx"],
                        "description": "Required output document format."},
             "output": _string("New authorized output filename including extension.", 4096),
-            "content": _string("Short Markdown/text content; use source_id for large tables.", 16000),
+            "content": _string("CSV or JSON rows for xlsx; Markdown headings, bullets and pipe tables for docx; Markdown outline for pptx. JSON sections/slides support native tables, images and charts. Use source_id for large data.", 16000),
             "source_id": _string("Existing authorized structured data reference.", 160),
             "template": _string("Existing authorized template reference.", 4096),
             "style": {"type": "string", "enum": ["clean", "professional", "academic"],
@@ -78,7 +78,10 @@ OFFICE_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
             "action": {"type": "string", "enum": [
                 "set_cells", "set_formula", "append_rows", "format_range", "add_chart",
                 "replace_text", "append_section", "apply_style", "add_slide",
-            ], "description": "Choose ONE simple edit action."},
+                "set_text", "add_image", "add_table", "set_table", "update_chart",
+                "excel_summary", "excel_reconcile", "excel_clean", "excel_chart",
+                "word_report", "word_format", "slides_from_outline", "office_convert",
+            ], "description": "Choose one action. Recipes use small JSON content; office_convert content is pdf, csv, docx, xlsx or pptx."},
             "target": _string("Sheet/range, document text or section, or slide location.", 512),
             "content": _string("New text/formula or small JSON value representation.", 16000),
             "source_id": _string("Existing authorized data reference for large inserts.", 160),

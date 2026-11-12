@@ -1,98 +1,86 @@
-# HASHI Office Toolkit (HOT) — Function design and implementation handoff
+# HASHI Office Toolkit — Function contract
 
-Status: **initial scaffold only** on feature/office-toolkit. The five tools are NOT registered or executable yet. No live runtime adoption, deployment, or claim of user-visible Office capability. Follow AGENTS.md, ARCHITECTURE.md, the layered runtime boundaries, and the testing policy.
+Status: implemented on `feature/office-toolkit`. Adoption is explicit and instance-scoped. Source, qualified artifacts, running Workers, rendered previews and channel delivery are separate facts. Production adoption is outside this change.
 
-## Single owner and boundaries
+## Ownership and boundaries
 
-- Functional owner: **PAO** (authorized tool execution, file acquisition, artifact provenance and delivery orchestration). Engineering layer: **Functions**, with platform/instance-owned Office-sidecar configuration.
-- HERV3 is an Engine consumer and owns model-facing tool selection; it does **not** own a second Office executor, path policy or audit ledger.
-- The Frontend Connector is a delivery consumer. Workbench is a file preview/library consumer, **not** the owner of Office computation.
-- The immutable Core-host runtime, protected Core source/protocol, Functions role lock and existing installed environments must remain untouched. No global pip/uv sync, no new Python dependencies in sealed Core or Functions, and no changes to installed selector/manifest.
-- Every Agent can opt into the same installed tool set through the existing ToolRegistry authorization and Agent allowed-tools policy. This is **availability**, not automatically unrestricted filesystem access. Preserve the present permission gates and Workzone scoping for each Agent.
+**PAO** owns authorization, source acquisition, working-file handles, transactional operations and execution evidence in **Functions**. Platform/instance configuration selects a shared, isolated Office Runtime. HERV3 and CLI Engines consume the existing ToolRegistry; the Frontend Connector owns publication and delivery. Workbench remains a file-library/preview consumer.
 
-## Five canonical model-facing tools
+Core, its protocols/selectors, existing Functions locks and installed sealed Python environments are unchanged. Office libraries are imported only in the isolated worker. No model-selected interpreter, package installation, arbitrary code, second MCP server, second inference service, recipient selector or Office-specific delivery ledger exists.
 
-The sole initial definition owner is tools/office/contract.py. It is intentionally not yet imported by tools/schemas.py. The future registered JSON tools are:
+Ordinary/L0 execution retains allowed-tools, read-only invocation policy, authorized Workzone roots, enterprise path gates and live Run fencing. Opaque handles are scoped by instance, Agent and Session; calls bind request/call identity and arguments. L1/L2 managed Office channels are **not qualified**: their catalogues hide Office and existing managed dispatch fails closed. There is no fallback to ordinary execution. Process/environment isolation is not a new same-SID OS sandbox; do not claim it supplies L1/L2 isolation.
 
-1. office_inspect(path OR source=last_attachment OR file_id) — inspect file identity, capabilities and structural summary; return opaque file_id and a concrete next-step example.
-2. office_read(file_id, target?, view?) — read a bounded Excel cell range, Word section, PPTX slide or supported PDF part. Return compact data, row/page counts, truncation and continuation.
-3. office_create(format=xlsx|docx|pptx, output, content?|source_id?|template?|style?) — create editable file from Markdown, data reference or template. No arbitrary Python source execution.
-4. office_edit(file_id, action, target?, content?|source_id?) — atomic incremental edit of an authorized working copy. Start with cells/formulas, add rows/charts, Word sections/style/replace and slide addition. Keep complex transformations in named deterministic recipes, not a giant model schema.
-5. office_finish(file_id, output?, preview?, deliver?) — save into a new version, reopen and validate, render when supported and optionally deliver to the originating conversation with confirmed receipt.
+## Five canonical tools
 
-Do not make a full nested Office object model available as hundreds of function calls. Prefer the five compact tools, a small set of deterministic recipes and detailed Skills loaded on demand. No silent formula recalculation claim: openpyxl stores formulas but does not calculate them. A save, structural validation, recalculation, visual render and actual delivery are distinct statuses.
+The sole public schema owner is `tools/office/contract.py`, imported by `tools/schemas.py`.
 
-Response envelope (all tools):
+| Tool | Inputs and behavior |
+| --- | --- |
+| office_inspect | Exactly one of path, source=last_attachment, file_id. Validate content and return a scoped working handle and bounded structure. Attachments resolve through canonical Session storage, same owner/Agent, visible history up to the current Message (last 200 messages). |
+| office_read | file_id, optional target/view. Cells, paragraphs/headings, native Word tables, slide shapes/tables/charts, or PDF text. Bounded results include truncation and continuation. |
+| office_create | xlsx/docx/pptx, new output, content/source_id/template, optional style. Create a working copy; the output does not exist until finish. |
+| office_edit | file_id, one action, optional target/content/source_id. Stage and validate a new immutable version, compare the prior revision, then commit the handle. Originals are retained. |
+| office_finish | file_id, optional new output, preview/deliver. Reopen, publish verified bytes without overwriting existing files, optionally render and use the existing originating-conversation publication service. |
 
-    {
-      "status": "ok | error | partial",
-      "code": "STABLE_ERROR_CODE",
-      "file_id": "opaque reference when available",
-      "summary": "one line",
-      "data": "bounded relevant facts, not entire workbook",
-      "next": {"tool": "office_read", "arguments": {"file_id": "of_1", "target": "Sheet1!A1:D20"}},
-      "checks": {"saved": true, "structure": "passed", "recalculation": "not_performed", "visual": "not_checked", "delivered": false}
-    }
+Content is bounded CSV, Markdown or JSON **text**, never executable Python. Rich recipes use small JSON content instead of adding nested public schemas.
 
-For errors, return a specific correction example only when retrying has no uncertain effect. Unknown execution outcomes and repeated edits require reconciliation and idempotency, not blind retry.
+Responses share status, code, file_id, summary, data, next and checks. Checks independently report saved, structure, recalculation, visual and delivered. A successful write is not recalculation; a rendered preview is not visual approval; persisted/queued publication is not confirmed delivery. Read responses identify cached values versus formula text. Errors retain valid handles only, and give an actionable correction or reconciliation step.
 
-## Current starter implementation
+Representative targets: `Sales!A1:D20`, `paragraph:1-20`, `table:1!1:30`, `slide:1`, `slide:1/shape:3` (edits), `page:1-3`.
 
-- tools/office/contract.py — the five JSON tool definitions, read-only classification and narrow input validation; **validation is not authorization**.
-- tools/office/task_signal.py — deterministic, conservative Office attachment/intent hint producing office_basic. It does not grant rights or select an execution environment.
-- tools/office/package_probe.py — read-only, bounded OOXML bytes preflight (basic Excel sheet names and PPTX slide-part count) without installing Office libraries; this is **not** complete Office document validation.
-- tests/test_office_toolkit_basics.py — focused contract and preflight test cases.
-- docs/office-toolkit/office-basics/SKILL.md — staged small-model Skill draft. It is deliberately NOT under skills/ until the actual Office gateway is enabled and qualified.
+## Isolated, locked runtime
 
-These files must not be mistaken for a working tool gateway. Finish the actual runtime, policy, dispatch, integration and live non-production acceptance before advertising the tools to any model.
+- CPython 3.12, Windows x64 is the currently qualified platform. `requirements/office-runtime.in` declares the independent profile; `office-runtime-windows-py312.lock` pins every binary distribution and SHA256 in its complete dependency closure.
+- Install the lock into a **new** explicit environment using binary wheels and `--require-hashes`. Never synchronize a repository/Core/Functions environment. Changing dependencies requires a new qualification directory, not in-place upgrades.
+- Operator command `scripts/office_runtime.py prepare` verifies installed versions/RECORD hashes, copies worker code into a new generation, hashes its libraries, Python launcher and configured converter closure, then performs real isolated imports/health. The manifest binds protocol 1, platform, Python version and lock digest.
+- `health` and `activate` require explicit manifest, state_root and a short absolute work_root (at most 100 characters on Windows). Activation uses `orchestrator.config_json` and its observed revision; conflicts/durability errors are not blindly retried. Rollback activates a previously qualified manifest through the same operation.
+- Ordinary shared selection is `tool_options.office`, or an absolute `HASHI_OFFICE_RUNTIME_CONFIG` pointing to that configuration. CLI Gateway context freezes these operator options. Runtime availability requires the matching qualified health receipt; execution rechecks the hashed closure.
+- Each call gets a short private temporary transport directory under work_root. Durable candidates, handles and receipts stay under state_root. This avoids native Windows conversion failures with deeply nested state paths. No C/PATH fallback.
+- Child environment contains no inherited provider/Bot credentials or PYTHONPATH. Explicit temporary, profile and cache paths remain in the configured work directory. Request identity, response checksum, IPC limits and deadlines are checked. Timeout/cancellation cleans the owned process tree before returning.
+- Rendering/calculation is optional and independent. The locally tested adapter is official LibreOffice 26.2.7.3, separately extracted to D and hash-qualified, using its console entry and per-call UserInstallation. No COM, MSI registration or native Microsoft Office process is required. Record the installer source, version and official checksum when provisioning.
+- Model-facing tools cannot activate environments or alter runtime configuration. Operators validate the storage policy, volume identity/space and peak budget before provisioning. Shared installed packages do not grant shared document access.
 
-## Implementation roadmap
+Example operator arguments (replace explicit qualified paths; never run against a live environment):
 
-### A. Isolated Office Runtime — one per host, available to authorized Agents
+```text
+prepare --python <new-office-env>\Scripts\python.exe --destination <new-generation> --converter <converter>\program\soffice.com
+health --manifest <generation>\manifest.json --state-root <nonproduction-state> --work-root D:\AI\Temp\HASHI-Office
+activate --manifest <generation>\manifest.json --state-root <nonproduction-state> --work-root D:\AI\Temp\HASHI-Office --config <instance-office.json> --minimum-free-bytes <policy-reserve>
+```
 
-- Implement an isolated Office worker/sidecar launched by an **operator-qualified absolute executable**, not PATH python, model-provided arguments, or an Agent-selected interpreter.
-- Select runtime identity through existing platform/instance configuration, never through the protected Core selector.
-- Build a separate, independently pinned and hash-locked Office dependency closure in a fresh directory. Candidate packages: openpyxl (verify the locally available 3.1.5), python-docx, python-pptx, Pillow, and optional pandas/xlsxwriter/PyMuPDF. Install LibreOffice headless or native Windows Office automation only as independently configured *render/calculation adapters*, not mandatory baseline.
-- Use the existing deployment/runtime qualification conventions, prepare/health-check/activate/rollback. Never modify a live Core or Functions interpreter. Do not make runtime availability contingent on Telegram being connected.
-- One shared installed package closure can serve many Agents, but each request must be separately scoped to Agent/Instance/Run/Workzone and backed by isolated temporary files/OS rights. The runtime must not gain a wider read/write root simply because the host is capable of it.
-- Define a bounded versioned sidecar IPC contract with request identity, deadline, size limits, file handle/authorized source, policy context, response checksum and effect receipt. No arbitrary import/execution/script injection via tool parameters. Consider large input via trusted staging or file descriptor rather than full file bytes inside JSON.
+## Supported operations and recipes
 
-### B. PAO ToolRegistry and CLI Gateway integration
+| Area | Implemented behavior |
+| --- | --- |
+| Excel / UTF-8 CSV | Inspect sheets; bounded values/formula reads; create multiple sheets; set cells/formulas; append; fonts, fills, number formats and wrapping; native bar/line/pie charts; clean, grouped sum/count/average, keyed reconciliation. Long numeric identifiers stay text. |
+| Word | Markdown headings, bullets and native pipe tables; JSON sections/tables/PNG/JPEG images; exact run-preserving text replacement; add/set paragraphs, tables and images; professional/academic/clean presets; clone or append to authorized templates. |
+| PowerPoint | Markdown outlines or JSON slides; native text, tables, images and charts; indexed text/table/chart edits; append slides; presets and aspect-fit/grid layout. Template-only cloning preserves bytes; edited packages must retain existing parts/media. |
+| PDF / conversion | Inspect page count, bounded text extraction, render; Office-to-PDF through the qualified adapter; XLSX/CSV conversion; explicit XLSX conversion for converter recalculation; PDF-to-DOCX text extraction. PDF extraction does not preserve original layout. |
 
-- Import tool definitions from tools.office.contract into tools/schemas.py **only when the real backend is implemented**; add one office_basic tier in tools/registry.py, with the five tool names derived from OFFICE_TOOL_NAMES.
-- Implement an Office Function Gateway as the single dispatcher: authorize every read/write, verify opaque file handles, bind to Agent/Session/Workzone, call the isolated sidecar, reconcile timeouts, and publish durable effects through existing Canonical Audit / effect receipts / File delivery.
-- Place office_inspect/read in existing read-only policy classification only after checking all side effects and indirect assets. Treat create/edit/finish as mutations; a read-only planning/delegation context must not be able to invoke them. office_finish may publish to a recipient, so verify origin authority and no accidental owner-mirror delivery.
-- Share the exact registered public contract with isolated CLI Engines through the existing Tool Gateway. Do not build a second Office MCP server with independent access control.
-- Prefer preserving source by default; output paths are explicitly within authorized write roots, transactional/temp then atomic commit when possible. Detect changed original content and symlinks at commit, never silently overwrite someone else's update.
-- The /getfile feature has a separate feature/getfile branch. Office completion can emit ordinary canonical file-modification evidence and a deliverable; do not duplicate its recent-file index or make Office depend on merging that branch.
+Named actions are `excel_summary`, `excel_reconcile`, `excel_clean`, `excel_chart`, `word_report`, `word_format`, `slides_from_outline`, `office_convert`. Full examples and target syntax live in active `skills/office-basics/SKILL.md` and `references/recipes.md`. The staged documentation location redirects there. Normal SkillManager discovery validates the active package.
 
-### C. HERV3 small-model optimisation — mandatory
+## Validation, fidelity and recovery
 
-- OllamaAdapter currently advertises only the core tier by default. Merely adding office_basic to TOOL_TIERS does not make the tools visible. Wire a **deterministic per-turn Office hint** (attachment type + clear request signals), through the current HERV3 tool-catalogue and backend payload paths. Keep the current singleloop. No extra planning model or unconditional all-tools inflation.
-- Make output schemas concise and shallow. Emit bounded samples, clear next-tool recommendations, supported actions, real file IDs, and actionable schema errors.
-- Include a skill hint in the existing HERV3 skills catalogue; load full guide on demand and preserve the compact FYI/catalogue approach. Do not inject an Office manual into every prompt.
-- Native HERV3 tools, provider fallbacks, Ollama/OpenAI-compatible adapters and CLI Tool Gateway must all see only the same **authorized** tools, filtered by task relevance and runtime availability, without silently dropping Office on local small models.
-- Test real configured small models (e.g. the available Gemma/Qwen variant): no hidden intermediary LLM, no shell scripts needed for basic use. Record tool-choice accuracy, argument validity, end-to-end task success and number of turns. Targets are engineering goals, not current claims.
+- Files are at most 32 MiB. OOXML preflight bounds ZIP entries/expanded size, rejects invalid types, compression bombs, DTD/entities and unsafe relationships. Workbooks are bounded to 100 sheets / 200,000 cells; presentations 200 slides; PDFs 500 pages. Reads have independent text/cell budgets.
+- Edits reject macros, external relationships/formulas, tracked changes, comments, ActiveX, signatures, pivot caches and arbitrary embedded objects. Native PPT chart XLSX parts are allowed only with chart-package relationships and independently validated inert workbook contents. Macro execution is never supported.
+- Untouched media/custom XML bytes and existing package parts are checked after ordinary edits. Unsupported fidelity returns a specific error and keeps the prior working version and original. This is a conservative package-preservation check, not general Microsoft Office rendering equivalence.
+- Every use rechecks authorized roots and source/template/asset digests. Links/junctions and original overwrite are refused. A save uses a flushed temporary sibling and atomic no-replace publication, followed by byte hash readback.
+- SQLite stores immutable version references, revision, provenance, calculation facts and operation receipts. Repeated identical calls replay the receipt; different arguments under the same call ID conflict. Concurrent mutations compare revisions and cannot poison another receipt.
+- Cancelled uncommitted operations retire safely. Running intents left by process loss expire after at least five minutes; retired intent fencing prevents late candidate commits. Prepared saves are reconciled by their actual path/hash and never blindly overwritten or duplicated. An uncertain delivery is reported separately from saved bytes.
+- Audit/effect receipts and originating-conversation delivery reuse existing HASHI owners. `office_finish(deliver=true)` uses the durable publication API and reports each destination's actual state; model arguments cannot select another recipient.
 
-### D. Actual Office scope
+## Discovery and validation routes
 
-- Excel: workbook/sheets, bounded range read, cell writes/formulas, append, filtering/summarising, reconciliation, simple chart and formatting; formula update and cached results always distinguished.
-- Word: headings, paragraphs, tables, image, styles, template-based reports and precise replacement preserving unaffected styles as far as engine supports.
-- PowerPoint: slides, editable text, tables/images/charts, template/theme preservation, slide count/text/object parity and visual validation.
-- PDF: inspect/read/render/convert as capabilities allow; do not claim general PDF editing. Support macro-enabled input only with an explicit preservation policy. Never execute macros; fail/report where preserving them is unsupported.
-- For complex existing Office files, do not silently discard macros, external links, comments, change tracking, template assets or content. Report a precise limitation or select a high-fidelity configured engine.
-- Build recipes for excel_summary, excel_reconcile, excel_clean, excel_chart, word_report, word_format, slides_from_outline and office_convert after the baseline operations actually work.
+`office_basic` is derived from the canonical tool list. Deterministic attachment/intent hints augment the existing Ollama core catalogue and HERV3 stage catalogue; later tool turns retain relevance. Runtime availability and authorization filter the result. CLI uses the existing Tool Gateway and same executor/authority.
 
-## Focused acceptance and release evidence
+Focused tests: `tests/test_office_toolkit_basics.py`, `test_office_runtime.py`, `test_office_regressions.py`, `test_office_integration.py`. Set an explicit `HASHI_TEST_OFFICE_PYTHON` to a separate locked environment; library-backed tests otherwise skip honestly. Use a D basetemp. Tests cover real generated packages, exact content, formula text, corruption, external formulas, template/media/chart preservation, path/source changes, handle scope, concurrent calls, cancellation, recovery, bounded reads, canonical attachments/audit and an actual CLI MCP subprocess.
 
-1. Static/test baseline: python -m pytest -q tests/test_office_toolkit_basics.py ; python scripts/check_protected_core_changes.py --base main ; git diff --check. Record focused red/green evidence when adding real gateway behavior.
-2. Isolated worker: verify actual selected interpreter and installed package versions; run real XLSX/DOCX/PPTX read/create/edit with reopened byte-level and structural checks; corrupted/macro-heavy/external-link inputs and size limits must fail truthfully.
-3. Permissions and recovery: Agent A cannot read B's private files; Workzone access cannot expand; no arbitrary host paths or model-chosen Python; duplicated tool calls, failed output commit, timeout, crash and uncertain receipt are recoverable without duplicate mutation or misleading success.
-4. HERV3: actual Ollama schema selection and end-to-end tasks with available small Gemma and Qwen models, compare a stronger model. Require correct tool invocation, error correction, exact data and usable final document. Do not infer that tests of JSON schema alone prove small-model proficiency.
-5. CLI Engines: same tool names/authority via existing Gateway, with real file output.
-6. Frontend: one verified originating-session attachment via Telegram or Workbench when requested, re-entry/download/Office preview where supported. No double-publish, owner mirror or production context.
-7. Only select affected tests per docs/TESTING_POLICY.md; no unnecessary hosted GitHub CI. Validate in independent non-production Windows/WSL and report tested/untested surfaces separately. Do not merge or deploy production as part of this handoff.
+Shared registry/gateway changes also run the curated local gate from `docs/TESTING_POLICY.md` and affected direct consumers. Run `scripts/check_protected_core_changes.py --base origin/main` and `git diff --check` from the actual D checkout. No extra hosted full-suite CI or production restart is part of this feature.
 
-## Definition of done
+Manual `scripts/office_acceptance.py` is never started by pytest/CI. Explicit files mode performs real chart/analysis/template/conversion/rendering workflows and independently checks package XML and cached formula values. Model mode uses real HERV3/provider code, captures offered schemas/tool receipts, verifies native Word table/content bytes and forbids shell/Python tool use. Pass exact existing model/service targets; no downloads or second inference server.
 
-A normally authorized Agent, regardless of HERV3 or CLI Engine, can inspect an uploaded or authorized XLSX/DOCX/PPTX, read selected content, create/edit a working copy, validate/finish it and deliver the actual file without choosing a Python interpreter or writing an Office Python script. Small models can discover and use the same tools. Runtime/permissions/validation are real, not documentation or successful mocks. Open a PR with scoped evidence and noted fidelity limits; do not claim production acceptance.
+## Current acceptance boundaries
+
+Windows x64, ordinary/L0 Registry, real CLI Gateway and the isolated worker are the supported surface. Local Qwen 9B and Gemma 31B are tested separately; the latter is a stronger control, not evidence for a small Gemma. These are scoped examples, not a broad model success-rate claim. Initial failures and corrected runs remain in local evidence.
+
+L1/L2 execution qualification, WSL/Linux/macOS, native Office COM, general PDF editing/OCR, complex/macro Office fidelity and native Microsoft Office visual equivalence are not claimed. Converter output can change pagination/fonts/formula semantics; unsupported formulas or PDF text ordering need review. Automatic previews render the first page; users may inspect the complete PDF. Existing nonproduction/prod services do not adopt a branch merely because local tests or a PR pass. Telegram/Workbench delivery and external preview require real per-channel evidence; persist/queue/transport acknowledgement/user observation must remain distinct.

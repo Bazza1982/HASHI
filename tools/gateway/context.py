@@ -148,6 +148,12 @@ class GatewayContext:
             if credential:
                 scoped_secrets["scheduler_tool_token"] = credential
         canonical = getattr(registry, "canonical_audit", None)
+        tool_options = _json_safe(registry.tool_options) or {}
+        from tools.office.contract import OFFICE_TOOL_NAMES
+        if allowed_tools.intersection(OFFICE_TOOL_NAMES) and not tool_options.get("office"):
+            runtime = registry._office_runtime()
+            if runtime.availability()["available"]:
+                tool_options["office"] = dict(runtime.options)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,
             agent=str(audit.get("agent_name") or registry.workspace_dir.name),
@@ -186,7 +192,7 @@ class GatewayContext:
                     )
                 ),
             ),
-            tool_options=_json_safe(registry.tool_options) or {},
+            tool_options=tool_options,
             secrets={} if audit.get("tool_gateway_required") else (_json_safe(scoped_secrets) or {}),
             agents_config=_json_safe(registry.agents_config) or [],
             audit={**audit, "backend": backend},
