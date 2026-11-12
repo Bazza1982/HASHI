@@ -42,7 +42,7 @@ For errors, return a specific correction example only when retrying has no uncer
 - tools/office/task_signal.py — deterministic, conservative Office attachment/intent hint producing office_basic. It does not grant rights or select an execution environment.
 - tools/office/package_probe.py — read-only, bounded OOXML bytes preflight (basic Excel sheet names and PPTX slide-part count) without installing Office libraries; this is **not** complete Office document validation.
 - tests/test_office_toolkit_basics.py — focused contract and preflight test cases.
-- skills/office-basics/SKILL.md — short, model-friendly operating instructions.
+- docs/office-toolkit/office-basics/SKILL.md — staged small-model Skill draft. It is deliberately NOT under skills/ until the actual Office gateway is enabled and qualified.
 
 These files must not be mistaken for a working tool gateway. Finish the actual runtime, policy, dispatch, integration and live non-production acceptance before advertising the tools to any model.
 
