@@ -30,7 +30,7 @@ def _normalised_candidate(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(original, str) or not original or len(original) > 4096:
         return None
-    if "\\x00" in original or "\\" in original or original.startswith("/"):
+    if "\x00" in original or "\\" in original or original.startswith("/"):
         return None
     if any(part in {"", ".", ".."} for part in original.split("/")):
         return None
