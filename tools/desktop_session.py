@@ -253,12 +253,9 @@ class DesktopController:
         raise DesktopError("desktop_invalid_operation")
 
     def _preview_available(self):
+        # Native availability and actual capture errors are authoritative.
+        # A locked/secure label alone cannot veto a picture the adapter can read.
         self.native.available()
-        status = getattr(self.native, "desktop_state", None)
-        if callable(status):
-            value = status()
-            if value.get("locked") or value.get("secure_desktop"):
-                raise DesktopError("desktop_locked", 423)
 
     def previews(self, value, session_id):
         options = preview_options(value)
