@@ -38,3 +38,18 @@ async def test_lost_telegram_ack_is_durable_unknown_and_never_replayed(runtime):
  result=await GetFileService(runtime).transfer(update,raw_path=str(path))
  assert result["getfile"]["delivery_state"]=="unknown"
  assert len(bot.media)==1
+
+
+@pytest.mark.asyncio
+async def test_real_immutable_telegram_update_opens_native_menu_without_workbench_input(runtime):
+ from telegram import Update
+ from orchestrator.commands.getfile import getfile_command
+ bot=_ToolBot();runtime.app=NS(bot=bot);runtime.telegram_connected=True
+ update=Update.de_json({"update_id":501,"message":{"message_id":501,"date":1794480000,
+  "chat":{"id":7,"type":"private"},"from":{"id":7,"is_bot":False,"first_name":"QA"},"text":"/getfile"}},None)
+ await getfile_command(runtime,update,NS(args=[]))
+ assert bot.messages
+ markup=bot.messages[-1]["reply_markup"]
+ assert all(not str(b.callback_data).startswith("getfile:path:") for row in markup.inline_keyboard for b in row)
+ assert "Recent 10 distinct files" in bot.messages[-1]["text"]
+ assert runtime.queue.empty()

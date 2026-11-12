@@ -15,9 +15,19 @@ def tr(key, **values):
     return ui_language.tr("getfile." + key, **values)
 
 
+class _OriginOnlyUpdate:
+    """Presentation metadata without mutating PTB's immutable Update."""
+    _hashi_origin_only = True
+
+    def __init__(self, update):
+        self._update = update
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
 async def _send(runtime, update, text, **kwargs):
-    update._hashi_origin_only = True
-    return await runtime._reply_text(update, text, parse_mode="HTML", **kwargs)
+    return await runtime._reply_text(_OriginOnlyUpdate(update), text, parse_mode="HTML", **kwargs)
 
 
 async def _menu(runtime, update, *, query=None):
@@ -42,7 +52,7 @@ async def _menu(runtime, update, *, query=None):
     if not items:
         lines.append(tr("empty"))
     rows.append([InlineKeyboardButton(tr("refresh"), callback_data="getfile:refresh")])
-    if str(getattr(update, "_hashi_session_surface", "") or "") != "telegram":
+    if service.bind(update)["surface"] != "telegram":
         rows.append([InlineKeyboardButton(tr("path_send"), callback_data=f"getfile:path:{token}",
             api_kwargs={"hashi_text_input": {"label": tr("path_label"), "value": "", "max_length": 500}})])
     lines.extend(["", tr("limits"), tr("usage")])
@@ -86,7 +96,6 @@ async def getfile_command(runtime, update, context):
 
 async def getfile_callback(runtime, update, context):
     query = update.callback_query
-    update._hashi_origin_only = True
     try:
         service = GetFileService(runtime)
         service.bind(update)
