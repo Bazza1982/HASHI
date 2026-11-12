@@ -44,6 +44,12 @@ async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_byt
     menu=opened["messages"][-1]["command_ui"]
     assert menu["rows"][0][0]["disabled"] is False
     assert menu["rows"][-1][0]["text_input"]["max_length"]==500
+    from orchestrator.chat_transcript_projection import build_chat_projection
+    projection=build_chat_projection(runtime.session_store,
+        session=runtime.session_store.get_session(session["session_id"],owner_id="user:7"),
+        owner_id="user:7",include_command_ui=True)
+    persisted=next(row["command_ui"] for row in projection["messages"] if row.get("command_ui"))
+    assert persisted["rows"][-1][0]["text_input"]==menu["rows"][-1][0]["text_input"]
     assert str(path) not in json.dumps(menu)
     action=payload("act","request-click-file",menu_id=menu["menu_id"],revision=menu["revision"],
                    button_id=menu["rows"][0][0]["button_id"])
