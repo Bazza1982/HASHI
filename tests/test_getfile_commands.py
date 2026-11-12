@@ -39,6 +39,8 @@ async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_byt
                 "ui_locale":"en",**extra}
     opened=await dispatch_command_interaction(runtime,payload("open","request-open-menu",command="/getfile"),metadata)
     assert opened["ok"],opened
+    assert "Recent 10 distinct files" in opened["messages"][-1]["text"]
+    assert "getfile.coverage" not in opened["messages"][-1]["text"]
     menu=opened["messages"][-1]["command_ui"]
     assert menu["rows"][0][0]["disabled"] is False
     assert menu["rows"][-1][0]["text_input"]["max_length"]==500
