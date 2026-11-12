@@ -8,7 +8,8 @@ from orchestrator.frontend_projection import transport_text_component
 
 
 async def deliver_notice(
-    kernel, *, agent_id, origin, text, publication_id, send_notice
+    kernel, *, agent_id, origin, text, publication_id, send_notice,
+    recovery_category="command_result", recovery=False, original_at=None,
 ):
     """Retry publication/transport only, never the operation that produced it."""
     message = runtime_session.record_kernel_presentation_notice(
@@ -17,6 +18,8 @@ async def deliver_notice(
         text=text,
         idempotency_key=publication_id,
         origin=origin,
+        recovery_category=recovery_category,
+        original_at=original_at,
     )
     if not message:
         return {"sent": False}
@@ -75,6 +78,27 @@ async def deliver_notice(
             ),
         }
     claim = claims[0]
+    from orchestrator.frontend_dispatch import project_claimed_frontend_event
+    from orchestrator.frontend_telegram_replay import (
+        finish_without_telegram, telegram_replay_decision,
+    )
+    event = project_claimed_frontend_event(
+        store, claim, session_id=message["session_id"], owner_id=owner,
+    )
+    decision = telegram_replay_decision(
+        store, claim, event, owner_id=owner, agent_id=agent_id, chat_id=int(origin["chat_id"]),
+    )
+    # A starting notice is allowed on its immediate first attempt, never on recovery.
+    initial_transient = recovery_category == "transient" and not recovery and claim["attempt_count"] == 1
+    if decision.state != "send" and not initial_transient:
+        finish_without_telegram(store, claim, owner_id=owner, decision=decision)
+        return {**result, "sent": False, "delivery_state": decision.state}
+    rendered_text = text
+    if recovery or claim["attempt_count"] > 1:
+        from types import SimpleNamespace
+        from orchestrator.ui_language import preferred_locale
+        locale = preferred_locale(SimpleNamespace(global_config=config), actor_id=int(origin["chat_id"]))
+        rendered_text = decision.label(locale=locale) + "\n\n" + text
     try:
         delivered = await send_notice(
             kernel,
@@ -83,7 +107,7 @@ async def deliver_notice(
             notice_kind="final",
             chat_id=int(origin["chat_id"]),
             thread_id=origin.get("thread_id"),
-            render_text=lambda *_: text,
+            render_text=lambda *_: rendered_text,
         )
     except Exception:
         store.complete_delivery_outbox(

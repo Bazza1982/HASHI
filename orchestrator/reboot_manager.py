@@ -481,6 +481,9 @@ class RebootManager:
                 self.kernel, agent_id=record["source_agent"], origin=origin,
                 text=render(record["source_agent"], None), publication_id=idempotency_key,
                 send_notice=send_runtime_notice,
+                recovery_category="transient" if starting else "command_result",
+                recovery=int(record[delivery_key].get("attempts") or 0) > 1,
+                original_at=record.get("created_at") if starting else record.get("finished_at"),
             )
 
         if surface == "telegram":
@@ -608,6 +611,11 @@ class RebootManager:
                         message_id=result["message_id"],
                         sent_at=moment,
                     )
+                elif result.get("delivery_state") in {"expired", "suppressed"}:
+                    # FC has intentionally closed this endpoint; stop the
+                    # notice retry owner without claiming a successful send.
+                    delivery.update(status="exhausted", next_attempt_at=0,
+                                    reason="telegram_replay_" + result["delivery_state"])
                 else:
                     delivery.update(
                         status=(

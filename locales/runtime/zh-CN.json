@@ -10,6 +10,7 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "delivery.replay_label": "【补发｜原始时间：{timestamp}】",
     "voice.performance.on": "开启自动表演",
     "voice.performance.off": "关闭自动表演",
     "voice.performance.state": "自动表演：{state} · 仅高级语音，立即保存生效；每次朗读增加一次准备，预录试听保持原样。",

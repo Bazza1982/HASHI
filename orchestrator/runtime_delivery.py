@@ -1284,6 +1284,7 @@ async def dispatch_claimed_telegram_event(
     delivery_mode: str = "final_delivery",
     error_context: Mapping[str, Any] | None = None,
     include_text: bool = True,
+    recovery: bool = False,
 ) -> tuple[float, int]:
     """Render one already-claimed standard FC Event through Telegram."""
 
@@ -1314,11 +1315,26 @@ async def dispatch_claimed_telegram_event(
     canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
         standard_event
     )
+    is_recovery = recovery or int(claim.get("attempt_count") or 1) > 1
+    if is_recovery:
+        from orchestrator.frontend_telegram_replay import (
+            finish_without_telegram, telegram_replay_decision,
+        )
+        decision = telegram_replay_decision(
+            store, claim, standard_event, owner_id=frontend_owner_id,
+            agent_id=runtime.name, chat_id=chat_id,
+        )
+        if decision.state != "send":
+            finish_without_telegram(store, claim, owner_id=frontend_owner_id, decision=decision)
+            return 0.0, 0
+        replay_label = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id))
+        canonical_text = replay_label + ("\n\n" + canonical_text if canonical_text else "")
+        purpose = "incremental-deliverable"  # Canonical errors are already rendered; keep the replay label.
     canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
     from orchestrator.frontend_run_questions import question_identity
     frontend_question_id = question_identity(standard_event)
     if not include_text:
-        canonical_text = ""
+        canonical_text = replay_label if is_recovery else ""
     media_refs = _standard_event_media_refs(standard_event)
     outcome: dict[str, Any] = {}
     claim_terminal = False
@@ -1698,6 +1714,13 @@ async def send_long_message(
         if not claims:
             return 0.0, 0
         claim = claims[0]
+        if int(claim.get("attempt_count") or 1) > 1:
+            return await dispatch_claimed_telegram_event(
+                runtime, chat_id=chat_id, store=runtime.session_store, claim=claim,
+                frontend_owner_id=str(publication["owner_id"]), request_id=request_id,
+                purpose=purpose, delivery_mode=delivery_mode, error_context=error_context,
+                recovery=True,
+            )
         outcome: dict[str, Any] = {}
         try:
             duration, chunks = await _send_long_message_transport(

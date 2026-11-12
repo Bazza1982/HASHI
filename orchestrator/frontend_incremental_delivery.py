@@ -20,6 +20,7 @@ async def dispatch_incremental_telegram_event(
     request_id: str,
     event_id: str,
     delivery_route: Any = None,
+    recovery: bool = False,
 ) -> bool:
     """Claim one frozen endpoint and use the canonical Telegram FC renderer."""
     if (
@@ -59,6 +60,7 @@ async def dispatch_incremental_telegram_event(
             frontend_owner_id=owner_id,
             request_id=request_id,
             purpose="incremental-deliverable",
+            recovery=recovery,
         )
     except Exception as exc:
         # The claim is now unknown or failed. An uncertain transport effect
@@ -102,6 +104,7 @@ async def dispatch_pending_telegram_deliverables(
             request_id=str(candidate["request_id"]),
             event_id=str(candidate["event_id"]),
             delivery_route=candidate.get("delivery_route"),
+            recovery=True,
         ):
             dispatched += 1
     await refresh_telegram_question_renditions(runtime, store)
