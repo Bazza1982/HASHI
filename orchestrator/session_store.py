@@ -7015,7 +7015,7 @@ class SessionStore:
         for task in tasks:
             receipt_status = str(task["status"] or "")
             task_state = str(task["task_state"])
-            if receipt_status in {"accepted", "delivered", "failed", "unknown"}:
+            if receipt_status in {"accepted", "delivered", "failed", "unknown", "skipped"}:
                 state = receipt_status
             elif task_state in {"pending", "retry", "claimed"}:
                 state = "queued"
@@ -12826,6 +12826,7 @@ class SessionStore:
                             row["delivery_route_json"] or "{}"
                         ),
                         "attempt_count": int(row["attempt_count"]) + 1,
+                        "created_at": str(row["event_created_at"]),
                         "lease_owner": resolved_worker_id,
                         "lease_token": lease_token,
                         "lease_expires_at": expires_text,

@@ -20,6 +20,11 @@ def render_notice(
     targets = all_targets
     recovered_targets = []
     outcome = record.get("outcome")
+    warnings = list(record.get("warnings") or ())
+    actionable_warnings = [
+        warning for warning in warnings
+        if warning not in {"connectors_unavailable", "old_worker_exit_pending"}
+    ]
     confidence = record.get("observation_confidence")
     if not starting and outcome in {"partial", "failed"}:
         recovered_targets = [
@@ -50,7 +55,10 @@ def render_notice(
     elif partial:
         status = "partial"
     elif outcome == "succeeded_with_warning":
-        status = "succeeded_with_warning"
+        status = (
+            "online" if warnings and not actionable_warnings and confidence != "unconfirmed"
+            else "succeeded_with_warning"
+        )
     elif outcome == "rolled_back":
         status = "rolled_back"
     elif outcome == "failed":
@@ -96,6 +104,8 @@ def render_notice(
         "unconfirmed",
     }:
         key += "_broad"
+    elif mode == "min" and not source_update_incomplete and status in {"online", "succeeded"}:
+        key = "reboot.notice.online_min"
     elif total_count == 1 and status in {
         "starting",
         "online",
@@ -125,6 +135,8 @@ def render_notice(
             "reboot.fallback_reason." + fallback_reason_code, locale=language
         ),
     )
+    if starting:
+        return text
     if fallback and not starting and record.get("status") != "succeeded":
         text += "\n" + ui_language.tr(
             "reboot.notice.fallback_detail",
@@ -171,7 +183,13 @@ def render_notice(
         "topology_publish_failed",
         "generation_state_publish_failed",
     }
-    for warning in record.get("warnings") or ():
+    for warning in warnings:
+        # Normal retirement is diagnostic; a verified min result needs no progress footer.
+        if warning == "old_worker_exit_pending" or (
+            warning == "connectors_unavailable" and mode == "min"
+            and status in {"online", "succeeded"}
+        ):
+            continue
         warning_key = warning if warning in warning_keys else "followup_incomplete"
         text += "\n" + ui_language.tr(
             "reboot.warning." + warning_key,
@@ -213,6 +231,32 @@ def render_notice(
             agent=escape(str(sender_display or names.get(sender) or sender)),
         )
     return text
+
+
+def operation_notice(record):
+    """Plain FC text for API consumers, identical to the transport notice."""
+    from orchestrator.frontend_projection import transport_text_component
+
+    starting = (
+        record.get("status") in {"accepted", "running"}
+        and record.get("lifecycle_state", "accepted") == "accepted"
+    )
+    return transport_text_component(
+        render_notice(record, starting=starting), "telegram-html"
+    )["text"]
+
+
+def restart_notice(record, *, status):
+    """Render an already verified Remote outcome without deriving new truth."""
+    language = record.get("notify_locale")
+    key = {
+        "running": "api.restart.requested",
+        "succeeded": "api.restart.completed",
+        "unconfirmed": "api.restart.ack_unknown",
+    }.get(status, "api.restart.failed_notice")
+    return ui_language.tr(
+        key, locale=language, instance=str(record.get("target_instance") or "HASHI")
+    )
 
 
 def render_status(record, *, locale=None):

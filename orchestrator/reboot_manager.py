@@ -16,7 +16,7 @@ from orchestrator.reboot_receipts import (
     REBOOT_WORK_COUNTS,
     RebootReceipts,
 )
-from orchestrator.reboot_ui import render_notice
+from orchestrator.reboot_ui import operation_notice, render_notice
 from orchestrator import runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 from orchestrator.kernel_process import instance_runtime_dir, write_record
@@ -311,6 +311,7 @@ class RebootManager:
             "terminal": terminal,
             "shared_generation_id": (record.get("shared_replacement") or {}).get("generation_id"),
             "outcome": record.get("outcome"),
+            "notice": operation_notice(record),
             "warnings": list(record.get("warnings") or ()),
             "duration_seconds": record.get("duration_seconds"),
             "created_at": record.get("created_at"),
@@ -480,6 +481,9 @@ class RebootManager:
                 self.kernel, agent_id=record["source_agent"], origin=origin,
                 text=render(record["source_agent"], None), publication_id=idempotency_key,
                 send_notice=send_runtime_notice,
+                recovery_category="transient" if starting else "command_result",
+                recovery=int(record[delivery_key].get("attempts") or 0) > 1,
+                original_at=record.get("created_at") if starting else record.get("finished_at"),
             )
 
         if surface == "telegram":
@@ -607,6 +611,11 @@ class RebootManager:
                         message_id=result["message_id"],
                         sent_at=moment,
                     )
+                elif result.get("delivery_state") in {"expired", "suppressed"}:
+                    # FC has intentionally closed this endpoint; stop the
+                    # notice retry owner without claiming a successful send.
+                    delivery.update(status="exhausted", next_attempt_at=0,
+                                    reason="telegram_replay_" + result["delivery_state"])
                 else:
                     delivery.update(
                         status=(

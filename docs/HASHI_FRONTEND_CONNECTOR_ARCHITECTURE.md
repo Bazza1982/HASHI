@@ -158,6 +158,55 @@ retried by this path. Rate-limit handling remains with the existing owner.
 This is a Functions change; offline validation and exact-Agent hot adoption
 are separate from live Telegram acceptance and production deployment.
 
+### Bounded Telegram catch-up (2026-11-12)
+
+FC owns the catch-up decision over the original canonical Event and its existing
+per-endpoint task. Telegram never invents a new destination or business result.
+Automatic recovery is deliberately conservative:
+
+| User-visible output | Maximum age for automatic Telegram catch-up |
+| --- | --- |
+| Final assistant replies, reports and files | 2 hours |
+| Genuine task failures and completed user-command results | 10 minutes |
+| Still-pending questions/confirmations | 10 minutes, capped by their original validity |
+| Typing, queued/progress/start displays, background cleanup diagnostics | Never |
+| Normal user stop/steer/cancellation | Never replay as an error |
+
+Age starts at the original output Event, not Run admission, reconnection, task
+creation or retry. Every claimed Telegram output checks that deadline before
+transport, including its first direct Run delivery and the explicit-publication
+path. The recovery hint and attempt count do not enable/disable the lifetime
+check; they only help identify catch-up. Fresh direct UI displays retain their
+normal initial presentation and a bounded 10-minute lifetime, while recovery
+still excludes non-replayable displays. At the exact deadline the Telegram task expires. Invalid or
+missing timestamps and unclassified historical display notices fail closed.
+Known legacy user-interruption summaries are excluded even if recorded as
+`run.failed`. A question is revalidated against its owner, frozen route and
+current state; answered/cancelled/ended questions are not resent. Existing
+shorter question lifetimes are unchanged. Explicit supersession cancels the
+old notification; no language model or text-similarity inference is used.
+
+Runtime notices persist the small `delivery_recovery.category` fact in their
+canonical Message context: `command_result` or `transient`. Untyped old notices
+are not guessed into the whitelist. FC output keeps its original identity,
+body and time. Catch-up renditions add a localized “补发 / Re-delivered” label
+and the original full UTC timestamp, including media-only publications.
+Immediate direct delivery and fresh queued output created after the current
+successful Telegram connection are not labelled as catch-up. Recovery still
+checks their eligibility; output predating that connection and safe retries
+carry the catch-up label.
+
+Expired and intentionally excluded endpoint tasks become `expired` and
+`suppressed`, respectively, with a bounded `telegram_replay_*` reason and a
+`skipped` receipt. This never marks them delivered, changes another endpoint,
+deletes FC history/assets, or reruns the operation. Confirmed delivered tasks
+stay delivered; unknown outcomes and expired leases retain their existing
+evidence-based reconciliation and are never blindly resent. The Worker recovery
+sweep and Session-bound lifecycle-notice sender share this policy.
+
+This repair bounds Telegram push recovery only. It does not claim to repair
+external Workbench reconstruction of historical FC display Events.
+
 ### Telegram credential activation (2026-10-28)
 
 The Frontend Connector owns Bot credential verification and connection facts;

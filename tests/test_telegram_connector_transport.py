@@ -76,6 +76,7 @@ async def test_offline_lifecycle_notice_retains_its_frozen_destination(tmp_path,
     store.append_presentation_message(session_id=session["session_id"],owner_id=owner,agent_id="agent1",
         role="assistant",text="Local recovery confirmed",source="frontend.runtime_notice",
         idempotency_key="offline-notice",history_eligible=False,
+        message_context={"delivery_recovery":{"category":"command_result"}},
         outbox=True,delivery_route=route)
     runtime.telegram_connected=False
     assert await dispatch_pending_telegram_deliverables(runtime)==0
