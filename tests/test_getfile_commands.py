@@ -62,3 +62,28 @@ async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_byt
     assert direct["ok"] and direct["result"]["getfile"]["sha256"]==hashlib.sha256(path.read_bytes()).hexdigest(),direct
     assert not runtime_session.ensure_store(runtime).recent_session_runs(session["session_id"],owner_id="user:7")
     assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_encoded_path_action_uses_existing_wire_without_llm(runtime):
+    import base64
+    from orchestrator.command_interaction_transport import try_dispatch_command_interaction_transport, TRANSPORT_PREFIX
+    path=runtime.workspace_dir/"wire path.txt";path.write_bytes(b"actual-wire-input")
+    def wire(op,request,**extra):
+        value={"version":1,"op":op,"client_id":"clientabcdefghijkl","request_id":request,
+               "connection_binding":"connectionabcdefghijkl","ui_locale":"en",**extra}
+        return TRANSPORT_PREFIX+base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    opened=await try_dispatch_command_interaction_transport(runtime,
+        wire("open","request-wire-open-01",command="/getfile"),source_channel="workbench_api")
+    assert opened["ok"],opened
+    menu=opened["messages"][-1]["command_ui"]
+    action=wire("act","request-wire-path-01",menu_id=menu["menu_id"],revision=menu["revision"],
+                button_id=menu["rows"][-1][0]["button_id"],input_text='"'+str(path)+'"')
+    result=await try_dispatch_command_interaction_transport(runtime,action,source_channel="workbench_api")
+    assert result["ok"],result
+    assert result["result"]["getfile"]["sha256"]==hashlib.sha256(path.read_bytes()).hexdigest()
+    invalid=await try_dispatch_command_interaction_transport(runtime,
+        wire("act","request-wire-long-01",menu_id=menu["menu_id"],revision=menu["revision"],
+             button_id=menu["rows"][-1][0]["button_id"],input_text="x"*501),source_channel="workbench_api")
+    assert invalid["error_code"]=="command_menu_input_invalid"
+    assert runtime.queue.empty()

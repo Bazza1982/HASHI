@@ -88,6 +88,10 @@ def validate_operation(payload: Any) -> None:
             raise InteractionError("command_menu_request_invalid", 400)
     if op == "act" and (not isinstance(payload.get("button_id"), str) or not ID_PATTERN.fullmatch(payload["button_id"])):
         raise InteractionError("command_menu_request_invalid", 400)
+    if "input_text" in payload and (
+        op != "act" or not isinstance(payload["input_text"], str) or len(payload["input_text"]) > 500
+    ):
+        raise InteractionError("command_menu_input_invalid", 422)
     if op == "open":
         command = payload.get("command")
         if not isinstance(command, str) or not command.lstrip().startswith("/"):
