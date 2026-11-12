@@ -21,6 +21,7 @@ __pycache__/
 !constraints/transcription-py312.lock
 !constraints/ocr-py312.lock
 !constraints/tts-py312.lock
+!requirements/office-runtime-windows-py312.lock
 *.pid
 .claw/
 .bridge_u_f.lock

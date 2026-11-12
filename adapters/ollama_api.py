@@ -268,7 +268,8 @@ class OllamaAdapter(OpenRouterAdapter):
         if use_streaming:
             payload["stream"] = True
         if allow_tools and self.tool_registry:
-            tiers = tool_tiers or self.DEFAULT_TOOL_TIERS
+            from tools.office.discovery import message_tiers
+            tiers = message_tiers(tool_tiers or self.DEFAULT_TOOL_TIERS, messages)
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
             if excluded_tool_names:
                 tool_defs = [

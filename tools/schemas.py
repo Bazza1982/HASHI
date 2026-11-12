@@ -2642,6 +2642,10 @@ for _schema in TOOL_SCHEMAS:
         _properties.setdefault("tab_id", {"type": "string", "description": "Exact browser tab identity supplied by a live handoff. Never substitute another active tab."})
 
 
+# Office schemas have one owner; permission/runtime filtering stays in ToolRegistry.
+from tools.office.contract import office_tool_definitions
+TOOL_SCHEMAS.extend(office_tool_definitions())
+
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())

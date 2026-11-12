@@ -25,6 +25,8 @@ _ORDINARY_QUESTION_NAMES = frozenset({"ask_user", "get_user_answer"})
 class ManagedToolRegistry(ToolRegistry):
     """A testable integration seam, not a claim of L1/L2 completeness."""
 
+    _office_execution_supported = False
+
     def __init__(
         self,
         *,
@@ -238,6 +240,8 @@ class ManagedToolRegistry(ToolRegistry):
 
 class ManagedCatalogueRegistry(ToolRegistry):
     """Derive menus/schema before a Run without retaining a legacy executor."""
+
+    _office_execution_supported = False
 
     def __init__(self, *args, **kwargs):
         if kwargs.get("secrets"):
