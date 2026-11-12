@@ -514,3 +514,21 @@ def test_replay_label_has_localized_notice_and_unambiguous_original_time():
         "2026-11-12 06:03:04 UTC" in decision.label(locale=locale)
         for locale in ("en", "zh-CN")
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_connection", [False, True])
+async def test_healthy_queue_delivery_is_not_mislabelled_as_catch_up(
+    tmp_path, before_connection
+):
+    store, owner, session, accepted, runtime, event = queued(tmp_path, "final")
+    original = datetime.fromisoformat(event["created_at"].replace("Z", "+00:00"))
+    runtime._telegram_delivery_connected_at = (
+        original + timedelta(seconds=1)
+        if before_connection
+        else original - timedelta(seconds=1)
+    ).timestamp()
+    await dispatch_pending_telegram_deliverables(runtime)
+    text = runtime.app.bot.messages[0]["text"]
+    assert ("补发" in text) == before_connection
+    assert "The durable report" in text

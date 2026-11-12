@@ -1327,8 +1327,15 @@ async def dispatch_claimed_telegram_event(
         if decision.state != "send":
             finish_without_telegram(store, claim, owner_id=frontend_owner_id, decision=decision)
             return 0.0, 0
-        replay_label = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id))
-        canonical_text = replay_label + ("\n\n" + canonical_text if canonical_text else "")
+        connected_at = getattr(runtime, "_telegram_delivery_connected_at", None)
+        delayed = (
+            int(claim.get("attempt_count") or 1) > 1
+            or connected_at is None
+            or decision.original_at.timestamp() <= connected_at
+        )
+        replay_label = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id)) if delayed else ""
+        if replay_label:
+            canonical_text = replay_label + ("\n\n" + canonical_text if canonical_text else "")
         purpose = "incremental-deliverable"  # Canonical errors are already rendered; keep the replay label.
     canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
     from orchestrator.frontend_run_questions import question_identity

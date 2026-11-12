@@ -169,7 +169,10 @@ canonical Message context: `command_result` or `transient`. Untyped old notices
 are not guessed into the whitelist. FC output keeps its original identity,
 body and time. Catch-up renditions add a localized “补发 / Re-delivered” label
 and the original full UTC timestamp, including media-only publications.
-Immediate direct delivery is not labelled as catch-up.
+Immediate direct delivery and fresh queued output created after the current
+successful Telegram connection are not labelled as catch-up. Recovery still
+checks their eligibility; output predating that connection and safe retries
+carry the catch-up label.
 
 Expired and intentionally excluded endpoint tasks become `expired` and
 `suppressed`, respectively, with a bounded `telegram_replay_*` reason and a
