@@ -982,7 +982,7 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
         calls.append(
             (
                 record["status"],
-                kwargs["render_text"]("sunny", "备用名称"),
+                kwargs["render_text"]("sunny", "备用<&>名称"),
                 kwargs["chat_id"],
                 kwargs["thread_id"],
             )
@@ -999,8 +999,9 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     assert await manager.hot_restart(kernel._restart_request)
     await manager.send_pending()
     assert calls[-1][0] == "succeeded"  # persisted before sending
-    assert "显示&lt;&amp;&gt;名称" in calls[-1][1]
-    assert "备用名称" in calls[-1][1] and calls[-1][2:] == (42, 7)
+    assert "备用&lt;&amp;&gt;名称" in calls[-1][1]
+    assert calls[-1][1].startswith("✅ 热重启成功")
+    assert "备用&lt;&amp;&gt;名称" in calls[-1][1] and calls[-1][2:] == (42, 7)
     assert manager.receipts.records()[-1]["delivery"]["status"] == "pending"
     old_events = list(kernel.events)
     kernel.runtimes.clear()
@@ -1008,7 +1009,7 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     recovered.receipts.recover()
 
     async def recovered_send(_kernel, **kwargs):
-        text = kwargs["render_text"]("sunny", "备用名称")
+        text = kwargs["render_text"]("sunny", "备用<&>名称")
         assert "补发" not in text and "热重启成功" in text
         return {"sent": True, "sender": "sunny", "message_id": 2}
 
@@ -2050,14 +2051,14 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
 
     single = {
         "source_agent": "zelda",
-        "mode": "min",
+        "mode": "same",
         "targets": ["zelda"],
         "display_names": {"zelda": "Zelda"},
         "status": "succeeded",
         "lifecycle_state": "online",
         "locale": "en",
     }
-    assert render_notice(single, starting=True) == "🔄 Starting hot reboot. This takes about 2 minutes."
+    assert render_notice(single, starting=True) == "🔄 Starting hot reboot. This takes about 30 seconds."
     assert "Zelda" in render_notice(single)
     assert render_notice(single, locale="zh-CN") == "✅ Zelda热重启成功，耗时0秒。"
 

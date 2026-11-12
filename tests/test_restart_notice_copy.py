@@ -53,7 +53,7 @@ def test_genuine_followup_failure_and_unconfirmed_results_keep_their_warnings():
 ])
 def test_estimates_come_from_fc_for_each_supported_runtime_locale(locale, hot, cold):
     assert locale in ui_language.SUPPORTED_LOCALES
-    for mode in ("min", "same", "number", "group", "max"):
+    for mode in ("same", "number", "group", "max"):
         assert render_notice(hot_record(mode=mode, locale=locale), starting=True) == hot
     assert ui_language.tr("api.restart.requested", locale=locale, instance="HASHI3") == cold
     record = cold_record()
@@ -68,7 +68,7 @@ def test_estimates_come_from_fc_for_each_supported_runtime_locale(locale, hot, c
 
 
 def test_fc_plain_projection_preserves_safe_display_names():
-    record = hot_record(mode="min", targets=["agent1"],
+    record = hot_record(mode="same", targets=["agent1"],
                         display_names={"agent1": "<A & B>"}, warnings=[],
                         outcome="succeeded", locale="en")
     assert "&lt;A &amp; B&gt;" in render_notice(record)

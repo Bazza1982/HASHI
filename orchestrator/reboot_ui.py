@@ -21,9 +21,9 @@ def render_notice(
     recovered_targets = []
     outcome = record.get("outcome")
     warnings = list(record.get("warnings") or ())
-    connector_pending = "connectors_unavailable" in warnings
     actionable_warnings = [
-        warning for warning in warnings if warning != "connectors_unavailable"
+        warning for warning in warnings
+        if warning not in {"connectors_unavailable", "old_worker_exit_pending"}
     ]
     confidence = record.get("observation_confidence")
     if not starting and outcome in {"partial", "failed"}:
@@ -56,7 +56,7 @@ def render_notice(
         status = "partial"
     elif outcome == "succeeded_with_warning":
         status = (
-            "online" if connector_pending and not actionable_warnings
+            "online" if warnings and not actionable_warnings and confidence != "unconfirmed"
             else "succeeded_with_warning"
         )
     elif outcome == "rolled_back":
@@ -104,6 +104,8 @@ def render_notice(
         "unconfirmed",
     }:
         key += "_broad"
+    elif mode == "min" and not source_update_incomplete and status in {"online", "succeeded"}:
+        key = "reboot.notice.online_min"
     elif total_count == 1 and status in {
         "starting",
         "online",
@@ -182,6 +184,12 @@ def render_notice(
         "generation_state_publish_failed",
     }
     for warning in warnings:
+        # Normal retirement is diagnostic; a verified min result needs no progress footer.
+        if warning == "old_worker_exit_pending" or (
+            warning == "connectors_unavailable" and mode == "min"
+            and status in {"online", "succeeded"}
+        ):
+            continue
         warning_key = warning if warning in warning_keys else "followup_incomplete"
         text += "\n" + ui_language.tr(
             "reboot.warning." + warning_key,

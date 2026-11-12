@@ -123,13 +123,18 @@ escaping handled at the boundary.
 A verified local reboot with only optional connector recovery is a normal
 success: `✅ 完整热重启成功，耗时139.8秒，12个代理在线。`
 followed by `其它连接形式进行中。` when connection setup is still pending.
-The diagnostic receipt may retain `connectors_unavailable`; this alone is
-not a user-facing outage or reboot warning. Genuine cleanup/publication
-failures, partial results and unconfirmed outcomes retain their warning/error
-presentation. Observation and delivery never change the operation outcome.
+The diagnostic receipt may retain `connectors_unavailable` and
+`old_worker_exit_pending`; expected background connection setup and retirement
+are not user-facing reboot warnings. A successful `/reboot min` says only
+`✅ 热重启成功，耗时23.7秒。` without connection or cleanup details.
+Genuine cleanup/publication failures, partial results and unconfirmed outcomes
+retain their warning/error presentation. Rendering never changes the receipt,
+operation outcome, readiness checks or delivery state.
 
-Hot-reboot start notices say approximately 2 minutes; full-system restart
-start notices say approximately 5 minutes. These are user expectations, not
+Single-Agent hot-reboot start notices, including `/reboot min`, say
+approximately 30 seconds. Broader hot reboots say approximately 2 minutes;
+full-system restart start notices say approximately 5 minutes. These are
+user expectations, not
 blocking timers or timeout changes. Both available runtime catalogs and all
 active Workbench offline-fallback locales carry these estimates. Remote
 restart projections use the same FC catalog for start, verified completion
