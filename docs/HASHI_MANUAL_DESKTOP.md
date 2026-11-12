@@ -170,7 +170,7 @@ rejection, generation fencing, bounded JPEGs, shared frame work and the existing
 file lock (using synthetic screen/input providers off Windows). Existing Broker and
 Worker tests also run. These checks do not establish physical Windows input, frame
 quality or network latency. Local acceptance must check multiple monitors/negative
-origins, 125-200% DPI, dragging, Chinese input, secure-desktop failure, disconnection,
+origins, 125-200% DPI, dragging, Chinese input, native capture errors, disconnection,
 15-minute resource stability and mutual exclusion with an actual Agent.
 
 Mutation proof: temporarily bypassing worker-generation comparison made the pinned
@@ -182,3 +182,20 @@ Release/close the desktop, set `global.desktop_enabled=false` and adopt that ins
 configuration normally. No desktop polling continues when the frontend leaves.
 To roll back code, follow ordinary Functions/Remote/Worker adoption at the same
 scope; do not cold-restart protected Core merely as a testing shortcut.
+
+
+## Native picture admission
+
+The existing authenticated desktop session attempts the native display/frame
+operation even when status metadata labels the desktop locked or secure, or its
+name differs from Default. A state label alone is not proof of failed capture.
+Independent monitor previews follow the same native result instead of adding
+a second status-label rejection. The frontend continues to show available main
+pictures and previews. Actual native failures remain errors; no blank/fabricated
+success frame is substituted. Existing SYSTEM bridge ownership/session checks,
+PAO target binding, exclusive control leases and input ordering remain unchanged.
+
+Focused regression covers the real native admission method through the desktop
+controller and JPEG encoding, preview labels changing during capture, and actual
+native failure propagation. These fixtures do not claim a physical Winlogon
+screen was captured or change the user's desktop session.

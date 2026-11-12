@@ -320,17 +320,15 @@ def test_invalid_view_sequences_do_not_change_the_selected_display(desktop, sequ
     assert controller.sessions["session-a"].view == before
 
 @pytest.mark.parametrize("mid_capture", [False, True])
-def test_independent_previews_clear_on_locked_secure_desktop_without_disabling_the_main_view(desktop, mid_capture):
+def test_available_previews_ignore_locked_labels_before_and_after_capture(desktop, mid_capture):
     controller, native, _ = desktop
-    state = {"locked": not mid_capture, "secure_desktop": False}
+    state = {"locked": not mid_capture, "secure_desktop": True}
     native.desktop_state = lambda: dict(state)
     if mid_capture:
         native.after_capture = lambda: state.update(locked=True)
-    with pytest.raises(DesktopError, match="locked"):
-        previews(controller, ["left"])
-    assert len(native.captures) == int(mid_capture)
-    # The explicit secure-desktop/manual view remains an existing independent
-    # capability; only the extra overview preview is paused.
+    result = previews(controller, ["left"])
+    assert len(result["previews"]) == 1
+    assert len(native.captures) == 1
     native.after_capture = lambda: None
     controller.frame("", "session-a")
     assert controller.sessions["session-a"].frame_cache is not None
