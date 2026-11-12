@@ -1484,11 +1484,11 @@
     "wrapper.status_effect": "Model changes apply immediately in Wrapper mode; persona/style slot changes persist.",
     "wrapper.slots_heading": "PERSONA / STYLE SLOTS",
     "wrapper.status_action": "Choose a model page below or use <code>/wrapper set &lt;slot&gt; &lt;text&gt;</code>.",
-    "advanced.require_wrapper": "`/{command}` only applies in **wrapper** mode.\nUse `/mode wrapper` first.",
+    "advanced.require_wrapper": "`/{command}` belongs to retired wrapper mode.\nUse `/mode` to view the supported Fixed and Flex modes.",
     "advanced.require_managed": "`/{command}` only applies in **wrapper** or **audit** mode.\nUse `/mode wrapper` or `/mode audit` first.",
     "advanced.require_audit": "`/audit` only applies in **audit** mode.\nUse `/mode audit` first.",
     "advanced.require_audit_controls": "Audit controls require /mode audit.",
-    "advanced.require_wrapper_controls": "Wrapper controls require /mode wrapper.",
+    "advanced.require_wrapper_controls": "Wrapper controls are retired. Use /mode to view the supported Fixed and Flex modes.",
     "advanced.backend_not_allowed": "Backend not allowed for this agent: {backend}\nAllowed: {allowed}",
     "advanced.unknown_model": "Unknown model for {backend}: {model}",
     "advanced.core_already_active": "Core backend already active.",
@@ -3176,6 +3176,8 @@
     "safety.human_scope_note": "These choices allow access for longer. Check their scope and expiry before choosing."
   },
   "commands": {
+    "phone": "Audio call settings",
+    "call": "Video call settings",
     "standby": "Standby status and readiness",
     "safety": "View permission status",
     "askme": "Control question cards",

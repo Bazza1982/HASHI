@@ -527,6 +527,24 @@ class ToolRegistry:
             for name in ALL_TOOL_NAMES
             if name in available
         ]
+        # Declare the same frozen-route limits used by attachment preflight/storage.
+        # Definitions are deep copies; one HChat request must not change another Session.
+        from orchestrator.session_store import frontend_attachment_limits
+
+        policy, limits = frontend_attachment_limits(
+            self._effective_audit_context().get("request_source")
+        )
+        count, file_bytes, total_bytes = limits
+        for definition in definitions:
+            function = definition["function"]
+            if function["name"] in {"frontend_send_attachments", "frontend_publish_deliverable"}:
+                attachments = function["parameters"]["properties"]["attachments"]
+                attachments["maxItems"] = count
+                attachments["description"] = (
+                    f"Ordered local files for the frozen {policy} route. "
+                    f"Limits: {count} files, {file_bytes} bytes per file, "
+                    f"{total_bytes} bytes total; budgets are shared across this Run."
+                )
         if any(item["function"]["name"].startswith("browser_") for item in definitions):
             snapshot = self._capability_status_snapshot() or {}
             browsers = [

@@ -88,6 +88,14 @@ def validate_operation(payload: Any) -> None:
             raise InteractionError("command_menu_request_invalid", 400)
     if op == "act" and (not isinstance(payload.get("button_id"), str) or not ID_PATTERN.fullmatch(payload["button_id"])):
         raise InteractionError("command_menu_request_invalid", 400)
+    if "reply_reference" in payload:
+        from orchestrator.quoted_reply import normalize_quoted_reply
+        try:
+            if op != "open":
+                raise ValueError("quote is only valid for an open command")
+            normalize_quoted_reply(payload["reply_reference"])
+        except (ValueError, TypeError):
+            raise InteractionError("command_menu_request_invalid", 400) from None
     if op == "open":
         command = payload.get("command")
         if not isinstance(command, str) or not command.lstrip().startswith("/"):
@@ -582,3 +590,4 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
     if isinstance(handler_result, Mapping):
         extra["result"] = copy.deepcopy(dict(handler_result))
     return capture.result(**extra)
+# HASHI-Fingerprint: hfp_2abd4f5d52014ff4bdabdf2bbd30e4e5

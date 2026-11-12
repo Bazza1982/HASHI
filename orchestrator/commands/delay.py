@@ -268,6 +268,9 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
 
     try:
         minutes, message = parse_delay_request(body)
+        from orchestrator.quoted_reply import encode_quoted_reply
+
+        message = encode_quoted_reply(getattr(context, "reply_reference", None), message)
     except ValueError as exc:
         await _send(runtime, update, f"{html.escape(str(exc))}\n\n{_usage()}")
         return
@@ -318,3 +321,4 @@ COMMANDS = [
         callback=delay_command,
     )
 ]
+# HASHI-Fingerprint: hfp_c80112b234f9492e836d6d51ed0581b6
