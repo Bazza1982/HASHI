@@ -45,7 +45,7 @@ async def files(registry,root,receipts):
     await call("office_edit",{"file_id":excel,"action":"excel_summary","content":json.dumps({"group_by":"Team","value":"Amount"})})
     summary=await call("office_read",{"file_id":excel,"target":"Summary!A1:B3","view":"formulas"})
     assert summary["data"]["rows"][1:]==[["A",15],["B",20]],summary
-    await call("office_edit",{"file_id":excel,"action":"excel_chart","target":"Summary!A1:B3","content":json.dumps({"title":"Totals","type":"bar","anchor":"E2"})})
+    await call("office_edit",{"file_id":excel,"action":"excel_chart","target":"Summary!A1:B3","content":json.dumps({"title":"Totals","type":"bar"})})
     other=await call("office_create",{"format":"xlsx","output":"reference.xlsx","content":"Team,Amount\nA,99\nC,1"})
     await call("office_edit",{"file_id":excel,"source_id":other["file_id"],"action":"excel_reconcile","target":"Summary!A1:B3","content":json.dumps({"key":"Team"})})
     await call("office_edit",{"file_id":excel,"action":"set_formula","target":"Summary!C2","content":"=SUM(B2:B3)"})
