@@ -259,7 +259,7 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
     await asyncio.sleep(0)
 
     assert observed["chat_id"] == 777
-    assert "Restart request accepted for HASHI_TEST" in query.edits[-1][0]
+    assert query.edits[-1][0] == "🔄 Starting a full system restart. This takes about 5 minutes."
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ from orchestrator.reboot_receipts import (
     REBOOT_WORK_COUNTS,
     RebootReceipts,
 )
-from orchestrator.reboot_ui import render_notice
+from orchestrator.reboot_ui import operation_notice, render_notice
 from orchestrator import runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 from orchestrator.kernel_process import instance_runtime_dir, write_record
@@ -311,6 +311,7 @@ class RebootManager:
             "terminal": terminal,
             "shared_generation_id": (record.get("shared_replacement") or {}).get("generation_id"),
             "outcome": record.get("outcome"),
+            "notice": operation_notice(record),
             "warnings": list(record.get("warnings") or ()),
             "duration_seconds": record.get("duration_seconds"),
             "created_at": record.get("created_at"),

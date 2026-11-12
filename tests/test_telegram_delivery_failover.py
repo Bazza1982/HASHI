@@ -999,7 +999,7 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
         )
     record = {
         "source_agent": "source",
-        "mode": "min",
+        "mode": "same",
         "targets": ["source"],
         "display_names": {"source": "显示<&>名称"},
         "status": "succeeded",
