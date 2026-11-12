@@ -53,6 +53,7 @@ async def files(registry,root,receipts):
     cached=await call("office_read",{"file_id":excel,"target":"Summary!C2","view":"values"})
     assert cached["data"]["rows"]==[[35]],cached
     workbook=await call("office_finish",{"file_id":excel,"preview":True})
+    assert workbook["data"]["preview"]["pages"]==3, "A native chart was split across printed pages."
     assert workbook["checks"]["recalculation"]=="converter_performed",workbook
     csv_copy=await call("office_create",{"format":"xlsx","output":"csv-source.xlsx","source_id":excel})
     await call("office_edit",{"file_id":csv_copy["file_id"],"action":"office_convert","content":"csv"})

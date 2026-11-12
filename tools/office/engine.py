@@ -625,7 +625,10 @@ def chart_book(book, target, spec):
     chart.title = str(spec.get("title", "Chart"))
     chart.add_data(Reference(sheet, min_col=left + 1, max_col=right, min_row=top, max_row=bottom), titles_from_data=True)
     chart.set_categories(Reference(sheet, min_col=left, min_row=top + 1, max_row=bottom))
-    anchor = str(spec.get("anchor", "H2"))
+    # A new chart belongs below occupied data/previous charts by default;
+    # putting it far to the right causes native PDF pagination to split it.
+    default_anchor = "A" + str(max(sheet.max_row,bottom)+3+16*len(sheet._charts))
+    anchor = str(spec.get("anchor", default_anchor))
     from openpyxl.utils.cell import coordinate_from_string
     coordinate_from_string(anchor)
     sheet.add_chart(chart, anchor)
