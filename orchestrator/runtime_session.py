@@ -1331,6 +1331,8 @@ def record_kernel_presentation_notice(
     idempotency_key: str,
     content_format: str = "telegram-html",
     origin: Mapping[str, Any] | None = None,
+    recovery_category: str = "command_result",
+    original_at: float | None = None,
 ) -> dict[str, Any] | None:
     """Persist a delivered lifecycle notice even while its Worker is replaced."""
 
@@ -1345,6 +1347,10 @@ def record_kernel_presentation_notice(
             store = SessionStore.from_global_config(config)
         resolved_owner = SessionStore.owner_id_for(config)
         if origin and origin.get("session_id"):
+            from datetime import datetime, timezone
+            recovery = {"category": recovery_category}
+            if original_at is not None:
+                recovery["original_at"] = datetime.fromtimestamp(original_at, timezone.utc).isoformat()
             return publish_frontend_message(
                 SimpleNamespace(global_config=config, session_store=store, name=agent_id),
                 role="assistant", text=text, source="frontend.runtime_notice",
@@ -1355,6 +1361,7 @@ def record_kernel_presentation_notice(
                 expected_context_generation=origin.get("context_generation"),
                 frozen_delivery_route=origin.get("delivery_route"),
                 content_format=content_format, presentation_channel="notification",
+                message_context={"delivery_recovery": recovery},
             )
         session = store.resolve_primary_session(
             owner_id=resolved_owner,

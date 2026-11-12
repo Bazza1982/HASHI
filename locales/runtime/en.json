@@ -36,6 +36,7 @@
     "getfile.error.unavailable": "⚠️ The file cannot be read safely. Check access, links or file locks and refresh.",
     "getfile.error.changing": "⚠️ The file changed while being read. Wait for writing to finish, then refresh.",
     "getfile.error.too_large": "⚠️ This file exceeds this conversation’s transfer limit.",
+    "delivery.replay_label": "[Re-delivered | Original time: {timestamp}]",
     "voice.performance.on": "Performance on",
     "voice.performance.off": "Performance off",
     "voice.performance.state": "Automatic performance: {state} · Advanced TTS only; saved immediately. Adds one preparation step per reading. Prerecorded previews stay unchanged.",

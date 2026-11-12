@@ -142,6 +142,7 @@
       "tests/test_runtime_pipeline.py",
       "tests/test_telegram_delivery_failover.py",
       "tests/test_telegram_recovery_reliability.py",
+      "tests/test_telegram_replay_policy.py",
       "tests/test_worker_metadata_status.py",
       "tests/test_workbench_telegram_credential.py",
       "tests/test_telegram_activation_lifecycle.py",

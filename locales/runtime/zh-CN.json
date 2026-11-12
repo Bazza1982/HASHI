@@ -36,6 +36,7 @@
     "getfile.error.unavailable": "⚠️ 无法安全读取文件，请检查权限、链接或文件占用后刷新。",
     "getfile.error.changing": "⚠️ 文件在读取期间发生变化，请等待写入结束后刷新。",
     "getfile.error.too_large": "⚠️ 文件超过本会话的传输上限。",
+    "delivery.replay_label": "【补发｜原始时间：{timestamp}】",
     "voice.performance.on": "开启自动表演",
     "voice.performance.off": "关闭自动表演",
     "voice.performance.state": "自动表演：{state} · 仅高级语音，立即保存生效；每次朗读增加一次准备，预录试听保持原样。",

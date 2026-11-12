@@ -76,6 +76,6 @@ def test_migration_and_same_message_recovery_retain_run_policy(tmp_path):
     # Represent a real pre-feature schema; reopening must migrate without changing old Run policy.
     with reopened._connection() as connection:
         connection.execute("ALTER TABLE runs DROP COLUMN fingerprint_policy_json")
-        connection.execute("PRAGMA user_version=30")
+        connection.execute("UPDATE schema_metadata SET value=\'30\' WHERE key=\'schema_version\'")
     migrated = SessionStore(store.db_path, instance_id="TEST")
     assert FingerprintPolicy.from_snapshot(migrated.get_run(first.run_id)["fingerprint_policy"]).enabled is False
