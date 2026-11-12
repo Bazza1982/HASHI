@@ -121,7 +121,8 @@
       "tests/test_getfile_commands.py",
       "tests/test_getfile_catalogue.py",
       "tests/test_getfile_audio_document.py",
-      "tests/test_getfile_recovery.py"
+      "tests/test_getfile_recovery.py",
+      "tests/test_getfile_telegram.py"
     ]
   },
   "telegram": {
