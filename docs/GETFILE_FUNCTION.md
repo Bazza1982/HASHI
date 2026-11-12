@@ -1,6 +1,6 @@
-# /getfile — end-to-end Function contract (implementation handoff)
+# /getfile — end-to-end Function contract
 
-Status: **scaffold only, NOT implemented, NOT tested or adopted**. Branch `feature/getfile`.
+Status: **implemented on `feature/getfile`; review candidate, not production-adopted**. Non-production test/acceptance evidence is recorded in the companion PRs. External Telegram acceptance requires an independently configured test Bot/chat.
 Functional owners: **PAO** (Agent-scoped recent-file projection, Run/tool provenance, current access checks) and **Frontend Connectors** (command, menu and destination-scoped media delivery). Engineering layer: **Functions**. Do not change protected Core, its runtime/ABI or a versioned Core contract.
 
 ## User-visible contract
@@ -22,7 +22,7 @@ Use existing owned streams rather than enabling Fingerprint or scanning an entir
 
 The index is a **small, durable derived projection** (suggest 100–200 unique records per Instance+Agent, with source ID/cursor) rebuilt from the owning audit if missing; it is not a new authoritative audit writer. Rebuild must be bounded and not read the entire growing Canonical Audit on every menu open. One Agent never sees another Agent's entries. Deduplicate by root identity + path (casefold on Windows, case-sensitive on Linux), sort by activity time, exclude internal transient/evidence files with documented rules, and preserve provenance grade. No blanket filesystem watcher while idle. Keep activity collection independent of Fingerprint ON/OFF and of Telegram connection readiness.
 
-`orchestrator/getfile_recent.py` on this branch is an intentionally **pure selection kernel**, not complete index persistence or acquisition. It accepts only root-relative trusted candidates and rejects unsupported create/modify claims from unverified Engine reports. Wire it to one PAO-owned event/index service and expand focused tests without duplicating source-of-truth state.
+`orchestrator/getfile_recent.py` remains the pure selection kernel. `getfile_index.py` projects committed Canonical Audit events into `recent-files.sqlite3` (200 distinct records per owner). The latest ten are selected at query time. A bounded 4 MiB / 2,000-event tail is reconciled once per Functions process, when the index is missing, or after a marked projection failure. Recovery cannot reconstruct evidence older than that tail if the entire derived index is lost. No watcher or idle scan is installed.
 
 ## Existing integration points
 
@@ -39,5 +39,22 @@ The index is a **small, durable derived projection** (suggest 100–200 unique r
 - Deleted/stale/out-of-scope/broken symlink, large file, duplicate callback, lost acknowledgement, interrupted transfer, navigation away, expired menu and connector disconnect return accurate status without duplicate send or raw path leakage.
 - Focused red/green evidence and cross-repo contract tests under `docs/TESTING_POLICY.md`; check protected Core changes via `python scripts/check_protected_core_changes.py --base main`. No blanket hosted CI. Run isolated/non-production real integration and real Workbench browser; production, merge and deployment require separate user authorisation.
 - Keep `docs/HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md` and relevant owning contracts/tests current; root Agent FYI changes only if top-level navigation truly changes. Report source commit, tests, runtime adoption and actual UI acceptance separately.
+
+## Implementation and delivery receipts
+
+- `tools/recent_file_effect.py` wraps managed writes/patches with bounded before/after observations. Small file writes verify the actual UTF-8/newline bytes. Managed Shell recognizes at most eight literal output operands; interval changes remain `touched`, not a claim of Agent authorship. Native `file_edit` paths use the frozen admission Workzone snapshot. Fingerprint is optional throughout.
+- `commands/getfile.py` and `getfile_service.py` bind opaque 15-minute selections to owner, Agent, instance, Session, context generation, current Workzone revision and ingress conversation. Reads pin file/parents with the existing attachment fence, reject links/reparse points, enforce regular-file/size limits and recheck identity after reading.
+- One selection has one deterministic publication identity. The canonical Message, attachment and origin-only outbox are committed before transport; a repeated request recovers that publication even if the original file was deleted. Unknown Telegram acknowledgements remain uncertain and are not replayed automatically. A safely unsubmitted send follows the existing connector retry policy.
+- A successful native command returns `result.getfile`: version 1, instance/Agent/source-custody identity, Session/generation, Message/attachment/event IDs, current-byte SHA-256, byte size, filename, creation time, changed-since-menu flag and delivery state. This is an authenticated command receipt; Workbench does not accept browser-supplied acquisition paths or hashes for library copies. Attachment catalogues retain their existing private-metadata boundary.
+- Workbench receives an incoming attachment, plus one explicit File Library copy verified against this receipt. A failed library copy persists the source intent and retries by opaque library ID without another file request or conversation send. Background capture remains paused unless separately enabled.
+
+## Deliberate limits
+
+- 50,000,000 bytes for Telegram; 64 MiB for Workbench. Larger/chunked transfers are not implemented.
+- Only current admitted Workzones and Agent home are accepted. There is no new out-of-scope host-path capability.
+- Windows/WSL mounted-drive translation is supported. Linux-home paths on Windows require one explicitly authorized WSL UNC distribution root. Unavailable WSL shares fail closed.
+- Telegram forum topics are rejected because the current FC outbox route identifies the chat rather than the topic. Use a direct Bot conversation.
+- Native engines with no reliable file-edit event, indirect Shell scripts, subprocess/background writes and files beyond the bounded receipt budget remain coverage gaps. The UI labels this explicitly. `created`/`modified` are reserved for verified managed effects.
+- Outer Workbench menus follow the existing in-memory command UI lifecycle; reopen `/getfile` after a worker restart. Recent evidence, delivered attachments, outbox results and File Library copies are durable.
 
 Related Workbench consumer contract: `Bazza1982/hashi-workbench-v2`, branch `feature/getfile`, `docs/GETFILE_WORKBENCH.md`.

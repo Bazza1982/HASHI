@@ -1551,6 +1551,7 @@ class ToolRegistry:
                         "workspace_dir": str(self.workspace_dir),
                         "access_root": str(self.access_root),
                         "access_roots": [str(root) for root in self.access_roots],
+                        "owner_id": str(context.get("owner_id") or ""),
                     },
                 )
             except Exception as exc:
@@ -1768,8 +1769,9 @@ class ToolRegistry:
         return await asyncio.to_thread(request_proxy)
 
     async def _dispatch_observed(self, tool_name, arguments, *, tool_call_id=""):
+        from tools.recent_file_effect import dispatch_with_file_receipt
         if tool_name not in {"file_search", "file_list", "log_query", "shell", "bash"}:
-            return await self._dispatch(tool_name, arguments, tool_call_id=tool_call_id)
+            return await dispatch_with_file_receipt(self, tool_name, arguments, tool_call_id=tool_call_id)
         from tools.tool_activity import ToolActivity, broad_scope_advisory, command_search_roots
         from tools.builtins import BuiltinExecutionResult
         if tool_name in {"file_search", "file_list", "log_query"}:
@@ -1799,7 +1801,7 @@ class ToolRegistry:
                                     operation_type="declared_shell_search")
                     if broad_scope_advisory(declared):
                         activity.update(scope_advisory="Broad declared roots; existing permissions still apply")
-            result = await self._dispatch(tool_name, arguments, tool_call_id=tool_call_id)
+            result = await dispatch_with_file_receipt(self, tool_name, arguments, tool_call_id=tool_call_id)
             details = dict(result.details) if isinstance(result, BuiltinExecutionResult) else {}
             output = result.output if isinstance(result, BuiltinExecutionResult) else str(result)
             status = details.get("search_outcome")
