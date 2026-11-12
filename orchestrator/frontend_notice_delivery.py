@@ -87,10 +87,9 @@ async def deliver_notice(
     )
     decision = telegram_replay_decision(
         store, claim, event, owner_id=owner, agent_id=agent_id, chat_id=int(origin["chat_id"]),
+        recovery=recovery or claim["attempt_count"] > 1,
     )
-    # A starting notice is allowed on its immediate first attempt, never on recovery.
-    initial_transient = recovery_category == "transient" and not recovery and claim["attempt_count"] == 1
-    if decision.state != "send" and not initial_transient:
+    if decision.state != "send":
         finish_without_telegram(store, claim, owner_id=owner, decision=decision)
         return {**result, "sent": False, "delivery_state": decision.state}
     rendered_text = text

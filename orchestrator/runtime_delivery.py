@@ -1315,33 +1315,29 @@ async def dispatch_claimed_telegram_event(
     canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
         standard_event
     )
-    is_recovery = recovery or int(claim.get("attempt_count") or 1) > 1
-    if is_recovery:
-        from orchestrator.frontend_telegram_replay import (
-            finish_without_telegram, telegram_replay_decision,
-        )
-        decision = telegram_replay_decision(
-            store, claim, standard_event, owner_id=frontend_owner_id,
-            agent_id=runtime.name, chat_id=chat_id,
-        )
-        if decision.state != "send":
-            finish_without_telegram(store, claim, owner_id=frontend_owner_id, decision=decision)
-            return 0.0, 0
-        connected_at = getattr(runtime, "_telegram_delivery_connected_at", None)
-        delayed = (
-            int(claim.get("attempt_count") or 1) > 1
-            or connected_at is None
-            or decision.original_at.timestamp() <= connected_at
-        )
-        replay_label = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id)) if delayed else ""
-        if replay_label:
-            canonical_text = replay_label + ("\n\n" + canonical_text if canonical_text else "")
-        purpose = "incremental-deliverable"  # Canonical errors are already rendered; keep the replay label.
+    from orchestrator.frontend_telegram_replay import (
+        finish_without_telegram, telegram_replay_decision,
+    )
+    # Lifetime belongs to the original output, including its very first claim.
+    # Recovery hints affect presentation/eligibility, never whether expiry runs.
+    decision = telegram_replay_decision(
+        store, claim, standard_event, owner_id=frontend_owner_id,
+        agent_id=runtime.name, chat_id=chat_id, recovery=recovery,
+        connected_at=getattr(runtime, "_telegram_delivery_connected_at", None),
+    )
+    if decision.state != "send":
+        finish_without_telegram(store, claim, owner_id=frontend_owner_id, decision=decision)
+        return 0.0, 0
+    replay_label = ""
+    if decision.is_replay:
+        replay_label = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id))
+        canonical_text = replay_label + ("\n\n" + canonical_text if canonical_text else "")
+        purpose = "incremental-deliverable"  # Keep the canonical error and its replay label.
     canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
     from orchestrator.frontend_run_questions import question_identity
     frontend_question_id = question_identity(standard_event)
     if not include_text:
-        canonical_text = replay_label if is_recovery else ""
+        canonical_text = replay_label
     media_refs = _standard_event_media_refs(standard_event)
     outcome: dict[str, Any] = {}
     claim_terminal = False
@@ -1721,6 +1717,23 @@ async def send_long_message(
         if not claims:
             return 0.0, 0
         claim = claims[0]
+        from orchestrator.frontend_dispatch import project_claimed_frontend_event
+        from orchestrator.frontend_telegram_replay import (
+            finish_without_telegram, telegram_replay_decision,
+        )
+        event = project_claimed_frontend_event(
+            runtime.session_store, claim, session_id=str(publication["session_id"]),
+            owner_id=str(publication["owner_id"]),
+        )
+        decision = telegram_replay_decision(
+            runtime.session_store, claim, event, owner_id=str(publication["owner_id"]),
+            agent_id=runtime.name, chat_id=chat_id, recovery=False,
+            connected_at=getattr(runtime, "_telegram_delivery_connected_at", None),
+        )
+        if decision.state != "send":
+            finish_without_telegram(runtime.session_store, claim,
+                                    owner_id=str(publication["owner_id"]), decision=decision)
+            return 0.0, 0
         if int(claim.get("attempt_count") or 1) > 1:
             return await dispatch_claimed_telegram_event(
                 runtime, chat_id=chat_id, store=runtime.session_store, claim=claim,
@@ -1728,6 +1741,9 @@ async def send_long_message(
                 purpose=purpose, delivery_mode=delivery_mode, error_context=error_context,
                 recovery=True,
             )
+        if decision.is_replay:
+            text = decision.label(locale=ui_language.preferred_locale(runtime, actor_id=chat_id)) + "\n\n" + text
+            purpose = "incremental-deliverable"
         outcome: dict[str, Any] = {}
         try:
             duration, chunks = await _send_long_message_transport(

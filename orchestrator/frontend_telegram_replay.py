@@ -28,6 +28,7 @@ class ReplayDecision:
     state: str
     reason: str
     original_at: datetime | None
+    is_replay: bool = True
 
     def label(self, *, locale: str) -> str:
         from orchestrator.ui_language import tr
@@ -49,6 +50,8 @@ def telegram_replay_decision(
     agent_id: str,
     chat_id: int,
     now: datetime | None = None,
+    recovery: bool = True,
+    connected_at: float | None = None,
 ) -> ReplayDecision:
     """A conservative whitelist over canonical FC facts, not rendered prose."""
     detail = claim.get("detail") or {}
@@ -148,8 +151,21 @@ def telegram_replay_decision(
         "command_result": NOTICE_TTL_SECONDS,
         "question": NOTICE_TTL_SECONDS,
     }.get(category)
+    is_replay = (
+        int(claim.get("attempt_count") or 1) > 1
+        or (
+            connected_at is not None
+            and original is not None
+            and original.timestamp() <= connected_at
+        )
+        or (recovery and connected_at is None)
+    )
     if ttl is None:
-        return ReplayDecision("suppressed", "not_replayable", original)
+        if is_replay:
+            return ReplayDecision("suppressed", "not_replayable", original)
+        # A fresh direct UI display is allowed, but never gains an unlimited
+        # lifetime merely because its first transport attempt was delayed.
+        ttl = NOTICE_TTL_SECONDS
     if original is None:
         return ReplayDecision("suppressed", "invalid_timestamp", None)
     deadline = (
@@ -160,7 +176,7 @@ def telegram_replay_decision(
     observed = now or utc_now()
     if observed < original or observed >= deadline:
         return ReplayDecision("expired", "expired", original)
-    return ReplayDecision("send", "eligible", original)
+    return ReplayDecision("send", "eligible", original, is_replay=is_replay)
 
 
 def finish_without_telegram(

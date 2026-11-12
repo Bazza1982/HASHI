@@ -156,7 +156,12 @@ Automatic recovery is deliberately conservative:
 | Normal user stop/steer/cancellation | Never replay as an error |
 
 Age starts at the original output Event, not Run admission, reconnection, task
-creation or retry. At the exact deadline the Telegram task expires. Invalid or
+creation or retry. Every claimed Telegram output checks that deadline before
+transport, including its first direct Run delivery and the explicit-publication
+path. The recovery hint and attempt count do not enable/disable the lifetime
+check; they only help identify catch-up. Fresh direct UI displays retain their
+normal initial presentation and a bounded 10-minute lifetime, while recovery
+still excludes non-replayable displays. At the exact deadline the Telegram task expires. Invalid or
 missing timestamps and unclassified historical display notices fail closed.
 Known legacy user-interruption summaries are excluded even if recorded as
 `run.failed`. A question is revalidated against its owner, frozen route and

@@ -532,3 +532,198 @@ async def test_healthy_queue_delivery_is_not_mislabelled_as_catch_up(
     text = runtime.app.bot.messages[0]["text"]
     assert ("补发" in text) == before_connection
     assert "The durable report" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,seconds,expected",
+    [
+        ("final", 7200, "expired"),
+        ("failure", 600, "expired"),
+        ("final", 7199, "completed"),
+        ("failure", 599, "completed"),
+    ],
+)
+async def test_direct_first_claim_checks_original_deadline_after_offline_reopen(
+    tmp_path, monkeypatch, kind, seconds, expected
+):
+    from orchestrator import frontend_telegram_replay
+    from orchestrator.runtime_delivery import send_long_message
+
+    store, owner, session, accepted, runtime, event = queued(tmp_path, kind)
+    runtime.telegram_connected = False
+    # This is the normal direct Run delivery entry, with no recovery flag.
+    assert await send_long_message(
+        runtime,
+        chat_id=7,
+        text="caller copy",
+        request_id=accepted.request_id,
+        frontend_outbox=True,
+    ) == (0.0, 0)
+    assert task(store, event)["attempt_count"] == 0
+    original = age_event(store, event, 0)
+    observed = original + timedelta(seconds=seconds)
+    monkeypatch.setattr(frontend_telegram_replay, "utc_now", lambda: observed)
+    runtime.session_store = SessionStore(store.db_path, instance_id=store.instance_id)
+    runtime.telegram_connected = True
+    runtime._telegram_delivery_connected_at = observed.timestamp()
+    await send_long_message(
+        runtime,
+        chat_id=7,
+        text="caller copy",
+        request_id=accepted.request_id,
+        frontend_outbox=True,
+    )
+    result = task(store, event)
+    assert result["attempt_count"] == 1
+    assert result["state"] == expected
+    assert bool(runtime.app.bot.messages) == (expected == "completed")
+    if expected == "expired":
+        assert result["delivered_at"] is None
+        assert result["last_error_code"] == "telegram_replay_expired"
+    else:
+        text = runtime.app.bot.messages[0]["text"]
+        assert "补发" in text and original.strftime("%H:%M:%S") in text
+        assert "caller copy" not in text
+    with store._connection() as db:
+        assert (
+            db.execute(
+                "SELECT state FROM connector_delivery_tasks "
+                "WHERE connector_id='backend_api' AND event_id=?",
+                (event["event_id"],),
+            ).fetchone()[0]
+            == "pending"
+        )
+        assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    preserved = next(
+        e
+        for e in store.events(session["session_id"], owner_id=owner)
+        if e["event_id"] == event["event_id"]
+    )
+    assert preserved["created_at"] == original.isoformat()
+    count = len(runtime.app.bot.messages)
+    assert await dispatch_pending_telegram_deliverables(runtime) == 0
+    assert len(runtime.app.bot.messages) == count
+
+
+@pytest.mark.asyncio
+async def test_first_explicit_publication_claim_cannot_bypass_expiry(
+    tmp_path, monkeypatch
+):
+    from orchestrator import frontend_telegram_replay
+    from orchestrator.runtime_delivery import send_long_message
+
+    route, store, owner, session, accepted, runtime = setup_delivery(tmp_path)
+    runtime.telegram_connected = False
+    kwargs = dict(
+        chat_id=7,
+        text="Original diagnostic",
+        request_id=accepted.request_id,
+        purpose="error",
+    )
+    await send_long_message(runtime, **kwargs)
+    event = next(
+        e
+        for e in store.events(session["session_id"], owner_id=owner)
+        if e["kind"] == "frontend.message.recorded"
+        and e["detail"]["source"] == "telegram.long-message"
+    )
+    assert task(store, event)["attempt_count"] == 0
+    original = age_event(store, event, 0)
+    observed = original + timedelta(seconds=600)
+    monkeypatch.setattr(frontend_telegram_replay, "utc_now", lambda: observed)
+    runtime.telegram_connected = True
+    runtime._telegram_delivery_connected_at = observed.timestamp()
+    await send_long_message(runtime, **kwargs)
+    result = task(store, event)
+    assert result["attempt_count"] == 1 and result["state"] == "expired"
+    assert runtime.app.bot.messages == []
+    assert store.get_run(accepted.run_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_first_direct_file_claim_without_recovery_hint_still_expires(
+    tmp_path, monkeypatch
+):
+    import json
+    from orchestrator import frontend_telegram_replay
+    from orchestrator.frontend_incremental_delivery import (
+        dispatch_incremental_telegram_event,
+    )
+    from tests.test_frontend_attachment_tool import _registry
+
+    route, store, owner, session, accepted, runtime = setup_delivery(tmp_path)
+    report = tmp_path / "report.txt"
+    report.write_bytes(b"preserved report")
+    registry = _registry(
+        tmp_path,
+        store,
+        owner,
+        session,
+        allowed_tools=["frontend_publish_deliverable"],
+        runtime=None,
+    )
+    result = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "delayed-file", "attachments": [{"path": str(report)}]},
+        tool_call_id="publish",
+    )
+    assert not result.is_error, result.output
+    publication = json.loads(result.output)
+    event = next(
+        e
+        for e in store.events(session["session_id"], owner_id=owner)
+        if e["event_id"] == publication["event_id"]
+    )
+    original = age_event(store, event, 0)
+    observed = original + timedelta(seconds=7200)
+    monkeypatch.setattr(frontend_telegram_replay, "utc_now", lambda: observed)
+    runtime._telegram_delivery_connected_at = observed.timestamp()
+    await dispatch_incremental_telegram_event(
+        store,
+        runtime,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id=accepted.request_id,
+        event_id=event["event_id"],
+        delivery_route=route,
+    )
+    result = task(store, event)
+    assert result["attempt_count"] == 1 and result["state"] == "expired"
+    assert runtime.app.bot.messages == [] and runtime.app.bot.media == []
+    assert report.read_bytes() == b"preserved report"
+
+
+@pytest.mark.asyncio
+async def test_first_direct_start_notice_has_no_unbounded_initial_exception(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.frontend_notice_delivery import deliver_notice
+
+    route, store, owner, session, accepted, runtime = setup_delivery(tmp_path)
+    kernel = SimpleNamespace(
+        global_cfg=runtime.global_config,
+        session_store=store,
+        _runtime_map=lambda: {"agent1": runtime},
+    )
+    origin = dict(
+        surface="telegram",
+        chat_id=7,
+        owner_id=owner,
+        session_id=session["session_id"],
+        context_generation=1,
+        delivery_route=route,
+    )
+    send_notice = AsyncMock()
+    result = await deliver_notice(
+        kernel,
+        agent_id="agent1",
+        origin=origin,
+        text="Starting",
+        publication_id="reboot:delayed:starting",
+        send_notice=send_notice,
+        recovery_category="transient",
+        recovery=False,
+        original_at=(datetime.now(timezone.utc) - timedelta(seconds=601)).timestamp(),
+    )
+    send_notice.assert_not_awaited()
+    assert result["delivery_state"] == "expired" and not result["sent"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -94,7 +96,7 @@ async def test_media_stops_between_files_when_access_is_revoked(tmp_path):
     store = SimpleNamespace(visible_message_attachment=lambda *args, **kwargs: {
         "local_ref": str(file_path), "mime_type": "image/png"
     })
-    event = {"content_blocks": [
+    event = {"created_at": datetime.now(timezone.utc).isoformat(), "content_blocks": [
         {"type": "media_ref", "attachment_id": "one", "role": "photo"},
         {"type": "media_ref", "attachment_id": "two", "role": "photo"},
     ]}
@@ -126,7 +128,7 @@ async def test_only_global_users_can_explicitly_deliver_media_elsewhere(
     store = SimpleNamespace(visible_message_attachment=lambda *args, **kwargs: {
         "local_ref": str(file_path), "mime_type": "image/png"
     })
-    event = {"content_blocks": [
+    event = {"created_at": datetime.now(timezone.utc).isoformat(), "content_blocks": [
         {"type": "media_ref", "attachment_id": "one", "role": "photo"},
     ]}
 
@@ -166,7 +168,7 @@ async def test_media_revoked_while_waiting_is_settled_without_retry(tmp_path, mo
         visible_message_attachment=lambda *args, **kwargs: {"local_ref": str(file_path)},
         complete_delivery_outbox=lambda **entry: completions.append(entry),
     )
-    event = {"content_blocks": [
+    event = {"created_at": datetime.now(timezone.utc).isoformat(), "content_blocks": [
         {"type": "media_ref", "attachment_id": "one", "role": "photo"},
     ]}
     async def revoke(*args):
@@ -209,7 +211,7 @@ async def test_text_and_media_revoked_before_sending_are_suppressed(tmp_path, mo
     runtime.app.bot = SimpleNamespace(send_message=AsyncMock())
     completions, receipts = [], []
     store = SimpleNamespace(complete_delivery_outbox=lambda **entry: completions.append(entry))
-    event = {"content_blocks": [{"type": "media_ref", "attachment_id": "one"}]}
+    event = {"created_at": datetime.now(timezone.utc).isoformat(), "content_blocks": [{"type": "media_ref", "attachment_id": "one"}]}
 
     async def revoke(*args):
         config = read_config_json(config_path)
