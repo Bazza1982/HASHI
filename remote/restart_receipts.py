@@ -108,7 +108,15 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
     evidence = record.get("evidence") or {}
     phase = str(record.get("phase") or "accepted")[:80]
     sequence = 1 + len(timing.get("stages") or []) + int(terminal)
+    from orchestrator.reboot_ui import restart_notice
+
+    notice_status = (
+        "succeeded" if succeeded else "unconfirmed"
+        if terminal and (state == "completed" or phase == "terminal_verification")
+        else "failed" if terminal else "running"
+    )
     return {
+        "notice": restart_notice(record, status=notice_status),
         "action": "restart", "kind": "cold", "mode": "cold",
         "operation_id": record["restart_id"], "source_agent": agent,
         "instance_id": instance, "accepted": state != "rejected",

@@ -100,7 +100,7 @@ route gates and checks the old Workers rather than assuming restoration.
 
 Chinese examples (runtime messages have no persona greeting):
 
-- `🔄 开始热重启…`
+- `🔄 开始热重启。这大约需要2分钟时间。`
 - `✅ 月如热重启成功，耗时3秒。`
 - `✅ 完整热重启成功，耗时12秒，20个代理在线。`
 - `⚠️ 完整热重启部分成功：19/20 个代理已切换并在线；月如：后端尚未就绪。`
@@ -111,6 +111,29 @@ Chinese examples (runtime messages have no persona greeting):
 Names use display metadata and HTML escaping. Both English and Chinese wording
 live in the runtime language catalogs. Normal notices omit operation IDs,
 process IDs and raw exceptions. Detailed correlation remains in local logs.
+
+## Frontend wording and estimates
+
+Frontend Connector Functions own the operation projection's plain-text
+`notice` and the runtime language catalogs. Workbench uses this canonical
+notice instead of composing a second result from transport warning flags.
+TUI, Telegram and other Connectors render the same notice, with transport
+escaping handled at the boundary.
+
+A verified local reboot with only optional connector recovery is a normal
+success: `✅ 完整热重启成功，耗时139.8秒，12个代理在线。`
+followed by `其它连接形式进行中。` when connection setup is still pending.
+The diagnostic receipt may retain `connectors_unavailable`; this alone is
+not a user-facing outage or reboot warning. Genuine cleanup/publication
+failures, partial results and unconfirmed outcomes retain their warning/error
+presentation. Observation and delivery never change the operation outcome.
+
+Hot-reboot start notices say approximately 2 minutes; full-system restart
+start notices say approximately 5 minutes. These are user expectations, not
+blocking timers or timeout changes. Both available runtime catalogs and all
+active Workbench offline-fallback locales carry these estimates. Remote
+restart projections use the same FC catalog for start, verified completion
+and unconfirmed-outcome notices.
 
 ## Delivery and recovery
 
