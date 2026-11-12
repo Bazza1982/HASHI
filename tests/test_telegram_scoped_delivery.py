@@ -98,29 +98,31 @@ async def test_missing_delegated_outbox_cannot_fall_back_to_raw_send(tmp_path, m
 @pytest.mark.asyncio
 async def test_progress_publication_uses_the_run_scope(tmp_path, monkeypatch):
     import orchestrator.admin_local_testing as local_testing
+    from orchestrator.session_store import SessionStore
 
     runtime, _observations, _ = instance(tmp_path)
     owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    store = SessionStore(tmp_path / "delivery.sqlite3", instance_id="scoped-delivery-test")
+    session = store.create_session(owner_id=owner, agent_id=runtime.name)
     runtime._request_meta_by_id = {
-        "one": {"request_id": "one", "owner_id": owner, "hashi_session_id": "session-one"}
+        "one": {"request_id": "one", "owner_id": owner, "hashi_session_id": session["session_id"]}
     }
-    runtime.session_store = SimpleNamespace(
-        claim_delivery_outbox=lambda **kwargs: [{"outbox_id": "ob", "lease_token": "lease"}],
-        complete_delivery_outbox=lambda **kwargs: None,
-    )
+    runtime.session_store = store
     captured = []
+    publish = runtime_session.publish_frontend_message
+    def capture(*args, **kwargs):
+        captured.append(kwargs)
+        return publish(*args, **kwargs)
     monkeypatch.setattr(local_testing, "capture_local_command_output", AsyncMock(return_value=False))
-    monkeypatch.setattr(runtime_session, "publish_frontend_message",
-                        lambda *args, **kwargs: captured.append(kwargs) or {
-                            "session_id": "s", "owner_id": kwargs.get("explicit_owner_id") or "user:42",
-                            "delivery_event_id": "ev"})
+    monkeypatch.setattr(runtime_session, "publish_frontend_message", capture)
     monkeypatch.setattr(runtime_delivery, "_send_long_message_transport", AsyncMock(return_value=(0.1, 1)))
     result = await runtime_delivery.send_long_message(
         runtime, chat_id=100, text="progress", request_id="one", purpose="status",
     )
     assert result == (0.1, 1)
     assert captured[0]["explicit_owner_id"] == owner
-    assert captured[0]["explicit_session_id"] == "session-one"
+    assert captured[0]["explicit_session_id"] == session["session_id"]
+    assert store.messages(session["session_id"], owner_id=owner)[0]["text"] == "progress"
 
 @pytest.mark.asyncio
 async def test_revoked_progress_is_not_published_to_any_session(tmp_path, monkeypatch):

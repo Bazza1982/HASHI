@@ -92,6 +92,9 @@ class _FunctionWorkers:
     async def broadcast_topology(self):
         self.broadcasts += 1
 
+    def schedule_topology(self):
+        self.broadcasts += 1
+
     async def start_telegram_ingress(
         self,
         name,

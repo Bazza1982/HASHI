@@ -28,6 +28,15 @@ Notification policy is fail-open for delivery: if policy evaluation fails, the
 message is still sent and defaults to normal notification signalling. A policy
 or Function Worker contract mismatch must never turn into a silent delivery failure.
 
+## Catch-up eligibility
+
+Notification mode controls signalling, not automatic catch-up eligibility.
+FC separately limits replay to final replies/reports/files for 2 hours and
+genuine failures/command results for 10 minutes; pending questions also retain
+their own shorter deadline. Transient displays and normal user interruptions
+are never replayed. Catch-up identifies itself and the original UTC time.
+See [the FC recovery contract](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#bounded-telegram-catch-up-2026-11-12).
+
 ## Sound and vibration
 
 HASHI sends Telegram's Boolean `disable_notification` field. The Bot API does

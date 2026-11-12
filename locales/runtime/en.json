@@ -10,6 +10,7 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "delivery.replay_label": "[Re-delivered | Original time: {timestamp}]",
     "voice.performance.on": "Performance on",
     "voice.performance.off": "Performance off",
     "voice.performance.state": "Automatic performance: {state} · Advanced TTS only; saved immediately. Adds one preparation step per reading. Prerecorded previews stay unchanged.",

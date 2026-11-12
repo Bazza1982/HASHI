@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from orchestrator.lifecycle_timing import span
@@ -48,6 +49,7 @@ async def _connect(host: Any) -> None:
             with span("worker.telegram_connect", agent=host.agent_name):
                 connected = await asyncio.wait_for(host._prepare_telegram_application(), timeout=90)
             if connected:
+                runtime._telegram_delivery_connected_at = time.time()
                 if host.phase != "ACTIVE" or not host.accepting:
                     runtime.telegram_connected = False
                     return
