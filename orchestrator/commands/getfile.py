@@ -5,6 +5,7 @@ import asyncio
 import html
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCommand, RuntimeCallback
 from orchestrator.command_ui import card_title
@@ -23,6 +24,8 @@ class _OriginOnlyUpdate:
         self._update = update
 
     def __getattr__(self, name):
+        if name == "message":
+            return self._update.effective_message
         return getattr(self._update, name)
 
 
@@ -115,8 +118,12 @@ async def getfile_callback(runtime, update, context):
             raise GetFileError("invalid_path")
         # Preserve refresh and status after one action; double clicks remain bound
         # to the same publication rather than generating another file.
-        await query.edit_message_text(html.escape(tr("complete")), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr("refresh"), callback_data="getfile:refresh")]]))
+        try:
+            await query.edit_message_text(html.escape(tr("complete")), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr("refresh"), callback_data="getfile:refresh")]]))
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).casefold():
+                raise
         return result
     except GetFileError as exc:
         await _send(runtime, update, html.escape(tr("error." + exc.code)))
