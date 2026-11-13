@@ -50,6 +50,12 @@ def install_schema(connection):
               ) ORDER BY m.created_at,m.session_id,m.ordinal""")
 
 
+def source_identity(*, agent_id, session_id, agent_name=None):
+    """Legacy history preserves Session custody, never a new Agent incarnation."""
+    return {"agent_id": str(agent_id), "agent_name": str(agent_name or agent_id),
+            "agent_identity": "legacy-session:" + str(session_id)}
+
+
 def read_page(connection, *, instance_id, owner_id, agent_ids, after=0, limit=50):
     if (
         not isinstance(after, int)

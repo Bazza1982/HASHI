@@ -4814,6 +4814,29 @@ class SessionStore:
             context_generation=generation,
         )
 
+    def _presentation_message_id(self, session_id: str, key: str) -> str:
+        identity = "\n".join(("presentation-message-v1", self.instance_id, str(session_id), key))
+        return "msg_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+    def presentation_publication(self, *, session_id: str, owner_id: str, agent_id: str,
+                                 idempotency_key: str) -> dict[str, Any] | None:
+        """Recover one exact committed publication without replaying its effect."""
+        session = self.get_session(session_id, owner_id=owner_id)
+        if session["agent_id"] != str(agent_id).lower():
+            raise SessionNotFound(session_id)
+        message_id = self._presentation_message_id(session_id, idempotency_key)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM messages WHERE message_id=? AND session_id=?",
+                (message_id, session_id)).fetchone()
+            if row is None:
+                return None
+            event = connection.execute(
+                "SELECT event_id FROM frontend_message_events WHERE message_id=?", (message_id,)).fetchone()
+        if event is None:
+            raise SessionConflict("presentation publication has no delivery event")
+        return {**self._message_dict(row), "delivery_event_id": str(event["event_id"])}
+
     def append_presentation_message(
         self,
         *,
@@ -4913,15 +4936,7 @@ class SessionStore:
             raise ValueError("presentation message requires text or media")
         content_json = _json(normalized_content)
         content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
-        identity = "\n".join(
-            (
-                "presentation-message-v1",
-                self.instance_id,
-                str(session_id),
-                stable_key,
-            )
-        )
-        message_id = "msg_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        message_id = self._presentation_message_id(str(session_id), stable_key)
         now = _utc_now()
         with self._lock, (nullcontext(_connection) if _connection is not None
                          else self._connection()) as connection:

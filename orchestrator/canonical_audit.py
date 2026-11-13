@@ -480,7 +480,46 @@ class CanonicalAuditStore:
                     wrappers.append(wrapper)
                     previous_digest = str(wrapper["record_digest"])
                 self._append_wrappers_unlocked(wrappers)
+        # Projection follows commit. Losing it must not make a committed Tool retryable.
+        try:
+            from orchestrator.getfile_index import RecentFileIndex
+            RecentFileIndex(self).ingest([
+                {**record, "event_id": event_id}
+                for record, event_id in zip(pending, event_ids)
+            ])
+        except Exception:
+            # Commit has succeeded; mark only the disposable projection for a
+            # bounded rebuild, never retry the already committed Tool effect.
+            try:
+                (self.root / "recent-files.needs-rebuild").touch()
+            except OSError:
+                pass
+            import logging
+            logging.getLogger(__name__).warning("Recent-file projection needs reconciliation", exc_info=True)
         return event_ids
+
+    def recent_projection_events(self, *, authorization: Any, max_bytes: int, limit: int) -> list[dict[str, Any]]:
+        """Bounded internal derived-index recovery, never a full audit export."""
+        AuditAuthorization.parse(authorization).require()
+        if not 1 <= max_bytes <= 4 * 1024 * 1024 or not 1 <= limit <= 2000:
+            raise ValueError("projection recovery budget invalid")
+        with self._lock, self._chain_guard(exclusive=False):
+            if not self.events_path.exists():
+                return []
+            with self.events_path.open("rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                start = max(0, size - max_bytes)
+                handle.seek(start)
+                data = handle.read(max_bytes)
+            lines = data.splitlines()
+            if start:
+                lines = lines[1:]
+            result = []
+            for line in lines[-limit:]:
+                event = self._decode_record(json.loads(line))
+                if event.get("event_type") in {"tool_call", "provider_stream_event"}:
+                    result.append(event)
+            return result
 
     def record_batch(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
         """Compatibility alias for callers created before ``record_many``."""

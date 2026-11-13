@@ -96,6 +96,10 @@ def validate_operation(payload: Any) -> None:
             normalize_quoted_reply(payload["reply_reference"])
         except (ValueError, TypeError):
             raise InteractionError("command_menu_request_invalid", 400) from None
+    if "input_text" in payload and (
+        op != "act" or not isinstance(payload["input_text"], str) or len(payload["input_text"]) > 500
+    ):
+        raise InteractionError("command_menu_input_invalid", 422)
     if op == "open":
         command = payload.get("command")
         if not isinstance(command, str) or not command.lstrip().startswith("/"):
@@ -402,7 +406,10 @@ class Capture:
                 special = any(button.get(k) is not None for k in (
                     "web_app", "login_url", "switch_inline_query", "switch_inline_query_current_chat",
                     "switch_inline_query_chosen_chat", "callback_game", "pay", "copy_text"))
-                if not special and isinstance(callback, str) and not button.get("url"):
+                if str(callback or "").startswith("getfile:") and button.get("hashi_disabled_reason"):
+                    item["reason"] = str(button["hashi_disabled_reason"])[:256]
+                    # No action token is issued for an unavailable file.
+                elif not special and isinstance(callback, str) and not button.get("url"):
                     if 0 < len(callback.encode("utf-8")) <= 64:
                         resolved = self.resolve_callback(callback)
                         if resolved:
@@ -414,7 +421,7 @@ class Capture:
                             actions[key] = (callback, resolved[0])
                             item = {"text": label, "button_id": key, "disabled": False}
                             field=button.get("hashi_text_input")
-                            if isinstance(field, Mapping) and callback.startswith(("voice:manual:save","call:manualsave:")):
+                            if isinstance(field, Mapping) and callback.startswith(("voice:manual:save","call:manualsave:","getfile:path:")):
                                 item["text_input"]={"label":str(field.get("label",""))[:100],
                                     "value":str(field.get("value",""))[:500],"max_length":500}
                         else:
