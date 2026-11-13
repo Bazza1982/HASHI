@@ -9,8 +9,11 @@ import hashlib
 import json
 from typing import Any
 
+from orchestrator.session_attachment_limits import AttachmentSizeExceeded, SESSION_ATTACHMENT_LIMITS
 from orchestrator.multimodal_contract import (
     _read_authorized_media,
+    _validate_signature,
+    MultimodalContractError,
     attachment_manifest,
     canonical_request_content,
     normalize_request_content,
@@ -68,21 +71,37 @@ def admit_session_media(
                     "connector-media:"
                     + hashlib.sha256(stage_identity).hexdigest()
                 )
+            maximum = SESSION_ATTACHMENT_LIMITS.attachment_bytes
+            if part["size_bytes"] > maximum:
+                raise AttachmentSizeExceeded(part["size_bytes"], maximum)
+            # Receipt integrity and exact-path authority are intake requirements;
+            # knowing how to decode the bytes is not. Unknown/invalid native
+            # formats remain ordinary opaque files, not trusted native media.
+            payload = _read_authorized_media(
+                part, authorized_roots=(runtime.media_dir,), validate_signature=False,
+            )
+            stored_part = dict(part)
+            if part["modality"] in {"image", "audio", "video"} or part["mime_type"] == "application/pdf":
+                try:
+                    _validate_signature(payload[:64], part["mime_type"], part["attachment_id"])
+                except MultimodalContractError as exc:
+                    if exc.code not in {"MEDIA_SIGNATURE_UNVERIFIED", "MEDIA_SIGNATURE_MISMATCH"}:
+                        raise
+                    stored_part.update(modality="document", mime_type="application/octet-stream")
+                    stored_part.pop("semantic_role", None)
+                    stored_part.pop("duration_ms", None)
             staged = store.stage_attachment(
                 **scope,
                 filename=part["filename"],
-                media_type=part["mime_type"],
+                media_type=stored_part["mime_type"],
                 size_bytes=part["size_bytes"],
                 sha256=part["sha256"],
-                semantic_role=part.get("semantic_role", ""),
-                duration_ms=part.get("duration_ms"),
+                semantic_role=stored_part.get("semantic_role", ""),
+                duration_ms=stored_part.get("duration_ms"),
                 idempotency_key=stage_key,
             )
             attachment_id = str(staged["attachment_id"])
             attachment_ids.append(attachment_id)
-            payload = _read_authorized_media(
-                part, authorized_roots=(runtime.media_dir,),
-            )
             store.upload_attachment_bytes(
                 **scope, attachment_id=attachment_id, payload=payload,
             )

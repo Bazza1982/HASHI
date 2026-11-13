@@ -16,6 +16,21 @@ from orchestrator.config_json import read_config_json
 from orchestrator.pathing import resolve_bridge_home
 
 
+class AttachmentSizeExceeded(ValueError):
+    """Trusted byte-budget facts for ingress and safe failure presentation."""
+
+    def __init__(
+        self, actual_bytes: int | None, maximum_bytes: int, *, scope: str = "file"
+    ):
+        self.actual_bytes = actual_bytes
+        self.maximum_bytes = maximum_bytes
+        self.scope = scope
+        super().__init__(
+            f"attachment exceeds the {maximum_bytes} byte limit"
+            + (f" (received {actual_bytes} bytes)" if actual_bytes is not None else "")
+        )
+
+
 @dataclass(frozen=True)
 class SessionAttachmentLimits:
     count: int

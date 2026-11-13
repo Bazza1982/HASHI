@@ -50,6 +50,13 @@ Telegram downloads and completed `/long` batches also pass through the
 Functions-owned `telegram_media_admission` adapter before Run admission. It
 commits validated bytes to PAO's Session attachment store, derives canonical
 media parts and persists their attachment IDs in the original user Message.
+Receiving a user file never requires a recognised extension, MIME signature,
+parser or model capability: ZIP, text, unknown formats and empty files remain
+receivable within the byte budgets. Unrecognised or mismatched native-media
+signatures are retained as opaque files instead of claiming verified native
+media. Supported native-media routing keeps its existing signature checks.
+Receipt size/hash and exact-path authority remain mandatory; reception does not
+extract archives or execute their contents.
 The Session, owner and context generation stay frozen through queue admission.
 Download receipts or paths alone are not Run attachment authority; backend
 current-Run, content-integrity and exact-file fences remain unchanged. Native
@@ -66,7 +73,14 @@ their stricter validation. Connector/live adoption is a separate gate.
 Pre-admission media failures preserve their observed download, validation,
 attachment-store or admission stage. Functions maps typed errors to safe,
 localized causes and correlates a generated diagnostic reference with the
-existing error logger. Exception text, HTTP bodies, credentials and captions
+existing error logger. Size failures include trusted actual/max byte counts
+(and identify the Telegram download ceiling separately from the instance
+budget); an unavailable actual size is stated as unavailable. The connector
+checks advertised size before downloading and actual size afterward. Telegram
+cloud limits come from the Telegram library; local Bot API mode retains the
+instance budget without imposing the cloud ceiling. Wrapped storage errors
+preserve disk-full/access-denied causes rather than masquerading as Session
+conflicts. Exception text, HTTP bodies, credentials and captions
 are excluded from the public detail. Telegram's shared photo/document/video
 handler and WhatsApp download/storage use this presentation contract.
 Only failures before the admission call may say no model action was started.
