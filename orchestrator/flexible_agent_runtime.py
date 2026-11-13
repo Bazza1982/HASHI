@@ -211,6 +211,9 @@ async def _await_owned_completion(task: asyncio.Task):
                 return task.result()
 
 
+PARK_SUMMARY_TIMEOUT_SECONDS = 8.0
+
+
 class FlexibleAgentRuntime:
 
     def __getattribute__(self, name):
@@ -3277,16 +3280,26 @@ class FlexibleAgentRuntime:
             last_assistant_text,
             title_override=title_override,
         )
-        response = await self.backend_manager.generate_response(
-            self._build_park_summary_prompt(
-                context_block,
-                last_user_text,
-                last_assistant_text,
-                title_override=title_override,
-            ),
-            request_id=f"park-{int(time.time())}",
-            silent=True,
-        )
+        try:
+            response = await asyncio.wait_for(
+                self.backend_manager.generate_response(
+                    self._build_park_summary_prompt(
+                        context_block,
+                        last_user_text,
+                        last_assistant_text,
+                        title_override=title_override,
+                    ),
+                    request_id=f"park-{int(time.time())}",
+                    silent=True,
+                ),
+                timeout=PARK_SUMMARY_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            self.logger.warning(
+                "Park summary unavailable (%s); preserving recent context with fallback",
+                type(error).__name__,
+            )
+            response = None
         parsed = self._extract_json_object(response.text) if response and response.is_success else None
         if not parsed:
             parsed = fallback
