@@ -6566,7 +6566,7 @@ class WorkbenchApiServer:
                 if disposition_inline and not is_download
                 else MAX_SESSION_ATTACHMENT_BYTES
             )
-            if actual_size <= 0 or actual_size > size_limit:
+            if actual_size > size_limit:
                 raise SessionConflict("visible attachment exceeds the allowed size limit")
             if expected_size and expected_size != actual_size:
                 raise SessionConflict("visible attachment size changed")
@@ -7883,7 +7883,6 @@ class WorkbenchApiServer:
             ConfigConflictError,
             ConfigDurabilityError,
             read_config_json,
-            write_config_json,
         )
         from orchestrator.flexible_backend_registry import canonical_backend_engine
 

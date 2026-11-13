@@ -57,6 +57,8 @@ signatures are retained as opaque files instead of claiming verified native
 media. Supported native-media routing keeps its existing signature checks.
 Receipt size/hash and exact-path authority remain mandatory; reception does not
 extract archives or execute their contents.
+The visible-attachment download route also accepts zero-byte files; a zero size
+does not mean an absent attachment or a size-limit violation.
 The Session, owner and context generation stay frozen through queue admission.
 Download receipts or paths alone are not Run attachment authority; backend
 current-Run, content-integrity and exact-file fences remain unchanged. Native
