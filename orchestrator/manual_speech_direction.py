@@ -1,6 +1,12 @@
 """Bounded manual direction, shared by voice and frozen call profiles."""
 from orchestrator import ui_language
 
+
+class ManualSpeechDirectionUnsupported(ValueError):
+    """Public rejection identity; localized exception text is not the wire contract."""
+    code = "speech_manual_direction_unsupported"
+
+
 def validate(value):
     if not isinstance(value, dict) or set(value) - {"enabled", "instructions"}:
         raise ValueError(ui_language.tr("voice.manual.invalid"))
