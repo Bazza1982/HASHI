@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from orchestrator import ui_language
 from orchestrator.frontend_contracts import FrontendCaptionError
+from orchestrator.session_attachment_limits import AttachmentSizeExceeded
 from orchestrator.multimodal_contract import MultimodalContractError
 from orchestrator.voice_transcription_result import TranscriptionFailed
 
@@ -49,7 +50,7 @@ class AdmissionReceiptUnavailable(RuntimeError):
 
 
 def _reason(error: Exception) -> str:
-    from telegram.error import Forbidden, InvalidToken, NetworkError, TimedOut
+    from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, TimedOut
     from orchestrator.session_store import SessionConflict, SessionNotFound
 
     if isinstance(error, TranscriptionFailed):
@@ -63,7 +64,14 @@ def _reason(error: Exception) -> str:
         if error.code == "MEDIA_UNAVAILABLE" and isinstance(error.__cause__, OSError):
             return _reason(error.__cause__)
         return _MEDIA_REASONS.get(error.code, "invalid_input")
+    if isinstance(error, AttachmentSizeExceeded):
+        return {
+            "telegram": "telegram_file_too_large",
+            "total": "attachments_too_large",
+        }.get(error.scope, "attachment_too_large")
     if isinstance(error, SessionConflict):
+        if isinstance(error.__cause__, (OSError, AttachmentSizeExceeded)):
+            return _reason(error.__cause__)
         return "state_changed"
     if isinstance(error, SessionNotFound):
         return "scope_unavailable"
@@ -71,6 +79,8 @@ def _reason(error: Exception) -> str:
         return "timed_out"
     if isinstance(error, (Forbidden, InvalidToken)):
         return "service_rejected"
+    if isinstance(error, BadRequest):
+        return "request_rejected"
     if isinstance(error, (NetworkError, ConnectionError)):
         return "network_unavailable"
     if isinstance(error, FileNotFoundError):
@@ -95,17 +105,24 @@ class FrontendFailure:
     error_type: str
     limit: int | None = None
     error_code: str = ""
+    actual_bytes: int | None = None
+    maximum_bytes: int | None = None
 
     def diagnostic(self) -> dict[str, Any]:
         return {"reference": self.reference, "phase": self.phase, "reason": self.reason,
                 "submission_state": self.submission_state, "error_type": self.error_type,
-                **({"error_code": self.error_code} if self.error_code else {})}
+                **({"error_code": self.error_code} if self.error_code else {}),
+                **({"actual_bytes": self.actual_bytes, "maximum_bytes": self.maximum_bytes}
+                   if self.maximum_bytes is not None else {})}
 
     def render(self, *, locale: str | None = None) -> str:
         return ui_language.tr(
             "frontend.failure.detail", locale=locale,
             stage=ui_language.tr("frontend.failure.stage." + self.phase, locale=locale),
-            reason=ui_language.tr("frontend.failure.reason." + self.reason, locale=locale, limit=self.limit),
+            reason=ui_language.tr(
+                "frontend.failure.reason." + self.reason, locale=locale, limit=self.limit,
+                actual_bytes=self.actual_bytes, maximum_bytes=self.maximum_bytes,
+            ),
             submission=ui_language.tr("frontend.failure." + self.submission_state, locale=locale),
             reference=self.reference,
         )
@@ -125,5 +142,16 @@ def frontend_failure(error: Exception, *, phase: str,
     if isinstance(error, TranscriptionFailed):
         reference, error_code = error.failure.reference, error.failure.code
         error_type = error.failure.error_type
-    return FrontendFailure(phase, _reason(error), submission_state, reference,
-                           error_type, limit, error_code)
+    from orchestrator.session_store import SessionConflict
+
+    size_error = error
+    if isinstance(error, SessionConflict) and isinstance(error.__cause__, AttachmentSizeExceeded):
+        size_error = error.__cause__
+    reason = _reason(error)
+    if isinstance(size_error, AttachmentSizeExceeded) and size_error.actual_bytes is None:
+        reason += "_unknown"
+    return FrontendFailure(
+        phase, reason, submission_state, reference, error_type, limit, error_code,
+        size_error.actual_bytes if isinstance(size_error, AttachmentSizeExceeded) else None,
+        size_error.maximum_bytes if isinstance(size_error, AttachmentSizeExceeded) else None,
+    )

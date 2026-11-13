@@ -643,16 +643,19 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
     assert str(escaped_image) not in escaped.text
 
 
+@pytest.mark.parametrize("filename, media_type, payload", [
+    ("session-report.pdf", "application/pdf", b"%PDF-1.4 session-attachment"),
+    ("empty.dat", "application/octet-stream", b""),
+])
 @pytest.mark.asyncio
 async def test_transcript_attachment_in_session_attachments_root_is_served(
-    tmp_path: Path,
+    tmp_path: Path, filename: str, media_type: str, payload: bytes,
 ):
     server = _server(tmp_path)
     bridge_home = tmp_path / "bridge_home"
     session_attachments = bridge_home / "media" / "session_attachments"
     session_attachments.mkdir(parents=True)
-    payload = b"%PDF-1.4 session-attachment"
-    report = session_attachments / "session-report.pdf"
+    report = session_attachments / filename
     report.write_bytes(payload)
     server.global_config.bridge_home = bridge_home
     server._runtime_map = lambda: {"a": SimpleNamespace(media_dir=tmp_path / "agent-media")}
@@ -663,8 +666,8 @@ async def test_transcript_attachment_in_session_attachments_root_is_served(
         server.session_store,
         session_id=session["session_id"],
         owner_id="user:7",
-        filename="session-report.pdf",
-        media_type="application/pdf",
+        filename=filename,
+        media_type=media_type,
         payload=payload,
     )
     media_part = server.session_store.attachment_canonical_part(
@@ -698,10 +701,14 @@ async def test_transcript_attachment_in_session_attachments_root_is_served(
 
     assert response.status == 200
     assert response.body == payload
-    assert response.content_type == "application/pdf"
+    assert response.content_type == media_type
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     disposition = str(response.headers.get("Content-Disposition") or "")
-    assert disposition.startswith("inline")
+    assert disposition.startswith("inline" if media_type == "application/pdf" else "attachment")
+    report.write_bytes(b"tampered")
+    changed = await server.handle_transcript_attachment(request)
+    assert changed.status == 409
+    assert str(report) not in changed.text
 
 @pytest.mark.asyncio
 async def test_staged_frontend_image_is_visible_through_transcript_route(
@@ -1120,3 +1127,4 @@ async def test_required_commentary_matches_canonical_router_with_optional_switch
     assert projected["presentation_enabled"] is True
     assert projected["presentation_channel"] == "commentary"
     assert projected["summary"] == event.summary
+# HASHI-Fingerprint: hfp_1cf752395d3a47d08d67d8c1a97e6666

@@ -42,7 +42,7 @@ from orchestrator.session_titles import (
     automatic_session_title,
     is_system_session_title,
 )
-from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
+from orchestrator.session_attachment_limits import AttachmentSizeExceeded, SESSION_ATTACHMENT_LIMITS
 from orchestrator.storage_profile import removable_storage_profile
 from orchestrator import pcm_forget_preview, pcm_forget_session
 
@@ -4398,6 +4398,9 @@ class SessionStore:
                     if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
                         raise SessionConflict(
                             "message exceeds the configured total attachment size limit"
+                        ) from AttachmentSizeExceeded(
+                            total_attachment_bytes, MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+                            scope="total",
                         )
                     fingerprint = {
                         "attachment_id": attachment_id,
@@ -6046,7 +6049,7 @@ class SessionStore:
             attachment_policy
         )
         if declared_size > max_attachment_bytes:
-            raise ValueError("attachment exceeds the configured size limit")
+            raise AttachmentSizeExceeded(declared_size, max_attachment_bytes)
         is_audio = normalized_media_type.startswith("audio/")
         normalized_role = str(semantic_role or "").strip().casefold()
         if is_audio:
