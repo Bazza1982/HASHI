@@ -113,7 +113,16 @@
       "tests/test_frontend_failures.py",
       "tests/test_whatsapp_lifecycle_fc.py",
       "tests/test_whatsapp_enterprise_channel_gate.py",
-      "tests/test_frontend_whatsapp_mirror.py"
+      "tests/test_frontend_whatsapp_mirror.py",
+      "tests/test_getfile_recent.py",
+      "tests/test_getfile_index.py",
+      "tests/test_getfile_tools.py",
+      "tests/test_getfile_delivery.py",
+      "tests/test_getfile_commands.py",
+      "tests/test_getfile_catalogue.py",
+      "tests/test_getfile_audio_document.py",
+      "tests/test_getfile_recovery.py",
+      "tests/test_getfile_telegram.py"
     ]
   },
   "telegram": {

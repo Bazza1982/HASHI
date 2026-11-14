@@ -861,8 +861,9 @@ def publish_frontend_media_notification(
     explicit_owner_id: str | None = None,
     explicit_session_id: str | None = None,
     expected_context_generation: int | None = None,
+    origin_only: bool = False,
 ) -> dict[str, Any]:
-    """Commit a destination-scoped media notification before transport I/O."""
+    """Commit media before transport; explicit retrieval can exclude all mirrors."""
 
     store = ensure_store(runtime)
     resolved_owner = owner_id(runtime, explicit_owner_id)
@@ -920,9 +921,10 @@ def publish_frontend_media_notification(
         size_bytes=len(payload),
         sha256=str(sha256),
         semantic_role=resolved_role,
-        # The asset is about to become part of a durable visible Message.
-        # Message-bound output must remain readable with its history.
-        retention_indefinite=True,
+        # Message references protect their bytes independently of staging TTL.
+        # Abandoned explicit retrieval staging must not remain indefinitely.
+        retention_indefinite=not origin_only,
+        retention_seconds=86400 if origin_only else None,
         idempotency_key=f"explicit-media:{stable_id}:asset",
     )
     store.upload_attachment_bytes(
@@ -951,7 +953,7 @@ def publish_frontend_media_notification(
         session_channel_key=str(channel_key),
         chat_id=str(channel_key),
         telegram_requested=normalized_surface == "telegram",
-        additional_mirrors=configured_owner_mirror_destinations(
+        additional_mirrors=() if origin_only else configured_owner_mirror_destinations(
             request_metadata={"owner_id": resolved_owner},
             state_root=getattr(runtime.global_config, "bridge_home", None),
         ),
@@ -988,6 +990,7 @@ def publish_frontend_media_notification(
         ],
         outbox=True,
         delivery_route=route,
+        expected_context_generation=expected_context_generation,
     )
     publication = {
         **message,
@@ -1000,15 +1003,16 @@ def publish_frontend_media_notification(
         schedule_persisted_frontend_media_event,
     )
 
-    schedule_persisted_frontend_media_event(
-        runtime,
-        target={
-            "session_id": str(message["session_id"]),
-            "event_id": str(message["delivery_event_id"]),
-        },
-        owner_id=resolved_owner,
-        source_event_id=str(message["delivery_event_id"]),
-    )
+    if not origin_only:
+        schedule_persisted_frontend_media_event(
+            runtime,
+            target={
+                "session_id": str(message["session_id"]),
+                "event_id": str(message["delivery_event_id"]),
+            },
+            owner_id=resolved_owner,
+            source_event_id=str(message["delivery_event_id"]),
+        )
     return publication
 
 
@@ -1078,6 +1082,7 @@ def publish_frontend_media_notification_for_update(
     publication_id: str,
     semantic_role: str = "",
     presentation_role: str = "",
+    origin_only: bool = False,
 ) -> dict[str, Any]:
     """Publish media to the exact Session and generation that opened the UI."""
 
@@ -1102,6 +1107,7 @@ def publish_frontend_media_notification_for_update(
         explicit_owner_id=resolved_owner,
         explicit_session_id=explicit_session_id,
         expected_context_generation=expected_generation,
+        origin_only=origin_only,
     )
 
 
@@ -1120,6 +1126,12 @@ def publish_frontend_message_for_update(
     surface, channel_key, resolved_owner, explicit_session_id = (
         _update_session_route(runtime, update)
     )
+    frozen_route = None
+    if getattr(update, "_hashi_origin_only", False):
+        from orchestrator.frontend_delivery import freeze_run_delivery_route
+        frozen_route = freeze_run_delivery_route(
+            message_source_id=surface, session_surface=surface, session_channel_key=channel_key,
+            chat_id=channel_key, telegram_requested=surface == "telegram", additional_mirrors=())
     return publish_frontend_message(
         runtime,
         role=role,
@@ -1128,6 +1140,7 @@ def publish_frontend_message_for_update(
         publication_id=publication_id,
         surface=surface,
         channel_key=channel_key,
+        frozen_delivery_route=frozen_route,
         explicit_owner_id=resolved_owner,
         explicit_session_id=explicit_session_id,
         content_format=content_format,

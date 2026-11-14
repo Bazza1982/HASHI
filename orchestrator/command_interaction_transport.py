@@ -37,6 +37,7 @@ _FIELDS = frozenset(
         "menu_id",
         "revision",
         "button_id",
+        "input_text",
         "session_id",
         "context_generation",
         "reply_reference",
