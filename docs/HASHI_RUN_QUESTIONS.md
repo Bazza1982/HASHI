@@ -14,6 +14,29 @@ two. Admission exhaustion or a refused SQLite write reservation returns
 Cancellation retains admission until the submitted call settles. A disconnected
 caller has no success receipt and must reconcile its original idempotency key.
 
+
+Interactive HTTP and Telegram question operations use a question-only 200 ms
+SQLite busy timeout, including first-use schema setup, answer/consume/Stop
+claims and question-rendition writes. Schema mutex acquisition is also bounded.
+This connection policy does not change SessionStore's global 30-second default.
+Schema DDL now runs atomically under the same writer reservation; its ready
+flag is published only after commit.
+
+A failed reservation before any write returns the existing typed
+`question_storage_busy` response (HTTP 503), or the localized Telegram busy
+notice. The caller may retry the original idempotency key; no write or transport
+effect is automatically replayed. Errors after a possible commit remain
+unconfirmed. In particular, once a Stop answer is saved, a later busy Stop claim
+reports `question_stop_unconfirmed`, not a pre-write refusal, and preserves the
+existing explicit Stop retry and current-Run fence.
+
+`tests/test_run_question_busy.py` sustains an independent writer across repeated
+HTTP and Telegram attempts while probing actual HTTP and serialized Worker IPC.
+It verifies fast busy outcomes without committed answers, bounded executor
+recovery after unlock, exactly-once creation/answer/consumption and delivery,
+plus post-commit uncertainty and Stop ordering. These are isolated checks;
+production deployment and external-client acceptance remain separate.
+
 Question reads use a deferred, consistent read snapshot. Empty scans and current
 pending/terminal rows take no writer reservation. If expiry, cancellation or
 confirmed delivery failure requires persistence, the read snapshot closes first;

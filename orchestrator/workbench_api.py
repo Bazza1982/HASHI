@@ -1330,12 +1330,14 @@ class WorkbenchApiServer:
         owner=self._strict_authenticated_owner(request)
         if owner is None:
             return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        answer_committed = False
         try:
             body=await request.json()
             if not isinstance(body,dict):
                 raise QuestionError('question_payload_invalid',400)
             question=await self._question_work('answer', session_id=str(request.match_info['session_id']),owner_id=owner,
                 question_id=str(request.match_info['question_id']),payload=body)
+            answer_committed = True
             if (question.get('answer') or {}).get('system_action') == 'stop':
                 runtime = self._runtime_map().get(str(question['agent_id']).casefold())
                 if runtime is None:
@@ -1352,7 +1354,8 @@ class WorkbenchApiServer:
             question = self._question_for_display(question, owner, stop_complete=True)
             return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
         except DatabaseWorkBusy:
-            return web.json_response({'ok': False, 'error_code': 'question_storage_busy'},
+            return web.json_response({'ok': False, 'error_code': (
+                'question_stop_unconfirmed' if answer_committed else 'question_storage_busy')},
                                      status=503, headers={'Cache-Control': 'no-store'})
         except QuestionError as exc:
             return self._question_error(exc)

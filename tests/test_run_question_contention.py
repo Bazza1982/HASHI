@@ -89,23 +89,29 @@ async def test_locked_question_routes_keep_real_health_and_read_api_responsive(t
 
         return readings
 
+    async def request():
+        if operation == "list":
+            return await client.get(session_url, headers=headers)
+        elif operation == "answer":
+            return await client.post(session_url + "/" + question["question_id"] + "/answer",
+                headers=headers, json={"idempotency_key": "answer", "option_id": "blue"})
+        else:
+            payload = {"operation": "create" if operation == "initialize" else operation,
+                       **(spec("second") if operation in {"create", "initialize"}
+                        else {"question_id": question["question_id"]})}
+            return await client.post("/api/v1/run-questions/tool",
+                headers={"X-Hashi-Run-Question-Token": token}, json=payload)
+
     try:
         baseline = await asyncio.to_thread(probe)
         with writer_lock(server.session_store):
             probes = asyncio.create_task(asyncio.to_thread(probe))
-            if operation == "list":
-                response = await client.get(session_url, headers=headers)
-            elif operation == "answer":
-                response = await client.post(session_url + "/" + question["question_id"] + "/answer",
-                    headers=headers, json={"idempotency_key": "answer", "option_id": "blue"})
-            else:
-                payload = {"operation": "create" if operation == "initialize" else operation,
-                           **(spec("second") if operation in {"create", "initialize"}
-                            else {"question_id": question["question_id"]})}
-                response = await client.post("/api/v1/run-questions/tool",
-                    headers={"X-Hashi-Run-Question-Token": token}, json=payload)
-            assert response.status == 200, await response.text()
+            response = await request()
+            assert response.status == 503, await response.text()
+            assert (await response.json())["error_code"] == "question_storage_busy"
             readings = await probes
+        response = await request()
+        assert response.status == 200, await response.text()
         print(json.dumps({"operation": operation, "baseline_ms": baseline, "locked_ms": readings}))
         assert max(readings.values()) < 300, readings
         if operation == "list":
@@ -421,7 +427,7 @@ async def test_multiple_question_polls_bound_admission_and_do_not_duplicate_expi
     url = "/api/v1/sessions/" + session["session_id"] + "/questions"
     responses = []
     try:
-        with writer_lock(server.session_store, seconds=1.5):
+        with writer_lock(server.session_store, seconds=3.0):
             tasks = [asyncio.create_task(client.get(url, headers=headers)) for _ in range(12)]
             await asyncio.sleep(0.1)
             started = time.monotonic()
@@ -430,13 +436,13 @@ async def test_multiple_question_polls_bound_admission_and_do_not_duplicate_expi
             assert time.monotonic() - started < 0.3
             responses = await asyncio.gather(*tasks)
         statuses = [response.status for response in responses]
-        assert 503 in statuses and set(statuses) == {200, 503}
+        assert set(statuses) == {503}
         for response in responses:
-            data = await response.json()
-            if response.status == 503:
-                assert data["error_code"] == "question_storage_busy"
-            else:
-                assert data["questions"][0]["state"] == "expired"
+            assert (await response.json())["error_code"] == "question_storage_busy"
+        for _ in range(2):
+            response = await client.get(url, headers=headers)
+            assert response.status == 200
+            assert (await response.json())["questions"][0]["state"] == "expired"
         with service.store._connection() as c:
             assert c.execute("SELECT COUNT(*) FROM run_events WHERE kind='run.question.expired'").fetchone()[0] == 1
     finally:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from orchestrator import runtime_session, ui_language
-from orchestrator.frontend_database import run_database_work
+from orchestrator.frontend_database import DatabaseWorkBusy, run_database_work
 from orchestrator.frontend_run_questions import question_error_text, question_text
 from orchestrator.run_questions import QuestionError, RunQuestions
 from orchestrator.session_store import SessionConflict, SessionNotFound
@@ -26,7 +26,8 @@ async def _question(runtime, update, qid):
 
 
 def _answer_error_text(error, locale):
-    code = (error.code if isinstance(error, QuestionError) else
+    code = ('question_storage_busy' if isinstance(error, DatabaseWorkBusy) else
+            error.code if isinstance(error, QuestionError) else
             'question_not_found' if isinstance(error, SessionNotFound) else
             'question_state_changed')
     return question_error_text(code, locale)
@@ -46,6 +47,7 @@ async def handle_callback(runtime, update, context):
         await query.answer(ui['invalid'], show_alert=True)
         return
     qid, choice = match.groups()
+    saved = None
     try:
         q = await _question(runtime, update, qid)
         if q['state'] != 'pending':
@@ -89,6 +91,11 @@ async def handle_callback(runtime, update, context):
             if not result or not result.get('ok'):
                 await query.answer(ui['failed'], show_alert=True)
                 return
+    except DatabaseWorkBusy as exc:
+        # A saved Stop answer is not a pre-write busy refusal.
+        await query.answer(ui['failed'] if saved is not None else _answer_error_text(exc, locale),
+                           show_alert=True)
+        return
     except (QuestionError, SessionConflict, SessionNotFound) as exc:
         await query.answer(_answer_error_text(exc, locale), show_alert=True)
         return
@@ -126,9 +133,16 @@ async def handle_text_reply(runtime, update):
         from orchestrator.frontend_run_questions import QuestionRenditions
         def resolve(**scope):
             return QuestionRenditions(runtime_session.ensure_store(runtime)).resolve(**scope)
-        qid = await run_database_work(resolve,
-            agent_id=runtime.name, chat_id=update.effective_chat.id,
-            transport_message_id=getattr(original, "message_id", ""))
+        try:
+            qid = await run_database_work(resolve,
+                agent_id=runtime.name, chat_id=update.effective_chat.id,
+                transport_message_id=getattr(original, "message_id", ""))
+        except DatabaseWorkBusy as exc:
+            # Discovery did not establish that this reply is an ordinary message.
+            # Do not admit it as a new Run when its durable binding is unavailable.
+            await runtime._reply_text(update, _answer_error_text(
+                exc, ui_language.preferred_locale(runtime, update)))
+            return True
         if qid:
             ids.add(qid)
     if len(ids) != 1:
@@ -143,7 +157,7 @@ async def handle_text_reply(runtime, update):
             question_id=qid, payload={'text': message.text,
                 'idempotency_key': f'telegram:reply:{update.effective_chat.id}:{message.message_id}'})
         text = ui['saved']
-    except (QuestionError, SessionConflict, SessionNotFound) as exc:
+    except (DatabaseWorkBusy, QuestionError, SessionConflict, SessionNotFound) as exc:
         text = _answer_error_text(exc, locale)
     except Exception as exc:
         runtime.logger.warning('Question reply outcome unconfirmed (%s)', type(exc).__name__)

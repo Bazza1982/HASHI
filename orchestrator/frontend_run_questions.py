@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 
 from orchestrator.frontend_database import run_database_work
+from orchestrator.run_questions import question_connection, question_schema_lock
 
 _SCHEMA_LOCK = threading.RLock()
 
@@ -38,6 +39,7 @@ _TEXT = {
            'unavailable': 'This question is unavailable in this conversation. Refresh the question list.',
            'changed': 'The question state changed. Refresh it and check whether your answer was received.',
            'already_answered': 'This question already has an answer. Refresh it to check the saved answer.',
+           'busy': 'Question storage is busy. Retry shortly and check the saved answer.',
            'failed': 'Answer not confirmed. Refresh the question and check whether it was received.'},
     'zh-CN': {'write': '自行填写', 'reply': '请回复这条问题消息，填写您的答案。',
               'saved': '已收到答复', 'closed': '这条问题已结束，无法再提交答复。',
@@ -46,6 +48,7 @@ _TEXT = {
               'unavailable': '当前会话无法读取这条问题，请刷新问题列表。',
               'changed': '问题状态已变化，请刷新后检查答复是否已收到。',
               'already_answered': '这条问题已有答复，请刷新后检查已保存的答案。',
+              'busy': '问题服务正忙，请稍后重试并核对答复状态。',
               'failed': '答复尚未确认，请刷新问题，核对是否已收到。'},
     'zh-TW': {'write': '自行填寫', 'reply': '請回覆這則問題訊息，填寫您的答案。',
               'saved': '已收到答覆', 'closed': '這則問題已結束，無法再提交答覆。',
@@ -54,6 +57,7 @@ _TEXT = {
               'unavailable': '目前對話無法讀取這則問題，請重新整理問題清單。',
               'changed': '問題狀態已變更，請重新整理後檢查答覆是否已收到。',
               'already_answered': '這則問題已有答覆，請重新整理後檢查已儲存的答案。',
+              'busy': '問題服務正忙，請稍後重試並核對答覆狀態。',
               'failed': '答覆尚未確認，請重新整理問題，核對是否已收到。'},
     'ja': {'write': '自由に回答', 'reply': 'この質問メッセージに返信して回答してください。',
            'saved': '回答を受け取りました', 'closed': 'この質問の回答受付は終了しました。',
@@ -62,6 +66,7 @@ _TEXT = {
            'unavailable': 'この会話では質問を読み取れません。質問一覧を更新してください。',
            'changed': '質問の状態が変わりました。更新して回答が届いたか確認してください。',
            'already_answered': 'この質問には回答があります。更新して保存された回答を確認してください。',
+           'busy': '質問の保存処理が混み合っています。少し待って再試行し、回答の保存状態を確認してください。',
            'failed': '回答を確認できません。質問を更新して回答が届いたか確認してください。'},
 }
 
@@ -73,6 +78,7 @@ def question_text(locale):
 def question_error_text(code, locale):
     """Render only known PAO codes, never exception text or an answer."""
     key = {
+        'question_storage_busy': 'busy',
         'question_answer_invalid': 'invalid',
         'question_answer_required': 'invalid',
         'question_already_answered': 'already_answered',
@@ -108,10 +114,10 @@ class QuestionRenditions:
         self.store = store
         if getattr(store, '_question_renditions_schema_ready', False):
             return
-        with _SCHEMA_LOCK:
+        with question_schema_lock(_SCHEMA_LOCK):
             if getattr(store, '_question_renditions_schema_ready', False):
                 return
-            with store._connection() as connection:
+            with question_connection(store, write=True) as connection:
                 connection.execute("""CREATE TABLE IF NOT EXISTS frontend_question_renditions (
                     question_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
                     chat_id TEXT NOT NULL, transport_message_id TEXT NOT NULL,
@@ -129,14 +135,14 @@ class QuestionRenditions:
             chat_id=str(chat_id))
         if question["request_id"] != request_id:
             raise QuestionError("question_transport_scope_invalid")
-        with self.store._lock, self.store._connection() as connection:
+        with question_connection(self.store, write=True) as connection:
             connection.execute(
                 "INSERT INTO frontend_question_renditions VALUES(?,?,?,?,?) "
                 "ON CONFLICT(question_id,endpoint_id,transport_message_id) DO NOTHING",
                 (question_id, endpoint_id, str(chat_id), str(transport_message_id), "pending_v2"))
 
     def resolve(self, *, agent_id, chat_id, transport_message_id):
-        with self.store._lock, self.store._connection() as connection:
+        with question_connection(self.store) as connection:
             row = connection.execute(
                 "SELECT q.question_id FROM frontend_question_renditions f "
                 "JOIN run_questions q ON q.question_id=f.question_id "
@@ -149,7 +155,7 @@ class QuestionRenditions:
     def pending_updates(self, *, agent_id, limit=40):
         from orchestrator.run_questions import RunQuestions
         service = RunQuestions(self.store)
-        with self.store._lock, self.store._connection() as connection:
+        with question_connection(self.store) as connection:
             rows = connection.execute(
                 "SELECT q.*,f.endpoint_id,f.chat_id,f.transport_message_id "
                 "FROM frontend_question_renditions f "
@@ -163,7 +169,7 @@ class QuestionRenditions:
                      ("endpoint_id", "chat_id", "transport_message_id")}} for row in rows]
 
     def mark_rendered(self, question, *, unavailable=False):
-        with self.store._lock, self.store._connection() as connection:
+        with question_connection(self.store, write=True) as connection:
             connection.execute(
                 "UPDATE frontend_question_renditions SET presentation_state=? "
                 "WHERE question_id=? AND endpoint_id=? AND transport_message_id=?",

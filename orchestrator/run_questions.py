@@ -19,6 +19,7 @@ from orchestrator.frontend_database import DatabaseWorkBusy, is_sqlite_busy
 logger = logging.getLogger(__name__)
 _SCHEMA_LOCK = threading.RLock()
 
+QUESTION_BUSY_TIMEOUT_MS = 200
 QUESTION_TTL_SECONDS = 300
 QUESTION_CONTINUE_ID = '__hashi_continue__'
 QUESTION_STOP_ID = '__hashi_stop__'
@@ -126,15 +127,46 @@ def verify_tool_token(secret, token, *, instance_id, now=None):
     except (ValueError, TypeError, KeyError, AttributeError):
         raise QuestionError('question_tool_not_authenticated', 401) from None
 
+
+@contextmanager
+def question_schema_lock(lock):
+    """Schema setup cannot leave an interactive caller waiting on a Python lock."""
+    if not lock.acquire(timeout=QUESTION_BUSY_TIMEOUT_MS / 1000):
+        raise DatabaseWorkBusy("question schema initialization busy")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+@contextmanager
+def question_connection(store, *, write=False, busy_timeout_ms=None):
+    """Question-only connection policy; SessionStore defaults stay untouched."""
+    timeout = QUESTION_BUSY_TIMEOUT_MS if busy_timeout_ms is None else int(busy_timeout_ms)
+    with store._connection() as connection:
+        connection.execute("PRAGMA busy_timeout=" + str(timeout))
+        if write:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except Exception as error:
+                if is_sqlite_busy(error):
+                    # This reservation has not executed or committed a write.
+                    raise DatabaseWorkBusy("question write reservation busy") from error
+                raise
+        # Do not translate errors from yield/commit: an already committed effect
+        # with a missing receipt is unconfirmed and must use its original key.
+        yield connection
+
+
 class RunQuestions:
     def __init__(self, store, *, clock=None):
         self.store, self.clock = store, time.time if clock is None else clock
         if getattr(store, '_run_questions_schema_ready', False):
             return
-        with _SCHEMA_LOCK:
+        with question_schema_lock(_SCHEMA_LOCK):
             if getattr(store, '_run_questions_schema_ready', False):
                 return
-            with store._connection() as c:
+            with question_connection(store, write=True) as c:
                 c.execute('''CREATE TABLE IF NOT EXISTS run_questions (
                     question_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -199,9 +231,14 @@ class RunQuestions:
     @contextmanager
     def _read(self):
         # A deferred snapshot never reserves a writer. Close it before upgrading.
-        with self.store._connection() as c:
-            c.execute('BEGIN')
-            yield c
+        try:
+            with question_connection(self.store) as c:
+                c.execute('BEGIN')
+                yield c
+        except Exception as error:
+            if is_sqlite_busy(error):
+                raise DatabaseWorkBusy('question read busy') from error
+            raise
 
     @contextmanager
     def _transaction(self, *, operation='write', busy_timeout_ms=None, correlation=''):
@@ -211,15 +248,7 @@ class RunQuestions:
         started = time.monotonic()
         acquired = None
         try:
-            with self.store._connection() as c:
-                if busy_timeout_ms is not None:
-                    c.execute('PRAGMA busy_timeout=' + str(int(busy_timeout_ms)))
-                try:
-                    c.execute('BEGIN IMMEDIATE')
-                except Exception as exc:
-                    if is_sqlite_busy(exc):
-                        raise DatabaseWorkBusy('question write reservation busy') from exc
-                    raise
+            with question_connection(self.store, write=True, busy_timeout_ms=busy_timeout_ms) as c:
                 acquired = time.monotonic()
                 try:
                     yield c
