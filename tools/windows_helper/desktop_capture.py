@@ -209,6 +209,8 @@ class NativeDesktop:
                 w._send_inputs([w._keyboard_input(vk=vk, flags=(1 if extended else 0) | (2 if kind == "key_up" else 0))])
                 if kind == "key_up": self.keys.discard(key)
             elif kind == "text":
+                if not event["text"] or self._replace_richedit_text(event["text"]):
+                    return
                 # Unicode code units support supplementary characters. No clipboard.
                 data = event["text"].replace("\r\n", "\n").replace("\r", "\n").encode("utf-16-le")
                 items = []
@@ -220,6 +222,61 @@ class NativeDesktop:
                     else:
                         items.extend([w._keyboard_input(scan=code, flags=4), w._keyboard_input(scan=code, flags=6)])
                 for i in range(0, len(items), 128): w._send_inputs(items[i:i+128])
+
+    def _replace_richedit_text(self, text):
+        """Avoid the packet/TSF corruption in a focused modern RichEdit only."""
+        if "\0" in text:
+            return False
+        u = self.u
+        P = ctypes.c_void_p
+
+        class Gui(ctypes.Structure):
+            _fields_ = [("size", W.DWORD), ("flags", W.DWORD),
+                        ("active", W.HWND), ("focus", W.HWND), ("capture", W.HWND),
+                        ("menu", W.HWND), ("move", W.HWND), ("caret", W.HWND),
+                        ("rect", W.RECT)]
+
+        for name, arguments, result in (
+            ("GetGUIThreadInfo", [W.DWORD, ctypes.POINTER(Gui)], W.BOOL),
+            ("GetWindowThreadProcessId", [W.HWND, ctypes.POINTER(W.DWORD)], W.DWORD),
+            ("GetClassNameW", [W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
+            ("GetWindowLongW", [W.HWND, ctypes.c_int], W.LONG),
+            ("IsWindowUnicode", [W.HWND], W.BOOL),
+            ("GetForegroundWindow", [], W.HWND),
+            ("SendMessageTimeoutW", [W.HWND, W.UINT, P, W.LPCWSTR, W.UINT,
+                                     W.UINT, ctypes.POINTER(P)], P),
+        ):
+            fn = getattr(u, name)
+            fn.argtypes, fn.restype = arguments, result
+        foreground = u.GetForegroundWindow()
+        process = W.DWORD()
+        thread = u.GetWindowThreadProcessId(foreground, ctypes.byref(process))
+        info = Gui(size=ctypes.sizeof(Gui))
+        if not thread or not u.GetGUIThreadInfo(thread, ctypes.byref(info)) or not info.focus:
+            return False
+        target_process = W.DWORD()
+        if (u.GetWindowThreadProcessId(info.focus, ctypes.byref(target_process)) != thread
+                or target_process.value != process.value):
+            return False
+        name = ctypes.create_unicode_buffer(256)
+        if (not u.GetClassNameW(info.focus, name, len(name))
+                or name.value.lower() != "richeditd2dpt"
+                or not u.IsWindowUnicode(info.focus)
+                or u.GetWindowLongW(info.focus, -16) & 0x800):
+            return False
+        current = Gui(size=ctypes.sizeof(Gui))
+        if (u.GetForegroundWindow() != foreground
+                or not u.GetGUIThreadInfo(thread, ctypes.byref(current))
+                or current.focus != info.focus):
+            raise DesktopError("desktop_target_changed", 409)
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r")
+        result = P()
+        # One undoable EM_REPLACESEL; an uncertain timeout never falls back to
+        # SendInput, which could duplicate a late edit. No clipboard access.
+        if not u.SendMessageTimeoutW(info.focus, 0xC2, 1, normalized, 0x23, 500,
+                                    ctypes.byref(result)):
+            raise DesktopError("desktop_input_failed", 503)
+        return True
 
     def _input_desktop_diagnostics(self, event):
         """Private bounded failure facts, never window titles or desktop names."""

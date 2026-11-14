@@ -2992,8 +2992,14 @@ def create_app(
             body_bytes=b"",
         )
         if not ok:
-            detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
-            raise HTTPException(status_code=401, detail=detail)
+            return JSONResponse(status_code=401, content={
+                "ok": False,
+                "error_code": "auth_required" if reason == "auth_required" else "auth_failed",
+                "failure_layer": "remote_authentication",
+                "instance_id": _instance_info.get("instance_id"),
+                "detail": "Shared request credentials are required." if reason == "auth_required"
+                    else "Remote authentication failed. Check the connection credential, clock and signed request.",
+            })
         health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
         return _shared_token_response(request, {
             "ok": True,
@@ -3037,8 +3043,14 @@ def create_app(
                 error_code="auth_required" if reason == "auth_required" else "auth_invalid",
                 response_producer="remote_gateway",
             )
-            detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
-            raise HTTPException(status_code=401, detail=detail)
+            return JSONResponse(status_code=401, content={
+                "ok": False,
+                "error_code": "auth_required" if reason == "auth_required" else "auth_failed",
+                "failure_layer": "remote_authentication",
+                "instance_id": _instance_info.get("instance_id"),
+                "detail": "Shared request credentials are required." if reason == "auth_required"
+                    else "Remote authentication failed. Check the connection credential, clock and signed request.",
+            })
         body_bytes = _with_remote_workbench_ingress_evidence(
             method=request.method,
             api_path=api_path,
