@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timedelta, timezone
@@ -332,10 +334,15 @@ class ExchangeInbox:
         except OSError:
             pass
 
-    def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=10)
-        connection.row_factory = sqlite3.Row
-        return connection
+    @contextmanager
+    def _connection(self):
+        connection = sqlite3.connect(str(self.path), timeout=0.2)
+        try:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _record(row: sqlite3.Row, *, replayed: bool = False) -> InboxRecord:
@@ -738,6 +745,8 @@ class ExchangeIngressService:
         runtime_map: Callable[[], Mapping[str, Any]],
         session_store: Any,
     ):
+        self._storage_lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock()
         self.hashi_root = Path(hashi_root)
         self._runtime_map = runtime_map
         self.session_store = session_store
@@ -752,6 +761,34 @@ class ExchangeIngressService:
         self.outbox = ExchangeOutbox(
             self.hashi_root / "state" / "exchange_outbox.sqlite3"
         )
+
+    async def _storage_call(self, call, /, *args, **kwargs):
+        # Whole synchronous transactions (including lock wait/commit/close) stay
+        # on one worker. Cancellation drains that worker before releasing ownership.
+        async with self._storage_lock:
+            task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if task.cancelled():
+                        raise
+                except Exception as exc:
+                    logger.warning(
+                        "Exchange storage operation failed stage=%s sqlite_code=%s sqlite_name=%s",
+                        getattr(call, "__name__", "storage"),
+                        getattr(exc, "sqlite_errorcode", None),
+                        getattr(exc, "sqlite_errorname", None),
+                    )
+                    if cancelled:
+                        raise asyncio.CancelledError() from None
+                    raise
+            if cancelled:
+                raise asyncio.CancelledError()
+            return result
 
     @staticmethod
     def _delivery_status_notice(
@@ -857,6 +894,9 @@ class ExchangeIngressService:
             )
         return self.inbox.accept(delivery)
 
+    async def accept_async(self, *, evidence: Any, prompt: str) -> InboxRecord:
+        return await self._storage_call(self.accept, evidence=evidence, prompt=prompt)
+
     def _verify_reply_correlation(
         self,
         delivery: Mapping[str, Any],
@@ -930,11 +970,11 @@ class ExchangeIngressService:
         )
         identity = delivery_identity_key(delivery)
         inbox_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        current = self.inbox.get(inbox_key)
+        current = await self._storage_call(self.inbox.get, inbox_key)
         if current is None:
             raise ExchangeIngressError("Exchange delivery was not durably accepted")
         if current.state == "pending_confirmation":
-            self._queue_sender_status(
+            await self._storage_call(self._queue_sender_status,
                 current,
                 state="awaiting_confirmation",
             )
@@ -945,7 +985,7 @@ class ExchangeIngressService:
             "confirmation_superseded": "confirmation_superseded",
         }.get(current.state)
         if terminal_status is not None:
-            self._queue_sender_status(
+            await self._storage_call(self._queue_sender_status,
                 current,
                 state=terminal_status,
                 reason=(
@@ -969,7 +1009,7 @@ class ExchangeIngressService:
         )
 
         is_reply = delivery["message_type"] == "agent_reply"
-        observed_owners = self.session_store.conversation_owner_ids(
+        observed_owners = await self._storage_call(self.session_store.conversation_owner_ids,
             agent_id=recipient.agent_id
         )
         user_owners = [
@@ -980,7 +1020,7 @@ class ExchangeIngressService:
             if len(user_owners) == 1
             else f"exchange:{principal.authority_id}:{principal.actor_id}"
         )
-        is_fresh, confirmation = check_hchat_freshness_and_register(
+        is_fresh, confirmation = await self._storage_call(check_hchat_freshness_and_register,
             store=self.session_store,
             originated_at=delivery.get("created_at"),
             received_at=datetime.fromtimestamp(current.accepted_at, timezone.utc),
@@ -1003,12 +1043,12 @@ class ExchangeIngressService:
             },
         )
         if not is_fresh and confirmation is not None:
-            pending = self.inbox.mark_pending_confirmation(
+            pending = await self._storage_call(self.inbox.mark_pending_confirmation,
                 inbox_key,
                 confirmation_id=confirmation["confirmation_id"],
                 owner_id=confirmation["owner_id"],
             )
-            self._queue_sender_status(
+            await self._storage_call(self._queue_sender_status,
                 pending,
                 state="awaiting_confirmation",
             )
@@ -1023,21 +1063,21 @@ class ExchangeIngressService:
     ) -> InboxRecord:
         """Release exactly one Exchange inbox item after its bound decision."""
 
-        record = self.inbox.get(inbox_key)
+        record = await self._storage_call(self.inbox.get, inbox_key)
         if record is None:
             raise ExchangeIngressError("Exchange inbox record not found")
         if record.state in {"scheduled", "displayed"}:
             return record
         if record.confirmation_id != str(confirmation_id):
             raise ExchangeIngressConflict("Exchange confirmation identity mismatch")
-        self.inbox.release_confirmation(
+        await self._storage_call(self.inbox.release_confirmation,
             inbox_key,
             confirmation_id=confirmation_id,
         )
         try:
             return await self._schedule_key(inbox_key)
         except Exception:
-            self.inbox.restore_pending_confirmation(inbox_key)
+            await self._storage_call(self.inbox.restore_pending_confirmation, inbox_key)
             raise
 
     @staticmethod
@@ -1101,23 +1141,23 @@ class ExchangeIngressService:
         recover_scheduled: bool = False,
         recover_leased: bool = False,
     ) -> InboxRecord:
-        current = self.inbox.get(inbox_key)
+        current = await self._storage_call(self.inbox.get, inbox_key)
         if current is None:
             raise ExchangeIngressError("Exchange inbox record not found")
         if current.state == "scheduled" and not recover_scheduled:
             return current
-        record = self.inbox.claim(
+        record = await self._storage_call(self.inbox.claim,
             inbox_key,
             recover_scheduled=recover_scheduled,
             recover_leased=recover_leased,
         )
         if record is None:
-            current = self.inbox.get(inbox_key)
+            current = await self._storage_call(self.inbox.get, inbox_key)
             if current is not None:
                 return current
             raise ExchangeIngressError("Exchange inbox record not found")
         try:
-            config = load_exchange_config(self.hashi_root)
+            config = await self._storage_call(load_exchange_config, self.hashi_root)
             prompt = render_exchange_hchat_prompt(record.delivery)
             # The message was already accepted under a live publish decision.
             # A later unpublish blocks new acceptance but does not discard this
@@ -1144,7 +1184,7 @@ class ExchangeIngressService:
             fallback_exchange_owner_id = (
                 f"exchange:{principal.authority_id}:{principal.actor_id}"
             )
-            observed_owners = self.session_store.conversation_owner_ids(
+            observed_owners = await self._storage_call(self.session_store.conversation_owner_ids,
                 agent_id=recipient.agent_id
             )
             user_owners = [
@@ -1160,7 +1200,7 @@ class ExchangeIngressService:
                     else fallback_exchange_owner_id
                 )
             )
-            target_session = self.session_store.resolve_primary_session(
+            target_session = await self._storage_call(self.session_store.resolve_primary_session,
                 owner_id=target_owner_id,
                 agent_id=recipient.agent_id,
                 establish=True,
@@ -1179,7 +1219,7 @@ class ExchangeIngressService:
                 presentation_kind = (
                     "status" if status_notice is not None else "reply"
                 )
-                displayed = self.session_store.append_presentation_message(
+                displayed = await self._storage_call(self.session_store.append_presentation_message,
                     session_id=target_session["session_id"],
                     owner_id=target_owner_id,
                     agent_id=recipient.agent_id,
@@ -1213,13 +1253,13 @@ class ExchangeIngressService:
                         ),
                     },
                 )
-                displayed_record = self.inbox.mark_displayed(
+                displayed_record = await self._storage_call(self.inbox.mark_displayed,
                     inbox_key,
                     session_id=target_session["session_id"],
                     message_id=str(displayed["message_id"]),
                 )
                 if record.confirmation_id and status_notice is None:
-                    self._queue_sender_status(
+                    await self._storage_call(self._queue_sender_status,
                         displayed_record,
                         state="displayed",
                     )
@@ -1260,13 +1300,13 @@ class ExchangeIngressService:
                 )
             run_id = session_id = message_id = None
             try:
-                run = self.session_store.get_run_by_request(str(request_id))
+                run = await self._storage_call(self.session_store.get_run_by_request, str(request_id))
                 run_id = str(run.get("run_id") or "") or None
                 session_id = str(run.get("session_id") or "") or None
                 message_id = str(run.get("user_message_id") or "") or None
             except SessionNotFound:
                 pass
-            return self.inbox.mark_scheduled(
+            return await self._storage_call(self.inbox.mark_scheduled,
                 inbox_key,
                 request_id=str(request_id),
                 run_id=run_id,
@@ -1274,7 +1314,7 @@ class ExchangeIngressService:
                 message_id=message_id,
             )
         except Exception:
-            self.inbox.release(inbox_key)
+            await self._storage_call(self.inbox.release, inbox_key)
             raise
 
     def _run_state(self, record: InboxRecord) -> str | None:
@@ -1286,30 +1326,34 @@ class ExchangeIngressService:
             return None
         return str(run.get("state") or "") or None
 
-    async def recover_pending(
+    async def recover_pending(self, *, limit: int = 100, recover_scheduled: bool = False) -> list[InboxRecord]:
+        async with self._recovery_lock:
+            return await self._recover_pending(limit=limit, recover_scheduled=recover_scheduled)
+
+    async def _recover_pending(
         self,
         *,
         limit: int = 100,
         recover_scheduled: bool = False,
     ) -> list[InboxRecord]:
         recovered: list[InboxRecord] = []
-        self.inbox.purge()
-        scheduled = self.inbox.scheduled(limit=limit)
+        await self._storage_call(self.inbox.purge)
+        scheduled = await self._storage_call(self.inbox.scheduled, limit=limit)
         scheduled_states = {
-            record.inbox_key: self._run_state(record)
+            record.inbox_key: await self._storage_call(self._run_state, record)
             for record in scheduled
         }
         for record in scheduled:
             state = scheduled_states[record.inbox_key]
             if state is not None and state != "queued":
                 if record.confirmation_id:
-                    self._queue_sender_status(
+                    await self._storage_call(self._queue_sender_status,
                         record,
                         state="executed",
                     )
-                self.inbox.redact_scheduled(record.inbox_key)
+                await self._storage_call(self.inbox.redact_scheduled, record.inbox_key)
         try:
-            config = load_exchange_config(self.hashi_root)
+            config = await self._storage_call(load_exchange_config, self.hashi_root)
         except (OSError, ValueError):
             return recovered
         if not config.enabled:
@@ -1320,11 +1364,11 @@ class ExchangeIngressService:
         )
 
         confirmation_service = IngressConfirmationService(self.session_store)
-        for record in self.inbox.pending_confirmations(limit=limit):
+        for record in await self._storage_call(self.inbox.pending_confirmations, limit=limit):
             if not record.confirmation_id or not record.confirmation_owner_id:
                 continue
             try:
-                confirmation = confirmation_service.get(
+                confirmation = await self._storage_call(confirmation_service.get,
                     record.confirmation_id,
                     owner_id=record.confirmation_owner_id,
                 )
@@ -1332,29 +1376,29 @@ class ExchangeIngressService:
                 continue
             state = str(confirmation.get("state") or "")
             if state == "discarded":
-                terminal = self.inbox.mark_confirmation_terminal(
+                terminal = await self._storage_call(self.inbox.mark_confirmation_terminal,
                     record.inbox_key,
                     state="discarded",
                 )
-                self._queue_sender_status(terminal, state="discarded")
+                await self._storage_call(self._queue_sender_status, terminal, state="discarded")
                 recovered.append(terminal)
             elif state == "expired":
-                terminal = self.inbox.mark_confirmation_terminal(
+                terminal = await self._storage_call(self.inbox.mark_confirmation_terminal,
                     record.inbox_key,
                     state="confirmation_expired",
                 )
-                self._queue_sender_status(
+                await self._storage_call(self._queue_sender_status,
                     terminal,
                     state="confirmation_expired",
                     reason="confirmation_timeout_15m",
                 )
                 recovered.append(terminal)
             elif state == "superseded":
-                terminal = self.inbox.mark_confirmation_terminal(
+                terminal = await self._storage_call(self.inbox.mark_confirmation_terminal,
                     record.inbox_key,
                     state="confirmation_superseded",
                 )
-                self._queue_sender_status(
+                await self._storage_call(self._queue_sender_status,
                     terminal,
                     state="confirmation_superseded",
                     reason="session_context_advanced",
@@ -1390,7 +1434,7 @@ class ExchangeIngressService:
                         type(exc).__name__,
                     )
                 continue
-        for record in self.inbox.pending(
+        for record in await self._storage_call(self.inbox.pending,
             limit=limit,
             include_leased=recover_scheduled,
         ):

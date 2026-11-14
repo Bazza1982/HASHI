@@ -2338,7 +2338,7 @@ class WorkbenchApiServer:
             from orchestrator.exchange_config import load_exchange_config
 
             if load_exchange_config(self.config_path.parent).enabled:
-                service = self._exchange_ingress_service()
+                service = (await self._get_exchange_ingress_service())
                 await service.recover_pending(recover_scheduled=True)
                 self._exchange_recovery_task = asyncio.create_task(
                     self._exchange_recovery_loop(),
@@ -2367,6 +2367,21 @@ class WorkbenchApiServer:
                 session_store=self.session_store,
             )
         return self._exchange_ingress
+
+    async def _get_exchange_ingress_service(self):
+        if self._exchange_ingress is not None:
+            return self._exchange_ingress
+        task = getattr(self, "_exchange_ingress_start", None)
+        if task is None:
+            task = asyncio.create_task(asyncio.to_thread(self._exchange_ingress_service))
+            self._exchange_ingress_start = task
+            # Observe errors even if the only HTTP waiter was cancelled.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and getattr(self, "_exchange_ingress_start", None) is task:
+                self._exchange_ingress_start = None
 
     @staticmethod
     def _exchange_error_response(exc):
@@ -2412,7 +2427,7 @@ class WorkbenchApiServer:
 
         try:
             prompt, evidence = await self._exchange_request_payload(request)
-            record = self._exchange_ingress_service().accept(
+            record = await (await self._get_exchange_ingress_service()).accept_async(
                 evidence=evidence,
                 prompt=prompt,
             )
@@ -2432,7 +2447,7 @@ class WorkbenchApiServer:
 
         try:
             prompt, evidence = await self._exchange_request_payload(request)
-            record = await self._exchange_ingress_service().schedule(
+            record = await (await self._get_exchange_ingress_service()).schedule(
                 evidence=evidence,
                 prompt=prompt,
             )
@@ -2454,7 +2469,7 @@ class WorkbenchApiServer:
         while True:
             await asyncio.sleep(5)
             try:
-                await self._exchange_ingress_service().recover_pending()
+                await (await self._get_exchange_ingress_service()).recover_pending()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -9368,7 +9383,7 @@ class WorkbenchApiServer:
                 if str(rec.get("message_kind") or "").startswith("hchat_"):
                     saved_payload = rec.get("payload") or {}
                     if saved_payload.get("execution_kind") == "exchange_inbox":
-                        result = await self._exchange_ingress_service().confirm_pending(
+                        result = await (await self._get_exchange_ingress_service()).confirm_pending(
                             str(saved_payload.get("inbox_key") or ""),
                             confirmation_id=str(rec.get("confirmation_id") or ""),
                         )
