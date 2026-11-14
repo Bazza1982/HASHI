@@ -111,6 +111,14 @@ execution has started. If ACK or scheduling is interrupted, replay uses the
 same sender identity and message ID. SessionStore idempotency ensures a crash
 between queueing and inbox finalisation still resolves to the original Run.
 
+Cancellation after an inbox claim waits for the storage worker to settle, then
+releases only that invocation's still-matching scheduling lease. An unsuccessful
+claim cannot release another owner, and a replacement lease or an already
+scheduled record is preserved. Repeated cancellation cannot interrupt cleanup.
+Cancellation never replays enqueue itself: subsequent recovery uses the original
+HChat idempotency key and resolves an already accepted Run to the same identity,
+without waiting for a fresh scheduling lease to expire.
+
 Pending, scheduled-body and confirmation recovery follow durable inbox
 acceptance order, not wall-clock timestamps or message hashes. Acceptance
 assigns a private serial within the same SQLite write transaction; duplicate

@@ -472,7 +472,7 @@ class ExchangeInbox:
             ).fetchone()
         return self._record(row)
 
-    def release(self, inbox_key: str) -> None:
+    def release(self, inbox_key: str, *, claimed_at: float | None = None) -> None:
         now = time.time()
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -480,8 +480,9 @@ class ExchangeInbox:
                 UPDATE exchange_inbox
                 SET state='accepted', updated_at=?
                 WHERE inbox_key=? AND state='scheduling'
+                    AND (? IS NULL OR updated_at=?)
                 """,
-                (now, str(inbox_key)),
+                (now, str(inbox_key), claimed_at, claimed_at),
             )
 
     def mark_pending_confirmation(
@@ -1146,17 +1147,26 @@ class ExchangeIngressService:
             raise ExchangeIngressError("Exchange inbox record not found")
         if current.state == "scheduled" and not recover_scheduled:
             return current
-        record = await self._storage_call(self.inbox.claim,
-            inbox_key,
-            recover_scheduled=recover_scheduled,
-            recover_leased=recover_leased,
-        )
-        if record is None:
-            current = await self._storage_call(self.inbox.get, inbox_key)
-            if current is not None:
-                return current
-            raise ExchangeIngressError("Exchange inbox record not found")
+        record = None
+
+        def claim_for_schedule():
+            # _storage_call drains the worker before propagating cancellation.
+            # Retain its actual result even when that await cannot return it.
+            nonlocal record
+            record = self.inbox.claim(
+                inbox_key,
+                recover_scheduled=recover_scheduled,
+                recover_leased=recover_leased,
+            )
+            return record
+
         try:
+            await self._storage_call(claim_for_schedule)
+            if record is None:
+                current = await self._storage_call(self.inbox.get, inbox_key)
+                if current is not None:
+                    return current
+                raise ExchangeIngressError("Exchange inbox record not found")
             config = await self._storage_call(load_exchange_config, self.hashi_root)
             prompt = render_exchange_hchat_prompt(record.delivery)
             # The message was already accepted under a live publish decision.
@@ -1313,8 +1323,25 @@ class ExchangeIngressService:
                 session_id=session_id,
                 message_id=message_id,
             )
+        except asyncio.CancelledError:
+            if record is not None:
+                # Only release this invocation's successful claim. Finish the
+                # cleanup despite repeated cancellation; never replay enqueue.
+                # A committed scheduled record is preserved by release's CAS.
+                cleanup = asyncio.create_task(
+                    self._storage_call(self.inbox.release, inbox_key, claimed_at=record.updated_at)
+                )
+                while True:
+                    try:
+                        await asyncio.shield(cleanup)
+                        break
+                    except asyncio.CancelledError:
+                        if cleanup.cancelled():
+                            raise
+            raise
         except Exception:
-            await self._storage_call(self.inbox.release, inbox_key)
+            if record is not None:
+                await self._storage_call(self.inbox.release, inbox_key, claimed_at=record.updated_at)
             raise
 
     def _run_state(self, record: InboxRecord) -> str | None:

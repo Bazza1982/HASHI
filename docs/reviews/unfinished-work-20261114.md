@@ -59,3 +59,25 @@ Local follow-up validation: 85 focused native/desktop/permission-adjacent checks
 no skips or cancellations. The production-target native host also compiles as
 an x64 Windows executable. No installed desktop host, production service,
 credentials or protected Core were changed. No hosted workflow was requested.
+
+## Scheduling cancellation review follow-up — 2026-11-15
+
+Only P2 cancellation ownership changed in this follow-up. Claim completion is
+inside the cleanup scope and its result survives cancellation of the storage
+await. Cleanup drains in a shielded task even under repeated cancellation and
+compares the acquired lease timestamp before resetting a scheduling row. It
+cannot release an unsuccessful claim, a replacement owner's lease or a committed
+scheduled record. Enqueue is never retried inside the cancelled invocation.
+
+The original reviewed source failed four of six deterministic cancellation
+scenarios. An intermediate candidate failed the replacement-lease scenario;
+the final ownership check makes it pass. Tests stop at claim and enqueue
+boundaries before and after durable Run acceptance, and use the real SessionStore
+to prove immediate recovery retains one Run and one execution claim. Repeated
+cancellation and unsuccessful/replacement claim ownership are also covered.
+
+The selected scheduling, storage responsiveness, async entry, ingress and real
+Remote API regressions passed 43 checks, with no failures or skips. Existing
+Exchange protocol/authentication and native desktop implementations are
+otherwise unchanged. This follow-up performs no desktop control, hosted
+workflow, merge or deployment.
