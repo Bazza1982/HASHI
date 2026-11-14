@@ -1231,6 +1231,18 @@ class WorkbenchApiServer:
         except (ValueError,TypeError):
             return web.json_response({'ok':False,'error_code':'diagnostic_limit_invalid'},status=400)
 
+    async def _question_work(self, operation, **scope):
+        from orchestrator.frontend_database import run_database_work
+        return await run_database_work(
+            self._question_database, operation,
+            _db_role='backend_api', _db_instance=self.session_store.instance_id,
+            _db_operation='question.' + operation, **scope,
+        )
+
+    def _question_database(self, operation, **scope):
+        # Authenticated, parsed values only; HTTP objects stay on their loop.
+        return getattr(self._questions(), operation)(**scope)
+
     def _questions(self):
         if not hasattr(self,'_run_questions'):
             from orchestrator.run_questions import RunQuestions
@@ -1242,6 +1254,7 @@ class WorkbenchApiServer:
         return web.json_response({'ok':False,'error_code':exc.code},status=exc.status)
 
     async def handle_question_tool(self, request):
+        from orchestrator.frontend_database import DatabaseWorkBusy
         from orchestrator.run_questions import QuestionError,verify_tool_token
         try:
             claims=verify_tool_token(self.admin_token,request.headers.get('X-Hashi-Run-Question-Token',''),
@@ -1251,13 +1264,16 @@ class WorkbenchApiServer:
                 raise QuestionError('question_payload_invalid',400)
             operation=body.pop('operation',None)
             if operation=='create':
-                question=self._questions().create(request_id=claims['request_id'],agent_id=claims['agent_id'],payload=body)
+                question=await self._question_work('create', request_id=claims['request_id'],agent_id=claims['agent_id'],payload=body)
             elif operation=='get':
-                question=self._questions().get_answer(request_id=claims['request_id'],agent_id=claims['agent_id'],
+                question=await self._question_work('get_answer', request_id=claims['request_id'],agent_id=claims['agent_id'],
                     question_id=str(body.get('question_id') or ''))
             else:
                 raise QuestionError('question_operation_invalid',400)
             return web.json_response({'ok':True,'question':question},headers={'Cache-Control':'no-store'})
+        except DatabaseWorkBusy:
+            return web.json_response({'ok': False, 'error_code': 'question_storage_busy'},
+                                     status=503, headers={'Cache-Control': 'no-store'})
         except QuestionError as exc:
             return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:
@@ -1291,20 +1307,25 @@ class WorkbenchApiServer:
         return await read(self, request)
 
     async def handle_session_questions(self, request):
+        from orchestrator.frontend_database import DatabaseWorkBusy
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
         if owner is None:
             return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
         try:
-            result=self._questions().list(session_id=str(request.match_info['session_id']),owner_id=owner)
+            result=await self._question_work('list', session_id=str(request.match_info['session_id']),owner_id=owner)
             result=[self._question_for_display(question, owner) for question in result]
             return web.json_response({'ok':True,'questions':result},headers={'Cache-Control':'no-store'})
+        except DatabaseWorkBusy:
+            return web.json_response({'ok': False, 'error_code': 'question_storage_busy'},
+                                     status=503, headers={'Cache-Control': 'no-store'})
         except QuestionError as exc:
             return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:
             return self._v1_error(exc)
 
     async def handle_question_answer(self, request):
+        from orchestrator.frontend_database import DatabaseWorkBusy
         from orchestrator.run_questions import QuestionError
         owner=self._strict_authenticated_owner(request)
         if owner is None:
@@ -1313,7 +1334,7 @@ class WorkbenchApiServer:
             body=await request.json()
             if not isinstance(body,dict):
                 raise QuestionError('question_payload_invalid',400)
-            question=self._questions().answer(session_id=str(request.match_info['session_id']),owner_id=owner,
+            question=await self._question_work('answer', session_id=str(request.match_info['session_id']),owner_id=owner,
                 question_id=str(request.match_info['question_id']),payload=body)
             if (question.get('answer') or {}).get('system_action') == 'stop':
                 runtime = self._runtime_map().get(str(question['agent_id']).casefold())
@@ -1330,6 +1351,9 @@ class WorkbenchApiServer:
                     return web.json_response({'ok': False, 'error_code': 'question_stop_unconfirmed'}, status=503)
             question = self._question_for_display(question, owner, stop_complete=True)
             return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
+        except DatabaseWorkBusy:
+            return web.json_response({'ok': False, 'error_code': 'question_storage_busy'},
+                                     status=503, headers={'Cache-Control': 'no-store'})
         except QuestionError as exc:
             return self._question_error(exc)
         except (SessionNotFound,SessionConflict) as exc:

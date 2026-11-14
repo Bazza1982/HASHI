@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from typing import Any
 
+from orchestrator.frontend_database import DatabaseWorkBusy, is_sqlite_busy, run_database_work
 from orchestrator.frontend_connector_registry import endpoint_id_for
 from orchestrator.frontend_delivery import route_destination
 from orchestrator.runtime_delivery import dispatch_claimed_telegram_event
@@ -29,26 +31,31 @@ async def dispatch_incremental_telegram_event(
         or getattr(getattr(runtime, "app", None), "bot", None) is None
     ):
         return False
-    if delivery_route is None:
-        run = store.get_run_by_request(request_id, owner_id=owner_id)
-        delivery_route = run.get("delivery_route")
-    destination = route_destination(delivery_route, "telegram")
-    if destination is None:
-        return False
-    channel_key = str(destination["channel_key"])
-    endpoint_id = endpoint_id_for(
-        "telegram", ingress_transport="telegram", channel_key=channel_key
-    )
-    claims = store.claim_delivery_outbox(
-        session_id=session_id,
-        owner_id=owner_id,
-        worker_id=f"fc-telegram-deliverable-{event_id[:48]}",
-        event_id=event_id,
-        connector_id="telegram",
-        endpoint_id=endpoint_id,
-        limit=1,
-        lease_seconds=3600,
-    )
+    def claim():
+        route = delivery_route
+        if route is None:
+            run = store.get_run_by_request(request_id, owner_id=owner_id)
+            route = run.get("delivery_route")
+        destination = route_destination(route, "telegram")
+        if destination is None:
+            return [], None
+        channel_key = str(destination["channel_key"])
+        endpoint_id = endpoint_id_for(
+            "telegram", ingress_transport="telegram", channel_key=channel_key
+        )
+        claims = store.claim_delivery_outbox(
+            session_id=session_id,
+            owner_id=owner_id,
+            worker_id=f"fc-telegram-deliverable-{event_id[:48]}",
+            event_id=event_id,
+            connector_id="telegram",
+            endpoint_id=endpoint_id,
+            limit=1,
+            lease_seconds=3600,
+        )
+        return claims, channel_key
+    claims, channel_key = await run_database_work(claim, _db_role='worker', _db_instance=store.instance_id,
+                                                       _db_operation='telegram.claim')
     if not claims:
         return False
     try:
@@ -81,15 +88,20 @@ async def dispatch_pending_telegram_deliverables(
         or getattr(getattr(runtime, "app", None), "bot", None) is None
     ):
         return 0
-    store = ensure_store(runtime)
-    candidates = store.pending_incremental_telegram_deliveries(
-        agent_id=runtime.name, limit=limit
-    )
-    from orchestrator.run_questions import RunQuestions
+    def scan():
+        store = ensure_store(runtime)
+        from orchestrator.run_questions import RunQuestions
+        questions = RunQuestions(store)
+        questions.refresh_pending(agent_id=runtime.name, busy_timeout_ms=100)
+        candidates = questions.pending_telegram_deliveries(
+            agent_id=runtime.name, limit=limit, busy_timeout_ms=100)
+        candidates.extend(store.pending_incremental_telegram_deliveries(
+            agent_id=runtime.name, limit=limit))
+        return store, candidates
+    store, candidates = await run_database_work(scan, _db_role='worker',
+                                                 _db_instance=getattr(runtime.global_config, 'instance_id', 'unknown'),
+                                                 _db_operation='telegram.scan')
     from orchestrator.frontend_run_questions import refresh_telegram_question_renditions
-    questions = RunQuestions(store)
-    questions.refresh_pending(agent_id=runtime.name)
-    candidates = [*questions.pending_telegram_deliveries(agent_id=runtime.name, limit=limit), *candidates]
     dispatched = 0
     seen = set()
     for candidate in candidates:
@@ -112,16 +124,27 @@ async def dispatch_pending_telegram_deliverables(
 
 
 async def incremental_telegram_delivery_loop(runtime: Any) -> None:
+    busy_count = 0
     while not getattr(runtime, "is_shutting_down", False):
+        delay = 2.0
         try:
             await dispatch_pending_telegram_deliverables(runtime)
+            busy_count = 0
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            runtime.logger.exception(
-                "Incremental Telegram FC sweep failed: %s", exc
-            )
-        await asyncio.sleep(2.0)
+            if isinstance(exc, DatabaseWorkBusy) or is_sqlite_busy(exc):
+                busy_count = min(busy_count + 1, 4)
+                delay = random.uniform(2.0, min(30.0, 2.0 * (2 ** busy_count)))
+                runtime.logger.warning(
+                    "Incremental Telegram database busy: operation=sweep instance=%s "
+                    "role=worker retry_in=%.1fs",
+                    getattr(runtime.global_config, "instance_id", "unknown"), delay)
+            else:
+                runtime.logger.exception(
+                    "Incremental Telegram FC sweep failed: %s", exc)
+        # Retry discovery after bounded jitter, never a transport effect or answer.
+        await asyncio.sleep(delay)
 
 
 def start_incremental_telegram_delivery(runtime: Any) -> None:

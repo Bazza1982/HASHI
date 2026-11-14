@@ -1,5 +1,61 @@
 # Asynchronous questions within a Run
 
+## November 14: SQLite contention and event-loop isolation
+
+PAO question state remains in the existing Session database and schema. Backend
+API question list, tool create/get and answer execute lazy service construction
+and database calls in the FC database executor. Authentication, parsed request
+values, display projection, HTTP responses and the existing Stop command stay
+on their original event loop and in their original order.
+
+The process-local executor admits at most eight database calls and runs at most
+two. Admission exhaustion or a refused SQLite write reservation returns
+`question_storage_busy` (HTTP 503); it does not replay a question, answer or Stop.
+Cancellation retains admission until the submitted call settles. A disconnected
+caller has no success receipt and must reconcile its original idempotency key.
+
+Question reads use a deferred, consistent read snapshot. Empty scans and current
+pending/terminal rows take no writer reservation. If expiry, cancellation or
+confirmed delivery failure requires persistence, the read snapshot closes first;
+a short write transaction re-reads the complete owner/Session/Run/generation
+scope and current question before applying the change. SQLite BEGIN IMMEDIATE,
+not the process-local SessionStore mutex, is the cross-process mutation fence.
+Waiting for this writer must not hold that shared mutex and obstruct WAL reads.
+Creation, answering, consumption and Stop claims retain their existing atomicity.
+
+Question and Telegram-rendition schema setup is cached only after successful
+commit, per SessionStore lifetime. Initialization locks are separate from the
+SessionStore read mutex; a failed initialization remains retryable. Independent
+processes use their own connections and the existing idempotent schema DDL.
+No persisted schema version, database format or Core protocol changes.
+
+The Worker delivery sweep separates synchronous discovery/refresh/claim from
+async Telegram sends. Projection, replay eligibility, post-send receipt/reference
+persistence and rendition updates also leave the loop. Maintenance refresh write
+reservations use a 100 ms busy timeout. A SQLite BUSY/LOCKED or executor admission
+failure backs off discovery with bounded jitter (2–30 seconds), never a network
+effect, answer or uncertain outbox result. Frozen endpoints, leases and unknown
+outcome reconciliation remain authoritative.
+
+Slow database work records operation, instance, PID/role, opaque correlation,
+queue/lock wait and transaction duration as applicable. Fast paths are quiet;
+logs contain neither question/answer content nor credentials.
+
+Focused regression: `tests/test_run_question_contention.py` uses synthetic SQLite
+databases, an independent writer connection, actual aiohttp question routes and
+a serialized Worker JSON pipe. It checks first-use initialization, normal Session
+reads and health during contention; scan/claim/post-send persistence; bounded
+admission and cancellation; no-op reads, real expiry and concurrent scope changes.
+The pipe uses the real Worker request handler with isolated metadata, not a
+running production Worker or an external Telegram client. Existing Run-question,
+connector, Stop and unknown-delivery regressions remain mandatory.
+
+This repair is prepared in nonproduction for PR review. Offline regression does
+not establish runtime adoption or external-client acceptance. Adoption, sustained
+instance observation and any production lifecycle action remain separate. Roll
+back by adopting the complete prior validated Functions version; retain private
+configuration and databases rather than reverting or copying user data.
+
 ## November 2: accurate answer rejection
 
 Telegram callbacks and text replies distinguish invalid answers, already saved

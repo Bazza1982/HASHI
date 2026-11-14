@@ -1,6 +1,12 @@
 """FC rendering of PAO questions. Answer authority remains in RunQuestions."""
 from __future__ import annotations
 
+import threading
+
+from orchestrator.frontend_database import run_database_work
+
+_SCHEMA_LOCK = threading.RLock()
+
 
 def question_blocks(question):
     qid = question['question_id']
@@ -100,14 +106,20 @@ class QuestionRenditions:
         from orchestrator.run_questions import RunQuestions
         RunQuestions(store)
         self.store = store
-        with store._lock, store._connection() as connection:
-            connection.execute("""CREATE TABLE IF NOT EXISTS frontend_question_renditions (
-                question_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL, transport_message_id TEXT NOT NULL,
-                presentation_state TEXT NOT NULL,
-                PRIMARY KEY(question_id,endpoint_id,transport_message_id),
-                UNIQUE(endpoint_id,transport_message_id),
-                FOREIGN KEY(question_id) REFERENCES run_questions(question_id))""")
+        if getattr(store, '_question_renditions_schema_ready', False):
+            return
+        with _SCHEMA_LOCK:
+            if getattr(store, '_question_renditions_schema_ready', False):
+                return
+            with store._connection() as connection:
+                connection.execute("""CREATE TABLE IF NOT EXISTS frontend_question_renditions (
+                    question_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL, transport_message_id TEXT NOT NULL,
+                    presentation_state TEXT NOT NULL,
+                    PRIMARY KEY(question_id,endpoint_id,transport_message_id),
+                    UNIQUE(endpoint_id,transport_message_id),
+                    FOREIGN KEY(question_id) REFERENCES run_questions(question_id))""")
+            store._question_renditions_schema_ready = True
 
     def record(self, *, question_id, endpoint_id, chat_id, transport_message_id,
                owner_id, agent_id, request_id):
@@ -178,10 +190,13 @@ async def refresh_telegram_question_renditions(runtime, store):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.error import BadRequest, Forbidden
 
-    renditions = QuestionRenditions(store)
+    def pending():
+        renditions = QuestionRenditions(store)
+        return renditions, renditions.pending_updates(agent_id=runtime.name)
+    renditions, questions = await run_database_work(pending, _db_role='worker')
     locale = ui_language.preferred_locale(runtime)
     ui = question_text(locale)
-    for question in renditions.pending_updates(agent_id=runtime.name):
+    for question in questions:
         state = question["state"]
         stop_unconfirmed = (state == "answered" and
                             (question.get("answer") or {}).get("system_action") == "stop")
@@ -206,17 +221,18 @@ async def refresh_telegram_question_renditions(runtime, store):
                 chat_id=int(question["chat_id"]), message_id=int(question["transport_message_id"]),
                 text=text, parse_mode="HTML", reply_markup=markup)
         except Forbidden as exc:
-            renditions.mark_rendered(question, unavailable=True)
+            await run_database_work(renditions.mark_rendered, question, unavailable=True)
             runtime.logger.warning("Question card is no longer accessible (%s)", type(exc).__name__)
             continue
         except BadRequest as exc:
             detail = str(exc).lower()
             if "message is not modified" not in detail:
                 if "message to edit not found" in detail or "message can't be edited" in detail:
-                    renditions.mark_rendered(question, unavailable=True)
+                    await run_database_work(renditions.mark_rendered, question, unavailable=True)
                 runtime.logger.warning("Question card update failed (%s)", type(exc).__name__)
                 continue
         except Exception as exc:
             runtime.logger.warning("Question card update unconfirmed (%s)", type(exc).__name__)
             continue
-        renditions.mark_rendered(question)
+        await run_database_work(renditions.mark_rendered, question)
+# HASHI-Fingerprint: hfp_be43b1e442e34cca9dd04065780788f4

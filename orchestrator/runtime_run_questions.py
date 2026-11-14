@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from orchestrator import runtime_session, ui_language
+from orchestrator.frontend_database import run_database_work
 from orchestrator.frontend_run_questions import question_error_text, question_text
 from orchestrator.run_questions import QuestionError, RunQuestions
 from orchestrator.session_store import SessionConflict, SessionNotFound
@@ -14,8 +15,12 @@ def _service(runtime):
     return RunQuestions(runtime_session.ensure_store(runtime))
 
 
-def _question(runtime, update, qid):
-    return _service(runtime).telegram_question(question_id=qid,
+def _database(runtime, operation, **scope):
+    return getattr(_service(runtime), operation)(**scope)
+
+
+async def _question(runtime, update, qid):
+    return await run_database_work(_database, runtime, 'telegram_question', question_id=qid,
         owner_id=runtime_session.owner_id(runtime), agent_id=runtime.name,
         chat_id=str(update.effective_chat.id))
 
@@ -42,7 +47,7 @@ async def handle_callback(runtime, update, context):
         return
     qid, choice = match.groups()
     try:
-        q = _question(runtime, update, qid)
+        q = await _question(runtime, update, qid)
         if q['state'] != 'pending':
             stop_unconfirmed = (q['state'] == 'answered' and
                                 (q.get('answer') or {}).get('system_action') == 'stop')
@@ -63,7 +68,7 @@ async def handle_callback(runtime, update, context):
         index = int(choice)
         if index >= len(q['options']):
             raise QuestionError('question_answer_invalid')
-        saved = _service(runtime).answer(session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
+        saved = await run_database_work(_database, runtime, 'answer', session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
             question_id=qid, payload={'option_id': q['options'][index]['id'],
                                      'idempotency_key': f'telegram:callback:{query.id}'})
         if (saved.get('answer') or {}).get('system_action') == 'stop':
@@ -119,7 +124,9 @@ async def handle_text_reply(runtime, update):
     if not ids:
         # Some Telegram clients omit reply_markup on the quoted message.
         from orchestrator.frontend_run_questions import QuestionRenditions
-        qid = QuestionRenditions(runtime_session.ensure_store(runtime)).resolve(
+        def resolve(**scope):
+            return QuestionRenditions(runtime_session.ensure_store(runtime)).resolve(**scope)
+        qid = await run_database_work(resolve,
             agent_id=runtime.name, chat_id=update.effective_chat.id,
             transport_message_id=getattr(original, "message_id", ""))
         if qid:
@@ -131,8 +138,8 @@ async def handle_text_reply(runtime, update):
     ui = question_text(locale)
     try:
         qid = ids.pop()
-        q = _question(runtime, update, qid)
-        _service(runtime).answer(session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
+        q = await _question(runtime, update, qid)
+        await run_database_work(_database, runtime, 'answer', session_id=q['session_id'], owner_id=runtime_session.owner_id(runtime),
             question_id=qid, payload={'text': message.text,
                 'idempotency_key': f'telegram:reply:{update.effective_chat.id}:{message.message_id}'})
         text = ui['saved']
@@ -143,3 +150,4 @@ async def handle_text_reply(runtime, update):
         text = ui['failed']
     await runtime._reply_text(update, text)
     return True
+# HASHI-Fingerprint: hfp_cba45ce716ce4075940f37b8214daf33
