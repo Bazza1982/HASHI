@@ -7,3 +7,5 @@ Budgets estimate pronunciation units, audio duration, conservative initial RTF, 
 Validation includes lost delivery, duplicate/conflicting IDs, restart, cancellation with a late executor, deadline suppression, provider retry ownership, typed IPC results and long-text splitting. Actual model calibration and deployment evidence are reported separately.
 
 Calibration separates fixed cold/prefill reserves from per-unit cost. Very short generation/planning samples cannot inflate later long-input slopes; planning retains its existing 90-second cap and explicit plain-reading failure behavior. Regression: a cold one-character reading must not make a later normal segment impossible.
+
+Unsupported manual reading direction is a definite rejection before synthesis. Its stable public code is speech_manual_direction_unsupported; task status and durable restart recovery retain that code without exposing localized/provider exception text. It is never relabeled as an uncertain delivery or automatically retried.
