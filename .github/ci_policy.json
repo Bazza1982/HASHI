@@ -270,6 +270,7 @@
         "orchestrator/frontend_live_voice/delegation.py",
         "orchestrator/frontend_live_voice/delegation_policy.py",
         "orchestrator/frontend_live_voice/interpretation.py",
+        "orchestrator/frontend_media_setup.py",
         "orchestrator/frontend_live_voice/manager.py",
         "orchestrator/frontend_live_voice/openai_limits.py",
         "orchestrator/frontend_live_voice/openai_live.py",
@@ -955,6 +956,7 @@
         "orchestrator/frontend_live_voice/delegation.py",
         "orchestrator/frontend_live_voice/delegation_policy.py",
         "orchestrator/frontend_live_voice/interpretation.py",
+        "orchestrator/frontend_media_setup.py",
         "orchestrator/frontend_live_voice/manager.py",
         "orchestrator/frontend_live_voice/openai_limits.py",
         "orchestrator/frontend_live_voice/openai_live.py",
@@ -1427,7 +1429,9 @@
         "agent_seeds/**",
         "apps/**",
         "onboarding/**",
-        "hashi_assets/**"
+        "hashi_assets/**",
+        "tests/test_frontend_media_setup.py",
+        "tests/test_frontend_media_setup_http.py"
       ]
     },
     "telegram": {
@@ -1634,6 +1638,7 @@
         "orchestrator/frontend_live_voice/delegation.py",
         "orchestrator/frontend_live_voice/delegation_policy.py",
         "orchestrator/frontend_live_voice/interpretation.py",
+        "orchestrator/frontend_media_setup.py",
         "orchestrator/frontend_live_voice/manager.py",
         "orchestrator/frontend_live_voice/openai_limits.py",
         "orchestrator/frontend_live_voice/openai_live.py",
@@ -2265,6 +2270,7 @@
         "orchestrator/frontend_live_voice/delegation.py",
         "orchestrator/frontend_live_voice/delegation_policy.py",
         "orchestrator/frontend_live_voice/interpretation.py",
+        "orchestrator/frontend_media_setup.py",
         "orchestrator/frontend_live_voice/manager.py",
         "orchestrator/frontend_live_voice/openai_limits.py",
         "orchestrator/frontend_live_voice/openai_live.py",
@@ -2717,7 +2723,9 @@
         "tools/windows_use.py",
         "tools/workbench_client.py",
         "transports/chat_router.py",
-        "transports/whatsapp.py"
+        "transports/whatsapp.py",
+        "tests/test_frontend_media_setup.py",
+        "tests/test_frontend_media_setup_http.py"
       ]
     },
     "native": {

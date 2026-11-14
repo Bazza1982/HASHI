@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import os
 import tempfile
 from pathlib import Path
@@ -27,7 +28,7 @@ class CatalogCallTTS:
     ) -> None:
         self.manager = manager
         self.temp_root = Path(temp_root)
-        self.secrets = dict(secrets or {})
+        self.secrets = secrets if isinstance(secrets, Mapping) and not isinstance(secrets, dict) else dict(secrets or {})
 
     @staticmethod
     def _privacy_allows(service: dict, privacy_level: int) -> bool:
@@ -232,3 +233,4 @@ class CatalogCallTTS:
 
 
 __all__ = ["CatalogCallTTS"]
+# HASHI-Fingerprint: hfp_431b7dbd3bdc45bdaf12dbe89fba01b6

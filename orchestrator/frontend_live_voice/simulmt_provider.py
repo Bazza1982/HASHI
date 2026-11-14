@@ -37,8 +37,25 @@ class SimulMTProvider(OpenAILiveProvider):
     def credential(self, secrets):
         return ""  # The configured Compute client owns credential-reference resolution.
 
+    def connection_selection(self):
+        read_binding = getattr(getattr(self.directory, "config", None), "interpretation_connection", None)
+        if callable(read_binding):
+            try:
+                binding = read_binding()
+            except ComputeServiceError as exc:
+                if exc.code != "compute_not_configured":
+                    raise
+                binding = None
+            if binding is not None:
+                return binding
+        return self.node_id, self.service_id
+
     def is_available(self, secrets):
-        return bool(self.directory is not None and self.node_id and self.service_id)
+        try:
+            node_id, service_id = self.connection_selection()
+            return bool(self.directory is not None and node_id and service_id)
+        except ComputeServiceError:
+            return False
 
     def validate_selection(self, model, voice):
         if model not in MODELS or voice != "default":
@@ -74,11 +91,12 @@ class SimulMTProvider(OpenAILiveProvider):
         if not self.is_available({}):
             raise LiveVoiceError("live_translation_not_configured", 503)
         try:
+            node_id, service_id = self.connection_selection()
             refreshed = await self.directory.refresh()
-            if self.node_id in refreshed.errors:
-                raise ComputeServiceError(refreshed.errors[self.node_id])
+            if node_id in refreshed.errors:
+                raise ComputeServiceError(refreshed.errors[node_id])
             resolved = refreshed.catalogue.resolve(
-                ComputeReference(self.node_id, self.service_id, model),
+                ComputeReference(node_id, service_id, model),
                 ComputeRequirements(input_modalities=frozenset({"audio"}),
                     output_modalities=frozenset({"audio", "text"}),
                     protocols=frozenset({CREATE_PROTOCOL, ATTACH_PROTOCOL}),
@@ -131,3 +149,4 @@ class SimulMTProvider(OpenAILiveProvider):
 
     def opening(self, *args, **kwargs):
         raise LiveVoiceError("live_interpretation_opening_unsupported")
+# HASHI-Fingerprint: hfp_3a2e7926be614b09bd1357bcb670ccb6

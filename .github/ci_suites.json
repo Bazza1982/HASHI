@@ -122,7 +122,9 @@
       "tests/test_getfile_catalogue.py",
       "tests/test_getfile_audio_document.py",
       "tests/test_getfile_recovery.py",
-      "tests/test_getfile_telegram.py"
+      "tests/test_getfile_telegram.py",
+      "tests/test_frontend_media_setup.py",
+      "tests/test_frontend_media_setup_http.py"
     ]
   },
   "telegram": {
@@ -188,7 +190,9 @@
       "tests/test_run_question_connectors.py",
       "tests/test_run_questions_review.py",
       "tests/test_run_questions_repair.py",
-      "tests/test_permission_questions.py"
+      "tests/test_permission_questions.py",
+      "tests/test_frontend_media_setup.py",
+      "tests/test_frontend_media_setup_http.py"
     ]
   },
   "permissions": {

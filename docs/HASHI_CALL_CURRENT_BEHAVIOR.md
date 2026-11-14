@@ -15,9 +15,12 @@ numeric response-length requirements are retired.
 
 ## Entry, availability, and binding
 
-- **CALL-ENTRY-01** — Desktop Workbench retains its header Phone and video Call
+- **CALL-ENTRY-01** — The frontend retains exactly three reachable media
+  entrances: `/phone`, `/translate` and `/call`. They open status and API settings;
+  an active entrance returns to its own call. The standalone unverified control
+  is removed. Desktop Workbench retains its header Phone and video Call
   controls. Compact mobile headers keep the Agent identity centred and place
-  separate Voice call and Video call actions in the composer More menu; an
+  separate Phone, Translate and Call actions in the composer More menu; an
   active call exposes Return to call. Icons, focus treatment, and usable touch
   targets remain. Voice starts or returns only `/phone`; video starts or returns
   only `/call`. Neither entry can fall back to or retarget the other transport.
@@ -25,11 +28,14 @@ numeric response-length requirements are retired.
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
 - **CALL-ENTRY-03** — Current `call_ready` is authoritative. A retired stored
-  route cannot block direct Call. An unresolved route remains hidden until
-  discovery confirms readiness. Unknown, unavailable, or failed Call never
+  route cannot block direct Call. An unresolved route blocks actual dialing;
+  its status/configuration entrance remains visible and clickable. Unknown, unavailable, or failed Call never
   invokes Phone, and Phone startup never reads or selects the Call route.
 - **CALL-ENTRY-04** — Busy state prevents a second call. Existing calls remain
-  returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
+  returnable and endable. Unconfigured, busy or explicitly disabled Call remains
+  reachable for status/configuration. A prior API test is never a start gate.
+  Configuration and probe ownership are defined in
+  [media service setup](HASHI_MEDIA_SERVICE_SETUP.md).
 - **CALL-ENTRY-05** — Phone and Call are basic Functions. Phone is available
   when its selected live provider/model and credential are configured. Call is
   available when its selected STT target is usable and at least one
@@ -40,8 +46,10 @@ numeric response-length requirements are retired.
 
 ## Immediate media startup and degradation
 
-- **CALL-MEDIA-01** — Either fixed launch control immediately displays
-  Connecting and begins its own media acquisition in that same user action.
+- **CALL-MEDIA-01** — Explicit Start in the fixed entrance's setup surface
+  immediately displays Connecting and begins media acquisition in that same
+  user action. Opening status, configuring an API or testing connectivity does
+  not capture media.
   Phone acquires its WebRTC microphone; video Call acquires microphone and
   camera. Camera is part of video Call startup, not Phone. Context acquisition
   and the device permission request proceed during ringback. A video Call waits

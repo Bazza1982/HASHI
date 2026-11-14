@@ -23,6 +23,7 @@ import aiohttp
 
 from orchestrator.config_json import (
     ConfigDocument,
+    ConfigConflictError,
     new_config_json,
     read_config_json,
     write_config_json,
@@ -1548,6 +1549,56 @@ class ComputeServicesConfig:
         return write_config_json(self.path, doc)
 
 
+    def interpretation_connection(self):
+        """Read the canonical optional interpretation reference, retaining legacy selection."""
+        doc, _nodes = self.read()
+        bindings = doc.get("bindings", {})
+        if not isinstance(bindings, dict):
+            raise ComputeServiceError("compute_configuration_invalid")
+        value = bindings.get("translate")
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"node_id", "service_id"}:
+            raise ComputeServiceError("compute_reference_invalid")
+        return (_identifier(value["node_id"]), _identifier(value["service_id"]))
+
+    def save_interpretation_connection(self, binding, *, expected_revision):
+        """One revision-checked write for a node and its interpretation reference."""
+        required = {"node_id", "service_id", "base_url", "location", "authenticated"}
+        if not isinstance(binding, dict) or not required <= set(binding) or set(binding) - required - {"manifest_path"}:
+            raise ComputeServiceError("compute_reference_invalid")
+        node_id, service_id = _identifier(binding["node_id"]), _identifier(binding["service_id"])
+        if binding["location"] not in {"local", "lan"} or type(binding["authenticated"]) is not bool:
+            raise ComputeServiceError("compute_node_invalid")
+        try:
+            doc = read_config_json(self.path)
+        except FileNotFoundError:
+            doc = new_config_json(self.path, {"version": COMPUTE_CONFIG_VERSION, "nodes": []})
+        if doc.revision != expected_revision:
+            raise ConfigConflictError("Compute configuration changed")
+        self._nodes(doc)
+        rows = doc["nodes"]
+        existing = next((row for row in rows if row["id"] == node_id), None)
+        node = dict(existing or {"id": node_id, "label": node_id})
+        node.update(base_url=binding["base_url"], location=binding["location"], enabled=True)
+        if "manifest_path" in binding:
+            node["manifest_path"] = binding["manifest_path"] or DEFAULT_COMPUTE_MANIFEST_PATH
+        if binding["authenticated"]:
+            node["credential_ref"] = node.get("credential_ref") or f"secrets://compute_translate_{node_id}"
+        else:
+            node.pop("credential_ref", None)
+        validate_compute_node(node)
+        if existing is None:
+            rows.append(node)
+        else:
+            rows[rows.index(existing)] = node
+        bindings = doc.setdefault("bindings", {})
+        if not isinstance(bindings, dict):
+            raise ComputeServiceError("compute_configuration_invalid")
+        bindings["translate"] = {"node_id": node_id, "service_id": service_id}
+        return self.write(doc)
+
+
 class ComputeServiceClient:
     """Bounded, no-redirect client for one configured compute node."""
 
@@ -1918,3 +1969,4 @@ __all__ = [
     "parse_compute_manifest",
     "validate_compute_node",
 ]
+# HASHI-Fingerprint: hfp_6680698ee5904419b46288d70b600026

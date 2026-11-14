@@ -10,6 +10,7 @@ PAO owns admission, Run binding and speech coordination; PCM owns conversational
 `/voice` controls speech policy; `/call` controls Call interaction; `/phone` binds a live foreground Agent conversation; `/translate` binds independent simultaneous interpretation. HY-SimulMT interpretation sends no Agent Persona, conversation history or task delegation to the speech model. Its model locks translation direction. Conversation handoff applies to providers that support conversation/delegation. Presence presentation, speech generation, subtitles and physical playback are separate facts. Its desktop target comes from the existing primary Conversation, route revision and context generation, not a displayed historical Session or Worker boot Session.
 
 ## Authoritative documents
+- [Media service status, private API setup and optional connectivity tests](../HASHI_MEDIA_SERVICE_SETUP.md).
 - [Independent Translate entry, preferences and chat boundary](../HASHI_TRANSLATE.md).
 - [Phone simultaneous interpretation and Compute transport](../HASHI_PHONE_INTERPRETATION.md).
 - [Conversational Phone context handoff](../HASHI_PHONE_CONTEXT_HANDOFF.md).

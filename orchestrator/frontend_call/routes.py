@@ -51,19 +51,19 @@ def register_call_api(api):
             bridge_home / "state" / "call_tts",
             media_root,
             ffmpeg_cmd="ffmpeg",
-            secrets=getattr(api, "secrets", None),
+            secrets=getattr(api, "voice_secrets", getattr(api, "secrets", None)),
             catalog_path=catalog_path,
             project_root=project_root,
         )
         tts_synthesizer = CatalogCallTTS(
             tts_manager,
             temp_root=media_root / "call_tts",
-            secrets=getattr(api, "secrets", None),
+            secrets=getattr(api, "voice_secrets", getattr(api, "secrets", None)),
         )
     service = CallService(
         config,
         HashiPorts(api),
-        MediaAdapters(secret_resolver=getattr(api, "connector_secret_resolver", None)),
+        MediaAdapters(secret_resolver=getattr(api, "voice_secret_resolver", getattr(api, "connector_secret_resolver", None))),
         tts_synthesizer=tts_synthesizer,
         video_synthesizer=CallVideoTTS(
             bridge_home / "compute_services.json",
