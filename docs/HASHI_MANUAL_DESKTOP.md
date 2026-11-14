@@ -119,8 +119,14 @@ Only pending mouse moves may be coalesced by clients. Smooth and Ultra Smooth fl
 them at most every 33 ms, versus 100 ms in Standard and Save data. Input validation checks finite
 normalized coordinates, display revision, a recently checked frame, sequence and
 lease. Releases remain possible with expired frames. Displays are revalidated at
-input time. Unicode text uses SendInput, never clipboard sync. No command/shell/file
-transfer/audio interfaces are provided. No raw frame or input content is logged.
+input time. Unicode text normally uses SendInput, never clipboard sync. On the
+ordinary desktop, a focused, writable Unicode RichEditD2DPT control instead
+receives one undoable EM_REPLACESEL operation: modern Notepad can corrupt accepted
+Unicode keyboard packets. The target must still belong to the foreground
+thread/process and retain focus immediately before dispatch. Other controls and
+the secure desktop retain their existing keyboard paths. A 500 ms native message
+timeout is an uncertain edit: it is never replayed or followed by SendInput.
+No command/shell/file transfer/audio interfaces are provided. No raw frame or input content is logged.
 
 The ordinary Windows Worker cannot control the login/lock/UAC secure desktop or
 higher-integrity processes. An explicit local platform opt-in now selects an
