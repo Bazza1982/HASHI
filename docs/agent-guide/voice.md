@@ -14,6 +14,7 @@ PAO owns admission, Run binding and speech coordination; PCM owns conversational
 - [Phone simultaneous interpretation and Compute transport](../HASHI_PHONE_INTERPRETATION.md).
 - [Conversational Phone context handoff](../HASHI_PHONE_CONTEXT_HANDOFF.md).
 - [Speech performance and reading](../HASHI_SPEECH_PERFORMANCE.md).
+- [Bounded speech tasks and durable failure recovery](../SPEECH_TASKS.md).
 - [Call interaction](../HASHI_CALL_INTERACTION_2026-10-04.md) and [native audio](../HASHI_NATIVE_AUDIO_CHAT_DESIGN.md).
 - [TTS catalogue](../HASHI_VOICE_TTS_CATALOG.md).
 - [Presence desktop context and authenticated captions](../HASHI_AGENTPRESENCE_DESKTOP_CONTEXT.md).
@@ -23,6 +24,8 @@ PAO owns admission, Run binding and speech coordination; PCM owns conversational
 
 ## Source and verification
 For interpretation, start with `orchestrator/translate_manager.py`, `orchestrator/translate_settings.py`, `orchestrator/frontend_live_voice/simulmt_provider.py`, `orchestrator/phone_catalog.py`, `tests/test_translate_entry.py` and `tests/test_phone_interpretation.py`. For conversational Phone use `orchestrator/phone_context_handoff.py` and `tests/test_phone_context_handoff.py`. Service selection uses `orchestrator/compute_services.py` and `tests/test_compute_services.py`. Speech policy starts at `orchestrator/voice_manager.py`. For Presence desktop targets and captions, start with `orchestrator/frontend_agent_presence.py` and `orchestrator/agent_presence_captions.py`; use `tests/test_agentpresence_desktop_context.py`, `tests/test_agent_presence_captions.py` and `tests/test_agent_presence_caption_completion.py`. Verify cancellation, provenance, privacy routing and uncertain outcomes.
+
+For durable speech failures use `orchestrator/speech_tasks.py`, `tests/test_speech_tasks.py` and `tests/test_manual_speech_failure.py`; unsupported manual direction remains a definite typed rejection after restart and duplicate starts do not synthesize or retry it.
 
 ## Adoption
 Source compatibility, configured provider readiness, generated audio, playback and physical-client acceptance are separate. HY-SimulMT is experimentally qualified in an isolated canary; it is not a claim of live adoption. The [earlier translation-discovery snapshot](../HASHI_PHONE_TRANSLATION_BOUNDARY.md) is historical and cannot override the current contract.

@@ -28,9 +28,9 @@ async def prepare(manager, text, build_provider, *, state=None):
     context = {"enabled": True, "provider": selected, "plan": None, "reason": "unsupported"}
     manual=state.get("manual_direction") or {}
     if manual.get("enabled"):
-        from orchestrator.manual_speech_direction import plan
+        from orchestrator.manual_speech_direction import ManualSpeechDirectionUnsupported, plan
         if service.get("adapter") != "openai_compatible" or (service.get("automatic_performance") is False or service.get("location") not in {"local","lan"}):
-            raise ValueError(ui_language.tr("voice.manual.unsupported"))
+            raise ManualSpeechDirectionUnsupported(ui_language.tr("voice.manual.unsupported"))
         context.update(plan=plan(manual, service["model"]), reason=None, source="manual")
         return context
     if (service.get("automatic_performance") is False
