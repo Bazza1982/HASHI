@@ -63,7 +63,13 @@ def register_call_api(api):
     service = CallService(
         config,
         HashiPorts(api),
-        MediaAdapters(secret_resolver=getattr(api, "voice_secret_resolver", getattr(api, "connector_secret_resolver", None))),
+        MediaAdapters(
+            secret_resolver=getattr(
+                api,
+                "voice_secret_resolver",
+                getattr(api, "connector_secret_resolver", None),
+            )
+        ),
         tts_synthesizer=tts_synthesizer,
         video_synthesizer=CallVideoTTS(
             bridge_home / "compute_services.json",

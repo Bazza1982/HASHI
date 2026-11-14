@@ -28,7 +28,11 @@ class CatalogCallTTS:
     ) -> None:
         self.manager = manager
         self.temp_root = Path(temp_root)
-        self.secrets = secrets if isinstance(secrets, Mapping) and not isinstance(secrets, dict) else dict(secrets or {})
+        self.secrets = (
+            secrets
+            if isinstance(secrets, Mapping) and not isinstance(secrets, dict)
+            else dict(secrets or {})
+        )
 
     @staticmethod
     def _privacy_allows(service: dict, privacy_level: int) -> bool:
