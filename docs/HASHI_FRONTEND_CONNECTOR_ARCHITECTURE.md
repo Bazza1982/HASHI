@@ -16,6 +16,18 @@ configured external destination or physical device has passed live acceptance;
 the authoritative rollout evidence and remaining gates are tracked in
 [the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
+### Bounded database work for Run questions (2026-11-14)
+
+Backend API question persistence and Worker incremental Telegram discovery,
+claim, projection, receipt/reference persistence and rendition refresh use the
+Functions-owned bounded database executor. HTTP/Telegram objects and async sends
+stay on their event loop; SQLite connections remain inside their synchronous
+database call. Admission/cancellation never relinquishes a live write or replays
+an uncertain transport effect. PAO keeps owner/Run/generation and idempotency
+authority. See [Run questions](HASHI_RUN_QUESTIONS.md#november-14-sqlite-contention-and-event-loop-isolation)
+for the read-before-write refresh, contention and diagnostic contract. Runtime
+adoption and live frontend acceptance remain separate from offline tests.
+
 ### Quoted Workbench commands (2026-11-12)
 
 The existing command-UI transport accepts a bounded `reply_reference` only

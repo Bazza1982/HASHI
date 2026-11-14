@@ -4,6 +4,9 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+import os
+import threading
 import re
 import time
 from datetime import datetime, timezone
@@ -11,7 +14,12 @@ from uuid import uuid4
 from contextlib import contextmanager
 
 from orchestrator.session_store import SessionNotFound
+from orchestrator.frontend_database import DatabaseWorkBusy, is_sqlite_busy
 
+logger = logging.getLogger(__name__)
+_SCHEMA_LOCK = threading.RLock()
+
+QUESTION_BUSY_TIMEOUT_MS = 200
 QUESTION_TTL_SECONDS = 300
 QUESTION_CONTINUE_ID = '__hashi_continue__'
 QUESTION_STOP_ID = '__hashi_stop__'
@@ -119,22 +127,60 @@ def verify_tool_token(secret, token, *, instance_id, now=None):
     except (ValueError, TypeError, KeyError, AttributeError):
         raise QuestionError('question_tool_not_authenticated', 401) from None
 
+
+@contextmanager
+def question_schema_lock(lock):
+    """Schema setup cannot leave an interactive caller waiting on a Python lock."""
+    if not lock.acquire(timeout=QUESTION_BUSY_TIMEOUT_MS / 1000):
+        raise DatabaseWorkBusy("question schema initialization busy")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+@contextmanager
+def question_connection(store, *, write=False, busy_timeout_ms=None):
+    """Question-only connection policy; SessionStore defaults stay untouched."""
+    timeout = QUESTION_BUSY_TIMEOUT_MS if busy_timeout_ms is None else int(busy_timeout_ms)
+    with store._connection() as connection:
+        connection.execute("PRAGMA busy_timeout=" + str(timeout))
+        if write:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except Exception as error:
+                if is_sqlite_busy(error):
+                    # This reservation has not executed or committed a write.
+                    raise DatabaseWorkBusy("question write reservation busy") from error
+                raise
+        # Do not translate errors from yield/commit: an already committed effect
+        # with a missing receipt is unconfirmed and must use its original key.
+        yield connection
+
+
 class RunQuestions:
     def __init__(self, store, *, clock=None):
         self.store, self.clock = store, time.time if clock is None else clock
-        with store._lock, store._connection() as c:
-            c.execute('''CREATE TABLE IF NOT EXISTS run_questions (
-                question_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL,
-                owner_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT NOT NULL,
-                run_id TEXT NOT NULL, request_id TEXT NOT NULL, context_generation INTEGER NOT NULL,
-                create_key TEXT NOT NULL, create_digest TEXT NOT NULL, question_json TEXT NOT NULL,
-                state TEXT NOT NULL, answer_json TEXT, answer_key TEXT,
-                created_at TEXT NOT NULL, expires_epoch REAL NOT NULL, updated_at TEXT NOT NULL,
-                UNIQUE(run_id,create_key), FOREIGN KEY(run_id) REFERENCES runs(run_id))''')
-            c.execute('CREATE INDEX IF NOT EXISTS run_questions_session ON run_questions(session_id,context_generation,created_at)')
-            c.execute('''CREATE TABLE IF NOT EXISTS run_question_preferences (
-                instance_id TEXT NOT NULL, scope_key TEXT NOT NULL, enabled INTEGER NOT NULL,
-                PRIMARY KEY(instance_id,scope_key), CHECK(enabled IN (0,1)))''')
+        if getattr(store, '_run_questions_schema_ready', False):
+            return
+        with question_schema_lock(_SCHEMA_LOCK):
+            if getattr(store, '_run_questions_schema_ready', False):
+                return
+            with question_connection(store, write=True) as c:
+                c.execute('''CREATE TABLE IF NOT EXISTS run_questions (
+                    question_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL, request_id TEXT NOT NULL, context_generation INTEGER NOT NULL,
+                    create_key TEXT NOT NULL, create_digest TEXT NOT NULL, question_json TEXT NOT NULL,
+                    state TEXT NOT NULL, answer_json TEXT, answer_key TEXT,
+                    created_at TEXT NOT NULL, expires_epoch REAL NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(run_id,create_key), FOREIGN KEY(run_id) REFERENCES runs(run_id))''')
+                c.execute('CREATE INDEX IF NOT EXISTS run_questions_session ON run_questions(session_id,context_generation,created_at)')
+                c.execute('''CREATE TABLE IF NOT EXISTS run_question_preferences (
+                    instance_id TEXT NOT NULL, scope_key TEXT NOT NULL, enabled INTEGER NOT NULL,
+                    PRIMARY KEY(instance_id,scope_key), CHECK(enabled IN (0,1)))''')
+            # Publish only after a successful commit; failed/old-store setup retries.
+            store._run_questions_schema_ready = True
 
     def _policy(self, c, agent_id):
         agent = str(agent_id or '').strip().lower()
@@ -152,7 +198,7 @@ class RunQuestions:
                 'enabled': instance_enabled and agent_enabled}
 
     def question_policy(self, agent_id):
-        with self._transaction() as c:
+        with self._read() as c:
             return self._policy(c, agent_id)
 
     def set_question_policy(self, *, scope, agent_id, enabled):
@@ -160,7 +206,7 @@ class RunQuestions:
         if scope not in {'instance', 'agent'} or not agent or type(enabled) is not bool:
             raise QuestionError('question_policy_invalid', 400)
         key = 'instance' if scope == 'instance' else 'agent:' + agent
-        with self._transaction() as c:
+        with self._transaction(operation='set_question_policy', correlation=agent_id) as c:
             c.execute(
                 'INSERT INTO run_question_preferences(instance_id,scope_key,enabled) VALUES(?,?,?) '
                 'ON CONFLICT(instance_id,scope_key) DO UPDATE SET enabled=excluded.enabled',
@@ -183,25 +229,61 @@ class RunQuestions:
             return self._policy(c, agent)
 
     @contextmanager
-    def _transaction(self):
-        # A Python RLock does not fence the Agent Worker's independent SQLite
-        # connection. Reserve the write transaction before *any* scope read so
-        # cancellation, context changes and concurrent answers are linearized.
-        with self.store._lock, self.store._connection() as c:
-            c.execute('BEGIN IMMEDIATE')
-            try:
+    def _read(self):
+        # A deferred snapshot never reserves a writer. Close it before upgrading.
+        try:
+            with question_connection(self.store) as c:
+                c.execute('BEGIN')
                 yield c
-            except QuestionError:
-                # A refused answer may still have legitimately refreshed an
-                # expired/cancelled question. Persist that fact, not the answer.
-                c.commit()
-                raise
+        except Exception as error:
+            if is_sqlite_busy(error):
+                raise DatabaseWorkBusy('question read busy') from error
+            raise
+
+    @contextmanager
+    def _transaction(self, *, operation='write', busy_timeout_ms=None, correlation=''):
+        # SQLite is the cross-process fence. Never hold SessionStore's Python
+        # mutex while waiting for its writer: independent WAL readers must run.
+        # Every mutation reserves the writer BEFORE re-reading scope.
+        started = time.monotonic()
+        acquired = None
+        try:
+            with question_connection(self.store, write=True, busy_timeout_ms=busy_timeout_ms) as c:
+                acquired = time.monotonic()
+                try:
+                    yield c
+                except QuestionError:
+                    # Refusals can legitimately persist expiry/cancellation.
+                    c.commit()
+                    raise
+        finally:
+            finished = time.monotonic()
+            if finished - started >= 0.1:
+                logger.info(
+                    'run_questions.database operation=%s instance=%s pid=%s role=%s '
+                    'correlation=%s lock_wait_ms=%.1f transaction_ms=%.1f acquired=%s',
+                    operation, self.store.instance_id, os.getpid(),
+                    threading.current_thread().name,
+                    hashlib.sha256(str(correlation).encode()).hexdigest()[:16],
+                    ((acquired or finished) - started) * 1000,
+                    (finished - acquired) * 1000 if acquired else 0, acquired is not None)
+
+    def _read_refreshed(self, read, *, operation, busy_timeout_ms=None, correlation=''):
+        with self._read() as c:
+            rows = read(c)
+            if not any(self._refresh_change(c, row)[0] for row in rows):
+                return rows
+        # The read snapshot is gone. Another process may answer/cancel/reset
+        # meanwhile, so repeat the ENTIRE scoped query under the writer.
+        with self._transaction(operation=operation, busy_timeout_ms=busy_timeout_ms, correlation=correlation) as c:
+            return [{**dict(row), **dict(self._refresh(c, row))} for row in read(c)]
 
     def _session(self, c, session_id, *, owner_id=None):
         clauses=['session_id=?', 'instance_id=?', "status!='deleted'"]
         args=[session_id,self.store.instance_id]
         if owner_id is not None:
-            clauses.append('owner_id=?'); args.append(owner_id)
+            clauses.append('owner_id=?')
+            args.append(owner_id)
         row=c.execute('SELECT * FROM sessions WHERE '+' AND '.join(clauses),args).fetchone()
         if row is None:
             raise SessionNotFound(str(session_id))
@@ -237,7 +319,7 @@ class RunQuestions:
 
     def cancel(self, *, request_id, agent_id, question_id):
         """Withdraw a native request resolved/interrupted by its owning Engine."""
-        with self._transaction() as c:
+        with self._transaction(operation='cancel', correlation=question_id) as c:
             run = self._run(c, request_id, agent_id)
             row = c.execute('SELECT * FROM run_questions WHERE question_id=? AND run_id=?',
                             (question_id, run['run_id'])).fetchone()
@@ -253,7 +335,7 @@ class RunQuestions:
     def telegram_question(self, *, question_id, owner_id, agent_id, chat_id):
         """Bind an authenticated Telegram reply to the original frozen Run route."""
         from orchestrator.frontend_delivery import route_destination
-        with self._transaction() as c:
+        with self._transaction(operation='telegram_question', correlation=question_id) as c:
             row = c.execute('SELECT * FROM run_questions WHERE question_id=? AND owner_id=? AND agent_id=? AND instance_id=?',
                             (question_id, owner_id, str(agent_id).lower(), self.store.instance_id)).fetchone()
             if row is None:
@@ -265,20 +347,21 @@ class RunQuestions:
                 raise QuestionError('question_not_found', 404)
             return self._public(row)
 
-    def refresh_pending(self, *, agent_id, limit=100):
-        """Refresh deadlines even when a delivered card is no longer polled."""
-        with self._transaction() as c:
-            rows = c.execute(
+    def refresh_pending(self, *, agent_id, limit=100, busy_timeout_ms=None):
+        """Refresh real changes; an idle sweep takes no SQLite writer lock."""
+        def read(c):
+            return c.execute(
                 "SELECT * FROM run_questions WHERE instance_id=? AND agent_id=? "
                 "AND state IN ('pending','answered') ORDER BY created_at LIMIT ?",
                 (self.store.instance_id, str(agent_id).lower(), max(1, min(500, limit))),
             ).fetchall()
-            return [self._public(self._refresh(c, row)) for row in rows]
+        return [self._public(row) for row in self._read_refreshed(
+            read, operation='refresh_pending', busy_timeout_ms=busy_timeout_ms, correlation=agent_id)]
 
-    def pending_telegram_deliveries(self, *, agent_id, limit=20):
-        """Derived view of existing FC tasks; question creation/outbox is atomic."""
-        with self._transaction() as c:
-            rows = c.execute('''SELECT q.*, e.event_id FROM run_questions q
+    def pending_telegram_deliveries(self, *, agent_id, limit=20, busy_timeout_ms=None):
+        """Derived outbox view; unknown outcomes never become retry candidates."""
+        def read(c):
+            return c.execute('''SELECT q.*, e.event_id FROM run_questions q
                 JOIN run_events e ON e.run_id=q.run_id AND e.kind='run.question.created'
                     AND json_extract(e.detail_json,'$.question_id')=q.question_id
                 JOIN connector_delivery_tasks d ON d.event_id=e.event_id
@@ -287,12 +370,10 @@ class RunQuestions:
                         OR (d.state='claimed' AND d.lease_expires_at<=?))
                 ORDER BY q.created_at LIMIT ?''', (self.store.instance_id, str(agent_id).lower(),
                     datetime.now(timezone.utc).isoformat(), max(1, min(100, limit)))).fetchall()
-            result = []
-            for row in rows:
-                refreshed = self._refresh(c, row)
-                if refreshed['state'] == 'pending':
-                    result.append({**self._public(refreshed), 'owner_id': row['owner_id'], 'event_id': row['event_id']})
-            return result
+        return [{**self._public(row), 'owner_id': row['owner_id'], 'event_id': row['event_id']}
+                for row in self._read_refreshed(
+                    read, operation='pending_telegram_deliveries', busy_timeout_ms=busy_timeout_ms, correlation=agent_id)
+                if row['state'] == 'pending']
 
     def _delivery_failure(self, c, row):
         rows = c.execute(
@@ -310,7 +391,9 @@ class RunQuestions:
             return "delivery_failed"
         return None
 
-    def _refresh(self, c, row):
+    def _refresh_change(self, c, row):
+        if row['state'] not in ('pending', 'answered'):
+            return None, None
         run = c.execute('''SELECT r.state,s.context_generation AS current_generation,s.status AS session_status
             FROM runs r JOIN sessions s ON s.session_id=r.session_id WHERE r.run_id=?''',
             (row['run_id'],)).fetchone()
@@ -323,7 +406,11 @@ class RunQuestions:
             delivery_failure = self._delivery_failure(c, row)
             if delivery_failure:
                 new_state = "cancelled"
-        if new_state and row['state'] in ('pending','answered'):
+        return new_state, delivery_failure
+
+    def _refresh(self, c, row):
+        new_state, delivery_failure = self._refresh_change(c, row)
+        if new_state:
             data = json.loads(row["question_json"])
             if delivery_failure:
                 data["resolution_reason"] = delivery_failure
@@ -365,7 +452,7 @@ class RunQuestions:
         ttl=min(ttl,QUESTION_TTL_SECONDS)
         data={'question':question,'options':cleaned,'allow_free_text':free,'purpose':purpose}
         digest=hashlib.sha256(_json({**data,'expires_seconds':ttl}).encode()).hexdigest()
-        with self._transaction() as c:
+        with self._transaction(operation='create', correlation=request_id) as c:
             run=self._run(c,request_id,agent_id)
             session=self._session(c,run['session_id'])
             if not self._policy(c, agent_id)['enabled']:
@@ -383,7 +470,8 @@ class RunQuestions:
                 self._refresh(c,old)
             if c.execute("SELECT COUNT(*) FROM run_questions WHERE run_id=? AND state IN ('pending','answered')",(run['run_id'],)).fetchone()[0]>=8:
                 raise QuestionError('question_limit_reached',429)
-            now=self.clock(); qid='que_'+uuid4().hex
+            now=self.clock()
+            qid='que_'+uuid4().hex
             c.execute('''INSERT INTO run_questions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                       (qid,self.store.instance_id,session['owner_id'],run['agent_id'],run['session_id'],run['run_id'],
                        request_id,generation,key,digest,_json(data),'pending',None,None,
@@ -404,19 +492,20 @@ class RunQuestions:
         return row
 
     def list(self,*,session_id,owner_id):
-        with self._transaction() as c:
+        def read(c):
             session=self._session(c,session_id,owner_id=owner_id)
-            rows=c.execute('''SELECT * FROM run_questions WHERE session_id=? AND owner_id=? AND instance_id=?
+            return c.execute('''SELECT * FROM run_questions WHERE session_id=? AND owner_id=? AND instance_id=?
                 AND context_generation=? ORDER BY created_at DESC LIMIT 50''',
                 (session_id,owner_id,self.store.instance_id,session['context_generation'])).fetchall()
-            return [self._public(self._refresh(c,r)) for r in reversed(rows)]
+        return [self._public(row) for row in reversed(self._read_refreshed(read, operation='list', correlation=session_id))]
 
     def answer(self,*,session_id,owner_id,question_id,payload):
         key=self._text(payload.get('idempotency_key'),160,'question_idempotency_required')
-        with self._transaction() as c:
+        with self._transaction(operation='answer', correlation=question_id) as c:
             row=self._scoped(c,question_id,session_id=session_id,owner_id=owner_id)
             spec=json.loads(row['question_json'])
-            option=payload.get('option_id'); text=payload.get('text','')
+            option=payload.get('option_id')
+            text=payload.get('text','')
             system_actions = {item['id']: item['system_action'] for item in system_question_options(spec['options'])}
             if option is not None and (not isinstance(option,str) or option not in {o['id'] for o in spec['options']} | set(system_actions)):
                 raise QuestionError('question_answer_invalid',400)
@@ -462,7 +551,7 @@ class RunQuestions:
             return self._public(row)
 
     def stop_claim(self, *, question_id, agent_id):
-        with self._transaction() as c:
+        with self._transaction(operation='stop_claim', correlation=question_id) as c:
             row = c.execute(
                 'SELECT * FROM run_questions WHERE question_id=? AND instance_id=? AND agent_id=?',
                 (question_id, self.store.instance_id, str(agent_id).strip().lower()),
@@ -476,7 +565,7 @@ class RunQuestions:
             return self._public(row)
 
     def get_answer(self,*,request_id,agent_id,question_id):
-        with self._transaction() as c:
+        with self._transaction(operation='get_answer', correlation=question_id) as c:
             run=self._run(c,request_id,agent_id)
             session=self._session(c,run['session_id'])
             row=self._scoped(c,question_id,session_id=run['session_id'],owner_id=session['owner_id'])
@@ -492,3 +581,4 @@ class RunQuestions:
                 row=c.execute('SELECT * FROM run_questions WHERE question_id=?',(question_id,)).fetchone()
                 self._event(c,row,'consumed')
             return self._public(row)
+# HASHI-Fingerprint: hfp_bba118626d64487ebaa358e3b27f228e

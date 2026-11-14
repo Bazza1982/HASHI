@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from orchestrator.frontend_database import run_database_work
+
 import asyncio
 import hashlib
 import html as html_lib
@@ -423,7 +425,7 @@ async def _send_standard_event_media_to_telegram(
         attachment_id = str(media_ref.get("attachment_id") or "").strip()
         if not attachment_id:
             raise ValueError("canonical media reference has no attachment identity")
-        attachment = store.visible_message_attachment(
+        attachment = await run_database_work(store.visible_message_attachment,
             str(claim["session_id"]),
             owner_id=str(owner_id),
             message_id=message_id,
@@ -840,7 +842,7 @@ async def _send_long_message_transport(
         channel_key=str(chat_id),
     )
 
-    def record_frontend_receipt(status: str) -> None:
+    async def record_frontend_receipt(status: str) -> None:
         if outbox_outcome is not None and outbox_outcome.get("status") == "retry":
             return  # No external effect was attempted/accepted.
         if not frontend_event_id or not frontend_session_id or not frontend_owner_id:
@@ -870,7 +872,7 @@ async def _send_long_message_transport(
 
         from orchestrator.runtime_session import record_frontend_delivery_receipt
 
-        record_frontend_delivery_receipt(
+        await run_database_work(record_frontend_delivery_receipt,
             runtime,
             session_id=str(frontend_session_id),
             owner_id=str(frontend_owner_id),
@@ -884,7 +886,7 @@ async def _send_long_message_transport(
             },
         )
 
-    def record_delivery(stage: str, **fields: Any) -> None:
+    async def record_delivery(stage: str, **fields: Any) -> None:
         if outbox_outcome is not None:
             accepted_count = len(accepted_message_ids)
             outbox_outcome["accepted_message_ids"] = list(accepted_message_ids)
@@ -919,7 +921,7 @@ async def _send_long_message_transport(
                 }
                 and isinstance(value, (str, int, float, bool, type(None)))
             }
-            canonical.record(
+            await run_database_work(canonical.record,
                 "delivery_event",
                 {
                     "stage": stage,
@@ -944,7 +946,7 @@ async def _send_long_message_transport(
             )
             raise
 
-    record_delivery("requested")
+    await record_delivery("requested")
     await runtime_delivery_order.wait_for_turn(runtime, request_id)
     if not runtime.telegram_connected:
         runtime.logger.info(
@@ -953,7 +955,7 @@ async def _send_long_message_transport(
         )
         if outbox_outcome is not None:
             outbox_outcome["status"] = "retry"
-        record_delivery("deferred", disposition="telegram_disconnected", chunks=0)
+        await record_delivery("deferred", disposition="telegram_disconnected", chunks=0)
         return 0.0, 0
 
     send_started = monotonic()
@@ -971,8 +973,8 @@ async def _send_long_message_transport(
             f"Telegram delivery blocked for {request_id or '<none>'} "
             f"(purpose={purpose}, mode={delivery_mode})"
         )
-        record_delivery("blocked", disposition="delivery_failover", chunks=0)
-        record_frontend_receipt("skipped")
+        await record_delivery("blocked", disposition="delivery_failover", chunks=0)
+        await record_frontend_receipt("skipped")
         return 0.0, 0
 
     async def _send_or_skip(**kwargs) -> bool:
@@ -990,7 +992,7 @@ async def _send_long_message_transport(
             runtime, owner_id=effective_owner, chat_id=chat_id,
             explicit_recipient=explicit_telegram_purpose(purpose),
         ):
-            record_delivery("blocked", disposition="telegram_access_revoked")
+            await record_delivery("blocked", disposition="telegram_access_revoked")
             if outbox_outcome is not None:
                 outbox_outcome["status"] = "unknown" if accepted_message_ids else "suppressed"
             return False
@@ -1013,13 +1015,15 @@ async def _send_long_message_transport(
                         try:
                             if frontend_question_id:
                                 from orchestrator.frontend_run_questions import QuestionRenditions
-                                QuestionRenditions(store).record(
+                                def record_question(**scope):
+                                    return QuestionRenditions(store).record(**scope)
+                                await run_database_work(record_question,
                                     question_id=frontend_question_id, endpoint_id=audit_endpoint_id,
                                     chat_id=chat_id, transport_message_id=stable_message_id,
                                     owner_id=str(frontend_owner_id), agent_id=runtime.name,
                                     request_id=str(request_id))
                             else:
-                                recorder(
+                                await run_database_work(recorder,
                                     session_id=str(frontend_session_id),
                                     owner_id=str(frontend_owner_id),
                                     connector_id="telegram",
@@ -1055,7 +1059,7 @@ async def _send_long_message_transport(
                 reconnect = getattr(runtime, "_telegram_reconnect", None)
                 if callable(reconnect):
                     reconnect()
-                record_delivery("deferred", disposition="telegram_connect_unavailable")
+                await record_delivery("deferred", disposition="telegram_connect_unavailable")
                 return False
             retry_after = _retry_after_seconds(exc)
             if retry_after is not None:
@@ -1071,19 +1075,19 @@ async def _send_long_message_transport(
                     f"Telegram flood control for request_id={request_id or '<none>'} "
                     f"(purpose={purpose}); skipping send, retry_after_s={retry_after}"
                 )
-                record_delivery(
+                await record_delivery(
                     "blocked",
                     disposition="telegram_retry_after",
                     retry_after_seconds=retry_after,
                 )
                 return False
-            record_delivery(
+            await record_delivery(
                 "failed",
                 disposition="telegram_exception",
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            record_frontend_receipt(
+            await record_frontend_receipt(
                 "failed" if isinstance(exc, BadRequest) else "unknown"
             )
             raise
@@ -1129,14 +1133,14 @@ async def _send_long_message_transport(
             ),
         )
         if not sent:
-            record_frontend_receipt("unknown" if accepted_message_ids else "failed")
+            await record_frontend_receipt("unknown" if accepted_message_ids else "failed")
             return max(0.0, monotonic() - send_started), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose=error, chunks=1, text_len={len(msg)})"
         )
-        record_delivery("completed", disposition="sent", chunks=1)
-        record_frontend_receipt("delivered")
+        await record_delivery("completed", disposition="sent", chunks=1)
+        await record_frontend_receipt("delivered")
         return max(0.0, monotonic() - send_started), 1
 
     input_is_html = str(parse_mode or "").strip().casefold() == "html"
@@ -1223,7 +1227,7 @@ async def _send_long_message_transport(
             chunk_count,
             final_chunk=True,
         ):
-            record_frontend_receipt(
+            await record_frontend_receipt(
                 "unknown" if accepted_message_ids else "failed"
             )
             return max(0.0, monotonic() - send_started), 0
@@ -1231,8 +1235,8 @@ async def _send_long_message_transport(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
         )
-        record_delivery("completed", disposition="sent", chunks=chunk_count)
-        record_frontend_receipt("delivered")
+        await record_delivery("completed", disposition="sent", chunks=chunk_count)
+        await record_frontend_receipt("delivered")
         return max(0.0, monotonic() - send_started), chunk_count
 
     raw_chunks, html_chunks = [], []
@@ -1259,7 +1263,7 @@ async def _send_long_message_transport(
         if not await _send_chunk(
             rc, hc, chunk_count, final_chunk=chunk_count == total_chunks
         ):
-            record_frontend_receipt(
+            await record_frontend_receipt(
                 "unknown" if accepted_message_ids else "failed"
             )
             return max(0.0, monotonic() - send_started), chunk_count - 1
@@ -1267,8 +1271,8 @@ async def _send_long_message_transport(
         f"Sent Telegram message for request_id={request_id or '<none>'} "
         f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
     )
-    record_delivery("completed", disposition="sent", chunks=chunk_count)
-    record_frontend_receipt("delivered")
+    await record_delivery("completed", disposition="sent", chunks=chunk_count)
+    await record_frontend_receipt("delivered")
     return max(0.0, monotonic() - send_started), chunk_count
 
 
@@ -1294,7 +1298,7 @@ async def dispatch_claimed_telegram_event(
         runtime, owner_id=frontend_owner_id, chat_id=chat_id,
         explicit_recipient=explicit_telegram_purpose(purpose),
     ):
-        store.complete_delivery_outbox(
+        await run_database_work(store.complete_delivery_outbox,
             outbox_id=str(claim["outbox_id"]),
             lease_token=str(claim["lease_token"]),
             status="suppressed",
@@ -1305,7 +1309,7 @@ async def dispatch_claimed_telegram_event(
     from orchestrator.frontend_connector_registry import require_connector_event
     from orchestrator.frontend_dispatch import project_claimed_frontend_event
 
-    standard_event = project_claimed_frontend_event(
+    standard_event = await run_database_work(project_claimed_frontend_event,
         store,
         claim,
         session_id=str(claim["session_id"]),
@@ -1320,13 +1324,13 @@ async def dispatch_claimed_telegram_event(
     )
     # Lifetime belongs to the original output, including its very first claim.
     # Recovery hints affect presentation/eligibility, never whether expiry runs.
-    decision = telegram_replay_decision(
+    decision = await run_database_work(telegram_replay_decision,
         store, claim, standard_event, owner_id=frontend_owner_id,
         agent_id=runtime.name, chat_id=chat_id, recovery=recovery,
         connected_at=getattr(runtime, "_telegram_delivery_connected_at", None),
     )
     if decision.state != "send":
-        finish_without_telegram(store, claim, owner_id=frontend_owner_id, decision=decision)
+        await run_database_work(finish_without_telegram, store, claim, owner_id=frontend_owner_id, decision=decision)
         return 0.0, 0
     replay_label = ""
     if decision.is_replay:
@@ -1345,7 +1349,7 @@ async def dispatch_claimed_telegram_event(
     try:
         if not media_refs:
             if not canonical_text:
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
                     status="suppressed",
@@ -1373,7 +1377,7 @@ async def dispatch_claimed_telegram_event(
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")
             )
-            store.complete_delivery_outbox(
+            await run_database_work(store.complete_delivery_outbox,
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
@@ -1412,13 +1416,13 @@ async def dispatch_claimed_telegram_event(
                     else "suppressed" if raw_status == "suppressed" else "failed"
                 )
                 if status == "retry":
-                    store.complete_delivery_outbox(
+                    await run_database_work(store.complete_delivery_outbox,
                         outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
                         status="retry", retry_safe=True, error_code="telegram_disconnected",
                     )
                     claim_terminal = True
                     return 0.0, 0
-                _record_standard_telegram_receipt(
+                await run_database_work(_record_standard_telegram_receipt,
                     store,
                     session_id=str(claim["session_id"]),
                     owner_id=str(frontend_owner_id),
@@ -1427,7 +1431,7 @@ async def dispatch_claimed_telegram_event(
                     status="skipped" if status == "suppressed" else status,
                     message_ids=message_ids,
                 )
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
                     status=status,
@@ -1451,14 +1455,14 @@ async def dispatch_claimed_telegram_event(
                 )
                 error_code = "telegram_delivery_blocked"
             if blocked and not runtime.telegram_connected:
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
                     status="retry", retry_safe=True, error_code="telegram_disconnected",
                 )
                 claim_terminal = True
                 return 0.0, 0
             if blocked:
-                _record_standard_telegram_receipt(
+                await run_database_work(_record_standard_telegram_receipt,
                     store,
                     session_id=str(claim["session_id"]),
                     owner_id=str(frontend_owner_id),
@@ -1467,7 +1471,7 @@ async def dispatch_claimed_telegram_event(
                     status="failed",
                     message_ids=[],
                 )
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
                     status="failed",
@@ -1497,7 +1501,7 @@ async def dispatch_claimed_telegram_event(
             from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
             if (not accepted_effects and not message_ids
                     and telegram_request_not_submitted(media_error)):
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]), lease_token=str(claim["lease_token"]),
                     status="retry", retry_safe=True, error_code="telegram_connect_unavailable",
                 )
@@ -1515,7 +1519,7 @@ async def dispatch_claimed_telegram_event(
                     else "unknown"
                 )
             )
-            _record_standard_telegram_receipt(
+            await run_database_work(_record_standard_telegram_receipt,
                 store,
                 session_id=str(claim["session_id"]),
                 owner_id=str(frontend_owner_id),
@@ -1525,7 +1529,7 @@ async def dispatch_claimed_telegram_event(
                 message_ids=message_ids,
                 attachment_receipts=list(outcome.get("attachment_receipts") or ()),
             )
-            store.complete_delivery_outbox(
+            await run_database_work(store.complete_delivery_outbox,
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
@@ -1544,7 +1548,7 @@ async def dispatch_claimed_telegram_event(
             if message_ids and len(message_ids) == accepted_effects
             else "accepted"
         )
-        _record_standard_telegram_receipt(
+        await run_database_work(_record_standard_telegram_receipt,
             store,
             session_id=str(claim["session_id"]),
             owner_id=str(frontend_owner_id),
@@ -1554,7 +1558,7 @@ async def dispatch_claimed_telegram_event(
             message_ids=message_ids,
             attachment_receipts=list(outcome.get("attachment_receipts") or ()),
         )
-        store.complete_delivery_outbox(
+        await run_database_work(store.complete_delivery_outbox,
             outbox_id=str(claim["outbox_id"]),
             lease_token=str(claim["lease_token"]),
             status="completed",
@@ -1565,7 +1569,7 @@ async def dispatch_claimed_telegram_event(
         if not claim_terminal:
             if media_refs:
                 try:
-                    _record_standard_telegram_receipt(
+                    await run_database_work(_record_standard_telegram_receipt,
                         store,
                         session_id=str(claim["session_id"]),
                         owner_id=str(frontend_owner_id),
@@ -1582,7 +1586,7 @@ async def dispatch_claimed_telegram_event(
                         type(receipt_error).__name__,
                     )
             try:
-                store.complete_delivery_outbox(
+                await run_database_work(store.complete_delivery_outbox,
                     outbox_id=str(claim["outbox_id"]),
                     lease_token=str(claim["lease_token"]),
                     status="unknown",
