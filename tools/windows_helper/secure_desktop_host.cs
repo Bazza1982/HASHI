@@ -165,6 +165,9 @@ namespace HashiDesktop {
     sealed class Desktop {
       readonly HashSet<int> keys=new HashSet<int>();
       readonly HashSet<int> buttons=new HashSet<int>();
+      readonly Func<string,bool> richEditText;
+      public Desktop() : this(N.TryReplaceRichEditText) {}
+      internal Desktop(Func<string,bool> writer) { richEditText=writer; }
       DateTime lastInput=DateTime.UtcNow;
       public bool NeedsReset() { return (keys.Count>0 || buttons.Count>0) && (DateTime.UtcNow-lastInput).TotalSeconds>=3; }
       public object Run(string op,Dictionary<string,object> a) {
@@ -227,6 +230,11 @@ namespace HashiDesktop {
           else if(keys.Contains(vk)) { Key(vk,0,flags|2); keys.Remove(vk); }
         } else if(kind=="text") {
           string text=S(a,"text"); if(text.Length>4096) throw new InvalidOperationException();
+          // Modern Notepad's TSF path can turn a Unicode SendInput burst into
+          // repeated final characters even though every packet was accepted.
+          // Use its focused native RichEdit selection operation once; never
+          // replay a timed-out edit or touch the clipboard.
+          if(text.Length==0 || richEditText(text)) return new { injected=true };
           foreach(char c in text.Replace("\r\n","\n").Replace("\r","\n")) {
             if(c=='\n' || c=='\t') { int vk=c=='\n' ? 13 : 9; Key(vk,0,0); Key(vk,0,2); }
             else { TextCharacter(c); }
@@ -316,6 +324,43 @@ namespace HashiDesktop {
       internal static string SessionSid(int session) {
         IntPtr token; if(!WTSQueryUserToken(session,out token)) throw new Win32Exception();
         try { using(var id=new WindowsIdentity(token)) return id.User.Value; } finally { CloseHandle(token); }
+      }
+      [StructLayout(LayoutKind.Sequential)] internal struct GUI {
+        public int size; public uint flags;
+        public IntPtr active,focus,capture,menu,move,caret;
+        public int left,top,right,bottom;
+      }
+      [DllImport("user32.dll",SetLastError=true)] static extern bool GetGUIThreadInfo(uint thread,ref GUI info);
+      [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern int GetClassName(IntPtr window,StringBuilder name,int size);
+      [DllImport("user32.dll",EntryPoint="GetWindowLongW")] static extern int GetWindowStyle(IntPtr window,int index);
+      [DllImport("user32.dll")] static extern bool IsWindowUnicode(IntPtr window);
+      [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true,EntryPoint="SendMessageTimeoutW")]
+      static extern IntPtr SendTextMessage(IntPtr window,uint message,IntPtr param,string text,uint flags,uint timeout,out IntPtr result);
+      internal static bool TryReplaceRichEditText(string text) {
+        if(text.IndexOf('\0')>=0 || Secure()) return false;
+        IntPtr foreground=GetForegroundWindow(); uint process;
+        uint thread=GetWindowThreadProcessId(foreground,out process);
+        var info=new GUI { size=Marshal.SizeOf(typeof(GUI)) };
+        if(thread==0 || !GetGUIThreadInfo(thread,ref info) || info.focus==IntPtr.Zero) return false;
+        uint targetProcess;
+        if(GetWindowThreadProcessId(info.focus,out targetProcess)!=thread || targetProcess!=process) return false;
+        var name=new StringBuilder(256);
+        if(GetClassName(info.focus,name,name.Capacity)==0 ||
+           !String.Equals(name.ToString(),"RichEditD2DPT",StringComparison.OrdinalIgnoreCase) ||
+           !IsWindowUnicode(info.focus) || (GetWindowStyle(info.focus,-16)&0x800)!=0) return false;
+        var current=new GUI { size=Marshal.SizeOf(typeof(GUI)) };
+        if(GetForegroundWindow()!=foreground || !GetGUIThreadInfo(thread,ref current) || current.focus!=info.focus)
+          throw new InvalidOperationException("desktop text target changed");
+        ReplaceRichEditText(info.focus,text);
+        return true;
+      }
+      internal static void ReplaceRichEditText(IntPtr target,string text) {
+        // EM_REPLACESEL is marshalled by USER32 across the process boundary,
+        // preserves the selection/undo contract and does not read user text.
+        string normalized=text.Replace("\r\n","\n").Replace("\r","\n").Replace("\n","\r");
+        IntPtr result;
+        if(SendTextMessage(target,0xc2,new IntPtr(1),normalized,0x23,500,out result)==IntPtr.Zero)
+          throw new Win32Exception();
       }
       internal static void Send(INPUT i) { if(SendInput(1,new[]{i},Marshal.SizeOf(typeof(INPUT)))!=1) throw new Win32Exception(); }
       internal static bool Secure() {
