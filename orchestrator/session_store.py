@@ -42,6 +42,7 @@ from orchestrator.session_titles import (
     automatic_session_title,
     is_system_session_title,
 )
+from orchestrator.session_attachment_limits import AttachmentSizeExceeded, SESSION_ATTACHMENT_LIMITS
 from orchestrator.storage_profile import removable_storage_profile
 from orchestrator import pcm_forget_preview, pcm_forget_session
 
@@ -61,9 +62,9 @@ SESSION_KIND_AGENT_ACTIVITY = "agent_activity"
 SESSION_KINDS = frozenset(
     {SESSION_KIND_CONVERSATION, SESSION_KIND_AGENT_ACTIVITY}
 )
-MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
-MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
-MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_SESSION_ATTACHMENTS_PER_MESSAGE = SESSION_ATTACHMENT_LIMITS.count
+MAX_SESSION_ATTACHMENT_BYTES = SESSION_ATTACHMENT_LIMITS.attachment_bytes
+MAX_SESSION_ATTACHMENT_TOTAL_BYTES = SESSION_ATTACHMENT_LIMITS.total_bytes
 HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE = HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
 HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
 HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
@@ -137,6 +138,16 @@ def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
             HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
         )
     raise ValueError("unknown attachment policy")
+
+
+def frontend_attachment_limits(request_source: object) -> tuple[str, tuple[int, int, int]]:
+    """Resolve the frozen Run's output policy for both tool declaration and preflight."""
+    policy = (
+        "hchat"
+        if str(request_source or "").strip().casefold() == "bridge:hchat-draft"
+        else "standard"
+    )
+    return policy, _attachment_policy_limits(policy)
 
 
 def _utc_now() -> str:
@@ -4387,6 +4398,9 @@ class SessionStore:
                     if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
                         raise SessionConflict(
                             "message exceeds the configured total attachment size limit"
+                        ) from AttachmentSizeExceeded(
+                            total_attachment_bytes, MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+                            scope="total",
                         )
                     fingerprint = {
                         "attachment_id": attachment_id,
@@ -6050,7 +6064,7 @@ class SessionStore:
             attachment_policy
         )
         if declared_size > max_attachment_bytes:
-            raise ValueError("attachment exceeds the configured size limit")
+            raise AttachmentSizeExceeded(declared_size, max_attachment_bytes)
         is_audio = normalized_media_type.startswith("audio/")
         normalized_role = str(semantic_role or "").strip().casefold()
         if is_audio:

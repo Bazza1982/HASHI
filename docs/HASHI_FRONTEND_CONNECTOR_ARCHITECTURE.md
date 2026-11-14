@@ -16,6 +16,23 @@ configured external destination or physical device has passed live acceptance;
 the authoritative rollout evidence and remaining gates are tracked in
 [the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
+### Quoted Workbench commands (2026-11-12)
+
+The existing command-UI transport accepts a bounded `reply_reference` only
+for an open operation. It is untrusted quoted content, not an actor, route or
+Session selector. The Worker validates its shape independently; authentication,
+current selected Session/generation and original invocation identity remain
+mandatory. The reference remains part of the operation fingerprint so an
+identical retry replays only its saved result and a changed quote cannot reuse
+the same request identity. No new endpoint or Core RPC is introduced.
+
+Command recognition uses the new reply body, never quoted source text. The PAO
+`/delay` owner serializes the existing `HASHI_QUOTE_V1` envelope around the
+scheduled message after validating minutes/message through its normal parser.
+It preserves the original schedule, frozen route and idempotency policy. Other
+control commands keep their existing meaning. Older Functions reject this
+optional field; the paired Workbench change does not fall back to a model Run.
+
 ## 1. Definition
 
 A registered ingress transport retains its identity when PAO selects an Agent
@@ -33,6 +50,15 @@ Telegram downloads and completed `/long` batches also pass through the
 Functions-owned `telegram_media_admission` adapter before Run admission. It
 commits validated bytes to PAO's Session attachment store, derives canonical
 media parts and persists their attachment IDs in the original user Message.
+Receiving a user file never requires a recognised extension, MIME signature,
+parser or model capability: ZIP, text, unknown formats and empty files remain
+receivable within the byte budgets. Unrecognised or mismatched native-media
+signatures are retained as opaque files instead of claiming verified native
+media. Supported native-media routing keeps its existing signature checks.
+Receipt size/hash and exact-path authority remain mandatory; reception does not
+extract archives or execute their contents.
+The visible-attachment download route also accepts zero-byte files; a zero size
+does not mean an absent attachment or a size-limit violation.
 The Session, owner and context generation stay frozen through queue admission.
 Download receipts or paths alone are not Run attachment authority; backend
 current-Run, content-integrity and exact-file fences remain unchanged. Native
@@ -49,7 +75,14 @@ their stricter validation. Connector/live adoption is a separate gate.
 Pre-admission media failures preserve their observed download, validation,
 attachment-store or admission stage. Functions maps typed errors to safe,
 localized causes and correlates a generated diagnostic reference with the
-existing error logger. Exception text, HTTP bodies, credentials and captions
+existing error logger. Size failures include trusted actual/max byte counts
+(and identify the Telegram download ceiling separately from the instance
+budget); an unavailable actual size is stated as unavailable. The connector
+checks advertised size before downloading and actual size afterward. Telegram
+cloud limits come from the Telegram library; local Bot API mode retains the
+instance budget without imposing the cloud ceiling. Wrapped storage errors
+preserve disk-full/access-denied causes rather than masquerading as Session
+conflicts. Exception text, HTTP bodies, credentials and captions
 are excluded from the public detail. Telegram's shared photo/document/video
 handler and WhatsApp download/storage use this presentation contract.
 Only failures before the admission call may say no model action was started.
@@ -731,7 +764,52 @@ accepts only files inside the Agent's authorized Workzones, applies the same
 advertised count and byte limits as frontend intake, verifies content hashes,
 and uses the tool-call identity for replay-safe idempotency. A reused identity
 with different bytes is rejected. Multiple tool calls may contribute ordered
-attachments to one reply, but the total limits still apply to the Message.
+attachments, but the count and aggregate-byte budgets apply to the whole Run,
+including incremental deliverables and the final reply. Splitting tool calls
+does not reset those budgets.
+
+The standard policy has one owner, `orchestrator.session_attachment_limits`.
+It defaults to 16 attachments, 64 MiB per file and 64 MiB aggregate. The
+tool schemas, preflight, Session storage and capability snapshot derive from
+that owner. An instance can select its limits in the ignored
+`<bridge_home>/state/session_attachment_limits.json` document:
+
+```json
+{
+  "version": 1,
+  "max_attachments_per_message": 64,
+  "max_attachment_bytes": 67108864,
+  "max_total_attachment_bytes_per_message": 67108864
+}
+```
+
+The document accepts count 1–1024 and each byte budget 1–1073741824. Missing
+fields keep their process/default values. File fields take precedence over
+inherited `HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE`,
+`HASHI_SESSION_MAX_ATTACHMENT_BYTES` and
+`HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES`, respectively. Invalid values,
+unknown document fields and unsupported versions reject the candidate rather
+than silently ignoring an operator's choice. Use the revision-aware
+`orchestrator.config_json` reader/writer for managed updates.
+
+A replacement shared Frontend Function and its Agent Workers read the selected
+document at startup. Adopt changes through the qualified shared Functions
+lifecycle; do not reload modules or cold-restart Core to change a limit.
+Verify the effective `/api/v1/capabilities` limits after adoption. Existing
+processes keep their selected snapshot. Raising only the count does not raise
+the memory budget; standard output still buffers file bytes, so increase byte
+budgets only with a matching resource allowance.
+
+HChat keeps its separate versioned 10-file/1-GiB streaming contract. Connector
+transport limits, such as Telegram media groups, remain connector-owned;
+they do not determine the standard Session attachment count.
+
+Both attachment tools project their per-Run schemas from the same frozen
+request-source policy used by preflight and Session storage. Standard catalog
+schemas use the configured Session count; HChat draft Runs advertise exactly
+the HChat count and byte budgets, never the larger of the two policies.
+Projection changes only copied definitions, preserves Session isolation, and
+does not select a policy from a client-controlled display surface.
 
 The public `frontend_connector` capability snapshot includes the
 connector-neutral registry and versioned FC contract families. The standard

@@ -2485,6 +2485,14 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         updated = ensure_store(runtime).start_fresh_generation(
             session["session_id"], reason="user_fresh",
         )
+        # Only this command's confirmed commit advances its output binding.
+        # Other in-flight updates retain their old-generation publication fence.
+        project_binding = getattr(update, "_hashi_bind_session_projection", None)
+        if callable(project_binding):
+            project_binding(
+                session_id=str(updated["session_id"]),
+                context_generation=int(updated["context_generation"]),
+            )
         phase = "activate"
         _discard_session_transients(runtime)
         _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)

@@ -3,8 +3,10 @@ Tool JSON Schema definitions in model-provider function-calling format.
 HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
+from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
 from tools.documentation_schema import DOCUMENTATION_READ_SCHEMA
 
+_ATTACHMENT_SCHEMA_MAX_ITEMS = SESSION_ATTACHMENT_LIMITS.count
 TOOL_SCHEMAS = [
     {'function': {'description': 'Ask a clarification or preference question in this active Run. '
                              'Returns immediately with question_id. Continue independent work, '
@@ -670,7 +672,7 @@ TOOL_SCHEMAS = [
                     "attachments": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 16,
+                        "maxItems": _ATTACHMENT_SCHEMA_MAX_ITEMS,
                         "description": "Ordered files to attach to the current assistant reply.",
                         "items": {
                             "type": "object",
@@ -731,7 +733,7 @@ TOOL_SCHEMAS = [
                     "attachments": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 16,
+                        "maxItems": _ATTACHMENT_SCHEMA_MAX_ITEMS,
                         "description": "Ordered, completed local files in this result.",
                         "items": {
                             "type": "object",
@@ -2639,6 +2641,10 @@ for _schema in TOOL_SCHEMAS:
         _properties["handoff_id"] = {"type": "string", "description": "Exact local live-tab handoff ID; required for embedded browser actions."}
         _properties.setdefault("tab_id", {"type": "string", "description": "Exact browser tab identity supplied by a live handoff. Never substitute another active tab."})
 
+
+# Office schemas have one owner; permission/runtime filtering stays in ToolRegistry.
+from tools.office.contract import office_tool_definitions
+TOOL_SCHEMAS.extend(office_tool_definitions())
 
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 

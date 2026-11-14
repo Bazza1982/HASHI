@@ -40,6 +40,7 @@ _FIELDS = frozenset(
         "input_text",
         "session_id",
         "context_generation",
+        "reply_reference",
     }
 )
 
@@ -123,6 +124,9 @@ async def try_dispatch_command_interaction_transport(
             "session_channel_key": "default",
             "connection_binding": payload.pop("connection_binding"),
         }
+        if "reply_reference" in payload:
+            # Quote data cannot select or authorize the invocation's Session.
+            metadata["reply_reference"] = payload["reply_reference"]
         if payload["op"] != "catalogue":
             try:
                 selected = payload.pop("session_id", None)
@@ -168,3 +172,4 @@ async def try_dispatch_command_interaction_transport(
         return dict(result)
     except InteractionError as exc:
         return exc.result()
+# HASHI-Fingerprint: hfp_7c18f7bc94134cae861b9dd7f97536f2

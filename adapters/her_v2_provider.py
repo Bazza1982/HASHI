@@ -1039,6 +1039,11 @@ class _EvidenceRecordingToolRegistry:
         self._serial = 0
         self.max_loops = None
 
+    def get_tool_definitions(self, tiers=None):
+        from tools.office.discovery import stage_tiers
+        return self._base.get_tool_definitions(tiers=stage_tiers(
+            tiers, self._request.goal, self._request.attachment_manifest))
+
     @property
     def receipts(self) -> tuple[ToolEvidenceReceipt, ...]:
         return tuple(self._receipts)
@@ -1218,6 +1223,11 @@ class _EvidenceRecordingToolRegistry:
             self._record_recovery_receipt(receipt)
             raise
 
+        if tool_name in {"office_inspect","office_read"}:
+            office_result = (getattr(result,"details",None) or {}).get("office_result",{})
+            actual_id = str(office_result.get("data",{}).get("attachment_id") or "")
+            admitted_ids = {str(item.get("attachment_id") or "") for item in self._request.attachment_manifest}
+            matched_attachment_ids = (actual_id,) if office_result.get("status")=="ok" and actual_id and actual_id in admitted_ids else ()
         receipt = self._receipt(
             tool_name=tool_name,
             tool_call_id=effective_call_id,

@@ -23,12 +23,14 @@ from uuid import uuid4
 from orchestrator.background_job_policy import background_job_start_authorized
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 from tools.smart_tools import SmartToolRuntime
+from tools.office.contract import OFFICE_TOOL_NAMES, OFFICE_READ_ONLY_TOOLS
 
 # Tool tiers — send only what's needed per turn to save context window.
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
     "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
+    "office_basic": list(OFFICE_TOOL_NAMES),
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
@@ -93,6 +95,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "desktop_screenshot",
         "file_list",
         "file_read",
+        *OFFICE_READ_ONLY_TOOLS,
         "file_search",
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
@@ -392,6 +395,8 @@ class ToolRegistry:
         """Return explicit safety capability for delegated/shadow execution."""
 
         name = str(tool_name or "").strip()
+        if name in OFFICE_TOOL_NAMES:
+            return name in OFFICE_READ_ONLY_TOOLS
         configured = self.tool_options.get(name, {})
         if isinstance(configured, dict) and "read_only" in configured:
             return configured.get("read_only") is True
@@ -522,6 +527,24 @@ class ToolRegistry:
             for name in ALL_TOOL_NAMES
             if name in available
         ]
+        # Declare the same frozen-route limits used by attachment preflight/storage.
+        # Definitions are deep copies; one HChat request must not change another Session.
+        from orchestrator.session_store import frontend_attachment_limits
+
+        policy, limits = frontend_attachment_limits(
+            self._effective_audit_context().get("request_source")
+        )
+        count, file_bytes, total_bytes = limits
+        for definition in definitions:
+            function = definition["function"]
+            if function["name"] in {"frontend_send_attachments", "frontend_publish_deliverable"}:
+                attachments = function["parameters"]["properties"]["attachments"]
+                attachments["maxItems"] = count
+                attachments["description"] = (
+                    f"Ordered local files for the frozen {policy} route. "
+                    f"Limits: {count} files, {file_bytes} bytes per file, "
+                    f"{total_bytes} bytes total; budgets are shared across this Run."
+                )
         if any(item["function"]["name"].startswith("browser_") for item in definitions):
             snapshot = self._capability_status_snapshot() or {}
             browsers = [
@@ -622,7 +645,17 @@ class ToolRegistry:
         self._http_capability_cache = (now, status)
         return copy.deepcopy(status)
 
+    def _office_runtime(self):
+        from tools.office.runtime import OfficeRuntime
+        return OfficeRuntime(self.tool_options.get("office") or {})
+
     def tool_availability(self, tool_name: str) -> dict[str, Any]:
+        if tool_name in OFFICE_TOOL_NAMES:
+            if getattr(self, "_office_execution_supported", True) is False:
+                return {"available":False,"code":"capability_unavailable",
+                        "reason":"office_managed_channel_unqualified",
+                        "next_step":"Office requires a qualified execution channel for this permission level."}
+            return self._office_runtime().availability()
         if tool_name == "file_search" and (self.tool_options.get("file_search") or {}).get("enabled") is False:
             return {"available": False, "code": "capability_unavailable", "reason": "scoped_search_disabled"}
         requirement = _device_tool_requirement(tool_name)
@@ -1268,6 +1301,8 @@ class ToolRegistry:
                 "output_original_chars": original_chars,
             }
         is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
+        if tool_name in OFFICE_TOOL_NAMES:
+            is_error = (details or {}).get("office_result", {}).get("status") == "error"
         result = ToolResult(
             tool_call_id=effective_call_id,
             output=output,
@@ -1302,7 +1337,7 @@ class ToolRegistry:
                 )}
         try:
             receipt = (result.details or {}).get("effect_receipt")
-            if "fingerprint" not in (result.details or {}):
+            if receipt is None and "fingerprint" not in (result.details or {}):
                 receipt = observe_tool_effect(tool_name=tool_name, call_id=result.tool_call_id,
                     arguments=arguments, output=result.output, is_error=result.is_error,
                     workspace_dir=self.workspace_dir, access_roots=self.access_roots)
@@ -1587,7 +1622,7 @@ class ToolRegistry:
         arguments: dict,
         result: ToolResult,
     ) -> str | None:
-        if tool_name != "file_write" or result.is_error:
+        if tool_name not in {"file_write", "office_finish"} or result.is_error:
             return None
         context = self._effective_audit_context()
         db_path = context.get("enterprise_db_path")
@@ -1595,6 +1630,8 @@ class ToolRegistry:
         project_id = context.get("project_id")
         task_id = context.get("task_id")
         raw_path = str((arguments or {}).get("path") or "").strip()
+        if tool_name == "office_finish":
+            raw_path = str((result.details or {}).get("office_result", {}).get("data", {}).get("output") or "")
         if not all([db_path, org_id, project_id, task_id, raw_path]):
             return None
         try:
@@ -1618,7 +1655,7 @@ class ToolRegistry:
                 artifact_type=str(context.get("artifact_type") or "file"),
                 path=path,
                 metadata={
-                    "source": "tool_registry.file_write",
+                    "source": "tool_registry." + tool_name,
                     "tool_call_id": result.tool_call_id,
                     "agent": context.get("agent_name"),
                 },
@@ -1884,6 +1921,9 @@ class ToolRegistry:
         )
 
         opts = self.tool_options
+        if tool_name in OFFICE_TOOL_NAMES:
+            from tools.office.integration import execute_office
+            return await execute_office(self, tool_name, arguments, tool_call_id)
         read_roots, search_scope, read_cwd = self._read_scope()
         if tool_name == "file_search":
             from tools.file_search import execute_file_search

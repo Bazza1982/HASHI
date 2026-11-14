@@ -10,7 +10,8 @@ from typing import Any
 from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import NetworkError, TimedOut
+from telegram.constants import FileSizeLimit
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from orchestrator import runtime_long, ui_language
 from orchestrator.frontend_failures import frontend_failure
@@ -25,6 +26,7 @@ from orchestrator.multimodal_contract import (
     request_content_is_voice_origin,
 )
 from orchestrator.runtime_common import _print_user_message
+from orchestrator.session_attachment_limits import AttachmentSizeExceeded, SESSION_ATTACHMENT_LIMITS
 from orchestrator.voice_transcription_result import TranscriptionFailed, TranscriptionFailure, transcribe_audio
 from orchestrator.voice_transcript_gate import (
     complete_native_audio_response,
@@ -374,6 +376,19 @@ def _single_attachment_metadata(
     }
 
 
+def _check_download_size(runtime: Any, size_bytes: Any) -> None:
+    if type(size_bytes) is not int or size_bytes < 0:
+        return
+    maximum = SESSION_ATTACHMENT_LIMITS.attachment_bytes
+    scope = "file"
+    if not getattr(runtime.app.bot, "local_mode", False):
+        cloud_maximum = int(FileSizeLimit.FILESIZE_DOWNLOAD)
+        if cloud_maximum < maximum:
+            maximum, scope = cloud_maximum, "telegram"
+    if size_bytes > maximum:
+        raise AttachmentSizeExceeded(size_bytes, maximum, scope=scope)
+
+
 async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
     local_path = _available_media_path(runtime.media_dir, filename)
     retryable_errors = (TimedOut, NetworkError, TimeoutError, OSError)
@@ -383,9 +398,23 @@ async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
     for attempt in range(1, max_attempts + 1):
         try:
             tg_file = await runtime.app.bot.get_file(file_id)
+            _check_download_size(runtime, getattr(tg_file, "file_size", None))
             await tg_file.download_to_drive(local_path)
+            _check_download_size(runtime, local_path.stat().st_size)
             runtime.logger.info(f"Downloaded media: {local_path}")
             return local_path
+        except AttachmentSizeExceeded:
+            local_path.unlink(missing_ok=True)
+            raise
+        except BadRequest as exc:
+            if (
+                not getattr(runtime.app.bot, "local_mode", False)
+                and str(exc).strip().casefold() in {"file is too big", "file too big"}
+            ):
+                raise AttachmentSizeExceeded(
+                    None, int(FileSizeLimit.FILESIZE_DOWNLOAD), scope="telegram"
+                ) from exc
+            raise
         except retryable_errors as e:
             last_error = e
             if attempt >= max_attempts:
@@ -425,7 +454,9 @@ async def handle_media_message(
             reason="media_fallback_unavailable",
         )
     )
-    if not acceptance.accepted:
+    # File reception does not depend on the selected model's parsers.
+    # Native-media routing still performs its own capability/format checks.
+    if not acceptance.accepted and media_kind.casefold() != "document":
         message_keys = {
             "model_modality_unsupported": "media.model_unsupported",
             "model_capability_unknown": "media.capability_unknown",
@@ -457,6 +488,10 @@ async def handle_media_message(
     )
     phase = "download"
     try:
+        incoming = getattr(update.message, media_kind.casefold(), None)
+        if isinstance(incoming, (list, tuple)):
+            incoming = incoming[-1] if incoming else None
+        _check_download_size(runtime, getattr(incoming, "file_size", None))
         local_path = await runtime.download_media(file_id, filename)
         phase = "validate"
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
@@ -1444,3 +1479,4 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
         update.effective_chat.id, prompt, "sticker", summary,
         request_metadata={"ingress_transport": "telegram"},
     )
+# HASHI-Fingerprint: hfp_270c57aa7b814b09a31059505e05b4f7

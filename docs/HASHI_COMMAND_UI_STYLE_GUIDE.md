@@ -48,6 +48,14 @@ Put advanced text syntax last, or show it only after invalid input.
 
 ## 4. Command help and registration
 
+Phone and Call picker descriptions come from the same active runtime locale
+catalogues as the other registered commands. Frozen locales retain the existing
+English fallback. Compatibility controls for retired wrapper mode explain the
+retirement and point to `/mode` for supported Fixed/Flex choices; they never
+instruct users to enable `/mode wrapper`. This wording does not revive or delete
+legacy mode/configuration behavior.
+
+
 - `/help` is generated from the same registered command metadata used by the
   Telegram command picker.
 - Commands are grouped by user intent, not implementation module.

@@ -1,0 +1,9 @@
+# Office Runtime v1: independent Windows x64 / CPython 3.12 closure.
+# Never install this into Core or the qualified Functions environment.
+openpyxl==3.1.5
+python-docx==1.2.0
+python-pptx==1.0.2
+Pillow==13.0.0
+PyMuPDF==2.1
+XlsxWriter==3.2.9
+defusedxml==0.7.1

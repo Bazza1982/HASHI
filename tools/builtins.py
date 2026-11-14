@@ -1982,12 +1982,7 @@ async def execute_frontend_send_attachments(
     import mimetypes
 
     from orchestrator.session_store import (
-        HCHAT_SESSION_ATTACHMENT_BYTES,
-        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE,
-        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
-        MAX_SESSION_ATTACHMENT_BYTES,
-        MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
-        MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+        frontend_attachment_limits,
         IdempotencyConflict,
         SessionConflict,
         SessionNotFound,
@@ -1995,26 +1990,9 @@ async def execute_frontend_send_attachments(
     )
 
     context = dict(audit_context or {})
-    is_hchat_selection = (
-        str(context.get("request_source") or "").strip().casefold()
-        == "bridge:hchat-draft"
-    )
-    attachment_policy = "hchat" if is_hchat_selection else "standard"
-    max_attachment_count = (
-        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE
-        if is_hchat_selection
-        else MAX_SESSION_ATTACHMENTS_PER_MESSAGE
-    )
-    max_attachment_bytes = (
-        HCHAT_SESSION_ATTACHMENT_BYTES
-        if is_hchat_selection
-        else MAX_SESSION_ATTACHMENT_BYTES
-    )
-    max_total_bytes = (
-        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES
-        if is_hchat_selection
-        else MAX_SESSION_ATTACHMENT_TOTAL_BYTES
-    )
+    attachment_policy, limits = frontend_attachment_limits(context.get("request_source"))
+    is_hchat_selection = attachment_policy == "hchat"
+    max_attachment_count, max_attachment_bytes, max_total_bytes = limits
     surface = str(context.get("session_surface") or "").strip().casefold()
     # Connector surfaces are presentation hints, not eligibility gates. All
     # attachments bind to the same canonical Session message/group contract.

@@ -92,8 +92,9 @@ class NativeDesktop:
             self.u.SetThreadDpiAwarenessContext(previous)
 
     def available(self):
-        if not self.win32.get_desktop_state().get("interactive"):
-            raise DesktopError("desktop_locked", 423)
+        # Desktop names/lock labels do not prove that capture is unavailable.
+        # Let the actual Win32 operation report success or its native error.
+        return None
 
     def displays(self):
         # ctypes callback signatures are installed for this call; serialize
