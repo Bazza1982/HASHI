@@ -1756,3 +1756,16 @@ drains terminal results, incremental deliverables and routed notices. Only
 typed connection evidence proving no request was submitted permits retry.
 Partial effects, expired claims and unknown responses remain unknown and are
 not automatically resent. Business Runs never replay.
+
+### Origin-only file retrieval
+
+`/getfile` is a PAO/FC Function: PAO owns bounded recent-file evidence and
+current-scope acquisition, FC owns its native command and durable origin-only
+media publication. Its command responses and media freeze the originating
+connector/Session; configured owner mirrors and optional subscriber wake-ups
+are excluded for this explicit file request. No Engine Run is admitted.
+The existing presentation idempotency key recovers committed media before a
+duplicate click can reread or resend. Session generation is fenced again at
+atomic message append. Telegram unknown acknowledgements keep the existing
+non-replay semantics. See [GETFILE_FUNCTION.md](GETFILE_FUNCTION.md) for the
+typed receipt, evidence grades, limits and unsupported forum-topic route.

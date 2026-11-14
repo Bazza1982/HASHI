@@ -315,6 +315,11 @@ def _project_command_ui(value: object) -> dict | None:
                 button["button_id"] = button_id
             if url is not None:
                 button["url"] = url
+            field = raw_button.get("text_input")
+            if (button_id is not None and not disabled and isinstance(field, dict)
+                    and isinstance(field.get("label"), str)):
+                button["text_input"] = {"label": field["label"][:100],
+                    "value": str(field.get("value") or "")[:500], "max_length": 500}
             reason = raw_button.get("reason")
             if isinstance(reason, str) and reason:
                 button["reason"] = reason[:100]

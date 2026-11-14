@@ -333,9 +333,7 @@ finish(json.loads(tree.read_text()))
         owner.close()
 
 
-@pytest.mark.platform
-@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows native HANDLE retirement")
-def test_completed_launches_release_all_parent_handles(tmp_path):
+def _assert_completed_launches_release_handles(tmp_path):
     import ctypes
     from ctypes import wintypes
     import gc
@@ -372,3 +370,27 @@ def test_completed_launches_release_all_parent_handles(tmp_path):
         cycle(index)
         gc.collect()
         assert count() == baseline, "completed Function launch leaked a parent HANDLE"
+
+
+@pytest.mark.platform
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows native HANDLE retirement")
+def test_completed_launches_release_all_parent_handles(tmp_path):
+    import subprocess
+    import sys
+
+    # The suite process also owns unrelated Windows/RPC handles. Main reproduced
+    # a -2 delta from ALPC Port cleanup while the Function-owned handles retired.
+    # Measure the same real launches in a fresh process, retaining exact equality
+    # after every cycle rather than tolerating growth or retrying an assertion.
+    probe = (
+        "import runpy,sys;from pathlib import Path;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "module=runpy.run_path(sys.argv[2]);"
+        "module['_assert_completed_launches_release_handles'](Path(sys.argv[3]))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", probe, str(ROOT), __file__, str(tmp_path)],
+        cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        timeout=90,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

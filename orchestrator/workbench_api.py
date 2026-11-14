@@ -8180,6 +8180,11 @@ class WorkbenchApiServer:
                 attachment_id=request.query.get("attachment_id"))
             messages = await asyncio.to_thread(build_agent_history_projection,
                 self.session_store, messages=source["messages"], owner_id=owner)
+            from orchestrator.attachment_catalogue import source_identity
+            names = {str(row["name"]): str(row.get("display_name") or row["name"]) for row in agents}
+            identity = source_identity(agent_id=source["agent_id"], session_id=source["session_id"],
+                                       agent_name=names.get(source["agent_id"]))
+            messages = [{**row, **identity} for row in messages]
             result = {**source, "messages": messages, "instance_id": self.session_store.instance_id}
             if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 2 * 1024 * 1024:
                 raise ValueError("attachment source context exceeds its limit")
@@ -8222,12 +8227,9 @@ class WorkbenchApiServer:
                 for message in page["messages"]:
                     result = build_agent_history_projection(self.session_store, messages=[message], owner_id=owner)
                     for row in result:
-                        row["agent_id"] = message["agent_id"]
-                        row["agent_name"] = names.get(message["agent_id"], message["agent_id"])
-                        # Legacy history lacks a trustworthy incarnation snapshot.
-                        # Preserve Session custody rather than assigning it to a
-                        # newly-created Agent that happens to reuse the name.
-                        row["agent_identity"] = "legacy-session:" + message["session_id"]
+                        row.update(attachment_catalogue.source_identity(
+                            agent_id=message["agent_id"], session_id=message["session_id"],
+                            agent_name=names.get(message["agent_id"])))
                         encoded_size = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
                         if size + encoded_size > 2 * 1024 * 1024:
                             if not projected:

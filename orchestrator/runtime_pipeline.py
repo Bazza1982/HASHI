@@ -188,7 +188,7 @@ class _CanonicalStreamAuditBatch:
             _flush_on_deadline,
         )
 
-    def capture(self, event: Any) -> None:
+    def capture(self, event: Any, *, file_scope=None) -> None:
         if self.store is None:
             return
         # Workbench answer previews are deliberately ephemeral.  The final
@@ -227,6 +227,7 @@ class _CanonicalStreamAuditBatch:
                 "provenance": {
                     "source": origin,
                     "provider_provenance": provider_provenance,
+                    **({"getfile_scope": file_scope} if file_scope is not None else {}),
                 },
             }
         )
@@ -3102,7 +3103,9 @@ async def setup_interactive_feedback(
 
     async def _canonical_stream_callback(event):
         terminal_console.record_stream_event(runtime.name, item.request_id, event)
-        canonical_stream_batch.capture(event)
+        from orchestrator.getfile_index import run_scope
+        canonical_stream_batch.capture(event, file_scope=(
+            run_scope(runtime, item) if getattr(event, "kind", None) == "file_edit" else None))
         if getattr(event, "kind", None) == "file_edit":
             try:
                 from orchestrator.fingerprint.coverage import observe_engine_event
