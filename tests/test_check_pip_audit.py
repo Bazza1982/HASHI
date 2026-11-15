@@ -35,6 +35,7 @@ def test_main_falls_back_to_current_interpreter_when_executable_is_missing(
         ["pip-audit", "--desc", "--progress-spinner", "off"],
         [
             audit.sys.executable,
+            "-B",
             "-m",
             "pip_audit",
             "--desc",
@@ -78,6 +79,7 @@ def test_module_fallback_keeps_requirement_file_precedence(
     ]
     assert calls[2] == [
         audit.sys.executable,
+        "-B",
         "-m",
         "pip_audit",
         "-r",

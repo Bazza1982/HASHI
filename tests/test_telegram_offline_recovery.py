@@ -180,6 +180,7 @@ async def test_offline_final_result_survives_store_reopen_without_rerunning_busi
 @pytest.mark.asyncio
 async def test_topology_schedule_and_retirement_do_not_hold_caller():
     supervisor=FunctionWorkerSupervisor.__new__(FunctionWorkerSupervisor)
+    supervisor.kernel=SimpleNamespace(_handoff_draining=False)
     supervisor._shutting_down=False
     supervisor._topology_revision=0
     supervisor._topology_task=None
