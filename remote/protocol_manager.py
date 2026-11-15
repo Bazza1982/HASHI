@@ -181,6 +181,9 @@ class ProtocolManager:
         self._last_superloop_review = 0.0
         self._last_agent_snapshot_version = ""
         self._last_agent_file_signature: tuple[int, int] | None = None
+        self._last_instances_file_signature: tuple | None = None
+        self._instances_cache_loaded = False
+        self._instances_cache: dict[str, Any] = {}
         self._last_agent_directory_state = "core_offline"
         self._force_handshake = False
         self._agent_snapshot_cache: list[dict[str, Any]] = []
@@ -198,6 +201,7 @@ class ProtocolManager:
         self._activity: dict[str, int] = {
             "control_wakeups": 0,
             "bootstrap_runs": 0,
+            "bootstrap_known_peer_skips": 0,
             "route_probes": 0,
             "route_circuit_skips": 0,
             "liveness_backoff_skips": 0,
@@ -207,6 +211,8 @@ class ProtocolManager:
             "core_health_checks": 0,
             "agent_snapshot_checks": 0,
             "agent_snapshot_file_reads": 0,
+            "instances_source_checks": 0,
+            "instances_file_reads": 0,
             "inflight_cycles": 0,
         }
 
@@ -737,12 +743,14 @@ class ProtocolManager:
 
     async def _bootstrap_known_peers(self, *, initial_delay: float = 0.0) -> None:
         """
-        Probe peers listed in instances.json and register reachable ones.
+        Probe unregistered peers listed in instances.json and register reachable ones.
 
         This is a fallback for environments where mDNS multicast doesn't cross
         network boundaries (e.g. WSL2 to physical LAN). Any instance that has
         a remote_port and a reachable host is injected into the peer registry so
-        the normal handshake cycle can then proceed with it.
+        the normal handshake cycle can then proceed with it. Once a peer is in
+        the registry, liveness and handshake are its sole recovery owners; they
+        already consume current route candidates and apply peer/endpoint backoff.
         """
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)  # Give discovery backends a moment before first bootstrap
@@ -750,7 +758,7 @@ class ProtocolManager:
         self._last_bootstrap_run = time.time()
         local_id = str(self._instance_info.get("instance_id") or "").upper()
         instances = self._dedupe_bootstrap_instances(self._load_instances())
-        live_endpoints = read_live_endpoints(self._hashi_root)
+        live_endpoints: dict | None = None
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
@@ -761,10 +769,11 @@ class ProtocolManager:
             if instance_id == local_id:
                 continue
             existing_peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
-            if existing_peer and self._bootstrap_existing_peer_is_healthy(existing_peer):
-                continue  # Already known via a healthy discovery path.
-            if existing_peer and self._bootstrap_existing_peer_has_live_discovery(existing_peer):
-                continue  # Live discovery already owns this peer; don't re-inject fallback routes.
+            if existing_peer:
+                self._count_activity("bootstrap_known_peer_skips")
+                continue
+            if live_endpoints is None:
+                live_endpoints = read_live_endpoints(self._hashi_root)
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
@@ -856,19 +865,6 @@ class ProtocolManager:
         if platform in {"windows", "linux", "darwin", "macos"} or environment in {"windows", "linux", "darwin", "macos"}:
             add(DEFAULT_REMOTE_PORT)
         return ports
-
-    def _bootstrap_existing_peer_is_healthy(self, peer) -> bool:
-        properties = dict(getattr(peer, "properties", None) or {})
-        live_status = str(properties.get("live_status") or "").strip().lower()
-        handshake_state = str(properties.get("handshake_state") or "").strip().lower()
-        if live_status == "online":
-            return True
-        return handshake_state == "handshake_accepted"
-
-    def _bootstrap_existing_peer_has_live_discovery(self, peer) -> bool:
-        properties = dict(getattr(peer, "properties", None) or {})
-        preferred = str(properties.get("preferred_backend") or properties.get("discovery") or "").strip().lower()
-        return preferred in {"lan", "tailscale"}
 
     def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
@@ -3648,10 +3644,41 @@ class ProtocolManager:
         except Exception:
             return {}
 
+    @staticmethod
+    def _instances_file_signature(path: Path) -> tuple:
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return ("absent",)
+        except OSError as exc:
+            return ("unreadable", type(exc).__name__, int(exc.errno or 0))
+        return (
+            "file",
+            int(stat_result.st_mtime_ns),
+            int(stat_result.st_ctime_ns),
+            int(stat_result.st_size),
+            int(getattr(stat_result, "st_ino", 0) or 0),
+        )
+
     def _load_instances(self) -> dict:
         path = self._hashi_root / "instances.json"
+        self._count_activity("instances_source_checks")
+        signature = self._instances_file_signature(path)
+        if (
+            getattr(self, "_instances_cache_loaded", False)
+            and signature == getattr(self, "_last_instances_file_signature", None)
+        ):
+            return getattr(self, "_instances_cache", {})
         data = self._load_json(path)
-        return data.get("instances", {}) if isinstance(data, dict) else {}
+        instances = data.get("instances", {}) if isinstance(data, dict) else {}
+        if not isinstance(instances, dict):
+            instances = {}
+        self._last_instances_file_signature = signature
+        self._instances_cache_loaded = True
+        self._instances_cache = instances
+        if signature and signature[0] == "file":
+            self._count_activity("instances_file_reads")
+        return instances
 
     def _same_machine_hint(self, entry: dict) -> bool:
         if not isinstance(entry, dict):

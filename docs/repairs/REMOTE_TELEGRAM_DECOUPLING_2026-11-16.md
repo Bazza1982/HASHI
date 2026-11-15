@@ -37,6 +37,8 @@ Functions, Worker or local Workbench readiness.
 | Discovery maintenance reparsed and hashed `secrets.json` every 30 seconds. | Two full credential-file reads per minute even when its file identity was unchanged. | The existing maintenance owner performs one metadata check and reloads/parses the credential only when its source signature changes; startup remains fail-closed and a changed invalid revision retains the last valid in-memory credential. |
 | Authenticated `/protocol/status` built the complete protocol projection twice. | Duplicate peer, discovery, directory and activity projection for one read-only request. | One projection is reused to add API capability facts; the endpoint remains read-only. |
 | An authenticated inbound handshake rebuilt an unchanged peer observation and let derived `live_status` age between `online` and `stale`. | A healthy HASHI6 heartbeat could rebuild the same route every ~37 seconds and persist the derived age transition, despite proving fresh authenticated liveness itself. | Equivalent inbound observations bypass canonical rebuild, refresh the existing peer's authenticated liveness in memory, and log only at debug level. Route, identity, capability or directory-revision changes still take the normal persistent path. |
+| Five-minute static bootstrap re-probed peers already registered as offline. | It duplicated liveness/handshake recovery and produced 14 route probes in one healthy four-minute acceptance segment that crossed the bootstrap boundary. | Bootstrap probes only unregistered instances. Registered peers remain with the liveness/handshake owner, which already reads current routes and applies peer/endpoint backoff. |
+| Route and status helpers reparsed `instances.json` on every lookup, and bootstrap read live endpoints before knowing whether an unknown peer existed. | One handshake/liveness pass could parse identical configuration once per peer; an all-known bootstrap still performed payload I/O. | A metadata signature preserves the parsed instance projection until the source changes. Bootstrap reads live endpoints lazily only for an unregistered instance. |
 
 ## Independent recovery contracts
 
@@ -87,8 +89,9 @@ counters only:
   draining suppressions and Worker connector RPC attempts.
 - Remote protocol: control wakes, bootstrap/liveness/handshake/Core/directory/
   inflight cycles, actual Agent-directory file reads, route probes, circuit
-  skips and liveness/handshake peer-backoff suppressions. Liveness and
-  handshake run counts now represent passes that attempted network work.
+  skips, known-peer bootstrap suppressions, instance-source checks/actual file
+  reads and liveness/handshake peer-backoff suppressions. Liveness and handshake
+  run counts now represent passes that attempted network work.
 - Remote discovery: maintenance cycles, advertisement calls, cheap credential
   source checks and actual credential reloads.
 - Peer registry: state writes, `instances.json` syncs, suppressed heartbeat
@@ -124,8 +127,13 @@ covering topology, connector commit and Telegram readiness contains 59 passing
 tests; Ruff passes for all files changed by this follow-up.
 
 The subsequent Remote idle-write/backoff regression group contains 173 passing
-tests and 2 platform skips. The complete `test_remote*` focused inventory is
-479 passing tests and 11 platform/live skips; this includes Remote peer,
+tests and 2 platform skips. The static-bootstrap duplicate-owner regression
+failed before the fix by observing an actual route probe for an already known
+offline peer; the instance-source cache regression likewise failed by observing
+two payload reads for an unchanged file. Both pass after the fix, together with
+unknown-peer bootstrap and existing healthy/discovery-owner cases (5/5).
+The complete `test_remote*` focused inventory is 480 passing tests and 11
+platform/live skips; this includes Remote peer,
 discovery, shared-token endpoint, lifecycle, supervisor, routing, delivery and
 Workbench gateway coverage. Live idle evidence is recorded separately after
 the updated Remote process is adopted.

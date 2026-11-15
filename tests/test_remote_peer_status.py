@@ -2111,6 +2111,42 @@ def test_bootstrap_probe_ports_does_not_default_wsl_peer(tmp_path):
     assert ports == [8767]
 
 
+def test_instances_config_is_reparsed_only_when_source_changes(tmp_path):
+    instances_path = tmp_path / "instances.json"
+    instances_path.write_text(
+        json.dumps({"instances": {"hashi1": {"instance_id": "HASHI1"}}}),
+        encoding="utf-8",
+    )
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI4"},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+    original_load_json = manager._load_json
+    reads = []
+    manager._load_json = lambda path: reads.append(path) or original_load_json(path)
+
+    assert manager._load_instances()["hashi1"]["instance_id"] == "HASHI1"
+    assert manager._load_instances()["hashi1"]["instance_id"] == "HASHI1"
+    assert reads == [instances_path]
+
+    instances_path.write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1"},
+                    "hashi2": {"instance_id": "HASHI2"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert manager._load_instances()["hashi2"]["instance_id"] == "HASHI2"
+    assert reads == [instances_path, instances_path]
+
+
 def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -2151,7 +2187,7 @@ def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
     assert peer.port == 8766
 
 
-def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
+def test_bootstrap_known_peers_leaves_existing_offline_peer_to_recovery_owner(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
     stale_peer = PeerInfo(
@@ -2164,6 +2200,7 @@ def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
         properties={"live_status": "offline", "handshake_state": "handshake_timed_out"},
     )
     captured = []
+    probes = []
 
     class RegistryStub:
         def get_peer(self, instance_id):
@@ -2189,13 +2226,16 @@ def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
     manager._dedupe_bootstrap_instances = lambda instances: instances
     manager._candidate_hosts_for_entry = lambda entry: ["192.168.50.6"]
     manager._probe_instance_route = (
-        lambda host, port, instance_id, timeout=2: host == "192.168.50.6" and int(port) == 8766 and instance_id == "INTEL"
+        lambda host, port, instance_id, timeout=2: probes.append(
+            (host, int(port), instance_id)
+        )
+        or True
     )
 
     asyncio.run(manager._bootstrap_known_peers())
 
-    assert len(captured) == 1
-    assert captured[0].port == 8766
+    assert probes == []
+    assert captured == []
 
 
 def test_bootstrap_known_peers_skips_existing_online_peer(tmp_path):
