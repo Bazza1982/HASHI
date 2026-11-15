@@ -121,3 +121,25 @@ No blocking source finding remains in the reviewed candidate.
   actual 24-Agent readiness, `/reboot min`, `/reboot max`, cold `/restart`,
   normal Agent work, rollback, scan counts, and measured timings must still
   pass. Production adoption and merge remain unapproved.
+
+## Non-production acceptance completed
+
+- HASHI4 cold `/restart` completed in 106.962 seconds. Core and shared
+  Functions became usable and all 24 Workers reached ACTIVE; the fixed-task
+  precheck took 4.067 seconds and runtime qualification took 0.798 seconds.
+- The selected Core and Functions venvs use the shared CPython base while its
+  204 additional files remain source-backed PEP 3147 `__pycache__/*.pyc`
+  entries. Startup succeeded without deleting them.
+- `/reboot min` completed in 6.6 seconds and replaced only the requested Agent
+  Worker. `/reboot max` completed in 39.1 seconds, retained the Core process,
+  and replaced shared Functions plus all 24 Workers; none of the old process
+  IDs remained alive.
+- A post-replacement arale request completed with the exact response
+  `HASHI4_MAX_FINAL_OK`. A further 45-second observation retained the same Core,
+  Functions and 24 ACTIVE Worker processes. The only degraded health item was
+  the isolated `temp` Telegram connector; normal Agent work remained usable.
+- Known task-definition failures returned in about 3.3 seconds with their
+  precise stage and reason, while the existing Core remained online. Failed
+  replacement candidates rolled back without losing the underlying error.
+- This evidence is scoped to HASHI4 and pull request 166. Production adoption
+  and merge remain unapproved.
