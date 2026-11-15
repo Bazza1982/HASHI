@@ -137,11 +137,50 @@ def _workbench_gateway_error_facts(exc: BaseException) -> dict[str, Any]:
     }
 
 
+_WORKBENCH_GATEWAY_VERBOSE_SUCCESS_EVENTS = frozenset(
+    {
+        "proxy_received",
+        "proxy_authenticated",
+        "forward_started",
+        "local_request_started",
+        "local_response_headers",
+        "local_response_body_started",
+        "local_response_body_completed",
+        "proxy_response_ready",
+        "asgi_response_started",
+    }
+)
+
+
+def _workbench_gateway_log_level(event: str, facts: dict[str, Any]) -> int:
+    status = facts.get("status")
+    failure_status = (
+        isinstance(status, int) and not isinstance(status, bool) and status >= 400
+    )
+    failure_fact = any(
+        facts.get(key) is not None for key in ("error_code", "exception_type")
+    )
+    if (
+        event in _WORKBENCH_GATEWAY_VERBOSE_SUCCESS_EVENTS
+        and not failure_status
+        and not failure_fact
+    ):
+        return logging.DEBUG
+    return logging.INFO
+
+
 def _workbench_gateway_log(event: str, **facts: Any) -> None:
     """Best-effort, content-free lifecycle evidence for the loopback relay."""
     try:
+        level = _workbench_gateway_log_level(event, facts)
+        if not logger.isEnabledFor(level):
+            return
         record = {"event": event, **{key: value for key, value in facts.items() if value is not None}}
-        logger.info("workbench gateway %s", json.dumps(record, ensure_ascii=True, sort_keys=True))
+        logger.log(
+            level,
+            "workbench gateway %s",
+            json.dumps(record, ensure_ascii=True, sort_keys=True),
+        )
     except Exception:
         return
 

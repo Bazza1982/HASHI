@@ -169,6 +169,13 @@ and otherwise sleeps up to 300 seconds. Protocol, discovery and registry expose
 small monotonic activity counters for idle acceptance; no additional watchdog
 or monitoring service is introduced.
 
+The authenticated Workbench gateway emits one INFO completion summary for a
+successful request. Successful intermediate receive, authenticate, forward and
+response stages are DEBUG diagnostics and are not serialized while normal INFO
+logging is active. Failure events, exceptions and intermediate HTTP 4xx/5xx
+statuses remain INFO evidence. This keeps request and authentication failures
+observable without multiplying normal proxy traffic into ten durable records.
+
 2026-09-27 HASHI1 repair record: the user requested this restart slowdown
 repair. The registry comparison fix is committed on local `main` as
 `e1e3b007`; the regression failed before the fix and passed after it, the
