@@ -940,10 +940,16 @@ class StartupManager:
         issues = [issue for issue in previous_issues if issue.get("code") not in {
             "agent_telegram_unavailable", "connector_activation"}]
         if unavailable:
+            ingress_owners = getattr(workers, "_telegram_ingress", {})
+            retryable = any(
+                (ingress := ingress_owners.get(name)) is not None
+                and not getattr(ingress, "permanent_failure_reason", None)
+                for name in unavailable
+            )
             issues.append({
                 "code": "agent_telegram_unavailable", "component": "telegram",
                 "severity": "warning", "summary": f"{len(unavailable)} agent(s) have no active Telegram connection.",
-                "automatic_retry": bool(any(name in getattr(workers, "_telegram_ingress", {}) for name in unavailable)),
+                "automatic_retry": retryable,
                 "details": {"agents": sorted(unavailable)},
             })
         if errors:

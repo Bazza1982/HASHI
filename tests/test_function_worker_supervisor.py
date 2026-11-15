@@ -312,6 +312,33 @@ async def test_unchanged_topology_and_connector_activation_are_not_repeated():
 
 
 @pytest.mark.asyncio
+async def test_handoff_draining_suppresses_transient_topology_and_connector_work():
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    kernel._handoff_draining = True
+    client = _Client("alpha", 101)
+    client.nonce = "alpha:101:test"
+    handle = _handle(kernel, client)
+    handle.metadata["telegram_async_connectors"] = True
+    kernel.runtimes = [handle]
+    supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+
+    assert await supervisor.broadcast_topology() is True
+    supervisor.activate_worker_connectors("alpha")
+
+    assert client.calls == []
+    assert supervisor.activity_snapshot()["topology_suppressed_draining"] == 1
+    assert (
+        supervisor.activity_snapshot()[
+            "connector_activation_suppressed_draining"
+        ]
+        == 1
+    )
+    assert supervisor.activity_snapshot()["topology_worker_rpcs"] == 0
+    assert supervisor.activity_snapshot()["connector_worker_rpcs"] == 0
+
+
+@pytest.mark.asyncio
 async def test_committed_route_starts_local_connectors_without_topology_republish():
     kernel = _Kernel()
     kernel.runtime_fingerprint.to_dict = lambda: {}

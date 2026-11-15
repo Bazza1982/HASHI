@@ -167,6 +167,50 @@ def test_global_local_ready_does_not_depend_on_telegram_or_retry():
     assert kernel.startup_status["services_ready"] is True
 
 
+@pytest.mark.parametrize(
+    ("permanent_failure", "automatic_retry"),
+    [("invalid_token", False), (None, True)],
+)
+def test_connector_health_reports_whether_telegram_retry_is_possible(
+    permanent_failure, automatic_retry
+):
+    handle = SimpleNamespace(
+        metadata={"worker_phase": "ACTIVE", "worker_accepting": True},
+        backend_ready=True,
+        telegram_connected=False,
+        client=SimpleNamespace(closed=False),
+    )
+    ingress = SimpleNamespace(permanent_failure_reason=permanent_failure)
+    workers = SimpleNamespace(
+        _telegram_ingress={"one": ingress},
+        telegram_ingress_snapshot=lambda name: {
+            "configured": True,
+            "running": False,
+            "connected": False,
+        },
+    )
+    kernel = SimpleNamespace(
+        function_workers=workers,
+        _runtime_map=lambda: {"one": handle},
+        startup_status={
+            "services_ready": True,
+            "phase": "ready",
+            "agent_states": {"one": "local"},
+            "failed_agents": 0,
+            "issues": [],
+        },
+    )
+
+    StartupManager(kernel, None).reconcile_connector_status(publish=False)
+
+    issue = next(
+        item
+        for item in kernel.startup_status["issues"]
+        if item["code"] == "agent_telegram_unavailable"
+    )
+    assert issue["automatic_retry"] is automatic_retry
+
+
 def test_no_herv3_recovery_candidates_means_no_historical_ledger_scan(tmp_path,monkeypatch):
     store=LedgerStore(tmp_path/"ledgers")
     def forbidden():

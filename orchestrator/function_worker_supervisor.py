@@ -1335,8 +1335,12 @@ class FunctionWorkerSupervisor:
         self._activity = {
             "topology_requests": 0,
             "topology_worker_rpcs": 0,
+            "topology_publications": 0,
+            "topology_unchanged_skips": 0,
+            "topology_suppressed_draining": 0,
             "connector_activation_requests": 0,
             "connector_worker_rpcs": 0,
+            "connector_activation_suppressed_draining": 0,
         }
         self._retirement_tasks: dict[FunctionWorkerClient, asyncio.Task[Any]] = {}
         self._qualification_lock = asyncio.Lock()
@@ -2179,6 +2183,16 @@ class FunctionWorkerSupervisor:
         unchanged topology notification into external network work.
         """
 
+        # Initial and replacement Agent routes are assembled while the shared
+        # Functions process is fenced.  Each Agent lifecycle reaches this
+        # owner, but no connector may be granted until the shared commit.  Do
+        # not traverse every installed route for those guaranteed no-ops; the
+        # one post-commit activation owns the complete installed set.
+        if getattr(self.kernel, "_handoff_draining", False):
+            FunctionWorkerSupervisor._count_activity(
+                self, "connector_activation_suppressed_draining"
+            )
+            return
         FunctionWorkerSupervisor._count_activity(
             self, "connector_activation_requests"
         )
@@ -2303,6 +2317,15 @@ class FunctionWorkerSupervisor:
         # Topology is a pure, generation/revision-deduplicated publication.
         # Credential loading and connector lifecycle are owned by their explicit
         # configuration and route-commit paths, never by this broadcast.
+        # Direct service/configuration notifications can arrive while a shared
+        # replacement is still fenced.  Publishing those transient snapshots
+        # used to send the same 24-Worker topology several times during one
+        # adoption.  The committed owner schedules one final publication.
+        if getattr(self.kernel, "_handoff_draining", False):
+            FunctionWorkerSupervisor._count_activity(
+                self, "topology_suppressed_draining"
+            )
+            return True
         calls = []
         for handle in list(self.kernel.runtimes):
             if not isinstance(handle, AgentRuntimeHandle):
@@ -2324,11 +2347,17 @@ class FunctionWorkerSupervisor:
                 )
             )
         if calls:
+            FunctionWorkerSupervisor._count_activity(
+                self, "topology_publications"
+            )
             results = await asyncio.gather(*calls, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
                     bridge_logger.warning("Function Worker topology refresh failed: %s", result)
             return not any(isinstance(result, BaseException) for result in results)
+        FunctionWorkerSupervisor._count_activity(
+            self, "topology_unchanged_skips"
+        )
         return True
 
     def update_active_metadata(

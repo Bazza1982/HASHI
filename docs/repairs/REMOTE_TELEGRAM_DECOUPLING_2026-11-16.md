@@ -18,6 +18,7 @@ Functions, Worker or local Workbench readiness.
 | Previous operation | Previous trigger/cost | New behavior |
 | --- | --- | --- |
 | Topology publication reloaded configuration, created/started shared Telegram ingress and sent `worker.connectors_start`. | Every topology request, including unchanged Agent/restart events; could fan out over all Workers and external Bot endpoints. | Topology computes a digest and sends only changed `worker.topology` RPCs. Explicit committed-route activation owns connector work. |
+| Initial/replacement Agent assembly attempted connector activation and direct topology publication while the shared Functions route was still fenced. | With 24 Agents this produced 24 guaranteed connector no-ops, repeated full route-list traversal and transient topology fan-out before the one authoritative commit. | Draining suppresses both operations. The shared commit owns one connector activation and one final topology publication after routes are usable. |
 | Shared replacement had a second connector retry owner. | A 5-second exponential loop duplicated the retry already owned by each ingress. | Removed. Every shared ingress and Worker connector has one task owner. |
 | Shared replacement reconciled Remote before connector completion. | Could run Remote task/supervisor lifecycle and add an external sidecar to the replacement path. | Removed. Shared hot replacement leaves Remote untouched and commits before connector recovery. |
 | Initial Worker startup awaited Remote. | Remote task/config/network failure could delay all local Workers. | Local Workers/services become usable first; initial Remote lifecycle is one non-overlapping background task. |
@@ -36,6 +37,8 @@ Functions, Worker or local Workbench readiness.
 - Shared Telegram ingress: one task per Agent. `InvalidToken`/`Forbidden` stop
   retries for that token revision. Temporary errors use exponential backoff to
   300 seconds, stable per-connector jitter and a server `RetryAfter` floor.
+  Health now reports `automatic_retry=false` for that permanent-failure state,
+  while retaining `automatic_retry=true` for a transient disconnected ingress.
 - Worker outbound Telegram: one task per committed Worker route. Permanent
   credential errors remain stopped until the Bot-token fingerprint changes;
   temporary retries are bounded and cancellable through the Worker stop event.
@@ -73,8 +76,9 @@ operation schedules network recovery but does not wait for connection success.
 The existing health/status projections now expose monotonic process-local
 counters only:
 
-- Functions: topology requests, topology RPC attempts, connector activation
-  requests and Worker connector RPC attempts.
+- Functions: topology requests, effective publications, unchanged/draining
+  suppressions, topology RPC attempts, effective connector activation requests,
+  draining suppressions and Worker connector RPC attempts.
 - Remote protocol: control wakes, bootstrap/liveness/handshake/Core/directory/
   inflight cycles, actual Agent-directory file reads, route probes and circuit
   skips.
@@ -105,3 +109,7 @@ Current offline evidence (groups overlap and therefore are not additive):
 - changed-scope Ruff: passed;
 - protected-Core diff guard and manifest: passed (no Protected Core change);
 - Agent FYI catalogue validation: passed.
+
+Post-adoption duplicate-work regression tests: 109 passed. The focused subset
+covering topology, connector commit and Telegram readiness contains 59 passing
+tests; Ruff passes for all files changed by this follow-up.
