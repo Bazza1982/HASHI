@@ -176,3 +176,11 @@ the same ASCII-dominant stream is no longer doubled. Core consumed 12.78 CPU
 seconds, Functions 318.84, Remote 31.17 and the 24 Workers together 1,663.48;
 these figures include the 6,294 real projections and are not attributed to
 background idle loops.
+
+The UTF-8 task-runner follow-up (`ba0f8242`) was then adopted through another
+HASHI4-only Remote restart in 18.032 seconds. Workbench remained ready on
+150/150 probes; Core, Functions and all Worker PIDs were unchanged, and Remote
+moved alone to PID 41612. Twenty uniquely correlated authenticated requests
+produced 20 completion records and zero intermediate-success records. The
+5,875-byte post-restart segment decoded as strict UTF-8 with a zero NUL-byte
+ratio, providing live evidence in addition to the Windows runner regression.
