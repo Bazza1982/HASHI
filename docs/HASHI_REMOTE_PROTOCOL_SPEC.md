@@ -157,9 +157,9 @@ peer registry. Once registered, liveness and handshake are the sole recovery
 owners and consume the current route candidates with their existing peer and
 endpoint backoff; the five-minute bootstrap pass must not become a third
 recovery loop for an offline peer. The instances source uses a cheap metadata
-signature and reparses its payload only when that signature changes. A pass in
-which every configured peer is already known does not read the live-endpoint
-payload.
+signature, checks that signature at most once per second, and reparses its
+payload only when the signature changes. A pass in which every configured peer
+is already known does not read the live-endpoint payload.
 
 Peer-registry heartbeat refreshes update memory on every observation, but an
 unchanged healthy projection writes durable state at most once per 600 seconds.

@@ -2130,6 +2130,7 @@ def test_instances_config_is_reparsed_only_when_source_changes(tmp_path):
     assert manager._load_instances()["hashi1"]["instance_id"] == "HASHI1"
     assert manager._load_instances()["hashi1"]["instance_id"] == "HASHI1"
     assert reads == [instances_path]
+    assert manager._activity["instances_source_checks"] == 1
 
     instances_path.write_text(
         json.dumps(
@@ -2142,9 +2143,11 @@ def test_instances_config_is_reparsed_only_when_source_changes(tmp_path):
         ),
         encoding="utf-8",
     )
+    manager._last_instances_source_check_monotonic = 0.0
 
     assert manager._load_instances()["hashi2"]["instance_id"] == "HASHI2"
     assert reads == [instances_path, instances_path]
+    assert manager._activity["instances_source_checks"] == 2
 
 
 def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):

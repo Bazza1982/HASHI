@@ -184,6 +184,8 @@ class ProtocolManager:
         self._last_instances_file_signature: tuple | None = None
         self._instances_cache_loaded = False
         self._instances_cache: dict[str, Any] = {}
+        self._last_instances_source_check_monotonic = 0.0
+        self._instances_source_check_interval_seconds = 1.0
         self._last_agent_directory_state = "core_offline"
         self._force_handshake = False
         self._agent_snapshot_cache: list[dict[str, Any]] = []
@@ -3662,6 +3664,15 @@ class ProtocolManager:
 
     def _load_instances(self) -> dict:
         path = self._hashi_root / "instances.json"
+        now = time.monotonic()
+        if (
+            getattr(self, "_instances_cache_loaded", False)
+            and now
+            - float(getattr(self, "_last_instances_source_check_monotonic", 0.0))
+            < float(getattr(self, "_instances_source_check_interval_seconds", 1.0))
+        ):
+            return getattr(self, "_instances_cache", {})
+        self._last_instances_source_check_monotonic = now
         self._count_activity("instances_source_checks")
         signature = self._instances_file_signature(path)
         if (

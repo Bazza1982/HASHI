@@ -38,7 +38,7 @@ Functions, Worker or local Workbench readiness.
 | Authenticated `/protocol/status` built the complete protocol projection twice. | Duplicate peer, discovery, directory and activity projection for one read-only request. | One projection is reused to add API capability facts; the endpoint remains read-only. |
 | An authenticated inbound handshake rebuilt an unchanged peer observation and let derived `live_status` age between `online` and `stale`. | A healthy HASHI6 heartbeat could rebuild the same route every ~37 seconds and persist the derived age transition, despite proving fresh authenticated liveness itself. | Equivalent inbound observations bypass canonical rebuild, refresh the existing peer's authenticated liveness in memory, and log only at debug level. Route, identity, capability or directory-revision changes still take the normal persistent path. |
 | Five-minute static bootstrap re-probed peers already registered as offline. | It duplicated liveness/handshake recovery and produced 14 route probes in one healthy four-minute acceptance segment that crossed the bootstrap boundary. | Bootstrap probes only unregistered instances. Registered peers remain with the liveness/handshake owner, which already reads current routes and applies peer/endpoint backoff. |
-| Route and status helpers reparsed `instances.json` on every lookup, and bootstrap read live endpoints before knowing whether an unknown peer existed. | One handshake/liveness pass could parse identical configuration once per peer; an all-known bootstrap still performed payload I/O. | A metadata signature preserves the parsed instance projection until the source changes. Bootstrap reads live endpoints lazily only for an unregistered instance. |
+| Route and status helpers reparsed `instances.json` on every lookup, and bootstrap read live endpoints before knowing whether an unknown peer existed. | One handshake/liveness pass could parse identical configuration once per peer; an all-known bootstrap still performed payload I/O. | A metadata signature, sampled at most once per second, preserves the parsed instance projection until the source changes. Bootstrap reads live endpoints lazily only for an unregistered instance. |
 
 ## Independent recovery contracts
 
@@ -130,7 +130,8 @@ The subsequent Remote idle-write/backoff regression group contains 173 passing
 tests and 2 platform skips. The static-bootstrap duplicate-owner regression
 failed before the fix by observing an actual route probe for an already known
 offline peer; the instance-source cache regression likewise failed by observing
-two payload reads for an unchanged file. Both pass after the fix, together with
+two payload reads for an unchanged file, then failed again when a single status
+burst still performed two metadata checks. Both pass after the fix, together with
 unknown-peer bootstrap and existing healthy/discovery-owner cases (5/5).
 The complete `test_remote*` focused inventory is 480 passing tests and 11
 platform/live skips; this includes Remote peer,
