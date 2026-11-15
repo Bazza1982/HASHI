@@ -4,10 +4,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.kernel_artifact import manifest_digest, verify_artifact
+from orchestrator.kernel_artifact import (
+    artifact_verification_stats,
+    manifest_digest,
+    validate_artifact_identity,
+    verify_artifact,
+)
+from orchestrator import kernel_process as kernel_module
 from orchestrator.kernel_process import KernelRuntime
 from orchestrator.runtime_contract import enforce_runtime_contract
 
@@ -44,7 +51,13 @@ async def serve(connection, bootstrap):
 
 
 def release(tmp_path, value="old", failure=""):
-    artifact = tmp_path / (value + failure)
+    artifact = (
+        tmp_path
+        / "instance"
+        / "state"
+        / "function_generations"
+        / (value + failure)
+    )
     module = artifact / "orchestrator" / "kernel_fixture.py"
     module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text(PEER.format(value=value, failure=failure))
@@ -165,6 +178,110 @@ def test_artifact_rejects_core_shadow_and_path_escape(tmp_path):
                 tmp_path,
                 {"entries": entries, "generation_id": manifest_digest(entries)},
             )
+
+
+def test_one_full_generation_scan_is_reused_by_twenty_four_worker_admissions(tmp_path):
+    generation = release(tmp_path)
+    root = Path(generation["generation_root"])
+    artifact_verification_stats(reset=True)
+
+    verify_artifact(root, generation["manifest"])
+    for _ in range(24):
+        validate_artifact_identity(root, generation["manifest"])
+
+    stats = artifact_verification_stats()
+    assert stats["full_scans"] == 1
+    assert stats["identity_checks"] == 24
+    assert stats["files_hashed"] == 1
+    assert stats["bytes_hashed"] == sum(
+        path.stat().st_size for path in root.rglob("*.py")
+    )
+    assert stats["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_replacement_failure_receipt_preserves_root_cause_and_rollback(
+    tmp_path, monkeypatch
+):
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    class Peer:
+        def __init__(self, *, activation_error=None):
+            self.activation_error = activation_error
+            self.calls = []
+
+        async def request(self, method, *args, **kwargs):
+            self.calls.append(method)
+            if method == "quiesce":
+                return {"checkpoint": "fixture"}
+            if method == "activate" and self.activation_error:
+                raise self.activation_error
+            return {"ok": True}
+
+    class Client:
+        def __init__(self, pid, *, activation_error=None):
+            self.process = Process(pid)
+            self.peer = Peer(activation_error=activation_error)
+
+        async def close(self):
+            self.process.alive = False
+
+    old = Client(101)
+    candidate = Client(202, activation_error=ValueError("activation fixture root cause"))
+    restored = Client(303)
+
+    async def prepare(_cls, bootstrap):
+        return restored if bootstrap.get("restore") else candidate
+
+    monkeypatch.setattr(kernel_module.ProcessClient, "prepare", classmethod(prepare))
+    monkeypatch.setattr(kernel_module, "validate_artifact_identity", lambda *a, **k: None)
+    monkeypatch.setattr(kernel_module, "compare_runtime_fingerprints", lambda *a, **k: None)
+    monkeypatch.setattr(kernel_module, "_observed_runtime", lambda *a, **k: object())
+
+    runtime = SimpleNamespace(to_dict=lambda: {})
+    kernel = KernelRuntime(ROOT, tmp_path, runtime)
+    previous = {
+        "generation_root": str(tmp_path / "previous"),
+        "manifest": {"generation_id": "sha256:previous"},
+    }
+    replacement = {
+        "generation_root": str(tmp_path / "candidate"),
+        "manifest": {"generation_id": "sha256:candidate"},
+    }
+    kernel.active = old
+    kernel.release = previous
+    monkeypatch.setattr(kernel, "verify_supplied_release", lambda release: None)
+    kernel.bootstrap = lambda release, handoff=None, **flags: {
+        "restore": bool(flags.get("restore")),
+    }
+    published = []
+    kernel.publish = lambda phase, **extra: published.append((phase, extra))
+
+    assert await kernel.replace(replacement, operation_id="f" * 32) is False
+    outcome = kernel.last_replacement_outcome
+    assert outcome["operation_id"] == "f" * 32
+    assert outcome["requested_scope"] == "shared_functions"
+    assert outcome["candidate_generation"] == "sha256:candidate"
+    assert outcome["candidate_pid"] == 202
+    assert outcome["product_code_execution_began"] is True
+    assert outcome["failure_stage"] == "candidate_activation"
+    assert outcome["exception_type"] == "ValueError"
+    assert outcome["reason_code"] == "replacement_candidate_activation_failed"
+    assert outcome["error"] == "activation fixture root cause"
+    assert outcome["rollback"] == {
+        "attempted": True,
+        "succeeded": True,
+        "mode": "restore_previous",
+    }
+    assert outcome["stage_timings_ms"]["total"] >= 0
+    assert kernel.active is restored and kernel.release is previous
+    assert published[-1][1]["replacement_outcome"] == outcome
 
 
 @pytest.mark.asyncio

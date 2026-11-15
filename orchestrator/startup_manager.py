@@ -576,9 +576,13 @@ class StartupManager:
                 return None, None
             pinned = getattr(self.kernel, "_startup_artifact", None)
             if pinned is not None:
-                from orchestrator.function_worker_supervisor import verify_generation_artifact
+                from orchestrator.kernel_artifact import validate_artifact_identity
                 generation, generation_root = pinned
-                await asyncio.to_thread(verify_generation_artifact, generation_root, generation)
+                await asyncio.to_thread(
+                    validate_artifact_identity,
+                    generation_root,
+                    generation.manifest.to_dict(),
+                )
             else:
                 generation, generation_root = await prepare()
             startup_progress.update(

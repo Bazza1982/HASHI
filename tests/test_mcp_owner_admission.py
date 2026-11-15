@@ -306,7 +306,7 @@ async def test_owner_preserves_tool_activity_progress(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_new_mcp_requires_current_strict_installation_qualification(tmp_path, monkeypatch):
+async def test_new_mcp_reuses_bound_parent_and_child_fast_admits(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import orchestrator.runtime_contract as contract
     audit, workspace, registry = setup(tmp_path)
@@ -314,18 +314,28 @@ async def test_new_mcp_requires_current_strict_installation_qualification(tmp_pa
     registry.audit_context.update(audit)
     adapter = SimpleNamespace(tool_registry=registry, config=SimpleNamespace(workspace_dir=workspace),
                               global_config=config)
-    admitted = SimpleNamespace(manifest_path=tmp_path/"qualified.json", manifest_digest="sha256:pinned")
+    admitted = SimpleNamespace(
+        manifest_path=tmp_path/"qualified.json",
+        manifest_digest="sha256:pinned",
+        fingerprint=SimpleNamespace(role=contract.FUNCTIONS_ROLE),
+    )
     monkeypatch.setattr(contract, "current_process_runtime", lambda: admitted)
-    def corrupted(*args, **kwargs):
-        raise contract.RuntimeContractError("runtime_integrity_failed: unlisted executable file")
-    monkeypatch.setattr(contract, "qualified_runtime_from_reference", corrupted)
-    invocation = None
+    def unexpected_deep_scan(*args, **kwargs):
+        raise AssertionError("MCP parent must not repeat deep installation qualification")
+    monkeypatch.setattr(
+        contract, "qualified_runtime_from_reference", unexpected_deep_scan
+    )
+    invocation = prepare_hashi_mcp(adapter, backend="codex-cli")
     try:
-        with pytest.raises(contract.RuntimeContractError, match="runtime_integrity_failed"):
-            invocation = prepare_hashi_mcp(adapter, backend="codex-cli")
+        arguments = list(invocation["args"])
+        assert arguments[arguments.index("--runtime-manifest") + 1] == str(
+            admitted.manifest_path
+        )
+        assert arguments[arguments.index("--runtime-manifest-digest") + 1] == (
+            admitted.manifest_digest
+        )
     finally:
-        if invocation:
-            invocation.close()
+        invocation.close()
         proxy = getattr(adapter, "_browser_gateway_proxy", None)
         if proxy:
             await asyncio.to_thread(proxy.close)

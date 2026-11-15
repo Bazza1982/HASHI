@@ -5,17 +5,17 @@
 
 ## Current development and published releases
 
-The current development source is the **v5.0.0-alpha.1** Core/environment
-separation candidate, encoded as **5.0.0a1** in Python metadata. See
-[the v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md) for why the Core major
-changed, other included changes and migration. It is not a stable production
+The current development source is the **v6.0.0-alpha.1** startup recovery and
+Core simplification candidate, encoded as **6.0.0a1** in Python metadata. See
+[the v6 recovery notes](RELEASE_NOTES_v6.0.0-alpha.1.md) for why the Core major
+changed, the focused migration and remaining risks. It is not a stable production
 release. Merging the candidate to `main` publishes source only.
 
-Publication snapshot checked on **2026-11-07**:
+Publication snapshot checked on **2026-11-15**:
 
 | Surface | Observed state |
 |---|---|
-| Development source metadata | v5.0.0-alpha.1 / 5.0.0a1; candidate, not a published distribution |
+| Development source metadata | v6.0.0-alpha.1 / 6.0.0a1; candidate, not a published distribution |
 | GitHub newest published pre-release | [v4.0.0-beta.1](https://github.com/Bazza1982/HASHI/releases/tag/v4.0.0-beta.1) |
 | GitHub Beta installation package | [hashi-bridge-4.0.0-beta.1.tgz](https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz) |
 | GitHub stable Latest | v2.0.0, a historical release |
@@ -99,11 +99,12 @@ Full release history lives in
 Milestone descriptions record what existed then; older Workbench, Claw,
 wrapper-mode, model, and hot-reload descriptions are not current instructions.
 
-The [v5 notes](RELEASE_NOTES_v5.0.0-alpha.1.md) describe the current source
-candidate and its limits. The historical
+The [v6 notes](RELEASE_NOTES_v6.0.0-alpha.1.md) describe the current source
+candidate and its limits. The [v5 notes](RELEASE_NOTES_v5.0.0-alpha.1.md)
+describe the preceding Core/Functions separation candidate. The historical
 [v4 Beta notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md)
 describe the published GitHub pre-release and npm-format installation archive.
-That GitHub asset does not imply an npm-registry publication or a v5 package.
+That GitHub asset does not imply an npm-registry publication or a v6 package.
 
 Maintainers use the
 [versioning policy](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_VERSIONING_POLICY.md)

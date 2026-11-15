@@ -5,6 +5,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from telegram.error import InvalidToken
 
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
@@ -179,6 +180,37 @@ async def test_ingress_supervises_initial_connection_failure(monkeypatch, failur
         assert ("delete_webhook", True) not in bot.calls
     finally:
         await ingress.stop()
+
+
+@pytest.mark.asyncio
+async def test_invalid_token_stops_connector_local_retries_until_config_changes():
+    bot = _Bot("invalid-token")
+    attempts = 0
+
+    async def reject():
+        nonlocal attempts
+        attempts += 1
+        raise InvalidToken("credential rejected")
+
+    bot.initialize = reject
+    ingress = CoreTelegramIngress(
+        agent_name="alpha",
+        token="invalid-token",
+        handle_lookup=lambda _: object(),
+        bot_factory=lambda _: bot,
+    )
+
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.wait_for(ingress.task, timeout=1)
+    assert attempts == 1
+    assert ingress.permanent_failure_reason == "invalid_token"
+    assert ingress.connected is False
+
+    # The same configuration cannot schedule another activation. The
+    # supervisor replaces this object only when the token fingerprint changes.
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.sleep(0)
+    assert attempts == 1
 
 
 @pytest.mark.asyncio

@@ -32,16 +32,17 @@ def build_live_probe_plan(
         "steps": [
             {
                 "id": "healthcheck",
-                "argv": ["python3", script_path, "healthcheck", "--socket", live_socket_path, "--wait-for-socket-s", "2"],
+                "argv": ["python3", "-B", script_path, "healthcheck", "--socket", live_socket_path, "--wait-for-socket-s", "2"],
             },
             {
                 "id": "ping",
-                "argv": ["python3", script_path, "ping", "--socket", live_socket_path, "--wait-for-socket-s", "2"],
+                "argv": ["python3", "-B", script_path, "ping", "--socket", live_socket_path, "--wait-for-socket-s", "2"],
             },
             {
                 "id": "active_tab",
                 "argv": [
                     "python3",
+                    "-B",
                     script_path,
                     "active_tab",
                     "--socket",
@@ -56,6 +57,7 @@ def build_live_probe_plan(
                 "id": "get_text",
                 "argv": [
                     "python3",
+                    "-B",
                     script_path,
                     "get_text",
                     "--socket",
@@ -70,6 +72,7 @@ def build_live_probe_plan(
                 "id": "screenshot",
                 "argv": [
                     "python3",
+                    "-B",
                     script_path,
                     "screenshot",
                     "--socket",

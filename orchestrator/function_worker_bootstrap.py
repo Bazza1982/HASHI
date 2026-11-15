@@ -13,12 +13,21 @@ if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator.kernel_import_guard import candidate_import_guard
-from orchestrator.kernel_artifact import GenerationModuleFinder, verify_artifact
+from orchestrator.kernel_artifact import GenerationModuleFinder, validate_artifact_identity
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
+    admitted_process_runtime_fingerprint,
     compare_runtime_fingerprints,
+    current_process_runtime,
     enforce_runtime_contract,
 )
+
+
+def _runtime_fingerprint(code_root: Path):
+    admitted = current_process_runtime()
+    if admitted is not None:
+        return admitted_process_runtime_fingerprint(admitted, code_root=code_root)
+    return enforce_runtime_contract(code_root)
 
 
 def run_generation_process(connection, bootstrap: dict) -> None:
@@ -27,11 +36,11 @@ def run_generation_process(connection, bootstrap: dict) -> None:
             os.setsid()
         code_root = Path(bootstrap["code_root"]).resolve()
         artifact = Path(bootstrap["generation_root"]).resolve()
-        runtime = enforce_runtime_contract(code_root)
+        runtime = _runtime_fingerprint(code_root)
         compare_runtime_fingerprints(
             RuntimeFingerprint.from_mapping(bootstrap["runtime"]), runtime
         )
-        verify_artifact(artifact, bootstrap["manifest"])
+        validate_artifact_identity(artifact, bootstrap["manifest"])
         os.environ.update(
             {
                 "BRIDGE_HOME": bootstrap["bridge_home"],
@@ -71,7 +80,7 @@ QUALIFICATION_RESULT_PREFIX = "HASHI_RUNTIME_RELEASE="
 
 def qualify_payload(payload: dict) -> dict:
     code_root = Path(payload["code_root"]).resolve()
-    runtime = enforce_runtime_contract(code_root)
+    runtime = _runtime_fingerprint(code_root)
     compare_runtime_fingerprints(RuntimeFingerprint.from_mapping(payload["runtime"]), runtime)
     os.environ["HASHI_SOURCE_ROOT"] = str(code_root)
     # Product qualification is the same import boundary as a prepared child.

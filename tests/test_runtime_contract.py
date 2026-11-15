@@ -399,17 +399,16 @@ def test_main_rejects_an_invalid_core_before_instance_or_function_side_effects(
     entry = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(entry)
 
-    def reject_core(code_root, *, role):
+    def reject_core_selection(code_root):
         assert code_root == ROOT
-        assert role == "core-host"
         raise RuntimeContractError("intentional invalid Core runtime")
 
     def unexpected_side_effect(*args, **kwargs):
         pytest.fail("unqualified Core reached instance or Functions setup")
 
-    monkeypatch.setattr(entry, "enforce_runtime_contract", reject_core)
-    for name in ("load_core_runtime_selection", "canonical_instance_home",
-                 "instance_runtime_dir", "InstanceLock", "KernelRuntime", "write_record"):
+    monkeypatch.setattr(entry, "load_core_runtime_selection", reject_core_selection)
+    for name in ("bind_process_runtime", "canonical_instance_home", "instance_runtime_dir",
+                 "InstanceLock", "KernelRuntime", "write_record"):
         monkeypatch.setattr(entry, name, unexpected_side_effect)
     home = tmp_path / "must-not-be-created"
     assert entry.main(["--bridge-home", str(home), "--replace-functions"]) == 78

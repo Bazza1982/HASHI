@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -247,13 +248,23 @@ function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredT
 function Start-ScheduledTask {{
     param($TaskName, $ErrorAction)
     Set-Content -Encoding UTF8 -LiteralPath {_ps_string(started)} -Value $TaskName
+    if ($TaskName -eq 'HashiRestart-restart-exact') {{
+        $RequestPath = Join-Path {_ps_string(root)} 'state/instance/cold-restart/request.json'
+        $Request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
+        @{{
+            schema=1; operation_id=[string]$Request.operation_id;
+            instance_id='RESTART-EXACT'; state='launch_accepted';
+            evidence=@{{core_pid=1234}}
+        }} | ConvertTo-Json -Depth 5 -Compress |
+            Set-Content -Encoding UTF8 -LiteralPath ([string]$Request.receipt_path)
+    }}
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 if ('{configure}' -eq 'ensure') {{
     # Existing valid tasks created elevated may lack the Limited user's ACE.
     $global:TaskSecurity = @{{}}
     $global:TaskSecurityWrites = @()
-    $global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit = 'PT5M'
+    $global:RegisteredTasks['HashiRestart-restart-exact'].Settings.ExecutionTimeLimit = 'PT10M'
     & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} ensure -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 }}
 $FirstWrites = $global:TaskSecurityWrites.Count
@@ -278,7 +289,7 @@ $FirstWrites = $global:TaskSecurityWrites.Count
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
     access = json.loads(security.read_text(encoding="utf-8-sig"))
-    assert access["RestartLimit"] == "PT10M"
+    assert access["RestartLimit"] == "PT5M"
     assert access["DurationWrites"] == (1 if configure == "ensure" else 0)
     assert access["FirstWrites"] == 2
     assert len(access["Writes"]) == 2  # A second ensure must not rewrite the ACL.
@@ -306,6 +317,24 @@ def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path, h
     stopped = tmp_path / "stopped.txt"
     started = tmp_path / "started.txt"
     log = tmp_path / "restart.log"
+    receipt = root / "state" / "instance" / "cold-restart" / "receipt.json"
+    request = receipt.with_name("request.json")
+    request.parent.mkdir(parents=True)
+    request.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": "b" * 32,
+                "instance_id": "RESTART-EXACT",
+                "code_root": str(root),
+                "hashi_root": str(root),
+                "receipt_path": str(receipt),
+                "requested_at": "2026-11-15T00:00:00Z",
+                "deadline_epoch_ms": int(time.time() * 1000) + 20_000,
+            }
+        ),
+        encoding="utf-8",
+    )
     (bin_dir / "bridge_ctl.ps1").write_text(
         "param([string]$Action, [string]$BridgeHome)\n"
         f"Set-Content -LiteralPath {_ps_string(stopped)} -Value $Action\n"
@@ -316,19 +345,30 @@ def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path, h
 
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
-$global:RuntimeState = 'Ready'
-$global:HealthCalls = 0
-function Get-ScheduledTask {{
-    param($TaskName, $ErrorAction)
-    [pscustomobject]@{{State=$global:RuntimeState}}
+$global:RuntimeTaskObject = [pscustomobject]@{{State=3; LastTaskResult=0}}
+$global:TaskFolder = [pscustomobject]@{{}}
+$global:TaskFolder | Add-Member -MemberType ScriptMethod -Name GetTask -Value {{
+    param($TaskName) $global:RuntimeTaskObject
 }}
+$global:Scheduler = [pscustomobject]@{{}}
+$global:Scheduler | Add-Member -MemberType ScriptMethod -Name Connect -Value {{}}
+$global:Scheduler | Add-Member -MemberType ScriptMethod -Name GetFolder -Value {{
+    param($Path) $global:TaskFolder
+}}
+$global:HealthCalls = 0
+function New-Object {{ param($ComObject) $global:Scheduler }}
 function Start-ScheduledTask {{
     param($TaskName, $ErrorAction)
-    $global:RuntimeState = 'Ready'
+    $global:RuntimeTaskObject.State = 4
     Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
+    @{{
+        schema=1; operation_id=('b' * 32);
+        instance_id=$(if ('{health_mode}' -eq 'foreign') {{'OTHER'}} else {{'RESTART-EXACT'}});
+        state='launch_accepted'; evidence=@{{core_pid=1234}}
+    }} | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -Encoding UTF8 -LiteralPath {_ps_string(receipt)}
 }}
-function Stop-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RuntimeState = 'Ready' }}
-function Get-ScheduledTaskInfo {{ [pscustomobject]@{{LastTaskResult=0}} }}
+function Stop-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RuntimeTaskObject.State = 3 }}
 function Start-Sleep {{ param($Seconds, $Milliseconds) }}
 function Invoke-RestMethod {{
     param($Uri, $Method, $TimeoutSec)
@@ -352,16 +392,16 @@ function Invoke-RestMethod {{
 exit $LASTEXITCODE
 """)
 
-    if health_mode in {"foreign", "failed-agent"}:
+    if health_mode == "foreign":
         assert result.returncode != 0
-        assert "Backend ready" not in log.read_text(encoding="utf-8-sig")
+        assert "identity mismatch" in log.read_text(encoding="utf-8-sig")
         return
     assert result.returncode == 0, result.stderr
     assert stopped.read_text(encoding="utf-8-sig").strip() == "stop"
     assert started.read_text(encoding="utf-8-sig").strip() == (
         "HashiRuntime-restart-exact"
     )
-    assert "Backend ready" in log.read_text(encoding="utf-8-sig")
+    assert "launch accepted" in log.read_text(encoding="utf-8-sig")
 
 
 def test_bridge_controller_does_not_swallow_process_termination_errors():
@@ -374,6 +414,139 @@ def test_bridge_controller_does_not_swallow_process_termination_errors():
     assert "$killFailures +=" in stop_block
     assert "Process termination reported errors" in stop_block
     assert "Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue" not in stop_block
+
+
+def test_bridge_launch_acceptance_allows_only_selected_launcher_or_direct_base_child():
+    result = _powershell(rf"""
+$Tokens = $null
+$ParseErrors = $null
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_string(ROOT / 'bin/bridge_ctl.ps1')}, [ref]$Tokens, [ref]$ParseErrors)
+if ($ParseErrors.Count) {{ throw ($ParseErrors | Out-String) }}
+$Functions = $Ast.FindAll({{
+    param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}}, $false)
+. ([scriptblock]::Create(($Functions | ForEach-Object {{ $_.Extent.Text }}) -join [Environment]::NewLine))
+$global:ProcessTable = @{{
+    700 = [pscustomobject]@{{ProcessId=700;ParentProcessId=600;ExecutablePath='C:\runtime\core\Scripts\python.exe'}}
+    701 = [pscustomobject]@{{ProcessId=701;ParentProcessId=700;ExecutablePath='C:\runtime\base\python.exe'}}
+    702 = [pscustomobject]@{{ProcessId=702;ParentProcessId=999;ExecutablePath='C:\runtime\base\python.exe'}}
+    703 = [pscustomobject]@{{ProcessId=703;ParentProcessId=700;ExecutablePath='C:\foreign\python.exe'}}
+}}
+function Get-CimInstance {{
+    param($ClassName, $Filter, $ErrorAction)
+    if ($ClassName -ne 'Win32_Process' -or $Filter -notmatch '(\d+)$') {{ return $null }}
+    return $global:ProcessTable[[int]$Matches[1]]
+}}
+$Approved = @('C:\runtime\core\Scripts\python.exe', 'C:\runtime\base\python.exe')
+[ordered]@{{
+    selected_launcher = Test-CoreLaunchProcess -CandidatePid 700 -LauncherPid 700 -ApprovedImages $Approved
+    venv_base_child = Test-CoreLaunchProcess -CandidatePid 701 -LauncherPid 700 -ApprovedImages $Approved
+    unrelated_parent = Test-CoreLaunchProcess -CandidatePid 702 -LauncherPid 700 -ApprovedImages $Approved
+    foreign_image = Test-CoreLaunchProcess -CandidatePid 703 -LauncherPid 700 -ApprovedImages $Approved
+}} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed == {
+        "selected_launcher": True,
+        "venv_base_child": True,
+        "unrelated_parent": False,
+        "foreign_image": False,
+    }
+
+
+def test_bridge_selected_venv_expands_only_to_its_declared_base_image(tmp_path):
+    environment = tmp_path / "core"
+    selected = environment / "Scripts" / "python.exe"
+    base = tmp_path / "base"
+    selected.parent.mkdir(parents=True)
+    base.mkdir()
+    selected.write_bytes(b"launcher")
+    (base / "python.exe").write_bytes(b"base")
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {base}\ninclude-system-site-packages = false\n", encoding="utf-8"
+    )
+    result = _powershell(f"""
+$Tokens = $null
+$ParseErrors = $null
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_string(ROOT / 'bin/bridge_ctl.ps1')}, [ref]$Tokens, [ref]$ParseErrors)
+if ($ParseErrors.Count) {{ throw ($ParseErrors | Out-String) }}
+$Function = $Ast.Find({{
+    param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $Node.Name -eq 'Get-ApprovedCoreProcessImages'
+}}, $false)
+. ([scriptblock]::Create($Function.Extent.Text))
+@(Get-ApprovedCoreProcessImages -SelectedExecutable {_ps_string(selected)}) |
+    ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [str(selected), str(base / "python.exe")]
+
+
+def test_bridge_checks_core_receipt_before_treating_launcher_exit_as_rejection():
+    text = (ROOT / "bin/bridge_ctl.ps1").read_text(encoding="utf-8")
+    start = text.split("function Start-Bridge", 1)[1].split(
+        "function Show-Status", 1
+    )[0]
+    assert start.index("$BridgePid = Get-BridgePid") < start.index(
+        "if ($Launcher.HasExited)"
+    )
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_bridge_consumes_active_request_and_discards_expired_stale_request(
+    tmp_path, expired
+):
+    code = tmp_path / "code"
+    home = tmp_path / "home"
+    request = home / "state" / "instance" / "cold-restart" / "request.json"
+    receipt = request.with_name("receipt.json")
+    request.parent.mkdir(parents=True)
+    code.mkdir()
+    request.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": "a" * 32,
+                "instance_id": "HASHI4",
+                "code_root": str(code),
+                "hashi_root": str(home),
+                "receipt_path": str(receipt),
+                "deadline_epoch_ms": int(time.time() * 1000)
+                + (-1000 if expired else 30_000),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _powershell(f"""
+$Tokens = $null
+$ParseErrors = $null
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_string(ROOT / 'bin/bridge_ctl.ps1')}, [ref]$Tokens, [ref]$ParseErrors)
+if ($ParseErrors.Count) {{ throw ($ParseErrors | Out-String) }}
+$Function = $Ast.Find({{
+    param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $Node.Name -eq 'Get-StartupRequest'
+}}, $false)
+. ([scriptblock]::Create($Function.Extent.Text))
+$StartupRequestPath = {_ps_string(request)}
+$BridgeHome = {_ps_string(home)}
+$ProjectDir = {_ps_string(code)}
+$InstanceId = 'HASHI4'
+$Value = Get-StartupRequest
+[ordered]@{{
+    is_null = $null -eq $Value
+    request_exists = Test-Path -LiteralPath $StartupRequestPath
+    operation_id = if ($null -eq $Value) {{ $null }} else {{ [string]$Value.operation_id }}
+}} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["request_exists"] is False
+    assert observed["is_null"] is expired
+    assert observed["operation_id"] == (None if expired else "a" * 32)
 
 
 @pytest.mark.parametrize("explicit_gateway,old_gateway", [(False, False), (True, False), (False, True)])
@@ -963,7 +1136,7 @@ function Invoke-RestMethod {{
     assert "ready_empty" in result.stdout
 # HASHI-Fingerprint: hfp_fe0457bf7c984c12b12d7aa97547a06a
 
-def test_same_privilege_restart_fallback_forwards_gateway_policy(tmp_path):
+def test_missing_fixed_restart_task_fails_before_stopping_or_launching(tmp_path):
     root = tmp_path / "hashi manual fallback"
     remote = root / "remote"
     remote.mkdir(parents=True)
@@ -984,9 +1157,6 @@ function powershell.exe {{
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} trigger -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 """)
-    assert result.returncode == 0, result.stderr
-    received = json.loads(captured.read_text(encoding="utf-8-sig"))
-    assert Path(received["File"]) == ROOT / "bin/bridge_ctl.ps1"
-    assert received["Action"] == "restart"
-    assert received["Resume"] is True
-    assert received["ApiGateway"] is True
+    assert result.returncode != 0
+    assert not captured.exists()
+    assert "Missing fixed restart task" in result.stderr

@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,23 @@ def _run(tmp_path: Path, case: str):
     )
     (tmp_path / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "HASHI3", "workbench_port": 65530}}),
+        encoding="utf-8",
+    )
+    receipt = tmp_path / "state" / "instance" / "cold-restart" / "receipt.json"
+    request = receipt.with_name("request.json")
+    request.parent.mkdir(parents=True)
+    request.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": "a" * 32,
+                "instance_id": "HASHI3",
+                "code_root": str(code),
+                "hashi_root": str(tmp_path),
+                "receipt_path": str(receipt),
+                "deadline_epoch_ms": int(time.time() * 1000) + 20_000,
+            }
+        ),
         encoding="utf-8",
     )
     trace = tmp_path / "calls.json"
@@ -81,6 +99,16 @@ function global:Get-ScheduledTaskInfo {
 function global:Start-ScheduledTask {
     param([string]$TaskName)
     $global:Calls.start++; $global:Running=$true; Save-Calls
+    if ($global:Case -eq 'crash') {
+        $global:Running=$false; $global:Result=7
+    } elseif ($global:Case -ne 'stubborn') {
+        @{schema=1;operation_id=('a' * 32);
+          instance_id=$(if ($global:Case -eq 'wrong_instance') {'FOREIGN'} else {'HASHI3'});
+          state='launch_accepted';evidence=@{core_pid=1234}} |
+            ConvertTo-Json -Depth 5 -Compress |
+            Set-Content -Encoding UTF8 -LiteralPath RECEIPT_PATH
+    }
+    Save-Calls
 }
 function global:Stop-ScheduledTask {
     param([string]$TaskName)
@@ -110,6 +138,7 @@ exit $LASTEXITCODE
     for key, value in {
         "TRACE_PATH": trace, "CASE_NAME": case, "RUNNER_PATH": RUNNER,
         "ROOT_PATH": tmp_path, "CODE_PATH": code, "LOG_PATH": log,
+        "RECEIPT_PATH": receipt,
     }.items():
         script = script.replace(key, _ps(value))
     wrapper.write_text(script, encoding="utf-8")
@@ -128,22 +157,22 @@ def test_runner_reuses_live_task_handle_and_finishes_when_healthy(tmp_path):
     assert p.returncode == 0, p.stdout
     assert stopped
     assert calls["open"] == 1 and calls["cim"] == 0
-    assert calls["health"] == 3 and calls["start"] == 1
-    assert "restart completed" in log
+    assert calls["health"] == 0 and calls["start"] == 1
+    assert "launch accepted" in log
 
 
 def test_runner_still_detects_task_crash_before_readiness(tmp_path):
     p, calls, log, _ = _run(tmp_path, "crash")
     assert p.returncode != 0
-    assert calls["health"] == 2 and calls["start"] == 1
-    assert "failed before readiness; result=7" in log
+    assert calls["health"] == 0 and calls["start"] == 1
+    assert "rejected launch; result=7" in log
 
 
 def test_runner_never_accepts_a_foreign_instance_health(tmp_path):
     p, calls, log, _ = _run(tmp_path, "wrong_instance")
     assert p.returncode != 0
-    assert calls["health"] == 300 and calls["start"] == 1
-    assert "timed out waiting" in log
+    assert calls["health"] == 0 and calls["start"] == 1
+    assert "identity mismatch" in log
 
 
 def test_task_read_failure_does_not_stop_the_running_instance(tmp_path):

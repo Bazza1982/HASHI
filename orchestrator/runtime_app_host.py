@@ -16,12 +16,13 @@ from pathlib import Path
 from orchestrator.function_generation import candidate_import_guard
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.function_worker_protocol import JsonConnectionPeer
-from orchestrator.kernel_artifact import verify_artifact
+from orchestrator.kernel_artifact import validate_artifact_identity
 from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError, RuntimeFingerprint
 from orchestrator import runtime_handoff
 from orchestrator.lifecycle_timing import timed
 
 
+# Compatibility constant for diagnostics/tests; shared connector retry is gone.
 CONNECTOR_RETRY_SECONDS = 5
 
 
@@ -50,11 +51,13 @@ class RuntimeAppHost:
         if core_runtime is not None and core_runtime.role != CORE_HOST_ROLE:
             raise RuntimeContractError("Admitted Core receipt has the wrong runtime role")
         manifest = self.bootstrap["manifest"]
+        validate_artifact_identity(
+            Path(self.bootstrap["generation_root"]), manifest
+        )
         with candidate_import_guard():
             for entry in manifest["entries"]:
                 importlib.import_module(entry["module"])
             validate_function_contract()
-        verify_artifact(Path(self.bootstrap["generation_root"]), manifest)
         from orchestrator.pathing import build_bridge_paths
         from orchestrator.runtime_app import UniversalOrchestrator
         from orchestrator.bootstrap_logging import configure_terminal_console
@@ -109,7 +112,6 @@ class RuntimeAppHost:
         from orchestrator.function_worker_supervisor import (
             generation_artifact_source_commit,
             generation_from_dict,
-            verify_generation_artifact,
         )
 
         generation_root = Path(self.bootstrap["generation_root"])
@@ -137,7 +139,6 @@ class RuntimeAppHost:
                 },
             }
         )
-        verify_generation_artifact(generation_root, startup_generation)
         self.app._startup_artifact = (
             startup_generation,
             generation_root,
@@ -252,7 +253,6 @@ class RuntimeAppHost:
                             errors["remote"] = str(remote.get("action") or "unavailable")
                     except Exception as exc:
                         errors["remote"] = f"{type(exc).__name__}: {exc}"
-                await app.function_workers.broadcast_topology()
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)
@@ -273,15 +273,6 @@ class RuntimeAppHost:
                 app._connector_activation_pending = False
             app.startup_manager.reconcile_connector_status(errors)
         return errors
-
-    async def _retry_connectors(self):
-        while not self.stopping.is_set() and not self.app._handoff_draining:
-            await asyncio.sleep(CONNECTOR_RETRY_SECONDS)
-            if self.app._handoff_draining:
-                return
-            if not await self._activate_connectors():
-                runtime_handoff.persist(self.app)
-                return
 
     @timed("shared.commit")
     async def commit(self):
@@ -329,8 +320,6 @@ class RuntimeAppHost:
         try:
             errors = await self._activate_connectors()
             runtime_handoff.persist(self.app)
-            if errors:
-                await self._retry_connectors()
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -1563,10 +1563,11 @@ class RebootManager:
             self._record_stage(record, "candidate_start", candidate_started)
             counts = self._metrics_for(record)["work_counts"]
             counts["candidate_worker_count"] = len(candidates)
-            # Protected bootstrap verifies the actual artifact once per Worker.
+            # Worker admission rechecks only the nonce-bound generation
+            # receipt. It does not read or hash the artifact again.
             counts["manifest_hash_count"] = int(
                 counts.get("manifest_hash_count", 0)
-            ) + len(candidates)
+            )
         return candidates
 
     @staticmethod

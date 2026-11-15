@@ -85,6 +85,7 @@ function Install-CapabilityTask {
     )
 
     $Arguments = @(
+        "-B",
         "-m",
         "tools.device_control_worker",
         "--kind", $Kind,

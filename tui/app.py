@@ -1141,6 +1141,7 @@ class HASHITuiApp(App):
 
         command = [
             sys.executable,
+            "-B",
             str(self.code_root / "main.py"),
             "--bridge-home",
             str(self.bridge_home),

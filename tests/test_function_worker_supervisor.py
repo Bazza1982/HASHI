@@ -67,8 +67,8 @@ def test_live_worker_prepare_does_not_repeat_probe_or_bootstrap_generation_check
                 called.add(f"{owner.id}.{node.func.attr}")
 
     # The isolated probe owns full-closure import/contract validation.  The
-    # protected bootstrap owns one actual artifact-byte verification per new
-    # process.  Repeating either in the live Host adds cost but no evidence.
+    # protected parent owns one actual artifact-byte verification for the
+    # generation. Repeating either in the live Host adds cost but no evidence.
     assert "verify_qualified_manifest_bytes" not in called
     assert "validate_function_contract" not in called
     assert "importlib.import_module" not in called
@@ -323,7 +323,7 @@ async def test_topology_adopts_saved_telegram_credentials_after_worker_cutover(
     assert not handle.get_runtime_metadata()["telegram_connected"]
     created[0].connected = True
     assert handle.get_runtime_metadata()["telegram_connected"]
-    assert handle.client.calls == ["worker.topology", "worker.topology"]
+    assert handle.client.calls == ["worker.topology"]
 
     created[0].offset = 77
     created[0].is_running = False
@@ -339,6 +339,7 @@ async def test_topology_adopts_saved_telegram_credentials_after_worker_cutover(
     assert len(created) == 3
     assert created[-1].token == replacement
     assert created[-1].offset is None  # Another Bot must not inherit the previous Bot's cursor.
+    assert handle.client.calls.count("worker.topology") == 3
 
     kernel._handoff_bot_offsets = {"alpha": {
         "bot_fingerprint": telegram_bot_fingerprint("previous-bot-token"), "offset": 999,
@@ -347,6 +348,52 @@ async def test_topology_adopts_saved_telegram_credentials_after_worker_cutover(
     await recovered.broadcast_topology()
     assert created[-1].token == replacement
     assert created[-1].offset is None  # Crash recovery also rejects another Bot's cursor.
+
+
+@pytest.mark.asyncio
+async def test_unchanged_topology_and_connector_activation_are_not_repeated():
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    client = _Client("alpha", 101)
+    client.nonce = "alpha:101:test"
+    handle = _handle(kernel, client)
+    handle.metadata["telegram_async_connectors"] = True
+    kernel.runtimes = [handle]
+    supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+
+    await asyncio.gather(
+        supervisor.broadcast_topology(), supervisor.broadcast_topology()
+    )
+    if supervisor._connector_start_tasks:
+        await asyncio.gather(*supervisor._connector_start_tasks.values())
+    await supervisor.broadcast_topology()
+
+    assert client.calls.count("worker.topology") == 1
+    assert client.calls.count("worker.connectors_start") == 1
+
+
+@pytest.mark.asyncio
+async def test_committed_route_starts_local_connectors_without_topology_republish():
+    kernel = _Kernel()
+    kernel.runtime_fingerprint.to_dict = lambda: {}
+    client = _Client("alpha", 101)
+    client.nonce = "alpha:101:test"
+    handle = _handle(kernel, client)
+    handle.metadata["telegram_async_connectors"] = True
+    handle._cutover = True
+    kernel.runtimes = [handle]
+    supervisor = kernel.function_workers = FunctionWorkerSupervisor(kernel)
+
+    await supervisor.broadcast_topology()
+    assert client.calls == ["worker.topology"]
+
+    handle._cutover = False
+    await supervisor.broadcast_topology()
+    if supervisor._connector_start_tasks:
+        await asyncio.gather(*supervisor._connector_start_tasks.values())
+
+    assert client.calls.count("worker.topology") == 1
+    assert client.calls.count("worker.connectors_start") == 1
 
 
 @pytest.mark.asyncio
@@ -1666,11 +1713,12 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(code_root=tmp_path, bridge_home=tmp_path)
     kernel.runtime_fingerprint = SimpleNamespace(
-        to_dict=lambda: {"dependency_digest": "core-full-distribution-set"}
+        to_dict=lambda: {
+            "dependency_digest": "selected-functions-distribution-set"
+        }
     )
     supervisor = FunctionWorkerSupervisor(kernel)
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
-    cache_calls = []
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.dependency_digest",
         lambda: (_ for _ in ()).throw(
@@ -1685,9 +1733,10 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     )
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.cached_current_runtime_fingerprint",
-        lambda policy, *, code_root: (
-            cache_calls.append((policy, code_root))
-            or SimpleNamespace(dependency_digest="worker-full-distribution-set")
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "routine Worker startup must reuse the admitted runtime identity"
+            )
         ),
         raising=False,
     )
@@ -1736,7 +1785,6 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     assert len(retired) == 1 and not supervisor._candidates
     assert process_args[0]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]
     assert process_args[0]["runtime"]["dependency_digest"] == (
-        "worker-full-distribution-set"
+        "selected-functions-distribution-set"
     )
-    assert cache_calls == [(("policy", tmp_path), tmp_path)]
 # HASHI-Fingerprint: hfp_1c65cb7af92e496dace719aeb3d865e9

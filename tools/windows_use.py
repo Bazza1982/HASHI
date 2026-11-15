@@ -221,7 +221,7 @@ function Invoke-UvPythonScriptJson {
     foreach ($pkg in $WithPackages) {
         $argsList += @('--with', $pkg)
     }
-    $argsList += @('python', $ScriptPath, $PayloadBase64)
+    $argsList += @('python', '-B', $ScriptPath, $PayloadBase64)
 
     $stdoutFile = Join-Path $env:TEMP ("hashi-windows-use-stdout-" + [guid]::NewGuid().ToString() + ".log")
     $stderrFile = Join-Path $env:TEMP ("hashi-windows-use-stderr-" + [guid]::NewGuid().ToString() + ".log")
@@ -507,7 +507,7 @@ if (-not $uv) {{
 }}
 $argsList = @()
 $argsList += $uv.base_args
-$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', '--with', 'uiautomation', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
+$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', '--with', 'uiautomation', 'python', '-B', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
 $env:PYTHONPATH = $(if ($env:PYTHONPATH) {{ $repoRoot + ';' + $env:PYTHONPATH }} else {{ $repoRoot }})
 Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $helperWorkingDir -WindowStyle Hidden | Out-Null
 @{{ ok = $true }} | ConvertTo-Json -Compress

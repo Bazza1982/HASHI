@@ -37,7 +37,7 @@ if not exist "%PYTHON_EXE%" (
     pause
     exit /b 1
 )
-"%PYTHON_EXE%" "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul
+"%PYTHON_EXE%" -B "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul
 if errorlevel 1 (
     echo ERROR: Python or the dependency generation violates the HASHI Core runtime contract.
     echo        Rebuild this installation; /reboot cannot replace the Core runtime.
@@ -46,8 +46,8 @@ if errorlevel 1 (
 )
 set "PID_FILE="
 set "INSTANCE_ID=HASHI"
-for /f "delims=" %%P in ('"%PYTHON_EXE%" "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field pid-path') do set "PID_FILE=%%P"
-for /f "delims=" %%P in ('"%PYTHON_EXE%" "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field instance-id') do set "INSTANCE_ID=%%P"
+for /f "delims=" %%P in ('"%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field pid-path') do set "PID_FILE=%%P"
+for /f "delims=" %%P in ('"%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field instance-id') do set "INSTANCE_ID=%%P"
 
 :: Check if main bridge is running via PID file
 set BRIDGE_RUNNING=0
@@ -73,7 +73,7 @@ echo.
 
 cd /d "%ROOT%"
 set PYTHONPATH=%ROOT%
-"%PYTHON_EXE%" tui.py 2>> "%LOG_FILE%"
+"%PYTHON_EXE%" -B tui.py 2>> "%LOG_FILE%"
 set EXIT_CODE=%ERRORLEVEL%
 
 echo. >> "%LOG_FILE%"

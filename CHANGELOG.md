@@ -10,8 +10,24 @@ Core generation, functional generation, and maintenance revision.
 
 ## [Unreleased]
 
-Target source candidate: **v5.0.0-alpha.1** (Python **5.0.0a1**).
+Target source candidate: **v6.0.0-alpha.1** (Python **6.0.0a1**).
 This section describes prepared source, not a published tag or installer.
+
+### Core v6 startup recovery
+
+- Separate deep installation/adoption verification from fast routine runtime
+  admission, and instrument the remaining full scans.
+- Accept only ordinary backed `__pycache__/*.pyc` installation extras while
+  continuing to reject unsealed startup hooks, `.pth` files, executables,
+  libraries and sourceless bytecode.
+- Qualify each Functions generation once, reuse its admitted identity across
+  Workers, and preserve exact replacement failure and rollback evidence.
+- Make cold restart task definitions fail fast, require a transaction-bound
+  launch acceptance receipt, and use one bounded readiness deadline.
+- Isolate permanent Telegram configuration failures and remove topology and
+  all-Agent work from connector retry paths.
+
+See [the v6 recovery notes](docs/RELEASE_NOTES_v6.0.0-alpha.1.md).
 
 ### Core v5 upgrade
 

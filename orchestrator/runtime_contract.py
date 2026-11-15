@@ -17,9 +17,11 @@ import re
 import struct
 import sys
 import sysconfig
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -27,6 +29,18 @@ CORE_HOST_ROLE = "core-host"
 FUNCTIONS_ROLE = "functions"
 _RUNTIME_ROLES = frozenset({CORE_HOST_ROLE, FUNCTIONS_ROLE})
 _PROCESS_RUNTIME = None
+_VERIFICATION_STATS_LOCK = threading.Lock()
+_VERIFICATION_STATS = {
+    "deep_scan_count": 0,
+    "deep_files_observed": 0,
+    "deep_files_hashed": 0,
+    "deep_bytes_hashed": 0,
+    "deep_cache_extras_ignored": 0,
+    "deep_duration_ms": 0.0,
+    "fast_admission_count": 0,
+    "fast_files_hashed": 0,
+    "fast_bytes_hashed": 0,
+}
 
 
 class RuntimeContractError(RuntimeError):
@@ -451,6 +465,8 @@ def current_runtime_fingerprint(
     policy: RuntimePolicy,
     *,
     code_root: Path,
+    dependency_digest_override: str | None = None,
+    core_source_digest_override: str | None = None,
 ) -> RuntimeFingerprint:
     implementation = str(getattr(sys.implementation, "name", "")).lower()
     cache_tag = str(getattr(sys.implementation, "cache_tag", "") or "")
@@ -473,6 +489,20 @@ def current_runtime_fingerprint(
             if approved.executable != executable or approved.environment_prefix != str(Path(sys.prefix).resolve()):
                 raise RuntimeContractError("Process runtime binding does not match the observed interpreter")
             installation = approved.installation_digest
+    effective_dependency_digest = (
+        dependency_digest_override
+        if dependency_digest_override is not None
+        else dependency_digest()
+    )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", effective_dependency_digest) is None:
+        raise RuntimeContractError("Invalid admitted dependency digest")
+    effective_core_source_digest = (
+        core_source_digest_override
+        if core_source_digest_override is not None
+        else core_source_digest(code_root)
+    )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", effective_core_source_digest) is None:
+        raise RuntimeContractError("Invalid admitted Core source digest")
     return RuntimeFingerprint(
         installation_digest=installation,
         role=policy.role,
@@ -487,8 +517,8 @@ def current_runtime_fingerprint(
         executable=executable,
         environment_prefix=str(Path(sys.prefix).resolve()),
         runtime_policy_digest=runtime_policy_digest(code_root, policy),
-        dependency_digest=dependency_digest(),
-        core_source_digest=core_source_digest(code_root),
+        dependency_digest=effective_dependency_digest,
+        core_source_digest=effective_core_source_digest,
         core_api=policy.core_api,
         function_api=policy.function_api,
         worker_model=policy.worker_model,
@@ -676,14 +706,23 @@ class QualifiedRuntime:
         return self.fingerprint.runtime_id
 
 
-def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None:
-    """Verify every byte and the full closure with one non-following traversal.
+def runtime_verification_stats(*, reset: bool = False) -> dict[str, int | float]:
+    """Return process-local deep-scan and fast-admission measurements."""
+    with _VERIFICATION_STATS_LOCK:
+        result = dict(_VERIFICATION_STATS)
+        if reset:
+            for name in _VERIFICATION_STATS:
+                _VERIFICATION_STATS[name] = 0.0 if name.endswith("_ms") else 0
+        return result
 
-    Directory redirects are checked once per entry, not once for every path
-    component of every file. Open-file identity and metadata are checked before
-    and after hashing so concurrent replacement is rejected as well.
-    """
-    root = Path(root)
+
+def _record_verification_stats(**values: int | float) -> None:
+    with _VERIFICATION_STATS_LOCK:
+        for name, value in values.items():
+            _VERIFICATION_STATS[name] += value
+
+
+def _validate_runtime_file_table(table: Any) -> None:
     if not isinstance(table, dict) or not table:
         raise RuntimeContractError("Runtime installation requires a nonempty file seal")
     for relative, checksum in table.items():
@@ -698,6 +737,41 @@ def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None
         if Path(relative).name.lower() in {"sitecustomize.py", "usercustomize.py",
                                          "sitecustomize.pyc", "usercustomize.pyc"}:
             raise RuntimeContractError("Runtime installation may not inject startup hooks")
+
+
+_CACHE_FILE = re.compile(r"^(?P<source>.+)\.[^.]+\.pyc$")
+_OPTIMIZED_CACHE_FILE = re.compile(
+    r"^(?P<source>.+)\.[^.]+\.opt-[0-9]+\.pyc$"
+)
+
+
+def _is_incidental_python_cache(relative: str, table: Mapping[str, str]) -> bool:
+    """Allow only PEP 3147 caches backed by an authoritative sealed source."""
+    path = Path(relative)
+    if path.suffix.lower() != ".pyc" or path.parent.name != "__pycache__":
+        return False
+    match = _OPTIMIZED_CACHE_FILE.fullmatch(path.name) or _CACHE_FILE.fullmatch(
+        path.name
+    )
+    if match is None:
+        return False
+    source = (path.parent.parent / (match.group("source") + ".py")).as_posix()
+    return source in table and Path(source).name.lower() not in {
+        "sitecustomize.py", "usercustomize.py"
+    }
+
+
+def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None:
+    """Deeply verify authoritative bytes and the installation closure.
+
+    Additional PEP 3147 caches are incidental runtime products and are not
+    authoritative installation files. Every other additional file remains a
+    closure failure. The -B flag prevents HASHI writes but does not make
+    bytecode harmless; explicit deep audits report the cache exception.
+    """
+    started = time.perf_counter()
+    root = Path(root)
+    _validate_runtime_file_table(table)
     observed = {}
     pending = [(root, "")]
     excluded = manifest_path.relative_to(root).as_posix() if manifest_path.is_relative_to(root) else None
@@ -707,8 +781,6 @@ def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None
             for entry in entries:
                 metadata = entry.stat(follow_symlinks=False)
                 if os.name == "nt" and metadata.st_ino == 0:
-                    # Windows DirEntry omits volume/file IDs. Obtain the real
-                    # identity rather than dropping the open-file race check.
                     metadata = os.stat(entry.path, follow_symlinks=False)
                 if (stat.S_ISLNK(metadata.st_mode)
                         or getattr(metadata, "st_file_attributes", 0) & 0x400):
@@ -721,14 +793,24 @@ def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None
                         observed[relative] = (Path(entry.path), metadata)
                 else:
                     raise RuntimeContractError("Runtime installation contains a non-regular entry")
-    if set(observed) != set(table):
+    extra = set(observed) - set(table)
+    incidental = {
+        relative for relative in extra
+        if _is_incidental_python_cache(relative, table)
+    }
+    unexpected = extra - incidental
+    missing = set(table) - set(observed)
+    if unexpected or missing:
         raise RuntimeContractError(
             "Runtime installation file closure changed: "
-            f"unlisted={sorted(set(observed)-set(table))[:10]}, "
-            f"missing={sorted(set(table)-set(observed))[:10]}")
+            f"unlisted={sorted(unexpected)[:10]}, missing={sorted(missing)[:10]}")
+
     def identity(value):
         return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
-    for relative, (file, expected_stat) in observed.items():
+
+    bytes_hashed = 0
+    for relative in table:
+        file, expected_stat = observed[relative]
         digest = hashlib.sha256()
         with file.open("rb") as stream:
             before = os.fstat(stream.fileno())
@@ -736,25 +818,128 @@ def verify_runtime_files(root: Path, table: Any, *, manifest_path: Path) -> None
                 raise RuntimeContractError("Runtime installation file changed during verification")
             while block := stream.read(1024 * 1024):
                 digest.update(block)
+                bytes_hashed += len(block)
             if identity(os.fstat(stream.fileno())) != identity(before):
                 raise RuntimeContractError("Runtime installation file changed during verification")
         if digest.hexdigest() != table[relative]:
             raise RuntimeContractError(f"Runtime installation file hash mismatch: {relative}")
+    _record_verification_stats(
+        deep_scan_count=1,
+        deep_files_observed=len(observed),
+        deep_files_hashed=len(table),
+        deep_bytes_hashed=bytes_hashed,
+        deep_cache_extras_ignored=len(incidental),
+        deep_duration_ms=(time.perf_counter() - started) * 1000,
+    )
 
 
-def load_qualified_runtime(
+def _hash_sealed_file(root: Path, table: Mapping[str, str], relative: str) -> int:
+    path = root / relative
+    if (relative not in table or path.is_symlink() or not path.is_file()
+            or not path.resolve().is_relative_to(root)):
+        raise RuntimeContractError(f"Required runtime file is unavailable: {relative}")
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != table[relative]:
+        raise RuntimeContractError(f"Runtime installation file hash mismatch: {relative}")
+    return len(payload)
+
+
+def _verify_shallow_import_root(
+    root: Path,
+    table: Mapping[str, str],
+    relative_root: str,
+    *,
+    manifest_path: Path,
+    declared_children: frozenset[str] = frozenset(),
+) -> None:
+    """Reject new top-level import/startup entries without a recursive scan."""
+    directory = root / relative_root if relative_root else root
+    if not directory.is_dir():
+        return
+    prefix = relative_root.rstrip("/")
+    prefix = prefix + "/" if prefix else ""
+    allowed = {
+        relative[len(prefix):].split("/", 1)[0]
+        for relative in table
+        if relative.startswith(prefix) and relative != prefix.rstrip("/")
+    }
+    if manifest_path.is_relative_to(directory):
+        allowed.add(manifest_path.relative_to(directory).parts[0])
+    allowed.update(declared_children)
+    for entry in os.scandir(directory):
+        if entry.name in allowed or entry.name == "__pycache__":
+            continue
+        metadata = entry.stat(follow_symlinks=False)
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and not getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
+            # venv creates empty scaffold directories such as Include and Lib
+            # that contain no authoritative files and therefore do not appear
+            # in the file seal.  Empty directories cannot supply a module or
+            # native loader.  A later populated import root is still rejected
+            # by its own shallow scan or by this nonempty-directory check.
+            with os.scandir(entry.path) as children:
+                if next(children, None) is None:
+                    continue
+        raise RuntimeContractError(
+            f"Runtime import root contains an unsealed top-level entry: "
+            f"{prefix}{entry.name}"
+        )
+
+
+def _fast_runtime_file_admission(
+    root: Path,
+    table: Mapping[str, str],
+    *,
+    manifest_path: Path,
+    required: tuple[str, ...],
+    import_roots: tuple[str, ...],
+) -> tuple[int, int]:
+    _validate_runtime_file_table(table)
+    hashed = 0
+    bytes_hashed = 0
+    for relative in dict.fromkeys(required):
+        bytes_hashed += _hash_sealed_file(root, table, relative)
+        hashed += 1
+    import_root_parts = tuple(
+        (relative_root, PurePosixPath(relative_root).parts)
+        for relative_root in dict.fromkeys(import_roots)
+    )
+    for relative_root, current_parts in import_root_parts:
+        declared_children = frozenset(
+            candidate_parts[len(current_parts)]
+            for _, candidate_parts in import_root_parts
+            if (
+                len(candidate_parts) > len(current_parts)
+                and candidate_parts[:len(current_parts)] == current_parts
+            )
+        )
+        _verify_shallow_import_root(
+            root,
+            table,
+            relative_root,
+            manifest_path=manifest_path,
+            declared_children=declared_children,
+        )
+    return hashed, bytes_hashed
+
+
+def _load_runtime_receipt(
     manifest_path: Path,
     *,
     expected_digest: str,
     code_root: Path,
     role: str = FUNCTIONS_ROLE,
+    deep_verification: bool,
 ) -> QualifiedRuntime:
-    """Verify a receipt selected by the trusted installation/release authority.
+    """Load a receipt selected by the trusted installation/release authority.
 
     This primitive never selects or authorizes a runtime. The caller supplies
-    a path AND digest from the installation authority, not Agent configuration.
-    Every environment/base file, including bytecode, is sealed. The child must
-    additionally report its observed identity before product imports or READY.
+    a path and digest from the installation authority, not Agent configuration.
+    Deep verification hashes the complete authoritative installation. Fast
+    admission hashes only execution-critical files and checks shallow import
+    roots; it relies on the previously deep-qualified manifest identity.
     """
     if role not in _RUNTIME_ROLES:
         raise RuntimeContractError("Invalid installation runtime role")
@@ -819,12 +1004,50 @@ def load_qualified_runtime(
         raise RuntimeContractError("Runtime executable is outside its approved environment")
     if not isinstance(value["environment_files"], dict) or not isinstance(value["base_files"], dict):
         raise RuntimeContractError("Runtime installation file tables must be objects")
-    if executable.relative_to(root).as_posix() not in value["environment_files"]:
+    environment_files = value["environment_files"]
+    base_files = value["base_files"]
+    executable_relative = executable.relative_to(root).as_posix()
+    if executable_relative not in environment_files:
         raise RuntimeContractError("Runtime executable is not sealed by its installation")
-    verify_runtime_files(root, value["environment_files"], manifest_path=path)
+    fast_files = 0
+    fast_bytes = 0
+    if deep_verification:
+        verify_runtime_files(root, environment_files, manifest_path=path)
+    else:
+        site_relative = (
+            "Lib/site-packages"
+            if runtime.platform == "windows"
+            else f"lib/python{runtime.python_minor}/site-packages"
+        )
+        standard_relative = (
+            "Lib"
+            if runtime.platform == "windows"
+            else f"lib/python{runtime.python_minor}"
+        )
+        required = (executable_relative,) + (
+            ("pyvenv.cfg",) if "pyvenv.cfg" in environment_files else ()
+        )
+        count, size = _fast_runtime_file_admission(
+            root,
+            environment_files,
+            manifest_path=path,
+            required=required,
+            import_roots=("", standard_relative, site_relative),
+        )
+        fast_files += count
+        fast_bytes += size
     policy = load_runtime_policy(code_root, role=role, runtime_root=root)
     validate_runtime_policy(policy, runtime)
-    observed = current_runtime_fingerprint(policy, code_root=code_root)
+    observed = current_runtime_fingerprint(
+        policy,
+        code_root=code_root,
+        dependency_digest_override=(
+            None if deep_verification else runtime.dependency_digest
+        ),
+        core_source_digest_override=(
+            None if deep_verification else runtime.core_source_digest
+        ),
+    )
     fields = ("implementation", "python_minor", "cache_tag", "platform_abi",
               "platform", "machine", "pointer_bits", "runtime_policy_digest", "core_source_digest")
     for field in fields:
@@ -836,7 +1059,38 @@ def load_qualified_runtime(
     if not base_root.is_absolute() or base_root.is_symlink():
         raise RuntimeContractError("Runtime CPython base path is invalid")
     base_root = base_root.resolve()
-    verify_runtime_files(base_root, value["base_files"], manifest_path=path)
+    if deep_verification:
+        verify_runtime_files(base_root, base_files, manifest_path=path)
+    else:
+        base_candidates = (
+            ("python.exe",)
+            if runtime.platform == "windows"
+            else (
+                f"bin/python{runtime.python_minor}",
+                "bin/python3",
+                "bin/python",
+            )
+        )
+        base_executable = next(
+            (relative for relative in base_candidates if relative in base_files),
+            None,
+        )
+        if base_executable is None:
+            raise RuntimeContractError("Runtime CPython base interpreter is not sealed")
+        standard_relative = (
+            "Lib"
+            if runtime.platform == "windows"
+            else f"lib/python{runtime.python_minor}"
+        )
+        count, size = _fast_runtime_file_admission(
+            base_root,
+            base_files,
+            manifest_path=path,
+            required=(base_executable,),
+            import_roots=("", standard_relative),
+        )
+        fast_files += count
+        fast_bytes += size
     config = root / "pyvenv.cfg"
     if config.is_file():
         settings = {}
@@ -853,18 +1107,21 @@ def load_qualified_runtime(
             raise RuntimeContractError("Runtime installation CPython base does not match its seal")
     elif base_root != root:
         raise RuntimeContractError("Runtime installation is missing its venv base binding")
-    site_path = root / ("Lib/site-packages" if runtime.platform == "windows"
-                        else f"lib/python{runtime.python_minor}/site-packages")
-    installed = {}
-    for distribution in importlib.metadata.distributions(path=[str(site_path)]):
-        name = re.sub(r"[-_.]+", "-", str(distribution.metadata.get("Name") or "")).lower()
-        if not name or name in installed:
-            raise RuntimeContractError("Runtime installation distribution metadata is ambiguous")
-        installed[name] = str(distribution.version)
-    validate_standard_dependencies(code_root, policy, installed=installed)
-    packages = "\n".join(f"{name}=={version}" for name, version in sorted(installed.items()))
-    if "sha256:" + hashlib.sha256(packages.encode()).hexdigest() != runtime.dependency_digest:
-        raise RuntimeContractError("Runtime installation dependency digest mismatch")
+    if deep_verification:
+        site_path = root / ("Lib/site-packages" if runtime.platform == "windows"
+                            else f"lib/python{runtime.python_minor}/site-packages")
+        installed = {}
+        for distribution in importlib.metadata.distributions(path=[str(site_path)]):
+            name = re.sub(r"[-_.]+", "-", str(distribution.metadata.get("Name") or "")).lower()
+            if not name or name in installed:
+                raise RuntimeContractError("Runtime installation distribution metadata is ambiguous")
+            installed[name] = str(distribution.version)
+        validate_standard_dependencies(code_root, policy, installed=installed)
+        packages = "\n".join(
+            f"{name}=={version}" for name, version in sorted(installed.items())
+        )
+        if "sha256:" + hashlib.sha256(packages.encode()).hexdigest() != runtime.dependency_digest:
+            raise RuntimeContractError("Runtime installation dependency digest mismatch")
     # Code/protocol qualification is separate from the immutable CR/FR identity.
     identity_fields = ("role", "implementation", "python", "cache_tag", "platform_abi",
                        "platform", "machine", "pointer_bits", "runtime_policy_digest", "dependency_digest")
@@ -872,7 +1129,47 @@ def load_qualified_runtime(
                 "environment_files": value["environment_files"], "base_files": value["base_files"]}
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     runtime = replace(runtime, installation_digest="sha256:" + hashlib.sha256(encoded).hexdigest())
+    if not deep_verification:
+        _record_verification_stats(
+            fast_admission_count=1,
+            fast_files_hashed=fast_files,
+            fast_bytes_hashed=fast_bytes,
+        )
     return QualifiedRuntime(path, digest, runtime)
+
+
+def load_qualified_runtime(
+    manifest_path: Path,
+    *,
+    expected_digest: str,
+    code_root: Path,
+    role: str = FUNCTIONS_ROLE,
+) -> QualifiedRuntime:
+    """Deep installation verification for install, adoption, and audit flows."""
+    return _load_runtime_receipt(
+        manifest_path,
+        expected_digest=expected_digest,
+        code_root=code_root,
+        role=role,
+        deep_verification=True,
+    )
+
+
+def admit_qualified_runtime(
+    manifest_path: Path,
+    *,
+    expected_digest: str,
+    code_root: Path,
+    role: str = FUNCTIONS_ROLE,
+) -> QualifiedRuntime:
+    """Fast admission of a runtime already selected and deeply qualified."""
+    return _load_runtime_receipt(
+        manifest_path,
+        expected_digest=expected_digest,
+        code_root=code_root,
+        role=role,
+        deep_verification=False,
+    )
 
 
 def current_process_runtime() -> QualifiedRuntime | None:
@@ -880,15 +1177,43 @@ def current_process_runtime() -> QualifiedRuntime | None:
     return _PROCESS_RUNTIME
 
 
-def bind_process_runtime(qualified: QualifiedRuntime, *, code_root: Path) -> None:
+def admitted_process_runtime_fingerprint(
+    qualified: QualifiedRuntime,
+    *,
+    code_root: Path,
+) -> RuntimeFingerprint:
+    """Observe process/ABI/code facts while reusing qualified dependency identity."""
+    policy = load_runtime_policy(
+        code_root,
+        role=qualified.fingerprint.role,
+        runtime_root=Path(qualified.fingerprint.environment_prefix),
+    )
+    validate_runtime_policy(policy, qualified.fingerprint)
+    observed = current_runtime_fingerprint(
+        policy,
+        code_root=code_root,
+        dependency_digest_override=qualified.fingerprint.dependency_digest,
+        core_source_digest_override=qualified.fingerprint.core_source_digest,
+    )
+    return replace(
+        observed,
+        installation_digest=qualified.fingerprint.installation_digest,
+    )
+
+
+def bind_process_runtime(
+    qualified: QualifiedRuntime,
+    *,
+    code_root: Path,
+) -> RuntimeFingerprint:
     """Bind once after observing this interpreter; never select from Agent/env input."""
     global _PROCESS_RUNTIME
-    observed = enforce_runtime_contract(code_root, role=qualified.fingerprint.role)
-    observed = replace(observed, installation_digest=qualified.fingerprint.installation_digest)
+    observed = admitted_process_runtime_fingerprint(qualified, code_root=code_root)
     compare_runtime_fingerprints(qualified.fingerprint, observed)
     if _PROCESS_RUNTIME is not None:
         compare_runtime_fingerprints(_PROCESS_RUNTIME.fingerprint, qualified.fingerprint)
     _PROCESS_RUNTIME = qualified
+    return observed
 
 
 @dataclass(frozen=True)
@@ -908,6 +1233,19 @@ def qualified_runtime_from_reference(reference, *, code_root: Path, role=FUNCTIO
         raise RuntimeContractError("Invalid trusted installation reference fields")
     return load_qualified_runtime(Path(reference["path"]), expected_digest=reference["digest"],
                                   code_root=code_root, role=role)
+
+
+def admitted_runtime_from_reference(reference, *, code_root: Path, role=FUNCTIONS_ROLE):
+    if not isinstance(reference, dict) or set(reference) != {"path", "digest"}:
+        raise RuntimeContractError("Invalid trusted installation reference")
+    if not all(isinstance(value, str) and value for value in reference.values()):
+        raise RuntimeContractError("Invalid trusted installation reference fields")
+    return admit_qualified_runtime(
+        Path(reference["path"]),
+        expected_digest=reference["digest"],
+        code_root=code_root,
+        role=role,
+    )
 
 
 def load_core_runtime_selection(code_root: Path) -> RuntimeSelection:
@@ -940,8 +1278,12 @@ def load_core_runtime_selection(code_root: Path) -> RuntimeSelection:
     if (not isinstance(record, dict) or set(record) != {"schema_version", "core", "functions"}
             or type(record["schema_version"]) is not int or record["schema_version"] != 1):
         raise RuntimeContractError("Invalid runtime release selector schema")
-    core = qualified_runtime_from_reference(record["core"], code_root=code_root, role=CORE_HOST_ROLE)
-    functions = qualified_runtime_from_reference(record["functions"], code_root=code_root)
+    core = admitted_runtime_from_reference(
+        record["core"], code_root=code_root, role=CORE_HOST_ROLE
+    )
+    functions = admitted_runtime_from_reference(
+        record["functions"], code_root=code_root
+    )
     compare_runtime_boundary(core.fingerprint, functions.fingerprint,
                              expected_functions=functions.fingerprint)
     return RuntimeSelection(core, functions)

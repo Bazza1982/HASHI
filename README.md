@@ -44,21 +44,21 @@ continuous loop.
 Capabilities depend on the selected engine, permissions, installed extras,
 and connected services. See the [integration guide](docs/INTEGRATIONS.md).
 
-## Why version 5
+## Why version 6
 
-v5 separates the stable HASHI Core from the application environment. Core
-runs in its own qualified Python installation with no third-party application
-packages; tools, providers and connectors run in replaceable Functions
-environments. Compatible Functions dependency updates and rollbacks can keep
-Core running. See [the v5 upgrade notes](docs/RELEASE_NOTES_v5.0.0-alpha.1.md)
-for the reason, architecture, other changes and migration steps.
+v6 restores startup availability while preserving v5's separation of Core and
+Functions. Deep byte verification remains an installation, adoption and audit
+operation; routine Core and Worker startup now uses a bounded admission
+contract. Ordinary backed `__pycache__/*.pyc` extras no longer invalidate an
+otherwise qualified installation, and connector failure is local. See
+[the v6 recovery notes](docs/RELEASE_NOTES_v6.0.0-alpha.1.md).
 
 ## Project Status
 
-Current development source metadata is **v5.0.0-alpha.1** (Python:
-**5.0.0a1**). This is the Core/environment separation candidate, not a stable
+Current development source metadata is **v6.0.0-alpha.1** (Python:
+**6.0.0a1**). This is the startup recovery and Core simplification candidate, not a stable
 production release. The most recent published GitHub pre-release remains
-v4.0.0-beta.1 until a separate v5 publication is completed.
+v4.0.0-beta.1 until a separate v6 publication is completed.
 
 The repository, npm registry, and GitHub Releases can be at different points.
 A source version does not prove that a matching npm package or installer has
@@ -67,7 +67,7 @@ before downloading.
 
 | Area | Current boundary |
 |---|---|
-| Personal/local use | Primary development path; v5 Alpha candidate for controlled testing |
+| Personal/local use | Primary development path; v6 Alpha candidate for controlled testing |
 | HERV3 | Native Python engine with one model/tool loop, optional Strategy Cards, Habits, and an experimental JEV companion |
 | Team/enterprise governance | Alpha profiles, policy, approvals, audit, and deployment artifacts; production deployment validation remains pending |
 | Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; the independently maintained Workbench v2 is an external client, not bundled with HASHI |
@@ -77,7 +77,7 @@ before downloading.
 | Device/browser control | Requires the relevant worker, browser, permissions, and per-platform validation |
 
 Detailed candidate scope is in the
-[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v5.0.0-alpha.1.md).
+[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v6.0.0-alpha.1.md).
 Historical milestones are recorded in
 [CHANGELOG.md](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md).
 

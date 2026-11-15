@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "approval_mode": "owner_approved",
+  "change_id": "core-v6-startup-recovery",
+  "authorization_reference": "Current human owner's explicit P0 HASHI4 Core major-version migration request req-hashiko-2026-11-15_221221-0001, received 2026-11-15 Australia/Sydney",
+  "implementer": "OpenAI Codex / Hashiko root agent operating on HASHI4 core5-fix",
+  "reviewer": "OpenAI Codex / Hashiko root agent — AI technical reviewer and implementer (not an independent human)",
+  "owner": "Current HASHI4 repository owner (human user in request req-hashiko-2026-11-15_221221-0001)",
+  "owner_decision": "approved",
+  "owner_decision_reference": "Request req-hashiko-2026-11-15_221221-0001 explicitly directs: 'Core changes are explicitly requested. Carry out the necessary Core major-version migration under the repository's existing governance requirements.' This approves the branch candidate work, not production adoption or merge.",
+  "technical_review_reference": "docs/core-reviews/2026-11-16-v6-technical-review.md on branch core5-fix",
+  "reviewed_at": "2026-11-16T00:31:24+11:00",
+  "verdict": "approved",
+  "product_version": "6.0.0a1",
+  "core_digest": "sha256:348c76b84c200f593fac3516861f56086bb94cf522151d935a8944b391c8c4bd",
+  "summary": "Owner-approved Core v6 branch candidate for HASHI4 P0 startup recovery. The accurately identified AI implementer also performed the technical review; this is not an independent-human review. Review covers narrow pyc tolerance, deep-versus-fast runtime admission, one-scan generation adoption with fail-closed direct launches, process/private admission, fail-fast cold restart, connector isolation, failure receipts, and instance isolation. Focused offline tests and static checks pass; an official-v6-runtime test exposed and the candidate corrected a supplied-generation path that had bypassed byte qualification, with the tamper and rollback regressions now passing before product execution. The exact clean official rebuild and actual HASHI4 restart/reboot/24-Agent acceptance remain mandatory. Optional TTS sidecar setup and production adoption are not approved or claimed complete."
+}

@@ -661,7 +661,7 @@ def _try_vector_backfill(root: Path, agent_id: str):
 
         try:
             result = subprocess.run(
-                [sys.executable, str(migrate), str(ws)],
+                [sys.executable, "-B", str(migrate), str(ws)],
                 capture_output=True,
                 text=True,
                 cwd=str(root),

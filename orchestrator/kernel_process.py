@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,21 +17,34 @@ from orchestrator.function_worker_bootstrap import (
 )
 from orchestrator.function_worker_protocol import JsonConnectionPeer
 from orchestrator.runtime_process import launch_function_process_async, run_protected_call_async
-from orchestrator.kernel_artifact import verify_artifact
+from orchestrator.kernel_artifact import (
+    artifact_verification_stats,
+    validate_artifact_identity,
+    verify_artifact,
+)
 from orchestrator.runtime_contract import (
     CORE_HOST_ROLE,
     RuntimeContractError,
     RuntimeFingerprint,
+    admitted_process_runtime_fingerprint,
+    admitted_runtime_from_reference,
     compare_runtime_boundary,
     load_core_runtime_selection,
     current_process_runtime,
-    qualified_runtime_from_reference,
+    runtime_verification_stats,
     runtime_installation_reference,
     compare_runtime_fingerprints,
     enforce_runtime_contract,
 )
 
 RECEIPT_PREFIX = QUALIFICATION_RESULT_PREFIX
+
+
+def _observed_runtime(code_root: Path, runtime: RuntimeFingerprint):
+    admitted = current_process_runtime()
+    if admitted is not None and admitted.fingerprint.role == runtime.role:
+        return admitted_process_runtime_fingerprint(admitted, code_root=code_root)
+    return enforce_runtime_contract(code_root, role=runtime.role)
 
 
 def canonical_instance_home(code_root: Path, override=None) -> Path:
@@ -67,7 +81,7 @@ async def qualify(
     code_root: Path, bridge_home: Path, runtime: RuntimeFingerprint, *, functions_runtime=None
 ) -> dict:
     """Run product qualification out of process; verify its exact receipt here."""
-    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root, role=runtime.role))
+    compare_runtime_fingerprints(runtime, _observed_runtime(code_root, runtime))
     if runtime.role == CORE_HOST_ROLE and functions_runtime is None:
         raise RuntimeContractError("Core host requires an independently qualified Functions runtime")
     expected = functions_runtime.fingerprint if functions_runtime is not None else runtime
@@ -87,7 +101,7 @@ async def qualify(
     compare_runtime_fingerprints(
         expected, RuntimeFingerprint.from_mapping(release["runtime"])
     )
-    compare_runtime_fingerprints(runtime, enforce_runtime_contract(code_root, role=runtime.role))
+    compare_runtime_fingerprints(runtime, _observed_runtime(code_root, runtime))
     if functions_runtime is not None:
         release["functions_installation"] = runtime_installation_reference(functions_runtime)
     artifact = Path(release["generation_root"]).resolve()
@@ -116,10 +130,14 @@ class ProcessClient:
 
     @classmethod
     async def prepare(cls, bootstrap: dict):
-        # The common launch owner verifies artifact and installation bytes
-        # immediately before starting the child; the child verifies them again.
+        # Qualification already verified bytes once. Routine launch validates
+        # the generation identity and private admission contract only.
         selected = bootstrap.get("functions_installation")
-        process, parent = await launch_function_process_async(bootstrap, runtime=selected)
+        process, parent = await launch_function_process_async(
+            bootstrap,
+            runtime=selected,
+            generation_already_verified=True,
+        )
         client = cls(process, parent)
         try:
             ready = await client.peer.request("prepare", timeout=240)
@@ -131,7 +149,12 @@ class ProcessClient:
             client.ready_metadata = ready
             client.owns_group = bool(bootstrap.get("process_group"))
             return client
-        except BaseException:
+        except BaseException as exc:
+            # The private parent accepted this child before product imports
+            # were released, so a later READY failure may have executed product
+            # code even though no ProcessClient is returned to the caller.
+            setattr(exc, "hashi_product_code_execution_began", True)
+            setattr(exc, "hashi_candidate_pid", process.pid)
             await client.close()
             raise
 
@@ -206,12 +229,38 @@ class KernelRuntime:
         self.stop_event = asyncio.Event()
         self._switch_lock = asyncio.Lock()
         self.state_dir = instance_runtime_dir(self.bridge_home)
+        self.last_replacement_outcome = None
+
+    def verify_supplied_release(self, release: dict) -> None:
+        """Qualify an externally supplied generation once before execution.
+
+        ``qualify()`` already performs this scan for generations it creates.
+        A supplied mapping carries no unforgeable in-process qualification
+        fact, so it must cross the same byte boundary here.  Recovery of the
+        exact committed ``self.release`` is handled separately and remains an
+        identity-only admission.
+        """
+        artifact = Path(release["generation_root"]).resolve()
+        generation_root = (
+            self.bridge_home / "state" / "function_generations"
+        ).resolve()
+        if not artifact.is_relative_to(generation_root):
+            raise ValueError("supplied artifact is outside this instance")
+        verify_artifact(artifact, release["manifest"])
 
     def selected_functions_runtime(self):
         if self.runtime.role == CORE_HOST_ROLE:
+            if self.functions_runtime is not None:
+                compare_runtime_boundary(
+                    self.runtime,
+                    self.functions_runtime.fingerprint,
+                    expected_functions=self.functions_runtime.fingerprint,
+                )
+                return self.functions_runtime
             selected = load_core_runtime_selection(self.code_root)
             compare_runtime_fingerprints(self.runtime, selected.core.fingerprint)
-            return selected.functions
+            self.functions_runtime = selected.functions
+            return self.functions_runtime
         return self.functions_runtime
 
     def release_functions_runtime(self, release):
@@ -219,12 +268,18 @@ class KernelRuntime:
             bound = current_process_runtime()
             if bound is None or bound.fingerprint.role != CORE_HOST_ROLE:
                 raise RuntimeContractError("Core host has no admitted installation binding")
-            verified = qualified_runtime_from_reference(
-                runtime_installation_reference(bound), code_root=self.code_root, role=CORE_HOST_ROLE)
-            compare_runtime_fingerprints(self.runtime, verified.fingerprint)
+            compare_runtime_fingerprints(self.runtime, bound.fingerprint)
         reference = release.get("functions_installation")
         if reference is not None:
-            selected = qualified_runtime_from_reference(reference, code_root=self.code_root)
+            selected = self.functions_runtime
+            if (
+                selected is None
+                or runtime_installation_reference(selected) != reference
+            ):
+                selected = admitted_runtime_from_reference(
+                    reference, code_root=self.code_root
+                )
+                self.functions_runtime = selected
         else:
             selected = self.selected_functions_runtime()
         if self.runtime.role == CORE_HOST_ROLE:
@@ -279,6 +334,10 @@ class KernelRuntime:
                     else None,
                     "runtime": self.runtime.to_dict(),
                     "functions_runtime": self.release.get("runtime") if self.release else None,
+                    "verification": {
+                        "runtime": runtime_verification_stats(),
+                        "generation": artifact_verification_stats(),
+                    },
                     **extra,
                 },
             )
@@ -286,10 +345,21 @@ class KernelRuntime:
             print(f"Kernel status write failed: {exc}", file=sys.stderr, flush=True)
 
     async def start(self, release=None, *, recovery=False):
-        release = release or await qualify(
-            self.code_root, self.bridge_home, self.runtime,
-            functions_runtime=self.selected_functions_runtime(),
-        )
+        if release is None:
+            release = await qualify(
+                self.code_root, self.bridge_home, self.runtime,
+                functions_runtime=self.selected_functions_runtime(),
+            )
+        elif release is self.release and self.release is not None:
+            # Same Kernel, same committed in-memory receipt and
+            # content-addressed root.  Internal recovery never rematerializes
+            # it.  A privileged/local writer can still alter Windows bytes;
+            # that residual risk is intentionally left to explicit audits.
+            validate_artifact_identity(
+                Path(release["generation_root"]), release["manifest"]
+            )
+        else:
+            self.verify_supplied_release(release)
         client = await ProcessClient.prepare(
             self.bootstrap(release, recovery=recovery, initial=self.release is None)
         )
@@ -305,34 +375,113 @@ class KernelRuntime:
         self.active, self.release = client, release
         self.publish("active")
 
-    async def replace(self, release=None) -> bool:
+    async def replace(self, release=None, *, operation_id=None) -> bool:
         async with self._switch_lock:
+            operation_id = str(operation_id or uuid4().hex)
+            started = time.monotonic()
+            stage_started = started
+            stage = "generation_qualification"
+            timings: dict[str, float] = {}
             old, previous = self.active, self.release
             candidate, handoff = None, None
             retired = False
+            quiesced = False
+            candidate_pid = None
+            product_code_execution_began = False
+            candidate_generation = None
+
+            def advance(next_stage: str) -> None:
+                nonlocal stage, stage_started
+                timings[stage] = round((time.monotonic() - stage_started) * 1000, 3)
+                stage = next_stage
+                stage_started = time.monotonic()
+
+            def safe_message(error: BaseException) -> str:
+                from orchestrator.bootstrap_logging import redact_log_text
+
+                return redact_log_text(
+                    str(error).replace("\r", " ").replace("\n", " ")
+                )[:1000]
+
+            def outcome(**changes):
+                value = {
+                    "schema": 1,
+                    "operation_id": operation_id,
+                    "requested_scope": "shared_functions",
+                    "candidate_generation": candidate_generation,
+                    "candidate_pid": candidate_pid,
+                    "product_code_execution_began": product_code_execution_began,
+                    "stage_timings_ms": {
+                        **timings,
+                        "total": round((time.monotonic() - started) * 1000, 3),
+                    },
+                    **changes,
+                }
+                self.last_replacement_outcome = value
+                return value
+
             try:
-                release = release or await qualify(
-                    self.code_root, self.bridge_home, self.runtime,
-            functions_runtime=self.selected_functions_runtime(),
-                )
+                if release is None:
+                    release = await qualify(
+                        self.code_root,
+                        self.bridge_home,
+                        self.runtime,
+                        functions_runtime=self.selected_functions_runtime(),
+                    )
+                else:
+                    candidate_generation = str(
+                        release.get("manifest", {}).get("generation_id") or ""
+                    ) or None
+                    self.verify_supplied_release(release)
+                candidate_generation = release["manifest"]["generation_id"]
+                advance("candidate_prepare")
                 candidate = await ProcessClient.prepare(self.bootstrap(release))
-                self.publish("preparing_handoff")
+                product_code_execution_began = True
+                candidate_pid = getattr(candidate.process, "pid", None)
+                advance("handoff_quiesce")
+                self.publish("preparing_handoff", operation_id=operation_id)
                 # The child closes intake and drains. A rejected drain leaves
                 # old authority intact, so it can resume with no publication.
                 handoff = await old.peer.request("quiesce", timeout=180)
-                verify_artifact(Path(release["generation_root"]), release["manifest"])
-                compare_runtime_fingerprints(
-                    self.runtime, enforce_runtime_contract(self.code_root, role=self.runtime.role)
+                quiesced = True
+                advance("handoff_validation")
+                validate_artifact_identity(
+                    Path(release["generation_root"]), release["manifest"]
                 )
+                compare_runtime_fingerprints(
+                    self.runtime, _observed_runtime(self.code_root, self.runtime)
+                )
+                advance("old_process_retirement")
                 await old.close()
                 retired = True
+                advance("candidate_activation")
                 await candidate.peer.request(
                     "activate", {"handoff": handoff}, timeout=360
                 )
+                timings[stage] = round((time.monotonic() - stage_started) * 1000, 3)
             except (Exception, asyncio.CancelledError) as exc:
+                product_code_execution_began = bool(
+                    getattr(
+                        exc,
+                        "hashi_product_code_execution_began",
+                        product_code_execution_began,
+                    )
+                )
+                candidate_pid = getattr(exc, "hashi_candidate_pid", candidate_pid)
+                failure_stage = stage
+                timings[stage] = round((time.monotonic() - stage_started) * 1000, 3)
+                close_error = None
                 if candidate is not None:
-                    await candidate.close()
+                    try:
+                        await candidate.close()
+                    except Exception as cleanup_error:
+                        close_error = safe_message(cleanup_error)
+                rollback = {"attempted": False, "succeeded": True, "mode": "not_required"}
+                rollback_error = None
                 if retired:
+                    rollback = {"attempted": True, "succeeded": False, "mode": "restore_previous"}
+                    rollback_started = time.monotonic()
+                    restored = None
                     try:
                         restored = await ProcessClient.prepare(
                             self.bootstrap(previous, handoff, restore=True)
@@ -341,33 +490,86 @@ class KernelRuntime:
                             "activate", {"handoff": handoff or {}}, timeout=360
                         )
                         await restored.peer.request("commit", timeout=120)
-                    except Exception as rollback_error:
-                        if "restored" in locals():
-                            await restored.close()
-                        self.active = None
-                        self.publish(
-                            "failed", error=str(exc), rollback_error=str(rollback_error)
-                        )
-                        raise RuntimeError(
-                            "Function replacement and rollback failed"
-                        ) from rollback_error
-                    self.active = restored
-                elif old is not None and old.process.is_alive():
-                    await old.peer.request("resume", timeout=45)
+                    except Exception as restore_error:
+                        rollback_error = restore_error
+                        if restored is not None:
+                            try:
+                                await restored.close()
+                            except Exception:
+                                pass
+                    else:
+                        self.active = restored
+                        rollback["succeeded"] = True
+                    timings["rollback"] = round(
+                        (time.monotonic() - rollback_started) * 1000, 3
+                    )
+                elif quiesced and old is not None and old.process.is_alive():
+                    rollback = {"attempted": True, "succeeded": False, "mode": "resume_previous"}
+                    rollback_started = time.monotonic()
+                    try:
+                        await old.peer.request("resume", timeout=45)
+                    except Exception as resume_error:
+                        rollback_error = resume_error
+                    else:
+                        rollback["succeeded"] = True
+                    timings["rollback"] = round(
+                        (time.monotonic() - rollback_started) * 1000, 3
+                    )
                 self.release = previous
-                self.publish("active", result="rolled_back", error=str(exc))
+                result = outcome(
+                    ok=False,
+                    result="rolled_back" if rollback["succeeded"] else "rollback_failed",
+                    failure_stage=failure_stage,
+                    exception_type=type(exc).__name__,
+                    reason_code=f"replacement_{failure_stage}_failed",
+                    error=safe_message(exc),
+                    candidate_cleanup_error=close_error,
+                    rollback={
+                        **rollback,
+                        **(
+                            {
+                                "exception_type": type(rollback_error).__name__,
+                                "error": safe_message(rollback_error),
+                            }
+                            if rollback_error is not None
+                            else {}
+                        ),
+                    },
+                )
+                if rollback_error is not None:
+                    self.active = None if retired else old
+                    self.publish("failed", replacement_outcome=result)
+                    raise RuntimeError(
+                        "Function replacement and rollback failed"
+                    ) from rollback_error
+                self.publish("active", result="rolled_back", replacement_outcome=result)
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return False
             # Publication is the commit point. A later notification/transport
             # fault cannot be reported as an all-or-none rollback.
             self.active, self.release = candidate, release
+            post_commit_error = None
+            commit_started = time.monotonic()
             try:
                 await candidate.peer.request("commit", timeout=120)
             except Exception as exc:
-                self.publish("active", result="committed", post_commit_error=str(exc))
-            else:
-                self.publish("active", result="committed")
+                post_commit_error = {
+                    "exception_type": type(exc).__name__,
+                    "error": safe_message(exc),
+                }
+            timings["commit"] = round((time.monotonic() - commit_started) * 1000, 3)
+            result = outcome(
+                ok=True,
+                result="committed",
+                failure_stage=None,
+                exception_type=None,
+                reason_code=None,
+                error=None,
+                rollback={"attempted": False, "succeeded": True, "mode": "not_required"},
+                post_commit_error=post_commit_error,
+            )
+            self.publish("active", result="committed", replacement_outcome=result)
             return True
 
     async def run(self):
@@ -393,7 +595,26 @@ class KernelRuntime:
                         self.publish("active", request_error=str(exc))
                     else:
                         request_path.unlink()
-                        ok = await self.replace()
+                        try:
+                            ok = await self.replace(operation_id=request_id)
+                        except BaseException:
+                            try:
+                                write_record(
+                                    self.state_dir
+                                    / ("replacement-" + request_id + ".json"),
+                                    {
+                                        "ok": False,
+                                        "generation_id": (
+                                            self.release["manifest"]["generation_id"]
+                                            if self.release
+                                            else None
+                                        ),
+                                        "outcome": self.last_replacement_outcome,
+                                    },
+                                )
+                            except OSError as receipt_error:
+                                self.publish("failed", receipt_error=str(receipt_error))
+                            raise
                         try:
                             write_record(
                                 self.state_dir
@@ -403,6 +624,7 @@ class KernelRuntime:
                                     "generation_id": self.release["manifest"][
                                         "generation_id"
                                     ],
+                                    "outcome": self.last_replacement_outcome,
                                 },
                             )
                         except OSError as exc:

@@ -40,7 +40,7 @@ try {
     # The explicit installation target owns identity, regardless of the caller's instance.
     $env:HASHI_INSTANCE_ID = ""
     $env:BRIDGE_HOME = $RepoRoot
-    $DefaultsJson = & $PythonExe -c "import json; from tools.browser_bridge_transport import BRIDGE_NAMESPACE, DEFAULT_WINDOWS_AUTH_FILE, DEFAULT_WINDOWS_PIPE; from tools.browser_native_host import DEFAULT_LOG_PATH; print(json.dumps({'namespace': BRIDGE_NAMESPACE, 'endpoint': str(DEFAULT_WINDOWS_PIPE), 'auth_file': str(DEFAULT_WINDOWS_AUTH_FILE), 'log_file': str(DEFAULT_LOG_PATH)}))"
+    $DefaultsJson = & $PythonExe -B -c "import json; from tools.browser_bridge_transport import BRIDGE_NAMESPACE, DEFAULT_WINDOWS_AUTH_FILE, DEFAULT_WINDOWS_PIPE; from tools.browser_native_host import DEFAULT_LOG_PATH; print(json.dumps({'namespace': BRIDGE_NAMESPACE, 'endpoint': str(DEFAULT_WINDOWS_PIPE), 'auth_file': str(DEFAULT_WINDOWS_AUTH_FILE), 'log_file': str(DEFAULT_LOG_PATH)}))"
 }
 finally {
     $env:PYTHONPATH = $PreviousPythonPath
@@ -85,7 +85,7 @@ try {
     $PreviousIdentityPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $RepoRoot
-        $IdentityJson = & $PythonExe -m tools.browser_extension_identity `
+        $IdentityJson = & $PythonExe -B -m tools.browser_extension_identity `
             --state-dir $IdentityStateDir `
             --namespace $BridgeNamespace
         if ($LASTEXITCODE -ne 0) {
@@ -182,7 +182,7 @@ internal static class HashiBrowserBridgeLauncher
         {
             FileName = PythonExe,
             WorkingDirectory = RepoRoot,
-            Arguments = "-m tools.browser_native_host --stdio --endpoint " + Quote(Endpoint)
+            Arguments = "-B -m tools.browser_native_host --stdio --endpoint " + Quote(Endpoint)
                 + " --auth-file " + Quote(AuthFile) + " --log-file " + Quote(LogFile)
                 + " --expected-origin " + Quote(ExpectedOrigin)
                 + (forwarded.Length > 0 ? " " + forwarded : ""),

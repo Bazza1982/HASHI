@@ -51,6 +51,7 @@ class CoquiProvider(BaseTTSProvider):
         env = os.environ.copy()
         proc = await asyncio.create_subprocess_exec(
             python_exe,
+            "-B",
             "-c",
             code,
             stdout=asyncio.subprocess.PIPE,

@@ -29,15 +29,35 @@ def test_fixed_lifecycle_binds_code_and_private_home_separately(tmp_path, monkey
         control_code_root=str(code),
     )
     monkeypatch.setattr(server.platform, "system", lambda: system)
+    selected_python = code / "functions" / "Scripts" / "python.exe"
+    selected_python.parent.mkdir(parents=True)
+    selected_python.write_bytes(b"launcher")
+    monkeypatch.setattr(
+        "remote.restart_runtime.selected_restart_python",
+        lambda root: str(selected_python),
+    )
+    runtime_data_root = tmp_path / "runtime catalogue"
+    monkeypatch.setattr(
+        "remote.restart_runtime.restart_runtime_data_root",
+        lambda: str(runtime_data_root),
+    )
     command = server._hashi_restart_command()
     assert any(str(code / "bin" / name) in command
                for name in ["hashi_restart_ctl.ps1", "bridge-u.sh"])
     if system == "Windows":
+        assert command[command.index("-Python") + 1] == str(selected_python)
         assert command[command.index("-HashiRoot") + 1] == str(home)
         assert command[command.index("-CodeRoot") + 1] == str(code)
+        assert command[command.index("-RuntimeDataRoot") + 1] == str(
+            runtime_data_root
+        )
         start = server._hashi_start_command()
+        assert start[start.index("-Python") + 1] == str(selected_python)
         assert start[start.index("-HashiRoot") + 1] == str(home)
         assert start[start.index("-CodeRoot") + 1] == str(code)
+        assert start[start.index("-RuntimeDataRoot") + 1] == str(
+            runtime_data_root
+        )
         assert "start" in start
     else:
         assert command[command.index("--bridge-home") + 1] == str(home)
@@ -69,4 +89,4 @@ def test_fixed_lifecycle_binds_code_and_private_home_separately(tmp_path, monkey
     )
     assert server._qualified_restart_runtime() == {"role": "functions"}
     assert qualified == [code]
-# HASHI-Fingerprint: hfp_c3e94caddca04a019e15f595fd87556d
+# HASHI-Fingerprint: hfp_dfa271ec6a0148ba9c9de42d949399ba

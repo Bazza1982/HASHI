@@ -49,6 +49,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "kind": "wsl_python",
             "argv": [
                 "python3",
+                "-B",
                 script_path,
                 "healthcheck",
                 "--socket",
@@ -63,6 +64,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "kind": "wsl_python",
             "argv": [
                 "python3",
+                "-B",
                 script_path,
                 "ping",
                 "--socket",
@@ -77,6 +79,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "kind": "wsl_python",
             "argv": [
                 "python3",
+                "-B",
                 script_path,
                 "active_tab",
                 "--socket",
@@ -93,6 +96,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "kind": "wsl_python",
             "argv": [
                 "python3",
+                "-B",
                 script_path,
                 "get_text",
                 "--socket",
@@ -109,6 +113,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "kind": "wsl_python",
             "argv": [
                 "python3",
+                "-B",
                 script_path,
                 "screenshot",
                 "--socket",

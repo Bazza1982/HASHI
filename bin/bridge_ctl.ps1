@@ -36,7 +36,8 @@ param(
     [switch]$Resume,
     [switch]$ApiGateway,
     [string]$BridgeHome,
-    [string]$RuntimeDataRoot
+    [string]$RuntimeDataRoot,
+    [string]$StartupRequestPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -247,6 +248,77 @@ function Get-BridgePid {
     return $pidVal
 }
 
+function Get-ApprovedCoreProcessImages {
+    <#
+    .DESCRIPTION
+        Return the executable images that an installer-qualified Windows venv
+        launcher may use for Core.  CPython's venv launcher can retain the
+        selected Scripts\python.exe as a parent while the sealed base
+        python.exe executes the program, so both identities are explicit.
+    #>
+    param([Parameter(Mandatory=$true)][string]$SelectedExecutable)
+
+    $Images = [System.Collections.Generic.List[string]]::new()
+    $Selected = [IO.Path]::GetFullPath($SelectedExecutable)
+    $Images.Add($Selected)
+    $EnvironmentRoot = Split-Path -Parent (Split-Path -Parent $Selected)
+    $Config = Join-Path $EnvironmentRoot "pyvenv.cfg"
+    if (Test-Path -LiteralPath $Config -PathType Leaf) {
+        $RuntimeBaseHome = $null
+        foreach ($Line in Get-Content -LiteralPath $Config) {
+            $Parts = @(([string]$Line) -split '=', 2)
+            if ($Parts.Count -eq 2 -and $Parts[0].Trim().Equals(
+                    "home", [StringComparison]::OrdinalIgnoreCase)) {
+                $RuntimeBaseHome = $Parts[1].Trim()
+                break
+            }
+        }
+        if ($RuntimeBaseHome -and [IO.Path]::IsPathRooted($RuntimeBaseHome)) {
+            $BaseExecutable = [IO.Path]::GetFullPath((Join-Path $RuntimeBaseHome "python.exe"))
+            if (Test-Path -LiteralPath $BaseExecutable -PathType Leaf) {
+                $Images.Add($BaseExecutable)
+            }
+        }
+    }
+    return @($Images | Select-Object -Unique)
+}
+
+function Test-CoreLaunchProcess {
+    <#
+    .DESCRIPTION
+        Prove that the PID published by Core is either the selected launcher
+        itself or its direct CPython-venv child, and that its image belongs to
+        the already-qualified runtime.  A controller/PowerShell PID or an
+        unrelated Python process can never satisfy this receipt boundary.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][int]$CandidatePid,
+        [Parameter(Mandatory=$true)][int]$LauncherPid,
+        [Parameter(Mandatory=$true)][string[]]$ApprovedImages
+    )
+
+    $Process = Get-CimInstance Win32_Process -Filter "ProcessId = $CandidatePid" -ErrorAction SilentlyContinue
+    if ($null -eq $Process -or [string]::IsNullOrWhiteSpace([string]$Process.ExecutablePath)) {
+        return $false
+    }
+    if ($CandidatePid -ne $LauncherPid -and [int]$Process.ParentProcessId -ne $LauncherPid) {
+        return $false
+    }
+    try {
+        $ObservedImage = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
+    } catch {
+        return $false
+    }
+    foreach ($ApprovedImage in $ApprovedImages) {
+        if ($ObservedImage.Equals(
+                [IO.Path]::GetFullPath([string]$ApprovedImage),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Invoke-GracefulShutdown {
     <#
     .DESCRIPTION
@@ -410,6 +482,97 @@ function ConvertTo-NativeArgument {
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
 }
 
+function Get-StartupRequest {
+    if (-not $StartupRequestPath) { return $null }
+    $ResolvedRequest = [IO.Path]::GetFullPath($StartupRequestPath)
+    $HomePrefix = $BridgeHome.TrimEnd('\') + '\'
+    if (-not $ResolvedRequest.StartsWith($HomePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Startup request must remain inside the HASHI instance home"
+    }
+    if (-not (Test-Path -LiteralPath $ResolvedRequest -PathType Leaf)) { return $null }
+    $Request = Get-Content -LiteralPath $ResolvedRequest -Raw | ConvertFrom-Json
+    $RequiredRequestFields = @(
+        "schema", "operation_id", "instance_id", "code_root", "hashi_root",
+        "receipt_path", "deadline_epoch_ms"
+    )
+    $RequestFields = @($Request.PSObject.Properties.Name)
+    $MissingRequestFields = @($RequiredRequestFields | Where-Object { $_ -notin $RequestFields })
+    if ($MissingRequestFields.Count -ne 0 -or [int]$Request.schema -ne 1) {
+        throw "Invalid startup request schema"
+    }
+    $RequiredRequestFields | Where-Object { $_ -ne "schema" -and $_ -ne "deadline_epoch_ms" } |
+        ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace([string]$Request.$_)) {
+                throw "Invalid startup request field: $_"
+            }
+        }
+    if ([string]$Request.operation_id -notmatch '^[a-fA-F0-9]{32}$') {
+        throw "Invalid startup operation id"
+    }
+    if (-not $InstanceId.Equals([string]$Request.instance_id, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Startup request instance identity mismatch"
+    }
+    if (-not $ProjectDir.Equals(
+            ([IO.Path]::GetFullPath([string]$Request.code_root)).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Startup request code root mismatch"
+    }
+    if (-not $BridgeHome.Equals(
+            ([IO.Path]::GetFullPath([string]$Request.hashi_root)).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Startup request instance root mismatch"
+    }
+    if ([int64]$Request.deadline_epoch_ms -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
+        Remove-Item -LiteralPath $ResolvedRequest -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    $ReceiptPath = [IO.Path]::GetFullPath([string]$Request.receipt_path)
+    if (-not $ReceiptPath.StartsWith($HomePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Startup receipt must remain inside the HASHI instance home"
+    }
+    $Request | Add-Member -NotePropertyName resolved_receipt_path -NotePropertyValue $ReceiptPath -Force
+    # The fixed restart runner already loaded this transaction. Consume the
+    # shared request before product launch so a later logon/start cannot be
+    # rejected by stale cold-restart state.
+    Remove-Item -LiteralPath $ResolvedRequest -Force -ErrorAction Stop
+    return $Request
+}
+
+function Write-StartupReceipt {
+    param(
+        $Request,
+        [string]$State,
+        [string]$FailureStage = $null,
+        [string]$ErrorText = $null,
+        [hashtable]$Evidence = @{}
+    )
+    if ($null -eq $Request) { return }
+    $Path = [string]$Request.resolved_receipt_path
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    $Value = [ordered]@{
+        schema = 1
+        operation_id = ([string]$Request.operation_id).ToLowerInvariant()
+        instance_id = $InstanceId
+        state = $State
+        failure_stage = $FailureStage
+        error = $ErrorText
+        launcher_pid = $PID
+        updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        evidence = $Evidence
+    }
+    $Temporary = $Path + "." + [Guid]::NewGuid().ToString("N") + ".tmp"
+    try {
+        [IO.File]::WriteAllText(
+            $Temporary,
+            ($Value | ConvertTo-Json -Depth 8 -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $Temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Start-Bridge {
     <#
     .DESCRIPTION
@@ -420,10 +583,15 @@ function Start-Bridge {
         [switch]$ApiGateway
     )
     
+    $StartupRequest = Get-StartupRequest
+
     # Check if already running
     $procs = Get-BridgeProcesses
     if ($procs.Count -gt 0) {
         Write-Log "Bridge-u-f is already running (found $($procs.Count) processes)" -Level "WARN"
+        Write-StartupReceipt -Request $StartupRequest -State "failed" `
+            -FailureStage "new_process_failed_to_start" `
+            -ErrorText "A HASHI Core process already owns this instance"
         return $false
     }
     
@@ -438,9 +606,13 @@ function Start-Bridge {
     $RoleResolver = Join-Path $ProjectDir "scripts\resolve_launch_runtime.py"
     $CorePythonExe = (& $PythonExe -B $RoleResolver --code-root $ProjectDir --field core-executable)
     if ($LASTEXITCODE -ne 0 -or -not $CorePythonExe) {
+        Write-StartupReceipt -Request $StartupRequest -State "failed" `
+            -FailureStage "runtime_qualification_failed" `
+            -ErrorText "Runtime setup is incomplete; install the verified release before starting."
         throw "Runtime setup is incomplete; install the verified release before starting."
     }
     $CorePythonExe = ([string]$CorePythonExe).Trim()
+    $ApprovedCoreImages = @(Get-ApprovedCoreProcessImages -SelectedExecutable $CorePythonExe)
     $LaunchArguments = @(
         "-I", "-B",
         $MainScript,
@@ -481,25 +653,63 @@ function Start-Bridge {
             -RedirectStandardOutput $StdoutLog `
             -RedirectStandardError $StderrLog `
             -PassThru
-        
-        # Wait for startup
-        for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 1
+
+        # A cold restart is accepted only after the selected Core (or the
+        # selected Windows venv launcher's direct sealed-base child) acquires
+        # the instance lock and publishes its own PID file. Merely creating
+        # this PowerShell or Python launcher is not acceptance.
+        $LaunchDeadlineEpochMs = if ($null -ne $StartupRequest) {
+            [int64]$StartupRequest.deadline_epoch_ms
+        } else {
+            [DateTimeOffset]::UtcNow.AddSeconds(7.5).ToUnixTimeMilliseconds()
+        }
+        while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $LaunchDeadlineEpochMs) {
             $procs = Get-BridgeProcesses
-            if ($procs.Count -gt 0) {
+            if ($null -ne $StartupRequest) {
+                $BridgePid = Get-BridgePid
+                if ($null -ne $BridgePid -and $procs.ContainsKey($BridgePid) `
+                        -and (Test-LockFileHeld) `
+                        -and (Test-CoreLaunchProcess -CandidatePid $BridgePid `
+                            -LauncherPid ([int]$Launcher.Id) -ApprovedImages $ApprovedCoreImages)) {
+                    Write-StartupReceipt -Request $StartupRequest -State "launch_accepted" `
+                        -Evidence @{
+                            core_pid = $BridgePid
+                            launcher_process_id = [int]$Launcher.Id
+                            core_process_image = [string](
+                                (Get-CimInstance Win32_Process -Filter "ProcessId = $BridgePid").ExecutablePath
+                            )
+                            stdout = $StdoutLog
+                            stderr = $StderrLog
+                            runtime_executable = $CorePythonExe
+                        }
+                    Write-Log "Bridge-u-f launch accepted by Core PID $BridgePid" -Level "OK"
+                    return $true
+                }
+            } elseif ($procs.Count -gt 0) {
                 Write-Log "Bridge-u-f started ($($procs.Count) processes)" -Level "OK"
                 return $true
             }
             if ($Launcher.HasExited) {
-                Write-Log "Bridge-u-f launcher exited with code $($Launcher.ExitCode). stdout=$StdoutLog stderr=$StderrLog" -Level "ERROR"
+                $Message = "Bridge-u-f launcher exited with code $($Launcher.ExitCode). stdout=$StdoutLog stderr=$StderrLog"
+                Write-StartupReceipt -Request $StartupRequest -State "failed" `
+                    -FailureStage "launcher_rejected" -ErrorText $Message `
+                    -Evidence @{ launcher_exit_code = [int]$Launcher.ExitCode; stdout = $StdoutLog; stderr = $StderrLog }
+                Write-Log $Message -Level "ERROR"
                 return $false
             }
+            Start-Sleep -Milliseconds 250
         }
-        
-        Write-Log "Bridge-u-f did not start within 30 seconds. stdout=$StdoutLog stderr=$StderrLog" -Level "ERROR"
+
+        $Message = "Bridge-u-f did not acquire the instance lock before the launch deadline. stdout=$StdoutLog stderr=$StderrLog"
+        Write-StartupReceipt -Request $StartupRequest -State "failed" `
+            -FailureStage "new_process_failed_to_start" -ErrorText $Message `
+            -Evidence @{ launcher_process_id = [int]$Launcher.Id; stdout = $StdoutLog; stderr = $StderrLog }
+        Write-Log $Message -Level "ERROR"
         return $false
         
     } catch {
+        Write-StartupReceipt -Request $StartupRequest -State "failed" `
+            -FailureStage "launcher_rejected" -ErrorText $_.Exception.Message
         Write-Log "Failed to start bridge-u-f: $($_.Exception.Message)" -Level "ERROR"
         return $false
     }

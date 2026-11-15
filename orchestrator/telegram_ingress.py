@@ -9,7 +9,10 @@ from collections.abc import Callable
 from typing import Any
 from pathlib import Path
 
-from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics
+from orchestrator.telegram_ingress_diagnostics import (
+    TelegramIngressDiagnostics,
+    safe_error,
+)
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 from telegram import Bot, Update
@@ -21,6 +24,7 @@ TELEGRAM_LONG_POLL_SECONDS = 30
 TELEGRAM_READ_TIMEOUT_SECONDS = 40
 TELEGRAM_POLL_WATCHDOG_SECONDS = TELEGRAM_READ_TIMEOUT_SECONDS + 5
 TELEGRAM_RETRY_SECONDS = 2.0
+TELEGRAM_RETRY_MAX_SECONDS = 60.0
 
 
 class TelegramIngressInitializationError(RuntimeError):
@@ -74,6 +78,8 @@ class CoreTelegramIngress:
         self._delivering_update = False
         self._initialized = False
         self._drop_pending_on_connect = False
+        self._retry_seconds = TELEGRAM_RETRY_SECONDS
+        self.permanent_failure_reason: str | None = None
 
     @property
     def is_running(self) -> bool:
@@ -95,7 +101,7 @@ class CoreTelegramIngress:
             raise RuntimeError("Telegram Bot identity changed at the Agent route")
 
     async def start(self, *, drop_pending_updates: bool) -> None:
-        if self.is_running:
+        if self.is_running or self.permanent_failure_reason is not None:
             return
         self._stopping = False
         self._initialized = False
@@ -170,6 +176,7 @@ class CoreTelegramIngress:
                 finally:
                     self._poll_task = None
                 self.diagnostics.poll_succeeded()
+                self._retry_seconds = TELEGRAM_RETRY_SECONDS
                 self._check_bot_identity(self.handle_lookup(self.agent_name))
                 status_ok = await self._set_connected(True)
                 for update in updates:
@@ -202,10 +209,22 @@ class CoreTelegramIngress:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.diagnostics.failure(exc, stage=stage, retry_seconds=TELEGRAM_RETRY_SECONDS)
+                reason = safe_error(exc, stage=stage)["reason"]
+                permanent = reason in {"invalid_token", "forbidden"}
+                retry_seconds = None if permanent else self._retry_seconds
+                self.diagnostics.failure(
+                    exc, stage=stage, retry_seconds=retry_seconds
+                )
                 if not self._stopping:
                     await self._set_connected(False)
-                    await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
+                    if permanent:
+                        self.permanent_failure_reason = reason
+                        return
+                    await asyncio.sleep(retry_seconds)
+                    self._retry_seconds = min(
+                        TELEGRAM_RETRY_MAX_SECONDS,
+                        max(TELEGRAM_RETRY_SECONDS, retry_seconds * 2),
+                    )
                 else:
                     self.connected = False
 

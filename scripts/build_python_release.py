@@ -53,6 +53,7 @@ def build_python_release(
         runner(
             (
                 sys.executable,
+                "-B",
                 "-m",
                 "build",
                 "--outdir",

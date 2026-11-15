@@ -18,9 +18,9 @@ check "node available"       node --version
 check "ffmpeg available"     ffmpeg -version
 check "say available"        which say
 check "pip available"        pip3 --version
-check "telegram-bot installed" python3 -c "import telegram"
-check "httpx installed"      python3 -c "import httpx"
-check "aiohttp installed"    python3 -c "import aiohttp"
+check "telegram-bot installed" python3 -B -c "import telegram"
+check "httpx installed"      python3 -B -c "import httpx"
+check "aiohttp installed"    python3 -B -c "import aiohttp"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

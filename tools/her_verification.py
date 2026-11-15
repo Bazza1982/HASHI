@@ -460,7 +460,7 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
     recipes: dict[str, dict[str, Any]] = {
         "pytest_core": {
             "description": "Curated deterministic pytest core gate.",
-            "argv": [python, "-m", "pytest", "-q"],
+            "argv": [python, "-B", "-m", "pytest", "-q"],
             "timeout_s": 1800.0,
         },
         "pytest_offline": {
@@ -470,6 +470,7 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
             ),
             "argv": [
                 python,
+                "-B",
                 "-m",
                 "pytest",
                 "-q",
@@ -480,8 +481,20 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
             "timeout_s": 3600.0,
         },
         "python_compile": {
-            "description": "Compile all Python sources in the current workspace.",
-            "argv": [python, "-m", "compileall", "-q", "."],
+            "description": "Parse workspace Python sources without writing bytecode.",
+            "argv": [
+                python,
+                "-B",
+                "-c",
+                (
+                    "from pathlib import Path;"
+                    "skip={'.git','.venv','.venv-wsl','node_modules','__pycache__'};"
+                    "files=[p for p in Path('.').rglob('*.py') "
+                    "if not skip.intersection(p.parts)];"
+                    "[compile(p.read_bytes(),str(p),'exec') for p in files];"
+                    "print(f'PYTHON_SYNTAX_OK {len(files)}')"
+                ),
+            ],
             "timeout_s": 900.0,
         },
     }

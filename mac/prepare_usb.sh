@@ -136,29 +136,29 @@ echo "[3/5] Extracting the verified runtime..."
 tar -xzf "$python_archive" -C "$BUILD_ROOT"
 PYTHON_EXE="$BUILD_ROOT/python/bin/python3"
 [ -x "$PYTHON_EXE" ] || fail "The verified archive did not contain python/bin/python3"
-"$PYTHON_EXE" -c \
+"$PYTHON_EXE" -B -c \
     "import sys; raise SystemExit(0 if sys.version_info[:3] == (3, 12, 13) and sys.platform == 'darwin' else 1)" || \
     fail "The extracted interpreter does not match the approved macOS runtime."
 
 echo "[4/5] Installing the pinned standard dependency generation..."
-"$PYTHON_EXE" -m pip install --disable-pip-version-check --only-binary=:all: \
+"$PYTHON_EXE" -B -m pip install --disable-pip-version-check --only-binary=:all: \
     -r "$BUILD_ROOT/constraints/standard-py312.lock"
-"$PYTHON_EXE" "$BUILD_ROOT/scripts/check_runtime_contract.py" --code-root "$BUILD_ROOT"
+"$PYTHON_EXE" -B "$BUILD_ROOT/scripts/check_runtime_contract.py" --code-root "$BUILD_ROOT"
 
 # Relocatable helper interpreters keep native speech dependencies outside Core.
 mkdir -p "$BUILD_ROOT/media"
 for kind in transcription tts; do
     cp -R "$BUILD_ROOT/python" "$BUILD_ROOT/media/$kind"
     helper="$BUILD_ROOT/media/$kind/bin/python3"
-    "$helper" -m pip install --disable-pip-version-check --only-binary=:all: \
+    "$helper" -B -m pip install --disable-pip-version-check --only-binary=:all: \
         -r "$BUILD_ROOT/constraints/$kind-py312.lock"
 done
 export HF_HUB_CACHE="$BUILD_ROOT/media/model-cache"
-"$BUILD_ROOT/media/transcription/bin/python3" -I \
+"$BUILD_ROOT/media/transcription/bin/python3" -I -B \
     "$BUILD_ROOT/orchestrator/voice_transcription_worker.py" --prepare-model
-"$BUILD_ROOT/media/transcription/bin/python3" -I \
+"$BUILD_ROOT/media/transcription/bin/python3" -I -B \
     "$BUILD_ROOT/orchestrator/voice_transcription_worker.py" --check-model
-"$BUILD_ROOT/media/tts/bin/python3" -I \
+"$BUILD_ROOT/media/tts/bin/python3" -I -B \
     "$BUILD_ROOT/orchestrator/voice_synthesis_worker.py" --probe
 
 echo "[5/5] Finalising the image..."
