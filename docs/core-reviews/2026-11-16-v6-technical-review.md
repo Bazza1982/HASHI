@@ -1,9 +1,9 @@
 # HASHI Core v6 startup-recovery technical review
 
-Review time: 2026-11-16T02:09:28+11:00
+Review time: 2026-11-16T02:46:06+11:00
 Branch: `core5-fix`
 Base: `main` at `1691832a`
-Protected-Core digest: `sha256:fe8ccd0776da69247b71b7b72b97c10fffe824c0ce80ee911f62176760bfa6fd`
+Protected-Core digest: `sha256:758fa158eb150eb3ac8eb0b96df70f0334652b05f26a3297226b52faf3254289`
 
 ## Reviewer identity and approval boundary
 
@@ -28,6 +28,7 @@ included in the digest and checked for boundary compatibility.
 The review also covered the owning non-Core lifecycle paths:
 `orchestrator/function_worker_supervisor.py`,
 `orchestrator/runtime_app_host.py`, `orchestrator/telegram_ingress.py`,
+`orchestrator/workbench_auth.py`,
 `remote/api/server.py`, `bin/bridge_ctl.ps1`,
 `bin/hashi_restart_ctl.ps1`, and `bin/hashi_restart_task_runner.ps1`.
 
@@ -46,11 +47,11 @@ No blocking source finding remains in the reviewed candidate.
   recursively hash the installation, rediscover packages, or rehash protected
   Core source for each child. A generated candidate exposed normal empty venv
   scaffold directories (`Include` and `Lib`) that have no sealed files. The
-  reviewed correction permits empty unsealed scaffolds and permits declared
-  import-root directories at their parent level only because each declared
-  root is then shallow-scanned itself. An undeclared directory is rejected as
-  soon as it contains an entry, and injected entries inside `Lib` or
-  `site-packages` are rejected by those roots' own scans.
+  reviewed correction permits a bounded file-free scaffold tree and permits
+  declared import-root directories at their parent level only because each
+  declared root is then shallow-scanned itself. A scaffold containing a file,
+  redirect, or more than 128 directory entries is rejected; injected entries
+  inside `Lib` or `site-packages` are rejected by those roots' own scans.
 - `-B` prevents HASHI-managed Python processes from writing bytecode; it does
   not prevent existing bytecode from being read. The narrow cache exception
   therefore retains a documented residual local-writer risk rather than
@@ -70,6 +71,11 @@ No blocking source finding remains in the reviewed candidate.
 - Connector retries are per connector. Permanent Telegram credential errors
   stop that connector until configuration changes. Connector activation no
   longer gates Core/Worker readiness or triggers all-Agent topology work.
+- When Remote is explicitly disabled by its authoritative lifecycle setting,
+  Functions no longer queries Task Scheduler for a Remote runtime principal.
+  A disabled connector therefore cannot add a 30-second credential-publication
+  failure to Core/Functions startup; enabling Remote restores the exact
+  registered-principal lookup and private-file protection boundary.
 - Cold restart now validates the exact task and transaction before stopping the
   old process, distinguishes acceptance from a launcher PID, uses one deadline,
   and preserves precise failure stages. Malformed root-bound requests fail
@@ -98,6 +104,11 @@ No blocking source finding remains in the reviewed candidate.
 - MCP ownership and readonly Python launch suite: 46 passed, 1 platform skip.
 - Focused cache/deep-fast tests: 38 passed; replacement receipt and
   one-scan tests passed; launcher/base-child acceptance tests passed.
+- Final platform-path correction: 57 focused runtime-installation,
+  Remote-principal, and minimal-Core tests passed. The expanded runtime,
+  restart, Worker, connector, and receipt suite reached 206 passed; its sole
+  pre-commit rejection was the intentional guard against generating a product
+  artifact from modified tracked Core source.
 - Testing under the selected official v6 Functions interpreter exposed two
   real regressions in the first candidate: a direct generation launch and an
   externally supplied Kernel release could reach identity-only admission

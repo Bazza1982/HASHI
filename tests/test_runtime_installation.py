@@ -48,7 +48,13 @@ def installation(tmp_path, role=FUNCTIONS_ROLE):
     executable = root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"synthetic admission fixture; never executable")
-    (base / "python.exe").write_bytes(b"synthetic immutable CPython base")
+    base_executable = base / (
+        "python.exe"
+        if sys.platform == "win32"
+        else f"bin/python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    base_executable.parent.mkdir(parents=True, exist_ok=True)
+    base_executable.write_bytes(b"synthetic immutable CPython base")
     (root / "pyvenv.cfg").write_text(
         f"home = {base}\ninclude-system-site-packages = false\n", encoding="utf-8")
     policy = load_runtime_policy(ROOT, role=role)
@@ -164,8 +170,18 @@ def test_fast_admission_rejects_unsealed_top_level_import_entry(tmp_path):
 
 def test_fast_admission_allows_empty_unsealed_venv_scaffold_directory(tmp_path):
     path, _, digest, _ = installation(tmp_path, CORE_HOST_ROLE)
-    (path.parent / "Include").mkdir()
-    (path.parent / "Lib" / "site-packages").mkdir(parents=True)
+    include = path.parent / (
+        "Include"
+        if sys.platform == "win32"
+        else f"include/python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    site = path.parent / (
+        "Lib/site-packages"
+        if sys.platform == "win32"
+        else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    include.mkdir(parents=True)
+    site.mkdir(parents=True)
 
     admitted = admit_qualified_runtime(
         path,

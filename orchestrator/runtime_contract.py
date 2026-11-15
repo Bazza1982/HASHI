@@ -853,6 +853,35 @@ def _verify_shallow_import_root(
     declared_children: frozenset[str] = frozenset(),
 ) -> None:
     """Reject new top-level import/startup entries without a recursive scan."""
+
+    def empty_scaffold_tree(path: str, *, entry_limit: int = 128) -> bool:
+        """Accept a bounded venv directory scaffold only when it has no files.
+
+        POSIX venvs commonly create ``include/pythonX.Y`` even when no headers
+        are installed.  Such directories are absent from the file seal.  Walk
+        only this otherwise-unsealed candidate, reject links and files, and
+        cap the work so fast admission cannot become an unbounded tree scan.
+        """
+        pending = [Path(path)]
+        observed = 0
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as children:
+                for child in children:
+                    observed += 1
+                    if observed > entry_limit:
+                        return False
+                    metadata = child.stat(follow_symlinks=False)
+                    if (
+                        stat.S_ISDIR(metadata.st_mode)
+                        and not stat.S_ISLNK(metadata.st_mode)
+                        and not getattr(metadata, "st_file_attributes", 0) & 0x400
+                    ):
+                        pending.append(Path(child.path))
+                        continue
+                    return False
+        return True
+
     directory = root / relative_root if relative_root else root
     if not directory.is_dir():
         return
@@ -874,14 +903,12 @@ def _verify_shallow_import_root(
             stat.S_ISDIR(metadata.st_mode)
             and not getattr(metadata, "st_file_attributes", 0) & 0x400
         ):
-            # venv creates empty scaffold directories such as Include and Lib
-            # that contain no authoritative files and therefore do not appear
-            # in the file seal.  Empty directories cannot supply a module or
-            # native loader.  A later populated import root is still rejected
-            # by its own shallow scan or by this nonempty-directory check.
-            with os.scandir(entry.path) as children:
-                if next(children, None) is None:
-                    continue
+            # venv creates file-free scaffold trees such as Include and
+            # include/pythonX.Y.  They contain no authoritative bytes and
+            # therefore do not appear in the file seal.  Any file, redirect,
+            # or oversized tree remains a startup rejection.
+            if empty_scaffold_tree(entry.path):
+                continue
         raise RuntimeContractError(
             f"Runtime import root contains an unsealed top-level entry: "
             f"{prefix}{entry.name}"

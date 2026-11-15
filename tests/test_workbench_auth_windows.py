@@ -86,6 +86,22 @@ def test_exact_instance_lookup_works_without_cim_enumeration(registered_schedule
     assert workbench_auth.resolve_remote_runtime_sids(registered_scheduler) == expected
 
 
+def test_disabled_remote_skips_scheduler_principal_lookup(tmp_path, monkeypatch):
+    config = tmp_path / "remote" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text(
+        "lifecycle:\n  remote_enabled: false\n  remote_supervised: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        workbench_auth,
+        "_windows_remote_runtime_sids",
+        lambda _root: pytest.fail("disabled Remote queried Task Scheduler"),
+    )
+
+    assert workbench_auth.resolve_remote_runtime_sids(tmp_path) == ()
+
+
 @pytest.mark.parametrize("case", ["denied", "empty", "invalid", "foreign"])
 def test_invalid_registration_cannot_publish_credentials(registered_scheduler, monkeypatch, case):
     monkeypatch.setenv("HASHI_TEST_PRINCIPAL_CASE", case)

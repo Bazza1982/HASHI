@@ -192,10 +192,12 @@ def test_same_core_pid_can_replace_fr_dependency_and_rollback_without_replaying(
         assert candidate["automatic_adoption"] is False
         references.append(candidate["functions"])
         runtime_ids.append(candidate["functions_runtime_id"])
+    bridge_home = tmp_path / "instance"
+    generation_root = bridge_home / "state" / "function_generations"
     requests = []
     from orchestrator.kernel_artifact import manifest_digest
     for label, failure in (("old", ""), ("new", ""), ("rejected", "activate")):
-        artifact = tmp_path / label
+        artifact = generation_root / label
         module = artifact / "orchestrator/role_native_fixture.py"
         module.parent.mkdir(parents=True)
         module.write_text(PEER.format(value="same-function-generation", failure=failure), encoding="utf-8")
@@ -240,7 +242,7 @@ async def check():
                           "before":before,"after":after,"rollback":rollback}))
     finally: await kernel.active.close()
 asyncio.run(check())
-""", payload, tmp_path / "instance", timeout=150, code_root=native_roles["code_root"])
+""", payload, bridge_home, timeout=150, code_root=native_roles["code_root"])
     observed["CR_ID"] = RuntimeFingerprint.from_mapping(observed["core"]).runtime_id
     observed["FR_IDs"] = runtime_ids
     observed["FG_ID"] = requests[0]["manifest"]["generation_id"]
