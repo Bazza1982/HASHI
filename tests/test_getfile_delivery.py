@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 from orchestrator.canonical_audit import CanonicalAuditStore
-from orchestrator.getfile_service import GetFileError, GetFileService, resolve_path
+from orchestrator.getfile_service import GetFileError, GetFileService, _guard, resolve_path
 from orchestrator.session_store import SessionStore
 
 
@@ -35,6 +35,27 @@ def observe(runtime, work, name):
         "arguments": {"path": str(work / name)}, "details": {"file_effect": {
             "path": str(work / name), "action": "created", "verified": True}}},
         provenance={"workspace_dir": str(work), "access_roots": [str(work)], "owner_id": "user:7"})
+
+
+def test_getfile_guard_reuses_runtime_generation_policy(target, monkeypatch):
+    import orchestrator.live_runtime_protection as protection
+
+    runtime, _update, work, _session = target
+    loads = 0
+
+    def load_policy(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return None
+
+    monkeypatch.setattr(protection, "policy_cache_key", lambda *args, **kwargs: ("generation-1",))
+    monkeypatch.setattr(protection, "load_live_runtime_policy", load_policy)
+    monkeypatch.setattr(protection, "evaluate_live_runtime_request", lambda *args, **kwargs: None)
+
+    _guard(runtime, work / "first.txt")
+    _guard(runtime, work / "second.txt")
+
+    assert loads == 1
 
 
 @pytest.mark.asyncio

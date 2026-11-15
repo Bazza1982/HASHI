@@ -539,10 +539,16 @@ class SessionStore:
         return connection
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def _connection(
+        self, *, busy_timeout_ms: int | None = None
+    ) -> Iterator[sqlite3.Connection]:
         """Commit or roll back, then deterministically release the file handle."""
 
         connection = self._connect()
+        if busy_timeout_ms is not None:
+            connection.execute(
+                f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}"
+            )
         try:
             with connection:
                 yield connection
@@ -565,38 +571,80 @@ class SessionStore:
                 version = 0
             if version > self.SCHEMA_VERSION:
                 raise RuntimeError("Session database requires a newer schema reader")
-            schema_ready = version == self.SCHEMA_VERSION
-            if schema_ready:
-                foreground_index = connection.execute(
-                    "SELECT sql FROM sqlite_master WHERE type = 'index' "
-                    "AND name = 'one_live_call_per_owner'"
-                ).fetchone()
-                # Legacy writers/restores can leave recovery work even when
-                # the version marker is current. Reuse the ordered migration.
-                schema_ready = (
-                    bool(foreground_index)
-                    and "foreground" in str(foreground_index["sql"] or "").lower()
-                    and connection.execute(
-                        "SELECT 1 FROM live_provider_fragment_inbox UNION ALL "
-                        "SELECT 1 FROM live_provider_delegation_inbox LIMIT 1"
-                    ).fetchone() is None
-                )
-        if schema_ready:
-            # Legacy writers can still set the scalar preference. This data
-            # projection is recovery, not a repeated schema migration.
-            with self._lock, self._connection() as connection:
-                connection.execute("""
-                    INSERT OR IGNORE INTO session_workzones(
-                        session_id, slot_id, path, enabled, label, created_at, updated_at)
-                    SELECT session_id, 'main', workzone, 1, '', created_at, updated_at
-                    FROM sessions
-                    WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
-                      AND NOT EXISTS (SELECT 1 FROM session_workzones AS w
-                                      WHERE w.session_id=sessions.session_id AND w.slot_id='main')
-                """)
-            self._repair_pending_audio_projections()
+        if version == self.SCHEMA_VERSION:
             return
         self._initialize_schema()
+
+    def run_deferred_maintenance(self) -> None:
+        """Repair legacy projections without extending the service critical path."""
+
+        with self._lock, self._connection() as connection:
+            missing_workzone = connection.execute(
+                """
+                SELECT 1 FROM sessions AS s
+                WHERE s.workzone IS NOT NULL AND TRIM(s.workzone) != ''
+                  AND NOT EXISTS (
+                      SELECT 1 FROM session_workzones AS w
+                      WHERE w.session_id=s.session_id AND w.slot_id='main'
+                  )
+                LIMIT 1
+                """
+            ).fetchone()
+            if missing_workzone is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO session_workzones(
+                        session_id, slot_id, path, enabled, label,
+                        created_at, updated_at
+                    )
+                    SELECT session_id, 'main', workzone, 1, '',
+                           created_at, updated_at
+                    FROM sessions
+                    WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
+                    """
+                )
+        self._repair_pending_audio_projections()
+
+    def _promote_legacy_live_provider_events(self) -> None:
+        """Promote old Provider inbox rows only when live recovery consumes them."""
+
+        with self._lock, self._connection() as connection:
+            pending = connection.execute(
+                "SELECT 1 FROM live_provider_fragment_inbox UNION ALL "
+                "SELECT 1 FROM live_provider_delegation_inbox LIMIT 1"
+            ).fetchone()
+            if pending is None:
+                return
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO live_provider_event_inbox(
+                    owner_id, provider_event_id, call_id, call_epoch,
+                    session_id, event_type, speaker, text, start_ms,
+                    end_ms, delegation_id, offset_ms, created_at
+                )
+                SELECT owner_id, provider_event_id, call_id, call_epoch,
+                       session_id, event_type, speaker, text, start_ms,
+                       end_ms, delegation_id, offset_ms, created_at
+                FROM (
+                    SELECT owner_id, provider_event_id, call_id, call_epoch,
+                           session_id, 'transcript' AS event_type, speaker,
+                           text, start_ms, end_ms, NULL AS delegation_id,
+                           NULL AS offset_ms, created_at
+                    FROM live_provider_fragment_inbox
+                    UNION ALL
+                    SELECT owner_id, provider_event_id, call_id, call_epoch,
+                           session_id, 'delegation' AS event_type,
+                           NULL AS speaker, NULL AS text, NULL AS start_ms,
+                           NULL AS end_ms, delegation_id, offset_ms, created_at
+                    FROM live_provider_delegation_inbox
+                )
+                ORDER BY created_at, call_id, call_epoch, provider_event_id
+                """
+            )
+            connection.execute("DELETE FROM live_provider_fragment_inbox")
+            connection.execute("DELETE FROM live_provider_delegation_inbox")
 
     def _initialize_schema(self) -> None:
         with self._lock, self._connection() as connection:
@@ -2542,6 +2590,7 @@ class SessionStore:
 
     def pending_live_provider_events(self) -> list[dict[str, Any]]:
         """Return all staged typed Provider events in their durable receive order."""
+        self._promote_legacy_live_provider_events()
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """SELECT i.*, c.agent_id, c.instance_id, c.instance_generation,
@@ -4112,6 +4161,101 @@ class SessionStore:
                 ),
             ).fetchone()
         return self._session_dict(resolved) if resolved is not None else selected
+
+    def resolve_primary_sessions(
+        self,
+        *,
+        owner_id: str,
+        agent_ids: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve existing primary/default Sessions for a roster in one read."""
+
+        owner = str(owner_id)
+        agents = tuple(
+            dict.fromkeys(
+                str(agent_id).strip().lower()
+                for agent_id in agent_ids
+                if str(agent_id).strip()
+            )
+        )
+        if not agents:
+            return {}
+        marks = ",".join("?" for _ in agents)
+        # This is an optional roster projection. Under a writer lock the API
+        # returns a degraded Session view and the next refresh retries; durable
+        # writes retain the normal 30-second busy timeout.
+        with self._connection(busy_timeout_ms=0) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT s.*,
+                       b.surface AS _binding_surface,
+                       b.channel_key AS _binding_channel_key,
+                       b.updated_at AS _binding_updated_at
+                FROM sessions AS s
+                LEFT JOIN channel_bindings AS b
+                  ON b.session_id=s.session_id
+                 AND b.instance_id=s.instance_id
+                 AND b.owner_id=s.owner_id
+                 AND b.agent_id=s.agent_id
+                 AND (
+                    (b.surface=? AND b.channel_key=?)
+                    OR b.surface='telegram'
+                    OR (b.surface='workbench' AND b.channel_key='default')
+                 )
+                WHERE s.instance_id=? AND s.owner_id=?
+                  AND s.agent_id IN ({marks})
+                  AND s.session_kind='conversation' AND s.status='active'
+                  AND (s.is_default=1 OR b.session_id IS NOT NULL)
+                """,
+                (
+                    PRIMARY_CONVERSATION_SURFACE,
+                    PRIMARY_CONVERSATION_CHANNEL,
+                    self.instance_id,
+                    owner,
+                    *agents,
+                ),
+            ).fetchall()
+        primary: dict[str, dict[str, Any]] = {}
+        legacy: dict[
+            str, tuple[tuple[str, str], str, dict[str, Any]]
+        ] = {}
+        defaults: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            surface = str(item.pop("_binding_surface") or "")
+            channel = str(item.pop("_binding_channel_key") or "")
+            binding_updated = str(item.pop("_binding_updated_at") or "")
+            agent = str(item["agent_id"]).lower()
+            session = self._session_dict(item)
+            if (
+                surface == PRIMARY_CONVERSATION_SURFACE
+                and channel == PRIMARY_CONVERSATION_CHANNEL
+            ):
+                primary[agent] = session
+            elif surface == "telegram" or (
+                surface == "workbench" and channel == "default"
+            ):
+                rank = (
+                    str(item.get("updated_at") or ""),
+                    binding_updated,
+                )
+                session_id = str(item.get("session_id") or "")
+                previous = legacy.get(agent)
+                if (
+                    previous is None
+                    or rank > previous[0]
+                    or (rank == previous[0] and session_id < previous[1])
+                ):
+                    legacy[agent] = (rank, session_id, session)
+            elif bool(item.get("is_default")):
+                defaults[agent] = session
+        return {
+            agent: primary.get(agent)
+            or (legacy.get(agent) or (None, None, None))[2]
+            or defaults[agent]
+            for agent in agents
+            if agent in primary or agent in legacy or agent in defaults
+        }
 
     def resolve_session(
         self,
@@ -7691,31 +7835,27 @@ class SessionStore:
         observed_now = now or datetime.now(timezone.utc)
         if observed_now.tzinfo is None:
             observed_now = observed_now.replace(tzinfo=timezone.utc)
+        observed_text = observed_now.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        candidate_sql = """
+            SELECT * FROM session_attachments
+            WHERE state IN ('staged','committed')
+              AND retention_indefinite=0
+              AND retention_seconds IS NOT NULL
+              AND media_type NOT LIKE 'audio/%'
+              AND julianday(created_at)
+                    + (MAX(retention_seconds, 1) / 86400.0) <= julianday(?)
+            ORDER BY created_at, attachment_id
+        """
         expired: list[dict[str, Any]] = []
         with self._lock, self._connection() as connection:
+            rows = connection.execute(candidate_sql, (observed_text,)).fetchall()
+            if not rows:
+                return []
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT * FROM session_attachments
-                WHERE state IN ('staged','committed')
-                  AND retention_indefinite=0
-                  AND retention_seconds IS NOT NULL
-                  AND media_type NOT LIKE 'audio/%'
-                ORDER BY created_at, attachment_id
-                """
-            ).fetchall()
+            rows = connection.execute(candidate_sql, (observed_text,)).fetchall()
             for row in rows:
-                try:
-                    created_at = datetime.fromisoformat(
-                        str(row["created_at"]).replace("Z", "+00:00")
-                    )
-                except ValueError:
-                    continue
-                deadline = created_at + timedelta(
-                    seconds=max(1, int(row["retention_seconds"]))
-                )
-                if observed_now < deadline:
-                    continue
                 attachment_id = str(row["attachment_id"])
                 reference_pattern = (
                     '%"attachment_id":"'
@@ -7779,9 +7919,7 @@ class SessionStore:
                         self._prune_empty_attachment_directories(file_path)
                     except OSError:
                         continue
-                expired_at = observed_now.astimezone(timezone.utc).isoformat().replace(
-                    "+00:00", "Z"
-                )
+                expired_at = observed_text
                 connection.execute(
                     """
                     UPDATE session_attachments SET state='expired'
@@ -7819,16 +7957,38 @@ class SessionStore:
             observed_now = observed_now.replace(tzinfo=timezone.utc)
         observed_now = observed_now.astimezone(timezone.utc)
         claimed_at = observed_now.isoformat().replace("+00:00", "Z")
+        candidate_sql = """
+            SELECT * FROM session_attachments
+            WHERE asset_id IN (
+                SELECT DISTINCT asset_id FROM session_attachments
+                WHERE asset_id IS NOT NULL AND asset_id != ''
+                  AND media_type LIKE 'audio/%'
+                  AND (
+                    state='deleting'
+                    OR audio_projection_pending=1
+                    OR (
+                        state='committed' AND retention_indefinite=0
+                        AND retention_seconds IS NOT NULL
+                        AND CASE
+                              WHEN retention_expires_at IS NOT NULL
+                                   AND TRIM(retention_expires_at) != ''
+                                THEN julianday(retention_expires_at)
+                              ELSE julianday(COALESCE(uploaded_at, created_at))
+                                   + (MAX(retention_seconds, 1) / 86400.0)
+                            END <= julianday(?)
+                    )
+                  )
+            )
+            ORDER BY asset_id, attachment_id
+        """
         claims: dict[str, AudioDeleteClaim] = {}
         projection_repairs: set[tuple[str, str, str]] = set()
         with self._lock, self._connection() as connection:
+            rows = connection.execute(candidate_sql, (claimed_at,)).fetchall()
+            if not rows:
+                return []
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """SELECT * FROM session_attachments
-                   WHERE asset_id IS NOT NULL AND asset_id != ''
-                     AND media_type LIKE 'audio/%'
-                   ORDER BY asset_id, attachment_id"""
-            ).fetchall()
+            rows = connection.execute(candidate_sql, (claimed_at,)).fetchall()
             grouped: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
                 grouped.setdefault(str(row["asset_id"]), []).append(row)
@@ -8982,14 +9142,27 @@ class SessionStore:
         target_agent_id = str(agent_id or "").strip().lower() or None
         stopped_request_id = str(user_stop_request_id or "").strip()
         reconciled_ids: list[str] = []
+        agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
+        params: tuple[str, ...] = (
+            (self.instance_id, target_agent_id)
+            if target_agent_id
+            else (self.instance_id,)
+        )
+        with self._connection() as connection:
+            pending = connection.execute(
+                f"""
+                SELECT 1 FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
+                WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                {agent_clause}
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        if pending is None:
+            return []
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
-            params: tuple[str, ...] = (
-                (self.instance_id, target_agent_id)
-                if target_agent_id
-                else (self.instance_id,)
-            )
             rows = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r

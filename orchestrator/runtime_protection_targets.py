@@ -8,7 +8,6 @@ from __future__ import annotations
 from functools import lru_cache
 import hashlib
 import json
-import os
 from pathlib import Path
 
 from orchestrator.runtime_contract import (
@@ -37,31 +36,21 @@ def _selector(core):
 
 
 def _selector_stamp(path: Path):
-    """Return a bounded content observation for denial-cache invalidation."""
+    """Return the atomic selector identity used to invalidate a qualified policy."""
     try:
         if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
             return ("redirected",)
-        with path.open("rb") as stream:
-            payload = stream.read(_MAX_SELECTOR_BYTES + 1)
-            opened = os.fstat(stream.fileno())
         current = path.stat()
     except OSError:
         # Observation failure does not discard an admitted boundary.
         return ("unavailable",)
-    opened_identity = (
-        opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+    return (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_mtime_ns,
+        getattr(current, "st_ctime_ns", 0),
     )
-    current_identity = (
-        current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
-    )
-    if opened_identity != current_identity:
-        return ("unstable",)
-    content = (
-        "oversize"
-        if len(payload) > _MAX_SELECTOR_BYTES
-        else "sha256:" + hashlib.sha256(payload).hexdigest()
-    )
-    return (current.st_mtime_ns, current.st_size, content)
 
 
 def protection_context_key(core_runtime=None):

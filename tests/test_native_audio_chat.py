@@ -1240,6 +1240,7 @@ def test_legacy_output_audio_projection_recovers_idempotently_after_failure(
         ).fetchone()[0] == 1
     monkeypatch.setattr(AudioAssetStore, "set_indefinite", original)
     recovered = SessionStore(db_path)
+    recovered.run_deferred_maintenance()
     assert recovered.audio_asset_bytes(
         session_id=session_id,
         owner_id=owner_id,

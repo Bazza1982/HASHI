@@ -27,6 +27,28 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_idle_maintenance_does_not_take_a_sqlite_write_lock(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    statements: list[str] = []
+    original_connect = store._connect
+
+    def traced_connect():
+        connection = original_connect()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+
+    assert store.cleanup_attachments() == []
+    assert store.cleanup_audio_assets() == []
+    assert store.reconcile_incomplete_runs() == []
+    store.run_deferred_maintenance()
+    assert not any(
+        statement.strip().upper().startswith("BEGIN IMMEDIATE")
+        for statement in statements
+    )
+
+
 def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
@@ -2308,6 +2330,7 @@ def test_existing_scalar_workzone_is_migrated_to_enabled_main_slot(tmp_path):
         )
 
     reloaded = SessionStore(store.db_path, instance_id="HASHI1")
+    reloaded.run_deferred_maintenance()
     state = reloaded.get_workzone_set(session["session_id"])
 
     assert state["revision"] == 0

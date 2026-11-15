@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from orchestrator.live_runtime_protection import load_live_runtime_policy
+from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeFingerprint
 from tools.registry import ToolRegistry
 
 
@@ -59,6 +60,48 @@ def _reason(result) -> str:
     assert result is not None
     assert result.is_error is True
     return str((result.details or {}).get("reason") or "")
+
+
+def test_runtime_protection_cache_key_does_not_read_unchanged_selector(
+    tmp_path, monkeypatch,
+):
+    import orchestrator.runtime_protection_targets as targets
+
+    prefix = tmp_path / "runtime" / "core"
+    prefix.mkdir(parents=True)
+    selector = prefix.parent / "hashi-runtime-release.json"
+    selector.write_text("{}", encoding="utf-8")
+    core = RuntimeFingerprint(
+        implementation="cpython",
+        python="3.13.0",
+        python_minor="3.13",
+        cache_tag="cpython-313",
+        platform_abi="test",
+        platform="win32",
+        machine="AMD64",
+        pointer_bits=64,
+        executable=str(prefix / "python.exe"),
+        environment_prefix=str(prefix),
+        runtime_policy_digest="sha256:test",
+        dependency_digest="sha256:test",
+        core_source_digest="sha256:test",
+        core_api=1,
+        function_api=1,
+        worker_model="process",
+        worker_protocol=1,
+        generation_schema=1,
+        role=CORE_HOST_ROLE,
+    )
+    monkeypatch.setattr(targets, "current_process_runtime", lambda: None)
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("selector bytes were read for a cache-key check")
+
+    monkeypatch.setattr(Path, "open", unexpected_read)
+
+    key = targets.protection_context_key(core)
+
+    assert key[2][0] != "unavailable"
 
 
 def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundary(tmp_path, monkeypatch):

@@ -2517,6 +2517,10 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             conn.execute("DROP INDEX IF EXISTS one_live_call_per_owner_agent")
             conn.execute("DROP INDEX IF EXISTS one_live_call_per_owner")
             conn.execute(
+                "UPDATE schema_metadata SET value = ? WHERE key = 'schema_version'",
+                (str(SessionStore.SCHEMA_VERSION - 1),),
+            )
+            conn.execute(
                 """
                 INSERT INTO live_calls(
                     call_id, owner_id, session_id, agent_id, instance_id,

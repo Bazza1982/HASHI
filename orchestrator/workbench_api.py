@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import re
+import sqlite3
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -203,6 +204,8 @@ from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error
 from orchestrator.voice_transcript_gate import state_after_transcription
 
 logger = logging.getLogger("BridgeU.WorkbenchAPI")
+_PRIMARY_SESSION_UNSET = object()
+_MAINTENANCE_FALLBACK_SECONDS = 300
 
 
 def is_request_loopback(request) -> bool:
@@ -427,6 +430,8 @@ class WorkbenchApiServer:
         telegram_bot_verifier=None,
     ):
         self.config_path = config_path
+        self._agent_config_snapshot_key: tuple | None = None
+        self._agent_config_snapshot = None
         self.global_config = global_config
         self.runtimes = runtimes or []
         self.orchestrator = orchestrator
@@ -469,14 +474,13 @@ class WorkbenchApiServer:
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
         self.ingress_confirmation = IngressConfirmationService(self.session_store)
-        self.reconciled_session_runs = (
-            self.session_store.reconcile_incomplete_runs()
-            if reconcile_session_runs
-            else []
-        )
+        self.reconciled_session_runs = []
+        self._reconcile_session_runs = bool(reconcile_session_runs)
+        self._startup_maintenance_task: asyncio.Task | None = None
         self._exchange_ingress = None
         self._exchange_recovery_task: asyncio.Task | None = None
         self._hchat_status_recovery_task: asyncio.Task | None = None
+        self._hchat_status_recovery_event = asyncio.Event()
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self._device_capability_topology_task: asyncio.Task | None = None
@@ -1390,7 +1394,35 @@ class WorkbenchApiServer:
         return list(self.runtimes)
 
     def _load_agent_rows(self, *, include_inactive: bool = False) -> list[dict]:
-        raw = read_config_json(self.config_path)
+        try:
+            info = self.config_path.stat()
+            key = (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                getattr(info, "st_ctime_ns", 0),
+            )
+        except OSError:
+            key = None
+        if key is not None and key == self._agent_config_snapshot_key:
+            raw = self._agent_config_snapshot
+        else:
+            raw = read_config_json(self.config_path)
+            try:
+                after = self.config_path.stat()
+                after_key = (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    getattr(after, "st_ctime_ns", 0),
+                )
+            except OSError:
+                after_key = None
+            if key is not None and after_key == key:
+                self._agent_config_snapshot_key = key
+                self._agent_config_snapshot = raw
         return [
             agent
             for agent in raw.get("agents", [])
@@ -2135,7 +2167,12 @@ class WorkbenchApiServer:
         return workspace_dir / "transcript.jsonl"
 
     def _metadata_for_agent(
-        self, agent_row: dict, runtime, *, owner_id: str | None = None
+        self,
+        agent_row: dict,
+        runtime,
+        *,
+        owner_id: str | None = None,
+        primary_session: Mapping[str, Any] | None | object = _PRIMARY_SESSION_UNSET,
     ) -> dict:
         if runtime is not None:
             metadata = dict(runtime.get_runtime_metadata())
@@ -2283,13 +2320,16 @@ class WorkbenchApiServer:
         metadata.pop("frontend_session_id", None)
         metadata.pop("frontend_context_generation", None)
         if owner_id is not None:
-            session = self.session_store.resolve_primary_session(
-                owner_id=owner_id, agent_id=agent_row["name"],
-            )
-            metadata["frontend_session_id"] = session["session_id"]
-            metadata["frontend_context_generation"] = int(
-                session["context_generation"]
-            )
+            session = primary_session
+            if session is _PRIMARY_SESSION_UNSET:
+                session = self.session_store.resolve_primary_session(
+                    owner_id=owner_id, agent_id=agent_row["name"],
+                )
+            if session is not None:
+                metadata["frontend_session_id"] = session["session_id"]
+                metadata["frontend_context_generation"] = int(
+                    session["context_generation"]
+                )
         return metadata
 
     def _is_whatsapp_available(self) -> bool:
@@ -2309,9 +2349,6 @@ class WorkbenchApiServer:
 
             self._permission_transition_endpoint = build_frontend_transition(self)
             await self._permission_transition_endpoint.start()
-        await asyncio.to_thread(self.session_store.cleanup_attachments)
-        await asyncio.to_thread(self.session_store.cleanup_audio_assets)
-        await self.live_voice_manager.start()
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         bind_host = self._select_bind_host()
@@ -2326,6 +2363,10 @@ class WorkbenchApiServer:
             if sockets
             else int(self.global_config.workbench_port)
         )
+        self._startup_maintenance_task = asyncio.create_task(
+            self._run_startup_maintenance(),
+            name="hashi-session-startup-maintenance",
+        )
         self._audio_cleanup_task = asyncio.create_task(
             self._audio_cleanup_loop(),
             name="hashi-native-audio-cleanup",
@@ -2334,12 +2375,11 @@ class WorkbenchApiServer:
             self._hchat_status_recovery_loop(),
             name="hashi-hchat-status-recovery",
         )
+        self._hchat_status_recovery_event.set()
         try:
             from orchestrator.exchange_config import load_exchange_config
 
             if load_exchange_config(self.config_path.parent).enabled:
-                service = (await self._get_exchange_ingress_service())
-                await service.recover_pending(recover_scheduled=True)
                 self._exchange_recovery_task = asyncio.create_task(
                     self._exchange_recovery_loop(),
                     name="hashi-exchange-inbox-recovery",
@@ -2465,11 +2505,52 @@ class WorkbenchApiServer:
         except (ValueError, json.JSONDecodeError) as exc:
             return self._exchange_error_response(exc)
 
+    async def _run_startup_maintenance(self) -> None:
+        try:
+            await self.live_voice_manager.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Deferred Live Voice recovery failed (%s)",
+                type(exc).__name__,
+            )
+        if self._reconcile_session_runs:
+            try:
+                self.reconciled_session_runs = await asyncio.to_thread(
+                    self.session_store.reconcile_incomplete_runs
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Deferred startup maintenance failed "
+                    "(reconcile_incomplete_runs: %s)",
+                    type(exc).__name__,
+                )
+        operations = (
+            self.session_store.run_deferred_maintenance,
+            self.session_store.cleanup_attachments,
+            self.session_store.cleanup_audio_assets,
+        )
+        for operation in operations:
+            try:
+                await asyncio.to_thread(operation)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Deferred startup maintenance failed (%s: %s)",
+                    operation.__name__,
+                    type(exc).__name__,
+                )
+
     async def _exchange_recovery_loop(self) -> None:
         while True:
-            await asyncio.sleep(5)
             try:
-                await (await self._get_exchange_ingress_service()).recover_pending()
+                await (await self._get_exchange_ingress_service()).recover_pending(
+                    recover_scheduled=True
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2477,6 +2558,7 @@ class WorkbenchApiServer:
                     "Exchange inbox recovery failed (%s)",
                     type(exc).__name__,
                 )
+            await asyncio.sleep(_MAINTENANCE_FALLBACK_SECONDS)
 
     async def _notify_hchat_confirmation_status(self, record: Mapping) -> bool:
         payload = record.get("payload") or {}
@@ -2609,6 +2691,7 @@ class WorkbenchApiServer:
 
     async def _hchat_status_recovery_loop(self) -> None:
         while True:
+            self._hchat_status_recovery_event.clear()
             try:
                 for record in self.ingress_confirmation.list_hchat_status_candidates():
                     try:
@@ -2625,11 +2708,17 @@ class WorkbenchApiServer:
                     "HChat sender status recovery failed (%s)",
                     type(exc).__name__,
                 )
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(
+                    self._hchat_status_recovery_event.wait(),
+                    timeout=_MAINTENANCE_FALLBACK_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def _audio_cleanup_loop(self) -> None:
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(_MAINTENANCE_FALLBACK_SECONDS)
             try:
                 await asyncio.to_thread(self.session_store.cleanup_attachments)
                 await asyncio.to_thread(self.session_store.cleanup_audio_assets)
@@ -2656,6 +2745,12 @@ class WorkbenchApiServer:
                 self._device_capability_topology_task, return_exceptions=True
             )
             self._device_capability_topology_task = None
+        if self._startup_maintenance_task is not None:
+            self._startup_maintenance_task.cancel()
+            await asyncio.gather(
+                self._startup_maintenance_task, return_exceptions=True
+            )
+            self._startup_maintenance_task = None
         if self._hchat_status_recovery_task is not None:
             self._hchat_status_recovery_task.cancel()
             await asyncio.gather(
@@ -5922,13 +6017,37 @@ class WorkbenchApiServer:
             )
         # Runtime metadata and Session discovery may wait for worker or disk
         # I/O. Keep other HTTP reads responsive while this projection runs.
-        agents = await asyncio.to_thread(lambda: [
-            self._metadata_for_agent(
-                agent_row, runtime_map.get(agent_row["name"]), owner_id=owner_id
-            )
-            for agent_row in agent_rows
-        ])
+        def project_agents():
+            session_metadata_degraded = False
+            try:
+                primary_sessions = self.session_store.resolve_primary_sessions(
+                    owner_id=owner_id,
+                    agent_ids=(row["name"] for row in agent_rows),
+                )
+            except sqlite3.OperationalError as exc:
+                if not any(
+                    marker in str(exc).casefold() for marker in ("locked", "busy")
+                ):
+                    raise
+                primary_sessions = {}
+                session_metadata_degraded = True
+            agents = [
+                self._metadata_for_agent(
+                    agent_row,
+                    runtime_map.get(agent_row["name"]),
+                    owner_id=owner_id,
+                    primary_session=primary_sessions.get(
+                        str(agent_row["name"]).casefold()
+                    ),
+                )
+                for agent_row in agent_rows
+            ]
+            return agents, session_metadata_degraded
+
+        agents, session_metadata_degraded = await asyncio.to_thread(project_agents)
         result = {"ok": True, "agents": agents}
+        if session_metadata_degraded:
+            result["session_metadata_degraded"] = True
         if include_inactive:
             from orchestrator.agent_move.service import completed_agent_departures
             try:
@@ -9366,6 +9485,8 @@ class WorkbenchApiServer:
                     decision="discard",
                     owner_id=owner,
                 )
+                if str(record.get("message_kind") or "").startswith("hchat_"):
+                    self._hchat_status_recovery_event.set()
                 return web.json_response(
                     {
                         "ok": True,
@@ -9671,6 +9792,8 @@ class WorkbenchApiServer:
                 owner_id=owner,
                 execute_fn=_execute_confirmed_run,
             )
+            if str(record.get("message_kind") or "").startswith("hchat_"):
+                self._hchat_status_recovery_event.set()
             run_payload: dict[str, Any] = {}
             if record.get("run_id"):
                 if str(record.get("message_kind") or "").startswith("hchat_"):
@@ -12693,6 +12816,8 @@ class WorkbenchApiServer:
                     },
                     status=409,
                 )
+            if confirmation is not None:
+                self._hchat_status_recovery_event.set()
             if not is_fresh and confirmation is not None:
                 confirmation_state = str(confirmation.get("state") or "")
                 waiting = confirmation_state in {
@@ -13370,6 +13495,8 @@ class WorkbenchApiServer:
                     },
                 },
             )
+            if confirmation is not None:
+                self._hchat_status_recovery_event.set()
             if not is_fresh and confirmation is not None:
                 confirmation_state = str(confirmation.get("state") or "")
                 waiting = confirmation_state in {
