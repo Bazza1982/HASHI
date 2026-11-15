@@ -17,6 +17,7 @@ Hashi Remote runs alongside HASHI and enables:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -285,10 +286,37 @@ class HashiRemoteApplication:
         self._instance_id = ""
         self._last_loaded_shared_token: str | None = None
         self._last_shared_token_revision = ""
+        self._last_shared_token_source_signature: tuple | None = None
         self._discovery_activity = {
             "maintenance_cycles": 0,
             "advertisement_updates": 0,
+            "credential_source_checks": 0,
+            "credential_reloads": 0,
         }
+
+    def _shared_token_source_signature(self) -> tuple:
+        """Return a non-secret, cheap credential-source change signature."""
+
+        env_value = str(os.getenv("HASHI_REMOTE_SHARED_TOKEN") or "").strip()
+        if env_value:
+            return (
+                "environment",
+                hashlib.sha256(env_value.encode("utf-8")).hexdigest(),
+            )
+        path = self._hashi_root / "secrets.json"
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return ("absent",)
+        except OSError as exc:
+            return ("unreadable", type(exc).__name__, int(exc.errno or 0))
+        return (
+            "file",
+            int(stat_result.st_mtime_ns),
+            int(stat_result.st_ctime_ns),
+            int(stat_result.st_size),
+            int(getattr(stat_result, "st_ino", 0) or 0),
+        )
 
     def _discovery_status(self) -> dict:
         backends = []
@@ -455,6 +483,9 @@ class HashiRemoteApplication:
         shared_token = token_snapshot.token
         self._last_loaded_shared_token = shared_token
         self._last_shared_token_revision = token_snapshot.revision
+        self._last_shared_token_source_signature = (
+            self._shared_token_source_signature()
+        )
         logger.info("  Auth     : %s", "shared-token" if shared_token else "discovery-only")
         logger.info("═" * 55)
         if not shared_token:
@@ -644,8 +675,12 @@ class HashiRemoteApplication:
         if not self._protocol_manager:
             return {"refreshed": False, "failed_backends": [], "reason": "protocol_unavailable"}
 
-        token_snapshot = load_shared_token_snapshot(self._hashi_root)
-        if token_snapshot.revision != self._last_shared_token_revision:
+        self._discovery_activity["credential_source_checks"] += 1
+        token_source_signature = self._shared_token_source_signature()
+        if token_source_signature != self._last_shared_token_source_signature:
+            self._last_shared_token_source_signature = token_source_signature
+            self._discovery_activity["credential_reloads"] += 1
+            token_snapshot = load_shared_token_snapshot(self._hashi_root)
             self._last_shared_token_revision = token_snapshot.revision
             self._protocol_manager.record_shared_token_config_state(
                 token_snapshot.state,

@@ -32,6 +32,10 @@ Functions, Worker or local Workbench readiness.
 | Restart-notification recovery rescanned receipt payloads every 30 seconds. | Up to 512 JSON payload reads per pass even after delivery. | Reads only new, changed or due records, retains full paged coverage, wakes on an exact retry deadline, otherwise sleeps up to 300 seconds. |
 | Peer route resolution synchronously probed candidate addresses. | A local API/status path could inherit several unreachable-address timeouts. | Route resolution performs no probe. Background owners verify routes; failed instance/host/port tuples use a 5–300 second circuit and all-open routes fail immediately. |
 | One unreachable instance retried every advertised address in one liveness/handshake pass and persisted every later failure count. | Several addresses could multiply one peer timeout; repeated failures rewrote peer state and `instances.json` without changing the functional offline state. | Each background pass attempts at most one eligible address per instance. Exact failure counts remain in memory, while disk persistence records only the first-failure/offline transitions and a bounded 600-second checkpoint. |
+| Unchanged Zeroconf service refreshes were published as new peer snapshots. | Normal mDNS TTL refreshes rebuilt canonical peer state, updated a volatile observation timestamp and rewrote state even though endpoint identity and metadata were unchanged. | The LAN listener suppresses byte-for-byte equivalent service records; the registry independently compares structural peer facts and checkpoints volatile observation time at most once per 600 seconds. |
+| Offline peer retries treated rotating address-specific exception text as a durable state change. | A peer that remained offline could rewrite peer state and `instances.json` whenever the selected address or Windows error text changed. | Exact diagnostics remain current in memory. Durable signatures ignore diagnostic text after the functional first-failure/offline transition, and liveness/handshake reuse the existing failure state for a bounded 30–300 second peer backoff. |
+| Discovery maintenance reparsed and hashed `secrets.json` every 30 seconds. | Two full credential-file reads per minute even when its file identity was unchanged. | The existing maintenance owner performs one metadata check and reloads/parses the credential only when its source signature changes; startup remains fail-closed and a changed invalid revision retains the last valid in-memory credential. |
+| Authenticated `/protocol/status` built the complete protocol projection twice. | Duplicate peer, discovery, directory and activity projection for one read-only request. | One projection is reused to add API capability facts; the endpoint remains read-only. |
 
 ## Independent recovery contracts
 
@@ -81,11 +85,14 @@ counters only:
   suppressions, topology RPC attempts, effective connector activation requests,
   draining suppressions and Worker connector RPC attempts.
 - Remote protocol: control wakes, bootstrap/liveness/handshake/Core/directory/
-  inflight cycles, actual Agent-directory file reads, route probes and circuit
-  skips.
-- Remote discovery: maintenance cycles and advertisement calls.
+  inflight cycles, actual Agent-directory file reads, route probes, circuit
+  skips and liveness/handshake peer-backoff suppressions. Liveness and
+  handshake run counts now represent passes that attempted network work.
+- Remote discovery: maintenance cycles, advertisement calls, cheap credential
+  source checks and actual credential reloads.
 - Peer registry: state writes, `instances.json` syncs, suppressed heartbeat
-  writes and suppressed unchanged handshake/failure-state writes.
+  writes, suppressed unchanged discovery writes and suppressed unchanged
+  handshake/failure-state writes.
 - Worker metadata: Telegram connector attempts and permanent-failure reason.
 
 These counters reset with their owning process and do not add a monitor thread,
@@ -114,3 +121,10 @@ Current offline evidence (groups overlap and therefore are not additive):
 Post-adoption duplicate-work regression tests: 109 passed. The focused subset
 covering topology, connector commit and Telegram readiness contains 59 passing
 tests; Ruff passes for all files changed by this follow-up.
+
+The subsequent Remote idle-write/backoff regression group contains 171 passing
+tests and 2 platform skips. The complete `test_remote*` focused inventory is
+477 passing tests and 11 platform/live skips; this includes Remote peer,
+discovery, shared-token endpoint, lifecycle, supervisor, routing, delivery and
+Workbench gateway coverage. Live idle evidence is recorded separately after
+the updated Remote process is adopted.

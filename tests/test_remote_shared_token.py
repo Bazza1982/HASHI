@@ -25,11 +25,13 @@ class _ProtocolStub:
     def __init__(self):
         self.handshakes: list[dict] = []
         self.messages: list[dict] = []
+        self.status_calls = 0
 
     def get_peer_view(self, peer):
         return {"instance_id": peer.instance_id}
 
     def get_protocol_status(self):
+        self.status_calls += 1
         return {"protocol_version": "2.0", "capabilities": ["handshake_v2"]}
 
     def get_local_agents_snapshot(self):
@@ -94,9 +96,7 @@ def _client_lan_mode(tmp_path, *, lan_mode: bool):
 
 @pytest.mark.parametrize("readiness,expected", [("ready", "ready"), ("starting", "degraded"), ("degraded", "degraded")])
 def test_rejected_foreign_peer_does_not_disable_ready_local_remote(tmp_path, readiness, expected):
-    from remote.api import server as remote_server
-
-    token = _write_shared_token(tmp_path)
+    _write_shared_token(tmp_path)
     client, protocol = _client_lan_mode(tmp_path, lan_mode=False)
     discovery = {"readiness": readiness, "state": "degraded", "trust_state": "rejected",
                  "peer_count": 1, "trusted_peer_count": 0, "rejected_peer_count": 1}
@@ -790,7 +790,7 @@ def test_protocol_status_is_redacted_without_auth(tmp_path):
 
 def test_protocol_status_trusted_view_includes_api_endpoint_capabilities(tmp_path):
     token = _write_shared_token(tmp_path)
-    client, _protocol = _client(tmp_path)
+    client, protocol = _client(tmp_path)
     headers = build_auth_headers(
         shared_token=token,
         method="GET",
@@ -812,6 +812,7 @@ def test_protocol_status_trusted_view_includes_api_endpoint_capabilities(tmp_pat
     assert "protocol_outbound_correlation_v1" in body["capabilities"]
     assert "protocol_ack_v1" in body["capabilities"]
     assert "protocol_reply_v1" in body["capabilities"]
+    assert protocol.status_calls == 1
 
 
 def test_protocol_status_trusted_view_reports_api_state_counts(tmp_path, monkeypatch):

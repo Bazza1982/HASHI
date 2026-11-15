@@ -3432,11 +3432,12 @@ def create_app(
                 "rescue_reboot_enabled": rescue_start_enabled,
                 "rescue_start_requirement": "authenticated_instance_control",
             }
+        protocol_state = _protocol_manager.get_protocol_status()
         return {
             "ok": True,
-            **_protocol_manager.get_protocol_status(),
+            **protocol_state,
             "capabilities": _protocol_capabilities_with_api_endpoints(
-                list((_protocol_manager.get_protocol_status() or {}).get("capabilities") or [])
+                list((protocol_state or {}).get("capabilities") or [])
             ),
             "protocol_auth_mode": protocol_auth_mode(),
             "shared_token_configured": has_shared_token(),

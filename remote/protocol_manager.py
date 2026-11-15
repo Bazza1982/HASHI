@@ -200,6 +200,8 @@ class ProtocolManager:
             "bootstrap_runs": 0,
             "route_probes": 0,
             "route_circuit_skips": 0,
+            "liveness_backoff_skips": 0,
+            "handshake_backoff_skips": 0,
             "liveness_runs": 0,
             "handshake_runs": 0,
             "core_health_checks": 0,
@@ -282,6 +284,37 @@ class ProtocolManager:
         if activity is None:
             activity = self._activity = {}
         activity[name] = int(activity.get(name, 0) or 0) + int(amount)
+
+    @staticmethod
+    def _peer_retry_backoff_seconds(peer) -> float:
+        """Return bounded retry delay for a peer already known to be offline."""
+
+        props = dict(getattr(peer, "properties", {}) or {})
+        try:
+            failures = max(0, int(props.get("consecutive_failures") or 0))
+        except (TypeError, ValueError):
+            failures = 0
+        if failures < 2:
+            return 0.0
+        # One quick confirmation is retained. Continued failure backs off to
+        # five minutes without creating another retry owner or timer task.
+        return min(300.0, 30.0 * (2 ** min(failures - 2, 4)))
+
+    def _peer_retry_due(self, peer, *, now: float | None = None) -> bool:
+        delay = self._peer_retry_backoff_seconds(peer)
+        if delay <= 0:
+            return True
+        props = dict(getattr(peer, "properties", {}) or {})
+        try:
+            last_failure = max(
+                float(props.get("last_seen_error") or 0),
+                float(props.get("last_handshake_at") or 0),
+            )
+        except (TypeError, ValueError):
+            last_failure = 0.0
+        if last_failure <= 0:
+            return True
+        return float(time.time() if now is None else now) - last_failure >= delay
 
     @staticmethod
     def _route_probe_key(instance_id: str, host: str, port: int) -> tuple[str, str, int]:
@@ -939,8 +972,9 @@ class ProtocolManager:
                     await self._bootstrap_known_peers()
                     self._last_bootstrap_run = now
                 if now - self._last_refresh_run >= 120:
-                    self._count_activity("liveness_runs")
-                    await self._refresh_peer_liveness_once()
+                    liveness_attempts = await self._refresh_peer_liveness_once()
+                    if liveness_attempts:
+                        self._count_activity("liveness_runs")
                     self._last_refresh_run = now
                 core_health_cache = getattr(
                     self, "_core_health_cache", (0.0, False)
@@ -957,8 +991,9 @@ class ProtocolManager:
                     getattr(self, "_force_handshake", False)
                     or now - self._last_handshake_run >= 30
                 ):
-                    self._count_activity("handshake_runs")
-                    await self._handshake_once()
+                    handshake_attempts = await self._handshake_once()
+                    if handshake_attempts:
+                        self._count_activity("handshake_runs")
                     self._last_handshake_run = now
                 active_inflight = any(
                     str((item or {}).get("state") or "")
@@ -976,20 +1011,28 @@ class ProtocolManager:
                 0.5 if active_inflight else self._poll_interval_seconds
             )
 
-    async def _refresh_peer_liveness_once(self) -> None:
+    async def _refresh_peer_liveness_once(self) -> int:
         if not self._peer_registry:
-            return
+            return 0
         semaphore = asyncio.Semaphore(4)
 
-        async def refresh(peer) -> bool:
+        async def refresh(peer) -> bool | None:
             async with semaphore:
                 return await self._refresh_single_peer_liveness(peer)
 
-        await asyncio.gather(*(refresh(peer) for peer in self._peer_registry.get_peers()))
+        results = await asyncio.gather(
+            *(refresh(peer) for peer in self._peer_registry.get_peers())
+        )
+        return sum(result is not None for result in results)
 
-    async def _refresh_single_peer_liveness(self, peer, *, timeout: float = 4) -> bool:
+    async def _refresh_single_peer_liveness(
+        self, peer, *, timeout: float = 4
+    ) -> bool | None:
         if not self._peer_registry or peer is None:
             return False
+        if not self._peer_retry_due(peer):
+            self._count_activity("liveness_backoff_skips")
+            return None
         ordered_hosts = self._ordered_candidate_hosts(
             peer.instance_id,
             int(peer.port),
@@ -999,6 +1042,8 @@ class ProtocolManager:
             peer.instance_id, int(peer.port), ordered_hosts
         )
         candidate_hosts = [selected_host] if selected_host else []
+        if not candidate_hosts:
+            return None
         last_exc = None
         refreshed = False
         attempted = False
@@ -1095,9 +1140,10 @@ class ProtocolManager:
             logger.info("Status liveness refresh: checked=%s refreshed=%s skipped=%s", checked, refreshed, skipped)
         return {"checked": checked, "refreshed": refreshed, "skipped": skipped}
 
-    async def _handshake_once(self) -> None:
+    async def _handshake_once(self) -> int:
         if not self._peer_registry:
-            return
+            return 0
+        attempt_count = 0
         for peer in self._peer_registry.get_peers():
             state = str((peer.properties or {}).get("handshake_state") or "handshake_pending")
             last_handshake_at = float((peer.properties or {}).get("last_handshake_at") or 0)
@@ -1110,6 +1156,13 @@ class ProtocolManager:
             if state == "handshake_in_progress" and handshake_age < 30:
                 continue
             if state in {"handshake_accepted", "handshake_rejected"} and not should_revalidate:
+                continue
+            if (
+                state in {"handshake_timed_out", "unreachable"}
+                and not getattr(self, "_force_handshake", False)
+                and not self._peer_retry_due(peer)
+            ):
+                self._count_activity("handshake_backoff_skips")
                 continue
             # Keep the last durable state while an outbound attempt is in
             # flight.  A transient in-progress write both caused unnecessary
@@ -1150,6 +1203,7 @@ class ProtocolManager:
 
             succeeded = False
             attempted = False
+            attempt_count += 1
             for host in candidate_hosts:
                 attempted = True
                 for url in self._candidate_urls(host, peer.port, "/protocol/handshake"):
@@ -1261,6 +1315,7 @@ class ProtocolManager:
                     last_error=f"all hosts unreachable: {candidate_hosts}",
                 )
         self._force_handshake = False
+        return attempt_count
 
     def handle_handshake(self, payload: dict) -> dict:
         from_instance = str(payload.get("from_instance") or "").strip().upper()

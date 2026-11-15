@@ -575,6 +575,12 @@ class _HashiListener(ServiceListener):
         if info:
             peer = _service_info_to_peer(info, self._self_id)
             if peer:
+                if self._peers.get(peer.instance_id) == peer:
+                    # Zeroconf refreshes unchanged service records before TTL
+                    # expiry.  The listener already owns the live record, so a
+                    # duplicate callback would only rebuild and persist the
+                    # same global peer snapshot.
+                    return
                 self._peers[peer.instance_id] = peer
                 logger.info("Discovered peer: %s @ %s:%d", peer.instance_id, peer.host, peer.port)
                 if self._on_change:

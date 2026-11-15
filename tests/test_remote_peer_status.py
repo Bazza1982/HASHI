@@ -530,7 +530,10 @@ def test_repeated_offline_peer_failure_does_not_rewrite_registry_each_cycle(
     monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
 
     registry.mark_refresh_result(
-        "HASHI1", ok=False, checked_at=now + 1, last_error="unreachable"
+        "HASHI1",
+        ok=False,
+        checked_at=now + 1,
+        last_error="unreachable via 192.0.2.71",
     )
 
     assert registry._peers["HASHI1"].properties["consecutive_failures"] == 3
@@ -571,13 +574,61 @@ def test_repeated_handshake_failure_does_not_rewrite_registry_each_cycle(
     monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
 
     registry.mark_handshake_result(
-        "HASHI1", state="handshake_timed_out", last_error="unreachable"
+        "HASHI1",
+        state="handshake_timed_out",
+        last_error="all hosts unreachable: ['192.0.2.71']",
     )
 
     assert registry._peers["HASHI1"].properties["consecutive_failures"] == 3
     assert sync_calls == []
     assert save_calls == []
     assert registry.activity_snapshot()["state_writes_suppressed"] == 1
+
+
+def test_unchanged_discovery_refresh_does_not_rewrite_registry(
+    tmp_path, monkeypatch
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances": {}}', encoding="utf-8"
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    peer = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.50.21",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={"discovery": "lan", "metadata_schema": "2"},
+    )
+    registry.on_peers_changed([peer], backend="lan")
+    first_observed_at = registry._observations["HASHI1"]["lan"].properties[
+        "route_observed_at"
+    ]
+    registry._last_refresh_persist_at = time.monotonic()
+    sync_calls = []
+    save_calls = []
+    monkeypatch.setattr(
+        registry, "_sync_to_instances_json", lambda: sync_calls.append(True)
+    )
+    monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
+    monkeypatch.setattr(
+        peer_registry_module.time, "time", lambda: first_observed_at + 60
+    )
+
+    registry.on_peers_changed([peer], backend="lan")
+
+    assert (
+        registry._observations["HASHI1"]["lan"].properties[
+            "route_observed_at"
+        ]
+        == first_observed_at + 60
+    )
+    assert sync_calls == []
+    assert save_calls == []
+    assert registry.activity_snapshot()["discovery_writes_suppressed"] == 1
 
 
 def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
@@ -1344,10 +1395,60 @@ def test_failed_peer_endpoints_are_circuit_broken_between_liveness_runs():
     assert len(calls) == 2
     assert len(refreshes) == 2
 
-    assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is None
     assert len(calls) == 2
     assert len(refreshes) == 2
     assert manager._activity["route_circuit_skips"] >= 2
+
+
+def test_offline_peer_retry_uses_existing_failure_state_for_bounded_backoff():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+        properties={
+            "handshake_state": "handshake_timed_out",
+            "live_status": "offline",
+            "consecutive_failures": 12,
+            "last_seen_error": 1_000,
+            "last_handshake_at": 990,
+        },
+    )
+
+    assert manager._peer_retry_backoff_seconds(peer) == 300.0
+    assert manager._peer_retry_due(peer, now=1_299) is False
+    assert manager._peer_retry_due(peer, now=1_300) is True
+
+
+def test_offline_peer_liveness_backoff_performs_no_network_work():
+    manager = object.__new__(ProtocolManager)
+    manager._activity = {}
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+        properties={
+            "live_status": "offline",
+            "consecutive_failures": 8,
+            "last_seen_error": time.time(),
+        },
+    )
+    manager._peer_registry = SimpleNamespace()
+    manager._get_json = lambda *_args, **_kwargs: pytest.fail(
+        "backed-off peer must not perform network I/O"
+    )
+
+    result = asyncio.run(manager._refresh_single_peer_liveness(peer))
+
+    assert result is None
+    assert manager._activity["liveness_backoff_skips"] == 1
 
 
 def test_protocol_status_includes_route_diagnostics(tmp_path):
