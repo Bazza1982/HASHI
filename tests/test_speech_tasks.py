@@ -127,3 +127,39 @@ def test_short_planning_sample_does_not_reject_a_long_logical_reading(tmp_path):
     budget=owner.estimator.estimate("爱情故事"*1250,phase="prepare")
     assert 40 <= budget.native_seconds <= 90
     owner.db.close()
+
+
+def test_status_is_read_only_by_default_and_seen_touch_is_rate_limited(tmp_path):
+    owner = SpeechTasks(tmp_path)
+    owner.db.execute(
+        "INSERT INTO speech_tasks "
+        "(id,fingerprint,phase,state,created,seen,expires,budget,attempts,result,error) "
+        "VALUES ('poll','fp','generate','completed',0,10,999999999999,'{}',1,'{}',NULL)"
+    )
+    owner.db.commit()
+    writes = 0
+    original_update = owner._update
+
+    def counted_update(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        return original_update(*args, **kwargs)
+
+    owner._update = counted_update
+    for _ in range(20):
+        owner.status("poll")
+    assert writes == 0
+
+    owner.status("poll", touch=True)
+    owner.status("poll", touch=True)
+    assert writes == 1
+    owner.db.close()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_exits_when_no_rows_need_future_work(tmp_path):
+    owner = SpeechTasks(tmp_path)
+    owner.maintenance = asyncio.create_task(owner._maintain())
+    await asyncio.wait_for(owner.maintenance, timeout=0.2)
+    assert owner.maintenance is None
+    await owner.close()

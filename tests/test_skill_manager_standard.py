@@ -127,6 +127,73 @@ def test_standard_skill_enable_state_is_per_workspace(tmp_path: Path):
     assert manager.is_skill_enabled(first_workspace, "portable-skill") is True
 
 
+def test_unchanged_skill_catalog_and_workspace_state_are_read_once(
+    tmp_path: Path, monkeypatch
+):
+    _write_skill(
+        tmp_path,
+        "portable-skill",
+        "name: portable-skill\ndescription: Use when testing cached reads.",
+    )
+    workspace = tmp_path / "workspaces" / "first"
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+    skill_reads = 0
+    state_reads = 0
+    original_read_text = manager._read_text
+    original_load_json = manager._load_json
+
+    def counted_text(path):
+        nonlocal skill_reads
+        skill_reads += 1
+        return original_read_text(path)
+
+    def counted_json(path, default, *, strict=False):
+        nonlocal state_reads
+        if Path(path).name == "skill_state.json":
+            state_reads += 1
+        return original_load_json(path, default, strict=strict)
+
+    monkeypatch.setattr(manager, "_read_text", counted_text)
+    monkeypatch.setattr(manager, "_load_json", counted_json)
+
+    for _ in range(10):
+        assert manager.get_skill("portable-skill") is not None
+        assert manager.get_active_toggle_ids(workspace) == set()
+        assert manager.get_disabled_skill_ids(workspace) == set()
+
+    assert skill_reads == 1
+    assert state_reads == 1
+
+
+def test_skill_cache_refreshes_after_install_edit_and_disable(tmp_path: Path):
+    project_root = tmp_path / "project"
+    source_root = tmp_path / "incoming"
+    _write_skill(
+        source_root,
+        "portable-skill",
+        "name: portable-skill\ndescription: First description.",
+    )
+    manager = SkillManager(project_root, project_root / "tasks.json")
+
+    ok, message, _skill = manager.install_skill(
+        source_root / "skills" / "portable-skill"
+    )
+    assert ok is True, message
+    assert manager.get_skill("portable-skill").description == "First description."
+
+    skill_path = project_root / "skills" / "portable-skill" / "SKILL.md"
+    skill_path.write_text(
+        "---\nname: portable-skill\ndescription: Edited description.\n---\n\n# Updated\n",
+        encoding="utf-8",
+    )
+    manager.refresh_skills()
+    assert manager.get_skill("portable-skill").description == "Edited description."
+
+    workspace = project_root / "workspaces" / "first"
+    manager.set_skill_enabled(workspace, "portable-skill", enabled=False)
+    assert manager.is_skill_enabled(workspace, "portable-skill") is False
+
+
 def test_skill_state_accepts_legacy_bytes_and_normalizes_on_update(tmp_path: Path):
     _write_skill(
         tmp_path,
