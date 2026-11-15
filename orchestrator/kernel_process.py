@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -38,6 +39,37 @@ from orchestrator.runtime_contract import (
 )
 
 RECEIPT_PREFIX = QUALIFICATION_RESULT_PREFIX
+
+_REPLACEMENT_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [REDACTED]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED_API_KEY]"),
+    (
+        re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])"),
+        "[REDACTED_BOT_TOKEN]",
+    ),
+    (
+        re.compile(
+            r"(?i)(\b(?:api[_ -]?key|password|passwd|token|secret|authorization|cookie|"
+            r"private[_ -]?key)\s*[:=]\s*)([^\s,;]+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"(?i)([?&](?:access_token|refresh_token|token|key|secret|signature)=)"
+            r"[^&#\s]+"
+        ),
+        r"\1[REDACTED]",
+    ),
+)
+
+
+def _sanitized_replacement_error(error: BaseException) -> str:
+    """Preserve a useful replacement failure without importing product logging."""
+    text = str(error).replace("\r", " ").replace("\n", " ")
+    for pattern, replacement in _REPLACEMENT_SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text[:1000]
 
 
 def _observed_runtime(code_root: Path, runtime: RuntimeFingerprint):
@@ -397,11 +429,7 @@ class KernelRuntime:
                 stage_started = time.monotonic()
 
             def safe_message(error: BaseException) -> str:
-                from orchestrator.bootstrap_logging import redact_log_text
-
-                return redact_log_text(
-                    str(error).replace("\r", " ").replace("\n", " ")
-                )[:1000]
+                return _sanitized_replacement_error(error)
 
             def outcome(**changes):
                 value = {

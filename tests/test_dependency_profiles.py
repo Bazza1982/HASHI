@@ -119,7 +119,7 @@ def test_python_release_build_uses_an_isolated_committed_export(tmp_path):
             with tarfile.open(archive_path, "w") as archive:
                 archive.add(payload, arcname="pyproject.toml")
             return
-        assert command[:3] == (sys.executable, "-m", "build")
+        assert command[:4] == (sys.executable, "-B", "-m", "build")
         assert working_directory != source.resolve()
         generated = working_directory / "hashi_bridge.egg-info" / "PKG-INFO"
         generated.parent.mkdir()

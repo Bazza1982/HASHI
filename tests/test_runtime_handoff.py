@@ -308,7 +308,6 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
     monkeypatch.setattr(runtime_app_host, "candidate_import_guard", nullcontext)
     monkeypatch.setattr(runtime_app_host.importlib, "import_module", lambda _name: None)
     monkeypatch.setattr(runtime_app_host, "validate_function_contract", lambda: None)
-    monkeypatch.setattr(runtime_app_host, "verify_artifact", lambda *_args: None)
     monkeypatch.setattr(
         pathing,
         "build_bridge_paths",
@@ -432,6 +431,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
         assert flaky.is_running and flaky.calls == 2
+        assert healthy.calls == 1
         assert app.startup_status["ready"] and not app.startup_status["degraded"]
     finally:
         host.stopping.set()

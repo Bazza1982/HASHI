@@ -1,9 +1,9 @@
 # HASHI Core v6 startup-recovery technical review
 
-Review time: 2026-11-16T00:31:24+11:00
+Review time: 2026-11-16T02:09:28+11:00
 Branch: `core5-fix`
 Base: `main` at `1691832a`
-Protected-Core digest: `sha256:348c76b84c200f593fac3516861f56086bb94cf522151d935a8944b391c8c4bd`
+Protected-Core digest: `sha256:fe8ccd0776da69247b71b7b72b97c10fffe824c0ce80ee911f62176760bfa6fd`
 
 ## Reviewer identity and approval boundary
 
@@ -76,6 +76,9 @@ No blocking source finding remains in the reviewed candidate.
   before path resolution.
 - Replacement receipts preserve the original exception, stage, candidate PID,
   product-execution state, timings, cleanup, and rollback result.
+- Receipt sanitization is implemented inside protected Core, so recording the
+  underlying error does not lazily import product logging code. The focused
+  regression verifies that credential-shaped text is redacted.
 - All lifecycle roots and receipts remain bound to the requested HASHI4 code
   and instance roots. No cross-instance selector or broad process action was
   introduced.

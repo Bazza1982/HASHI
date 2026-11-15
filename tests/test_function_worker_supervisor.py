@@ -1744,7 +1744,8 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     connection = SimpleNamespace(close=lambda: None)
     process_args = []
 
-    async def launch(bootstrap):
+    async def launch(bootstrap, **kwargs):
+        assert kwargs == {"generation_already_verified": True}
         process_args.append(bootstrap)
         return process, connection
 

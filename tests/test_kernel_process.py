@@ -233,7 +233,12 @@ async def test_replacement_failure_receipt_preserves_root_cause_and_rollback(
             self.process.alive = False
 
     old = Client(101)
-    candidate = Client(202, activation_error=ValueError("activation fixture root cause"))
+    candidate = Client(
+        202,
+        activation_error=ValueError(
+            "activation fixture root cause token=super-secret-value"
+        ),
+    )
     restored = Client(303)
 
     async def prepare(_cls, bootstrap):
@@ -273,7 +278,7 @@ async def test_replacement_failure_receipt_preserves_root_cause_and_rollback(
     assert outcome["failure_stage"] == "candidate_activation"
     assert outcome["exception_type"] == "ValueError"
     assert outcome["reason_code"] == "replacement_candidate_activation_failed"
-    assert outcome["error"] == "activation fixture root cause"
+    assert outcome["error"] == "activation fixture root cause token=[REDACTED]"
     assert outcome["rollback"] == {
         "attempted": True,
         "succeeded": True,
