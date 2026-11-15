@@ -1363,11 +1363,69 @@ class ProtocolManager:
                     "directory_state": str((payload.get("agent_directory") or {}).get("directory_state") or ""),
                 },
             )
-            self._peer_registry.on_peers_changed([peer])
-            logger.info(
-                "Handshake: reverse-registered %s @ %s:%d",
-                from_instance, effective_host, remote_port,
+            observation_is_equivalent = getattr(
+                self._peer_registry, "observation_is_equivalent", None
             )
+            equivalent = bool(
+                callable(observation_is_equivalent)
+                and observation_is_equivalent(
+                    peer,
+                    backend="handshake_inbound",
+                )
+            )
+            if not equivalent:
+                self._peer_registry.on_peers_changed([peer])
+                logger.info(
+                    "Handshake: reverse-registered %s @ %s:%d",
+                    from_instance,
+                    effective_host,
+                    remote_port,
+                )
+            else:
+                logger.debug(
+                    "Handshake: refreshed unchanged inbound peer %s",
+                    from_instance,
+                )
+            mark_handshake_result = getattr(
+                self._peer_registry, "mark_handshake_result", None
+            )
+            if callable(mark_handshake_result):
+                mark_handshake_result(
+                    from_instance,
+                    state="handshake_accepted",
+                    protocol_version=str(
+                        payload.get("protocol_version") or PROTOCOL_VERSION
+                    ),
+                    capabilities=list(payload.get("capabilities") or []),
+                    hashi_version=str(payload.get("hashi_version") or "unknown"),
+                    display_name=str(
+                        payload.get("display_name")
+                        or payload.get("display_handle")
+                        or from_instance
+                    ),
+                    display_handle=str(
+                        payload.get("display_handle")
+                        or f"@{from_instance.lower()}"
+                    ),
+                    remote_port=remote_port,
+                    workbench_port=int(
+                        payload.get("workbench_port") or DEFAULT_WORKBENCH_PORT
+                    ),
+                    platform=str(payload.get("platform") or "unknown"),
+                    host_identity=str(payload.get("host_identity") or ""),
+                    environment_kind=str(
+                        payload.get("environment_kind") or ""
+                    ),
+                    address_candidates=address_candidates,
+                    observed_candidates=observed_candidates,
+                    remote_agents=list(payload.get("agents") or []),
+                    remote_agent_directory=dict(
+                        payload.get("agent_directory") or {}
+                    ),
+                    remote_supervisor=dict(
+                        payload.get("remote_supervisor") or {}
+                    ),
+                )
 
         local_profile = self._local_network_profile()
         return {

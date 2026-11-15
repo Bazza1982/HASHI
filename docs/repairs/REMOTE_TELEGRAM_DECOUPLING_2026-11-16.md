@@ -36,6 +36,7 @@ Functions, Worker or local Workbench readiness.
 | Offline peer retries treated rotating address-specific exception text as a durable state change. | A peer that remained offline could rewrite peer state and `instances.json` whenever the selected address or Windows error text changed. | Exact diagnostics remain current in memory. Durable signatures ignore diagnostic text after the functional first-failure/offline transition, and liveness/handshake reuse the existing failure state for a bounded 30–300 second peer backoff. |
 | Discovery maintenance reparsed and hashed `secrets.json` every 30 seconds. | Two full credential-file reads per minute even when its file identity was unchanged. | The existing maintenance owner performs one metadata check and reloads/parses the credential only when its source signature changes; startup remains fail-closed and a changed invalid revision retains the last valid in-memory credential. |
 | Authenticated `/protocol/status` built the complete protocol projection twice. | Duplicate peer, discovery, directory and activity projection for one read-only request. | One projection is reused to add API capability facts; the endpoint remains read-only. |
+| An authenticated inbound handshake rebuilt an unchanged peer observation and let derived `live_status` age between `online` and `stale`. | A healthy HASHI6 heartbeat could rebuild the same route every ~37 seconds and persist the derived age transition, despite proving fresh authenticated liveness itself. | Equivalent inbound observations bypass canonical rebuild, refresh the existing peer's authenticated liveness in memory, and log only at debug level. Route, identity, capability or directory-revision changes still take the normal persistent path. |
 
 ## Independent recovery contracts
 
@@ -122,9 +123,9 @@ Post-adoption duplicate-work regression tests: 109 passed. The focused subset
 covering topology, connector commit and Telegram readiness contains 59 passing
 tests; Ruff passes for all files changed by this follow-up.
 
-The subsequent Remote idle-write/backoff regression group contains 171 passing
+The subsequent Remote idle-write/backoff regression group contains 173 passing
 tests and 2 platform skips. The complete `test_remote*` focused inventory is
-477 passing tests and 11 platform/live skips; this includes Remote peer,
+479 passing tests and 11 platform/live skips; this includes Remote peer,
 discovery, shared-token endpoint, lifecycle, supervisor, routing, delivery and
 Workbench gateway coverage. Live idle evidence is recorded separately after
 the updated Remote process is adopted.

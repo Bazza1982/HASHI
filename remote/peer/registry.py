@@ -140,7 +140,6 @@ class PeerRegistry:
             str(peer.host),
             int(peer.port),
             int(peer.workbench_port),
-            str(props.get("live_status") or ""),
             # Failure counts have functional transitions only at the first
             # failure and at the offline threshold (two failures).  Retain the
             # exact in-memory count for diagnostics, but do not rewrite peer
@@ -174,6 +173,10 @@ class PeerRegistry:
             # address produced a different OS error.
             "last_error",
             "last_refresh_error",
+            # This projection is derived from the retained handshake state,
+            # failure bucket and timestamps.  Persisting online/stale ageing as
+            # an independent fact made authenticated heartbeats flap disk state.
+            "live_status",
         ):
             props.pop(key, None)
         if not props.get("preferred_backend"):
@@ -229,6 +232,27 @@ class PeerRegistry:
             )
             for iid, peer in sorted(self._peers.items())
         )
+
+    def observation_is_equivalent(
+        self,
+        peer: PeerInfo,
+        *,
+        backend: str,
+    ) -> bool:
+        """Return whether an observation adds any durable routing/trust fact."""
+
+        iid = normalize_instance_id(peer.instance_id)
+        current = self._observations.get(iid, {}).get(
+            str(backend or "").strip().lower()
+        )
+        equivalent = bool(
+            current is not None
+            and self._handshake_persistence_signature(current)
+            == self._handshake_persistence_signature(peer)
+        )
+        if equivalent:
+            self._activity["discovery_writes_suppressed"] += 1
+        return equivalent
 
     def _peer_state_is_expired(self, instance_id: str, item: dict, *, now: int | None = None) -> bool:
         iid = str(instance_id or "").strip().upper()

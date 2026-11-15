@@ -267,6 +267,67 @@ def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip(
     assert captured[0].host == "192.168.50.21"
 
 
+def test_equivalent_inbound_handshake_refreshes_liveness_without_rebuilding_peer():
+    accepted = []
+
+    class RegistryStub:
+        def observation_is_equivalent(self, peer, *, backend):
+            assert peer.instance_id == "HASHI1"
+            assert backend == "handshake_inbound"
+            return True
+
+        def on_peers_changed(self, _peers):
+            pytest.fail("equivalent inbound observation must not rebuild peer state")
+
+        def mark_handshake_result(self, instance_id, **kwargs):
+            accepted.append((instance_id, kwargs))
+
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {
+        "instance_id": "HASHI2",
+        "remote_port": 8767,
+        "workbench_port": 18802,
+        "platform": "wsl",
+    }
+    manager._peer_registry = RegistryStub()
+    manager._capabilities = ["handshake_v2"]
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {
+        "version": "local-v1",
+        "directory_state": "fresh",
+    }
+    manager._local_network_profile = lambda: {
+        "host_identity": "sample-host",
+        "environment_kind": "wsl",
+        "address_candidates": [],
+        "observed_candidates": [],
+    }
+
+    response = manager.handle_handshake(
+        {
+            "from_instance": "HASHI1",
+            "_client_ip": "192.168.50.21",
+            "remote_port": 8766,
+            "workbench_port": 18800,
+            "platform": "wsl",
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2"],
+            "agents": [{"agent_name": "rika", "updated_at": 123}],
+            "agent_directory": {"version": "peer-v1", "directory_state": "fresh"},
+            "remote_supervisor": {"mode": "supervised"},
+            "address_candidates": [
+                {"host": "192.168.50.21", "scope": "lan", "source": "in"}
+            ],
+            "observed_candidates": [],
+        }
+    )
+
+    assert response["status"] == "handshake_accept"
+    assert accepted[0][0] == "HASHI1"
+    assert accepted[0][1]["state"] == "handshake_accepted"
+    assert accepted[0][1]["remote_agent_directory"]["version"] == "peer-v1"
+
+
 def test_live_endpoints_skip_unknown_instance_id(tmp_path):
     write_live_endpoints(
         tmp_path,
@@ -585,6 +646,66 @@ def test_repeated_handshake_failure_does_not_rewrite_registry_each_cycle(
     assert registry.activity_snapshot()["state_writes_suppressed"] == 1
 
 
+def test_authenticated_liveness_age_change_does_not_rewrite_registry(
+    tmp_path, monkeypatch
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances": {}}', encoding="utf-8"
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    now = int(time.time())
+    registry._peers["HASHI1"] = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.50.21",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        protocol_version="2.0",
+        capabilities=["handshake_v2"],
+        properties={
+            "handshake_state": "handshake_accepted",
+            "live_status": "stale",
+            "last_handshake_at": now - 90,
+            "last_seen_ok": now - 90,
+            "consecutive_failures": 0,
+            "agent_snapshot_version": "peer-v1",
+            "directory_state": "fresh",
+            "remote_agent_directory": {
+                "version": "peer-v1",
+                "directory_state": "fresh",
+                "updated_at": now - 90,
+            },
+        },
+    )
+    registry._last_refresh_persist_at = time.monotonic()
+    sync_calls = []
+    save_calls = []
+    monkeypatch.setattr(
+        registry, "_sync_to_instances_json", lambda: sync_calls.append(True)
+    )
+    monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
+
+    registry.mark_handshake_result(
+        "HASHI1",
+        state="handshake_accepted",
+        protocol_version="2.0",
+        capabilities=["handshake_v2"],
+        remote_agent_directory={
+            "version": "peer-v1",
+            "directory_state": "fresh",
+            "updated_at": now,
+        },
+    )
+
+    assert registry._peers["HASHI1"].properties["live_status"] == "online"
+    assert sync_calls == []
+    assert save_calls == []
+    assert registry.activity_snapshot()["state_writes_suppressed"] == 1
+
+
 def test_unchanged_discovery_refresh_does_not_rewrite_registry(
     tmp_path, monkeypatch
 ):
@@ -618,6 +739,7 @@ def test_unchanged_discovery_refresh_does_not_rewrite_registry(
         peer_registry_module.time, "time", lambda: first_observed_at + 60
     )
 
+    assert registry.observation_is_equivalent(peer, backend="lan") is True
     registry.on_peers_changed([peer], backend="lan")
 
     assert (
@@ -628,7 +750,7 @@ def test_unchanged_discovery_refresh_does_not_rewrite_registry(
     )
     assert sync_calls == []
     assert save_calls == []
-    assert registry.activity_snapshot()["discovery_writes_suppressed"] == 1
+    assert registry.activity_snapshot()["discovery_writes_suppressed"] == 2
 
 
 def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
