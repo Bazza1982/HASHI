@@ -124,6 +124,7 @@ class PeerRegistry:
             "state_writes": 0,
             "instance_syncs": 0,
             "heartbeat_writes_suppressed": 0,
+            "state_writes_suppressed": 0,
         }
         self._load_state()
 
@@ -149,6 +150,55 @@ class PeerRegistry:
             str(props.get("environment_kind") or ""),
             json.dumps(props.get("address_candidates") or [], sort_keys=True),
             json.dumps(props.get("observed_candidates") or [], sort_keys=True),
+        )
+
+    @staticmethod
+    def _handshake_persistence_signature(peer: PeerInfo) -> tuple:
+        """Return durable handshake facts without heartbeat timestamps."""
+
+        props = dict(peer.properties or {})
+        props["consecutive_failures"] = min(
+            int(props.get("consecutive_failures") or 0), 2
+        )
+        for key in (
+            "last_handshake_at",
+            "last_seen_error",
+            "last_seen_ok",
+            "route_observed_at",
+        ):
+            props.pop(key, None)
+        if not props.get("preferred_backend"):
+            props.pop("preferred_backend", None)
+        if not props.get("alternate_backends"):
+            props.pop("alternate_backends", None)
+        directory = props.get("remote_agent_directory")
+        if isinstance(directory, dict):
+            props["remote_agent_directory"] = {
+                "version": str(directory.get("version") or ""),
+                "directory_state": str(directory.get("directory_state") or ""),
+            }
+        agents = props.get("remote_agents")
+        if isinstance(agents, list):
+            props["remote_agents"] = [
+                {
+                    str(key): value
+                    for key, value in item.items()
+                    if key != "updated_at"
+                }
+                for item in agents
+                if isinstance(item, dict)
+            ]
+        return (
+            str(peer.host),
+            int(peer.port),
+            int(peer.workbench_port),
+            str(peer.protocol_version),
+            str(peer.hashi_version),
+            str(peer.display_name),
+            str(peer.display_handle),
+            str(peer.platform),
+            tuple(sorted(str(value) for value in peer.capabilities)),
+            json.dumps(props, sort_keys=True, ensure_ascii=False),
         )
 
     def _peer_state_is_expired(self, instance_id: str, item: dict, *, now: int | None = None) -> bool:
@@ -397,6 +447,7 @@ class PeerRegistry:
         peer = self._peers.get(iid)
         if peer is None:
             return
+        previous_signature = self._handshake_persistence_signature(peer)
         observations = self._observations.get(iid) or {}
         fallback = observations.get("bootstrap_fallback")
         has_live_discovery = any(name in observations for name in ("lan", "tailscale"))
@@ -481,8 +532,15 @@ class PeerRegistry:
             props["observed_candidates"] = list(observed_candidates)
         peer.properties = props
         self._peers[iid] = peer
-        self._sync_to_instances_json()
-        self._save_state()
+        current_signature = self._handshake_persistence_signature(peer)
+        now_monotonic = time.monotonic()
+        persist_due = now_monotonic - self._last_refresh_persist_at >= 600.0
+        if previous_signature != current_signature or persist_due:
+            self._sync_to_instances_json()
+            self._save_state()
+            self._last_refresh_persist_at = now_monotonic
+        else:
+            self._activity["state_writes_suppressed"] += 1
 
     def _load_state(self) -> None:
         if not self._state_path.exists():

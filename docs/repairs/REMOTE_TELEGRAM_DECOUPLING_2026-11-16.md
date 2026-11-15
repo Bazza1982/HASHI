@@ -29,6 +29,7 @@ Functions, Worker or local Workbench readiness.
 | Registry persisted each healthy liveness heartbeat. | Rewrote peer state and potentially `instances.json` on every refresh. | Material changes persist immediately; identical healthy state checkpoints at most every 600 seconds. |
 | Restart-notification recovery rescanned receipt payloads every 30 seconds. | Up to 512 JSON payload reads per pass even after delivery. | Reads only new, changed or due records, retains full paged coverage, wakes on an exact retry deadline, otherwise sleeps up to 300 seconds. |
 | Peer route resolution synchronously probed candidate addresses. | A local API/status path could inherit several unreachable-address timeouts. | Route resolution performs no probe. Background owners verify routes; failed instance/host/port tuples use a 5–300 second circuit and all-open routes fail immediately. |
+| One unreachable instance retried every advertised address in one liveness/handshake pass and persisted every later failure count. | Several addresses could multiply one peer timeout; repeated failures rewrote peer state and `instances.json` without changing the functional offline state. | Each background pass attempts at most one eligible address per instance. Exact failure counts remain in memory, while disk persistence records only the first-failure/offline transitions and a bounded 600-second checkpoint. |
 
 ## Independent recovery contracts
 
@@ -42,7 +43,9 @@ Functions, Worker or local Workbench readiness.
   Core health reads and Agent restart do not become Remote lifecycle owners.
 - Peer discovery: canonical instance identity is deduplicated before endpoint
   probing; recent successful endpoints are preferred and failed endpoints are
-  circuit-broken independently.
+  circuit-broken independently. Authentication rejection is revalidated at
+  most every 300 seconds until configuration changes, rather than every control
+  pass.
 - Telegram, Remote and WhatsApp do not share a global retry loop.
 
 Targeted Agent restart explicitly refreshes connector configuration after the
@@ -76,8 +79,8 @@ counters only:
   inflight cycles, actual Agent-directory file reads, route probes and circuit
   skips.
 - Remote discovery: maintenance cycles and advertisement calls.
-- Peer registry: state writes, `instances.json` syncs and suppressed heartbeat
-  writes.
+- Peer registry: state writes, `instances.json` syncs, suppressed heartbeat
+  writes and suppressed unchanged handshake/failure-state writes.
 - Worker metadata: Telegram connector attempts and permanent-failure reason.
 
 These counters reset with their owning process and do not add a monitor thread,

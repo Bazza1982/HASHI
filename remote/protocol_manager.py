@@ -738,14 +738,24 @@ class ProtocolManager:
                 logger.debug("Bootstrap: %s has no live or fallback probe ports, skipping", instance_id)
                 continue
             seen_hosts = self._candidate_hosts_for_entry(entry)
-
+            selected_host = ""
+            selected_ports: list[int] = []
             for host in seen_hosts:
-                selected_port = None
-                for remote_port in probe_ports:
-                    if not self._route_probe_allowed(
+                allowed_ports = [
+                    int(remote_port)
+                    for remote_port in probe_ports
+                    if self._route_probe_allowed(
                         instance_id, host, int(remote_port)
-                    ):
-                        continue
+                    )
+                ]
+                if allowed_ports:
+                    selected_host = host
+                    selected_ports = allowed_ports
+                    break
+
+            for host in ([selected_host] if selected_host else []):
+                selected_port = None
+                for remote_port in selected_ports:
                     reachable = await asyncio.get_running_loop().run_in_executor(
                         None,
                         lambda h=host, p=int(remote_port), iid=instance_id: self._probe_instance_route(h, p, iid, timeout=2),
@@ -980,17 +990,19 @@ class ProtocolManager:
     async def _refresh_single_peer_liveness(self, peer, *, timeout: float = 4) -> bool:
         if not self._peer_registry or peer is None:
             return False
-        candidate_hosts = self._ordered_candidate_hosts(
+        ordered_hosts = self._ordered_candidate_hosts(
             peer.instance_id,
             int(peer.port),
             self._candidate_hosts_for_peer(peer),
         )
+        selected_host = self._select_candidate_host(
+            peer.instance_id, int(peer.port), ordered_hosts
+        )
+        candidate_hosts = [selected_host] if selected_host else []
         last_exc = None
         refreshed = False
         attempted = False
         for host in candidate_hosts:
-            if not self._route_probe_allowed(peer.instance_id, host, int(peer.port)):
-                continue
             attempted = True
             for url in self._candidate_urls(host, peer.port, "/health"):
                 try:
@@ -1089,22 +1101,19 @@ class ProtocolManager:
         for peer in self._peer_registry.get_peers():
             state = str((peer.properties or {}).get("handshake_state") or "handshake_pending")
             last_handshake_at = float((peer.properties or {}).get("last_handshake_at") or 0)
-            should_revalidate = state == "handshake_accepted" and (time.time() - last_handshake_at) >= 300
+            handshake_age = time.time() - last_handshake_at
+            should_revalidate = state in {
+                "handshake_accepted",
+                "handshake_rejected",
+            } and handshake_age >= 300
             should_revalidate = should_revalidate or bool(getattr(self, "_force_handshake", False))
-            if state == "handshake_in_progress":
+            if state == "handshake_in_progress" and handshake_age < 30:
                 continue
-            if state == "handshake_accepted" and not should_revalidate:
+            if state in {"handshake_accepted", "handshake_rejected"} and not should_revalidate:
                 continue
-            # A periodic revalidation must not erase the last accepted trust
-            # state while the new handshake is in flight.  The previous code
-            # briefly published zero trusted peers, so an unrelated startup
-            # health probe could latch a false Remote degradation.  First-time
-            # handshakes still expose their in-progress state as before.
-            if state != "handshake_accepted":
-                self._peer_registry.mark_handshake_result(
-                    peer.instance_id,
-                    state="handshake_in_progress",
-                )
+            # Keep the last durable state while an outbound attempt is in
+            # flight.  A transient in-progress write both caused unnecessary
+            # disk churn and could briefly erase accepted trust from health.
             local_profile = self._local_network_profile()
             payload = {
                 "from_instance": self._instance_info.get("instance_id"),
@@ -1126,17 +1135,22 @@ class ProtocolManager:
                 "address_candidates": list(local_profile.get("address_candidates") or []),
                 "observed_candidates": list(local_profile.get("observed_candidates") or []),
             }
-            candidate_hosts = self._ordered_candidate_hosts(
+            ordered_hosts = self._ordered_candidate_hosts(
                 peer.instance_id,
                 int(peer.port),
                 self._candidate_hosts_for_peer(peer),
             )
+            selected_host = self._select_candidate_host(
+                peer.instance_id, int(peer.port), ordered_hosts
+            )
+            candidate_hosts = [selected_host] if selected_host else []
+
+            if not candidate_hosts:
+                continue
 
             succeeded = False
             attempted = False
             for host in candidate_hosts:
-                if not self._route_probe_allowed(peer.instance_id, host, int(peer.port)):
-                    continue
                 attempted = True
                 for url in self._candidate_urls(host, peer.port, "/protocol/handshake"):
                     try:
@@ -1162,6 +1176,9 @@ class ProtocolManager:
                                 peer.instance_id,
                                 state="handshake_rejected",
                                 last_error=str(result.get("reason") or "rejected"),
+                            )
+                            self._record_route_probe(
+                                peer.instance_id, host, int(peer.port), ok=True
                             )
                             succeeded = True
                             break

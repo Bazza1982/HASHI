@@ -539,6 +539,47 @@ def test_repeated_offline_peer_failure_does_not_rewrite_registry_each_cycle(
     assert registry.activity_snapshot()["heartbeat_writes_suppressed"] == 1
 
 
+def test_repeated_handshake_failure_does_not_rewrite_registry_each_cycle(
+    tmp_path, monkeypatch
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances": {}}', encoding="utf-8"
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    registry._peers["HASHI1"] = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.50.21",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={
+            "handshake_state": "handshake_timed_out",
+            "live_status": "offline",
+            "last_error": "unreachable",
+            "consecutive_failures": 2,
+        },
+    )
+    registry._last_refresh_persist_at = time.monotonic()
+    sync_calls = []
+    save_calls = []
+    monkeypatch.setattr(
+        registry, "_sync_to_instances_json", lambda: sync_calls.append(True)
+    )
+    monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
+
+    registry.mark_handshake_result(
+        "HASHI1", state="handshake_timed_out", last_error="unreachable"
+    )
+
+    assert registry._peers["HASHI1"].properties["consecutive_failures"] == 3
+    assert sync_calls == []
+    assert save_calls == []
+    assert registry.activity_snapshot()["state_writes_suppressed"] == 1
+
+
 def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -1296,13 +1337,17 @@ def test_failed_peer_endpoints_are_circuit_broken_between_liveness_runs():
 
     manager._get_json = unavailable
     assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert len(refreshes) == 1
 
     assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
     assert len(calls) == 2
-    assert len(refreshes) == 1
-    assert manager._activity["route_circuit_skips"] == 2
+    assert len(refreshes) == 2
+
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
+    assert len(calls) == 2
+    assert len(refreshes) == 2
+    assert manager._activity["route_circuit_skips"] >= 2
 
 
 def test_protocol_status_includes_route_diagnostics(tmp_path):
@@ -1580,7 +1625,6 @@ def test_handshake_ignores_successful_response_from_wrong_instance():
 
     asyncio.run(ProtocolManager._handshake_once(manager))
 
-    assert recorded[0] == ("INTEL", {"state": "handshake_in_progress"})
     assert recorded[-1][0] == "INTEL"
     assert recorded[-1][1]["state"] == "handshake_timed_out"
 
@@ -1620,8 +1664,33 @@ def test_old_peer_without_hmac_is_marked_rejected_auth_required():
 
     asyncio.run(ProtocolManager._handshake_once(manager))
 
-    assert recorded[0] == ("HASHI2", {"state": "handshake_in_progress"})
-    assert recorded[-1] == ("HASHI2", {"state": "handshake_rejected", "last_error": "auth_required"})
+    assert recorded[0] == (
+        "HASHI2",
+        {"state": "handshake_rejected", "last_error": "auth_required"},
+    )
+
+
+def test_recent_handshake_rejection_does_not_retry_until_revalidation_window():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI2",
+        display_name="HASHI2",
+        host="10.0.0.2",
+        port=8767,
+        workbench_port=18802,
+        platform="wsl",
+        properties={
+            "handshake_state": "handshake_rejected",
+            "last_handshake_at": time.time(),
+        },
+    )
+    manager._peer_registry = SimpleNamespace(get_peers=lambda: [peer])
+    manager._force_handshake = False
+    manager._post_json = lambda *_args, **_kwargs: pytest.fail(
+        "permanent rejection must not retry every control-loop pass"
+    )
+
+    asyncio.run(ProtocolManager._handshake_once(manager))
 
 
 def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
