@@ -496,6 +496,49 @@ def test_healthy_peer_heartbeat_does_not_rewrite_registry_each_cycle(
     assert registry.activity_snapshot()["heartbeat_writes_suppressed"] == 1
 
 
+def test_repeated_offline_peer_failure_does_not_rewrite_registry_each_cycle(
+    tmp_path, monkeypatch
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances": {}}', encoding="utf-8"
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    now = int(time.time())
+    registry._peers["HASHI1"] = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.50.21",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={
+            "handshake_state": "handshake_in_progress",
+            "live_status": "offline",
+            "last_seen_error": now,
+            "last_refresh_error": "unreachable",
+            "consecutive_failures": 2,
+        },
+    )
+    registry._last_refresh_persist_at = time.monotonic()
+    sync_calls = []
+    save_calls = []
+    monkeypatch.setattr(
+        registry, "_sync_to_instances_json", lambda: sync_calls.append(True)
+    )
+    monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
+
+    registry.mark_refresh_result(
+        "HASHI1", ok=False, checked_at=now + 1, last_error="unreachable"
+    )
+
+    assert registry._peers["HASHI1"].properties["consecutive_failures"] == 3
+    assert sync_calls == []
+    assert save_calls == []
+    assert registry.activity_snapshot()["heartbeat_writes_suppressed"] == 1
+
+
 def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()

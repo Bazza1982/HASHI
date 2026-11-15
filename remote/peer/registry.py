@@ -133,12 +133,17 @@ class PeerRegistry:
     @staticmethod
     def _refresh_persistence_signature(peer: PeerInfo) -> tuple:
         props = dict(peer.properties or {})
+        failures = int(props.get("consecutive_failures") or 0)
         return (
             str(peer.host),
             int(peer.port),
             int(peer.workbench_port),
             str(props.get("live_status") or ""),
-            int(props.get("consecutive_failures") or 0),
+            # Failure counts have functional transitions only at the first
+            # failure and at the offline threshold (two failures).  Retain the
+            # exact in-memory count for diagnostics, but do not rewrite peer
+            # state and instances.json for every later failed probe.
+            min(failures, 2),
             str(props.get("last_refresh_error") or ""),
             str(props.get("host_identity") or ""),
             str(props.get("environment_kind") or ""),
