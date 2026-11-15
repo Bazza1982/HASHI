@@ -258,7 +258,8 @@ def test_unqualified_installation_is_rejected_before_a_launch(tmp_path, defect, 
     elif defect == "changed-executable":
         Path(runtime["executable"]).write_bytes(b"changed")
     elif defect == "changed-base":
-        (Path(value["base_root"]) / "python.exe").write_bytes(b"changed")
+        base_file = next(iter(value["base_files"]))
+        (Path(value["base_root"]) / base_file).write_bytes(b"changed")
     elif defect == "wrong-abi":
         runtime["platform_abi"] = "unapproved-abi"
         reseal = True
