@@ -15452,6 +15452,10 @@ class WorkbenchApiServer:
         workers = getattr(self.orchestrator, "function_workers", None)
         if workers is None:
             return
+        schedule = getattr(workers, "schedule_topology", None)
+        if callable(schedule):
+            schedule()
+            return
         current = self._device_capability_topology_task
         if current is not None and not current.done():
             return
@@ -15529,12 +15533,16 @@ class WorkbenchApiServer:
                 ttl_seconds=float(payload.get("ttl_seconds") or 90),
             )
         except (ValueError, TypeError, CapabilityBrokerError) as exc:
+            # A failed health probe can evict a previously advertised Worker.
+            # The digest owner will suppress authentication failures that did
+            # not change structural capability state.
             self._schedule_device_capability_topology_refresh()
             return web.json_response(
                 {"ok": False, "error": str(exc)},
                 status=403,
             )
-        self._schedule_device_capability_topology_refresh()
+        # A successful heartbeat extends only the broker-owned expiry.  It is
+        # deliberately not a topology change and must not fan out to Agents.
         return web.json_response(
             {"ok": True, "registration": registration.to_dict()}
         )

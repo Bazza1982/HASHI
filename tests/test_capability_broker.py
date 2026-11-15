@@ -145,6 +145,34 @@ def test_wrong_instance_registration_is_rejected_before_publication(tmp_path):
     assert broker.status()["capabilities"] == []
 
 
+def test_heartbeat_expiry_is_not_part_of_worker_topology(tmp_path):
+    broker, bootstrap_token = _started_broker(tmp_path)
+    token = "h" * 64
+    registration = broker.register(
+        _payload(token),
+        bootstrap_token=bootstrap_token,
+    )
+    before = broker.topology_status()
+
+    refreshed = broker.heartbeat(
+        registration.capability_id,
+        worker_token=token,
+        identity={
+            "instance_id": registration.instance_id,
+            "capability_id": registration.capability_id,
+            "device_id": registration.device_id,
+            "user_session_id": registration.user_session_id,
+        },
+        ttl_seconds=180,
+    )
+
+    assert refreshed.expires_at > registration.expires_at
+    assert broker.topology_status() == before
+    assert "expires_at" not in before["capabilities"][0]
+    assert "registered_at" not in before["capabilities"][0]
+    assert "leases" not in before
+
+
 @pytest.mark.asyncio
 async def test_invoke_verifies_identity_releases_lease_and_redacts_argument_values(tmp_path):
     broker, bootstrap_token = _started_broker(tmp_path)

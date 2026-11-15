@@ -1628,9 +1628,15 @@ class FunctionWorkerSupervisor:
             endpoint_registry.snapshot() if endpoint_registry is not None else {}
         )
         capability_broker = getattr(self.kernel, "capability_broker", None)
-        capabilities = (
-            capability_broker.status() if capability_broker is not None else {}
-        )
+        if capability_broker is None:
+            capabilities = {}
+        else:
+            topology_status = getattr(capability_broker, "topology_status", None)
+            capabilities = (
+                topology_status()
+                if callable(topology_status)
+                else capability_broker.status()
+            )
         return {
             "runtimes": runtimes,
             "shared_functions": {

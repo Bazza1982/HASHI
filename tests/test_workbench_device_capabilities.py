@@ -138,15 +138,14 @@ async def test_heartbeat_requires_worker_bearer_token(tmp_path):
     assert accepted.status == 200
     assert broker.heartbeat_calls[-1][1]["ttl_seconds"] == 45.0
     await asyncio.sleep(0)
-    # Both a rejected heartbeat that may have evicted an unhealthy Worker and
-    # a successful lease extension refresh the Function-side catalogue. A
-    # still-running refresh is deliberately coalesced so heartbeats cannot
-    # accumulate topology work.
-    assert broadcasts
+    # The rejected heartbeat may represent an evicted unhealthy Worker.  The
+    # successful heartbeat changes only its private expiry and adds no second
+    # all-Worker topology broadcast.
+    assert broadcasts == ["broadcast"]
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_response_does_not_wait_for_busy_function_worker(tmp_path):
+async def test_successful_heartbeat_does_not_touch_function_workers(tmp_path):
     server, _broker, _broadcasts = _server(tmp_path)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -170,9 +169,9 @@ async def test_heartbeat_response_does_not_wait_for_busy_function_worker(tmp_pat
     )
 
     assert response.status == 200
-    await asyncio.wait_for(started.wait(), timeout=0.2)
-    assert server._device_capability_topology_task is not None
-    release.set()
+    await asyncio.sleep(0)
+    assert not started.is_set()
+    assert server._device_capability_topology_task is None
     await server.shutdown()
 
 
