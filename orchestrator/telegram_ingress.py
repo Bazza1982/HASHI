@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import random
 from collections.abc import Callable
 from typing import Any
 from pathlib import Path
@@ -24,7 +25,8 @@ TELEGRAM_LONG_POLL_SECONDS = 30
 TELEGRAM_READ_TIMEOUT_SECONDS = 40
 TELEGRAM_POLL_WATCHDOG_SECONDS = TELEGRAM_READ_TIMEOUT_SECONDS + 5
 TELEGRAM_RETRY_SECONDS = 2.0
-TELEGRAM_RETRY_MAX_SECONDS = 60.0
+TELEGRAM_RETRY_MAX_SECONDS = 300.0
+TELEGRAM_RETRY_JITTER = 0.2
 
 
 class TelegramIngressInitializationError(RuntimeError):
@@ -79,6 +81,10 @@ class CoreTelegramIngress:
         self._initialized = False
         self._drop_pending_on_connect = False
         self._retry_seconds = TELEGRAM_RETRY_SECONDS
+        self._retry_jitter_factor = random.uniform(
+            1.0 - TELEGRAM_RETRY_JITTER,
+            1.0 + TELEGRAM_RETRY_JITTER,
+        )
         self.permanent_failure_reason: str | None = None
 
     @property
@@ -209,9 +215,23 @@ class CoreTelegramIngress:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                reason = safe_error(exc, stage=stage)["reason"]
+                failure = safe_error(exc, stage=stage)
+                reason = failure["reason"]
                 permanent = reason in {"invalid_token", "forbidden"}
-                retry_seconds = None if permanent else self._retry_seconds
+                try:
+                    requested_retry = max(
+                        0.0, float(failure.get("retry_after") or 0)
+                    )
+                except (TypeError, ValueError):
+                    requested_retry = 0.0
+                retry_seconds = (
+                    None
+                    if permanent
+                    else max(
+                        requested_retry,
+                        self._retry_seconds * self._retry_jitter_factor,
+                    )
+                )
                 self.diagnostics.failure(
                     exc, stage=stage, retry_seconds=retry_seconds
                 )
@@ -223,7 +243,11 @@ class CoreTelegramIngress:
                     await asyncio.sleep(retry_seconds)
                     self._retry_seconds = min(
                         TELEGRAM_RETRY_MAX_SECONDS,
-                        max(TELEGRAM_RETRY_SECONDS, retry_seconds * 2),
+                        max(
+                            TELEGRAM_RETRY_SECONDS,
+                            requested_retry,
+                            self._retry_seconds * 2,
+                        ),
                     )
                 else:
                     self.connected = False

@@ -415,6 +415,14 @@ class UniversalOrchestrator:
             }
         )
         self.startup_status = startup_status
+        # Remote is an optional communication sidecar.  Begin its independent
+        # lifecycle only after Backend API, Workers and local services are
+        # already usable; max shared replacement candidates leave it untouched.
+        schedule_remote = getattr(
+            self.startup_manager, "schedule_remote_lifecycle", None
+        )
+        if callable(schedule_remote):
+            schedule_remote(global_cfg)
         if not getattr(self, "_handoff_draining", False):
             self._report_startup()
 

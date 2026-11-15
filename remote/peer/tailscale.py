@@ -30,7 +30,7 @@ class TailscaleDiscovery(PeerDiscovery):
         self_instance_id: str,
         hashi_root: Path,
         on_peers_changed: Optional[Callable] = None,
-        poll_seconds: int = 15,
+        poll_seconds: int = 60,
     ):
         self._self_id = self_instance_id.upper()
         self._hashi_root = hashi_root
@@ -114,8 +114,8 @@ class TailscaleDiscovery(PeerDiscovery):
         self._last_error = str(error)
         self._retry_count += 1
         self._next_retry_at = time.time() + min(
-            30.0,
-            float(2 ** min(self._retry_count - 1, 5)),
+            300.0,
+            float(5 * (2 ** min(self._retry_count - 1, 6))),
         )
 
     async def discover(self) -> list[PeerInfo]:
@@ -134,12 +134,17 @@ class TailscaleDiscovery(PeerDiscovery):
 
     async def _poll_loop(self) -> None:
         while self._running:
+            delay = float(self._poll_seconds)
             try:
                 await self._refresh_once()
             except Exception as exc:
                 self._record_failure(f"{type(exc).__name__}: {exc}")
                 logger.warning("TailscaleDiscovery: refresh failed: %s", exc)
-            await asyncio.sleep(self._poll_seconds)
+                delay = max(
+                    delay,
+                    max(0.0, self._next_retry_at - time.time()),
+                )
+            await asyncio.sleep(delay)
 
     async def _refresh_once(self) -> None:
         self._last_attempt_at = time.time()

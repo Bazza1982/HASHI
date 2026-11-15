@@ -170,6 +170,32 @@ startup preserves Telegram's pending updates; the accepted-update offset
 advances only after the Worker accepts each update. Source changes on HASHI3
 are not evidence that an already running shared Function has adopted them.
 
+### Connector lifecycle isolation (2026-11-16)
+
+Core/Functions/Worker local readiness is independent of Telegram, Remote,
+WhatsApp and other external transports. Topology publication is now a pure,
+generation/revision-deduplicated Worker RPC. It does not reload credentials,
+start a shared Telegram receiver, start Worker-local connectors, inspect
+Remote or recover another Agent. A committed Agent route grants connector
+ownership through a separate, explicitly scoped activation call. Targeted
+restart reconciles only the selected Agent; unchanged receivers and healthy
+Worker connector tasks are reused.
+
+Each Telegram receiver or Worker sender has one retry owner. `InvalidToken`
+and `Forbidden` are permanent for the adopted Bot-token revision and stop
+automatic retries; a different token revision creates/re-arms that connector.
+Temporary transport failures use bounded exponential backoff with per-connector
+jitter, respect a server `RetryAfter` floor, and cannot create overlapping
+tasks. Connector activation schedules network work but does not wait for a
+successful connection and does not participate in Worker `ACTIVE`, shared
+Functions commit, or Workbench local readiness.
+
+Workbench health is observational. Reading health does not reconcile Remote,
+reload connector configuration, enumerate all Agent connectors, publish
+topology, register tasks or start a transport. Small monotonic counters expose
+topology requests/RPC attempts and connector activation/RPC attempts so idle
+and restart acceptance can be measured without a new monitor service.
+
 ### Telegram command reply connection recovery (2026-10-31)
 
 Functions retries a command reply only when the actual transport exception

@@ -1030,6 +1030,12 @@ class FunctionWorkerHost:
                     runtime.telegram_connected
                     and getattr(getattr(runtime, "app", None), "running", False)
                 ),
+                "telegram_connector_attempts": int(
+                    getattr(runtime, "_telegram_connector_attempts", 0) or 0
+                ),
+                "telegram_connector_permanent_failure": getattr(
+                    runtime, "_telegram_connector_permanent_failure", None
+                ),
                 "telegram_ingress_connected": bool(
                     getattr(runtime, "telegram_ingress_connected", False)
                 ),

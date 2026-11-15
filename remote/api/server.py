@@ -36,7 +36,6 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
@@ -2464,9 +2463,11 @@ def _desktop_workbench_host(instance_id: str, port: int) -> str:
         try:
             request = urllib_request.Request(identity_url, method="GET", headers={"X-Workbench-Token": token})
             with urllib_request.urlopen(request, timeout=1.0) as response:
-                if response.status != 200: continue
+                if response.status != 200:
+                    continue
                 raw = response.read(1025)
-            if len(raw) > 1024: continue
+            if len(raw) > 1024:
+                continue
             identity = json.loads(raw)
         except (URLError, TimeoutError, OSError, ValueError):
             continue
@@ -2846,36 +2847,71 @@ def _retry_restart_notification(record):
     return _write_restart_record(record)
 
 
-_restart_notification_scan_after: tuple[Path, str] | None = None
+_restart_notification_seen: dict[str, int] = {}
+_restart_notification_due: dict[str, float] = {}
 
 
 def _recover_restart_notifications():
-    global _restart_notification_scan_after
-
     if not _control_hashi_root:
-        return
+        return 300.0
     directory = _restart_records_dir()
     if not directory.exists():
-        return
+        return 300.0
     paths = sorted(directory.glob("*.json"), key=lambda path: path.name)
-    if _restart_notification_scan_after is not None:
-        previous_directory, after_name = _restart_notification_scan_after
-        if previous_directory == directory:
-            remaining = [path for path in paths if path.name > after_name]
-            if remaining:
-                paths = remaining
-    # Bound payload reads, not the lifetime coverage. Advance past historical,
-    # deferred and invalid records too; wrap after the last filename. A process
-    # restart can safely reset this disposable cursor because notice identity
-    # and delivery state remain in each durable restart receipt.
-    for path in paths[:512]:
-        _restart_notification_scan_after = (directory, path.name)
+    now = time.time()
+    next_due: float | None = None
+    live_names = {str(path.resolve()) for path in paths}
+    for stale in set(_restart_notification_seen) - live_names:
+        _restart_notification_seen.pop(stale, None)
+        _restart_notification_due.pop(stale, None)
+    # Receipt payloads are read only when new/changed or when their exact retry
+    # deadline arrives. Historical delivered receipts are not reread forever.
+    payload_reads = 0
+    for path in paths:
         try:
-            if path.stat().st_size > 512 * 1024:
+            cache_key = str(path.resolve())
+            stat = path.stat()
+            due = float(_restart_notification_due.get(cache_key, 0.0) or 0.0)
+            if (
+                _restart_notification_seen.get(cache_key) == stat.st_mtime_ns
+                and (not due or due > now)
+            ):
+                if due:
+                    next_due = due if next_due is None else min(next_due, due)
                 continue
-            _retry_restart_notification(_read_restart_record(path.stem))
+            if payload_reads >= 512:
+                # Preserve full durable coverage without an unbounded burst.
+                # Already-processed paths will be cache hits on the next pass.
+                resume_at = now + 1.0
+                next_due = (
+                    resume_at if next_due is None else min(next_due, resume_at)
+                )
+                continue
+            payload_reads += 1
+            if stat.st_size > 512 * 1024:
+                _restart_notification_seen[cache_key] = stat.st_mtime_ns
+                continue
+            record = _retry_restart_notification(_read_restart_record(path.stem))
+            try:
+                _restart_notification_seen[cache_key] = path.stat().st_mtime_ns
+            except OSError:
+                _restart_notification_seen.pop(cache_key, None)
+            delivery = dict(record.get("notification") or {})
+            due = float(delivery.get("next_attempt_at") or 0.0)
+            if (
+                record.get("notify_origin")
+                and record.get("state") in {"completed", "failed", "rejected"}
+                and delivery.get("state") != "delivered"
+                and int(delivery.get("attempts") or 0) < 8
+                and due > now
+            ):
+                _restart_notification_due[cache_key] = due
+                next_due = due if next_due is None else min(next_due, due)
+            else:
+                _restart_notification_due.pop(cache_key, None)
         except (ValueError, OSError, KeyError, TypeError):
             logger.warning("Restart notification remains pending: %s", path.stem)
+    return max(1.0, min(300.0, (next_due - now) if next_due else 300.0))
 
 
 @asynccontextmanager
@@ -2883,10 +2919,11 @@ async def _restart_notification_lifespan(_app):
     async def recover():
         while True:
             try:
-                await asyncio.to_thread(_recover_restart_notifications)
+                delay = await asyncio.to_thread(_recover_restart_notifications)
             except (ValueError, OSError):
                 logger.warning("Restart notification recovery storage is unavailable")
-            await asyncio.sleep(30)
+                delay = 300.0
+            await asyncio.sleep(max(1.0, float(delay or 300.0)))
     task = asyncio.create_task(recover())
     try:
         yield

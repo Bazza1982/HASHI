@@ -457,6 +457,45 @@ def test_registry_refresh_success_derives_live_status_via_common_path(tmp_path):
     assert registry._peers["HASHI1"].properties["live_status"] == "online"
 
 
+def test_healthy_peer_heartbeat_does_not_rewrite_registry_each_cycle(
+    tmp_path, monkeypatch
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances": {}}', encoding="utf-8"
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    now = int(time.time())
+    registry._peers["HASHI1"] = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.50.21",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={
+            "handshake_state": "handshake_accepted",
+            "live_status": "online",
+            "last_seen_ok": now,
+            "consecutive_failures": 0,
+        },
+    )
+    registry._last_refresh_persist_at = time.monotonic()
+    sync_calls = []
+    save_calls = []
+    monkeypatch.setattr(
+        registry, "_sync_to_instances_json", lambda: sync_calls.append(True)
+    )
+    monkeypatch.setattr(registry, "_save_state", lambda: save_calls.append(True))
+
+    registry.mark_refresh_result("HASHI1", ok=True, checked_at=now + 1)
+
+    assert sync_calls == []
+    assert save_calls == []
+    assert registry.activity_snapshot()["heartbeat_writes_suppressed"] == 1
+
+
 def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -1055,6 +1094,32 @@ def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
     assert "hashi-desktop" not in deduped
 
 
+def test_bootstrap_dedupes_multiple_addresses_for_one_instance():
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI4", "platform": "windows"}
+    instances = {
+        "hashi7-old": {
+            "instance_id": "HASHI7",
+            "api_host": "192.0.2.70",
+            "remote_port": 8766,
+            "workbench_port": 18807,
+            "protocol_version": "1.0",
+        },
+        "hashi7-current": {
+            "instance_id": "HASHI7",
+            "api_host": "192.0.2.71",
+            "remote_port": 8766,
+            "workbench_port": 18807,
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2"],
+        },
+    }
+
+    deduped = ProtocolManager._dedupe_bootstrap_instances(manager, instances)
+
+    assert list(deduped) == ["hashi7-current"]
+
+
 def test_same_machine_hint_recognizes_same_host_wsl_siblings():
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
@@ -1126,11 +1191,75 @@ def test_resolve_peer_route_uses_loopback_candidate_for_live_same_host_peer():
         "hashi1": {"instance_id": "HASHI1", "same_host_loopback": "127.0.0.1", "remote_port": 8766}
     }
     manager._candidate_hosts_for_peer = lambda _peer: ["127.0.0.1", "192.168.50.21"]
-    manager._probe_route = lambda host, port: host == "127.0.0.1" and port == 8766
+    manager._probe_route = lambda *_args, **_kwargs: pytest.fail(
+        "route resolution must not synchronously probe external endpoints"
+    )
 
     route = ProtocolManager._resolve_peer_route(manager, "HASHI1")
 
     assert route == {"host": "127.0.0.1", "port": 8766, "instance_id": "HASHI1"}
+
+
+def test_resolve_peer_route_fast_fails_while_all_endpoint_circuits_are_open():
+    manager = object.__new__(ProtocolManager)
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {}
+    manager._activity = {}
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+    )
+    manager._peer_registry = SimpleNamespace(get_peer=lambda _iid: peer)
+    manager._load_instances = lambda: {}
+    manager._candidate_hosts_for_peer = lambda _peer: [
+        "192.0.2.70",
+        "192.0.2.71",
+    ]
+    manager._record_route_probe("HASHI7", "192.0.2.70", 8766, ok=False)
+    manager._record_route_probe("HASHI7", "192.0.2.71", 8766, ok=False)
+
+    assert ProtocolManager._resolve_peer_route(manager, "HASHI7") is None
+    assert manager._activity["route_circuit_skips"] == 2
+
+
+def test_failed_peer_endpoints_are_circuit_broken_between_liveness_runs():
+    manager = object.__new__(ProtocolManager)
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {}
+    manager._activity = {}
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+    )
+    refreshes = []
+    manager._peer_registry = SimpleNamespace(
+        mark_refresh_result=lambda *args, **kwargs: refreshes.append((args, kwargs))
+    )
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.0.2.70", "192.0.2.71"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    calls = []
+
+    def unavailable(url, *, timeout):
+        calls.append((url, timeout))
+        raise TimeoutError("unreachable")
+
+    manager._get_json = unavailable
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
+    assert len(calls) == 2
+    assert len(refreshes) == 1
+
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer, timeout=0.01)) is False
+    assert len(calls) == 2
+    assert len(refreshes) == 1
+    assert manager._activity["route_circuit_skips"] == 2
 
 
 def test_protocol_status_includes_route_diagnostics(tmp_path):
@@ -1463,7 +1592,7 @@ def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
         platform="windows",
         properties={
             "handshake_state": "handshake_accepted",
-            "last_handshake_at": time.time() - 31,
+            "last_handshake_at": time.time() - 301,
         },
     )
     recorded: list[tuple[str, dict]] = []
@@ -2013,6 +2142,28 @@ def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
     assert peers[0].properties["live_endpoint_source"] == "cache"
 
 
+@pytest.mark.asyncio
+async def test_tailscale_failure_backoff_never_busy_polls(tmp_path, monkeypatch):
+    discovery = TailscaleDiscovery("HASHI1", tmp_path, poll_seconds=60)
+    discovery._running = True
+    sleeps = []
+
+    async def fail_refresh():
+        raise OSError("tailscale unavailable")
+
+    async def stop_after_sleep(delay):
+        sleeps.append(delay)
+        discovery._running = False
+
+    monkeypatch.setattr(discovery, "_refresh_once", fail_refresh)
+    monkeypatch.setattr("remote.peer.tailscale.asyncio.sleep", stop_after_sleep)
+
+    await discovery._poll_loop()
+
+    assert sleeps == [60.0]
+    assert discovery.get_status()["retry_count"] == 1
+
+
 def test_local_agents_snapshot_marks_fresh_directory_state(tmp_path):
     (tmp_path / "agents.json").write_text(
         json.dumps({"agents": [{"name": "zelda", "display_name": "Zelda", "is_active": True}]}),
@@ -2028,6 +2179,23 @@ def test_local_agents_snapshot_marks_fresh_directory_state(tmp_path):
     assert snapshot[0]["agent_name"] == "zelda"
     assert snapshot[0]["directory_state"] == "fresh"
     assert snapshot[0]["agent_snapshot_version"]
+
+
+def test_unchanged_agent_snapshot_does_not_reread_file(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"agents": [{"name": "zelda", "is_active": True}]}),
+        encoding="utf-8",
+    )
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    first = ProtocolManager.get_local_agents_snapshot(manager)
+    second = ProtocolManager.get_local_agents_snapshot(manager)
+
+    assert second == first
+    assert manager._activity["agent_snapshot_file_reads"] == 1
 
 
 def test_core_online_reads_cached_health_without_probing_network():

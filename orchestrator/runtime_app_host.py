@@ -22,12 +22,6 @@ from orchestrator import runtime_handoff
 from orchestrator.lifecycle_timing import timed
 
 
-# Connector-local activation retries use bounded backoff and never re-run
-# healthy connectors or topology publication.
-CONNECTOR_RETRY_SECONDS = 5
-CONNECTOR_RETRY_MAX_SECONDS = 60
-
-
 class RuntimeAppHost:
     def __init__(self, peer, bootstrap):
         self.peer, self.bootstrap = peer, bootstrap
@@ -39,7 +33,6 @@ class RuntimeAppHost:
         self.whatsapp_paused = False
         self.connector_task = None
         self.connector_lock = asyncio.Lock()
-        self._connector_retry_agents = set()
         self.bootstrapped_agents = set()
         self.onboarding_paths = None
         self.onboarding_done = False
@@ -248,24 +241,19 @@ class RuntimeAppHost:
                 if reason in {"invalid_token", "forbidden"}:
                     if hasattr(ingress, "permanent_failure_reason"):
                         ingress.permanent_failure_reason = reason
-                else:
-                    self._connector_retry_agents.add(name)
 
         async with self.connector_lock:
             app._connector_activation_pending = True
             try:
                 app.startup_manager.reconcile_connector_status(pending=True, publish=False)
-                if getattr(app, "_shared_replacement_continuity", False):
-                    # Preparation must leave the old owner's Remote alone.
-                    # After retirement, the committed Functions owner restores
-                    # its configured sidecar before announcing readiness.
-                    try:
-                        await app.startup_manager._ensure_remote_lifecycle()
-                        remote = getattr(app, "remote_lifecycle_status", {}) or {}
-                        if remote.get("enabled") is not False and not remote.get("available"):
-                            errors["remote"] = str(remote.get("action") or "unavailable")
-                    except Exception as exc:
-                        errors["remote"] = f"{type(exc).__name__}: {exc}"
+                # Worker-local outbound connectors are granted independently of
+                # topology publication. The RPC only starts the selected
+                # Worker's own connector task and never gates local readiness.
+                activate_workers = getattr(
+                    app.function_workers, "activate_worker_connectors", None
+                )
+                if callable(activate_workers):
+                    activate_workers()
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)
@@ -331,10 +319,8 @@ class RuntimeAppHost:
 
     async def _start_committed_connectors(self):
         try:
-            errors = await self._activate_connectors()
+            await self._activate_connectors()
             runtime_handoff.persist(self.app)
-            if self._connector_retry_agents:
-                await self._retry_connectors()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -342,55 +328,6 @@ class RuntimeAppHost:
             import logging
             logging.getLogger("BridgeU.Orchestrator").exception(
                 "Committed connector activation failed; local services remain online")
-
-    async def _retry_connectors(self):
-        """Retry only connector starts that failed transiently."""
-        delay = max(0.0, float(CONNECTOR_RETRY_SECONDS))
-        while self._connector_retry_agents and not self.stopping.is_set():
-            if delay:
-                try:
-                    await asyncio.wait_for(self.stopping.wait(), timeout=delay)
-                    return
-                except TimeoutError:
-                    pass
-            retrying = set(self._connector_retry_agents)
-            self._connector_retry_agents.clear()
-            errors = {}
-            ingresses = self.app.function_workers._telegram_ingress
-            for name in retrying:
-                ingress = ingresses.get(name)
-                if ingress is None:
-                    continue
-                permanent = getattr(ingress, "permanent_failure_reason", None)
-                if permanent:
-                    errors[name] = str(permanent)
-                    continue
-                try:
-                    await asyncio.wait_for(
-                        ingress.start(
-                            drop_pending_updates=getattr(
-                                ingress, "drop_pending_on_start", False
-                            )
-                        ),
-                        timeout=45,
-                    )
-                except Exception as exc:
-                    from orchestrator.telegram_ingress_diagnostics import safe_error
-
-                    failure = safe_error(exc, stage="activation")
-                    reason = str(failure.get("reason") or "connector_error")
-                    message = str(failure.get("message") or reason)
-                    errors[name] = f"{type(exc).__name__}: {message}"
-                    if reason in {"invalid_token", "forbidden"}:
-                        if hasattr(ingress, "permanent_failure_reason"):
-                            ingress.permanent_failure_reason = reason
-                    else:
-                        self._connector_retry_agents.add(name)
-            self.app.startup_manager.reconcile_connector_status(errors)
-            delay = min(
-                float(CONNECTOR_RETRY_MAX_SECONDS),
-                max(float(CONNECTOR_RETRY_SECONDS), delay * 2),
-            )
 
     @staticmethod
     def _shared_drain_blockers(app):

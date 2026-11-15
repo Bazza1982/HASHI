@@ -119,7 +119,32 @@ class PeerRegistry:
         self._state_path = self._state_dir / f"peers_state_{self._self_id.lower()}.json"
         self._observations: dict[str, dict[str, PeerInfo]] = {}
         self._peers: dict[str, PeerInfo] = {}
+        self._last_refresh_persist_at = 0.0
+        self._activity = {
+            "state_writes": 0,
+            "instance_syncs": 0,
+            "heartbeat_writes_suppressed": 0,
+        }
         self._load_state()
+
+    def activity_snapshot(self) -> dict[str, int]:
+        return dict(self._activity)
+
+    @staticmethod
+    def _refresh_persistence_signature(peer: PeerInfo) -> tuple:
+        props = dict(peer.properties or {})
+        return (
+            str(peer.host),
+            int(peer.port),
+            int(peer.workbench_port),
+            str(props.get("live_status") or ""),
+            int(props.get("consecutive_failures") or 0),
+            str(props.get("last_refresh_error") or ""),
+            str(props.get("host_identity") or ""),
+            str(props.get("environment_kind") or ""),
+            json.dumps(props.get("address_candidates") or [], sort_keys=True),
+            json.dumps(props.get("observed_candidates") or [], sort_keys=True),
+        )
 
     def _peer_state_is_expired(self, instance_id: str, item: dict, *, now: int | None = None) -> bool:
         iid = str(instance_id or "").strip().upper()
@@ -297,6 +322,7 @@ class PeerRegistry:
         peer = self._peers.get(iid)
         if peer is None:
             return
+        previous_signature = self._refresh_persistence_signature(peer)
         now_ts = int(checked_at or time.time())
         props = self._normalize_live_props(peer.properties or {})
         if ok:
@@ -330,8 +356,15 @@ class PeerRegistry:
             props["live_status"] = self._derive_live_status(props, now=now_ts)
         peer.properties = props
         self._peers[iid] = peer
-        self._sync_to_instances_json()
-        self._save_state()
+        current_signature = self._refresh_persistence_signature(peer)
+        now_monotonic = time.monotonic()
+        persist_due = now_monotonic - self._last_refresh_persist_at >= 600.0
+        if previous_signature != current_signature or persist_due:
+            self._sync_to_instances_json()
+            self._save_state()
+            self._last_refresh_persist_at = now_monotonic
+        else:
+            self._activity["heartbeat_writes_suppressed"] += 1
 
     def mark_handshake_result(
         self,
@@ -498,6 +531,11 @@ class PeerRegistry:
                 }
             }
             self._state_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            activity = getattr(self, "_activity", None)
+            if activity is not None:
+                activity["state_writes"] = int(
+                    activity.get("state_writes", 0) or 0
+                ) + 1
         except Exception as exc:
             logger.warning("Registry: failed to save peer state: %s", exc)
 
@@ -1518,6 +1556,11 @@ class PeerRegistry:
             if changed:
                 data["instances"] = instances
                 _write_json_atomic(self._instances_path, data)
+                activity = getattr(self, "_activity", None)
+                if activity is not None:
+                    activity["instance_syncs"] = int(
+                        activity.get("instance_syncs", 0) or 0
+                    ) + 1
                 logger.info("Registry: instances.json updated (%d peers)", len(self._peers))
 
         except Exception as e:

@@ -356,13 +356,11 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
 
 
 @pytest.mark.asyncio
-async def test_transient_connector_failure_retries_without_blocking_other_connectors(
+async def test_shared_connector_activation_has_no_duplicate_retry_owner(
     tmp_path, monkeypatch
 ):
     from orchestrator.runtime_app_host import RuntimeAppHost
     from unittest.mock import AsyncMock
-
-    monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
 
     class Ingress:
         offset = None
@@ -430,9 +428,9 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         await asyncio.wait_for(activated.wait(), timeout=1)
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
-        assert flaky.is_running and flaky.calls == 2
+        assert not flaky.is_running and flaky.calls == 1
         assert healthy.calls == 1
-        assert app.startup_status["ready"] and not app.startup_status["degraded"]
+        assert app.startup_status["ready"] and app.startup_status["degraded"]
     finally:
         host.stopping.set()
         host.task.cancel()

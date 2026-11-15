@@ -70,6 +70,8 @@ from remote.terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
+DISCOVERY_MAINTENANCE_SECONDS = 30.0
+
 
 def _build_local_capabilities(*, rescue_start_enabled: bool) -> list[str]:
     capabilities = build_default_capabilities(
@@ -283,6 +285,10 @@ class HashiRemoteApplication:
         self._instance_id = ""
         self._last_loaded_shared_token: str | None = None
         self._last_shared_token_revision = ""
+        self._discovery_activity = {
+            "maintenance_cycles": 0,
+            "advertisement_updates": 0,
+        }
 
     def _discovery_status(self) -> dict:
         backends = []
@@ -354,6 +360,7 @@ class HashiRemoteApplication:
             "trust_state": trust_state,
             "state": state,
             "static_seed_fallback_active": fallback_active,
+            "activity": dict(self._discovery_activity),
         }
 
     def _build_self_peer(
@@ -614,6 +621,7 @@ class HashiRemoteApplication:
         local_capabilities: list[str],
     ) -> None:
         while not self._shutdown_event.is_set():
+            self._discovery_activity["maintenance_cycles"] += 1
             try:
                 await self._maintain_discovery_once(
                     instance_info=instance_info,
@@ -623,7 +631,7 @@ class HashiRemoteApplication:
                 )
             except Exception as exc:
                 logger.warning("Discovery maintenance failed: %s", exc)
-            await asyncio.sleep(1)
+            await asyncio.sleep(DISCOVERY_MAINTENANCE_SECONDS)
 
     async def _maintain_discovery_once(
         self,
@@ -658,7 +666,16 @@ class HashiRemoteApplication:
                         "Shared-token configuration changed; authenticated peer handshakes will be re-established"
                     )
 
-        directory = self._protocol_manager.get_local_agent_directory_state()
+        cached_directory = getattr(
+            self._protocol_manager,
+            "get_cached_local_agent_directory_state",
+            None,
+        )
+        directory = (
+            cached_directory()
+            if callable(cached_directory)
+            else self._protocol_manager.get_local_agent_directory_state()
+        )
         version = str(directory.get("version") or "")
         directory_state = str(directory.get("directory_state") or "")
         advertisement_key = f"{version}:{directory_state}"
@@ -691,6 +708,7 @@ class HashiRemoteApplication:
                     continue
                 update = getattr(discovery, "update_advertisement", None)
                 ok = bool(await update(peer_self)) if callable(update) else False
+                self._discovery_activity["advertisement_updates"] += 1
                 if ok and callable(get_status):
                     ok = str((get_status() or {}).get("readiness") or "") == "ready"
                 if ok:
@@ -700,6 +718,7 @@ class HashiRemoteApplication:
             retry_due = getattr(discovery, "retry_due", None)
             if callable(retry_due) and retry_due():
                 ok = bool(await discovery.advertise(peer_self))
+                self._discovery_activity["advertisement_updates"] += 1
                 get_status = getattr(discovery, "get_status", None)
                 if ok and callable(get_status):
                     ok = str((get_status() or {}).get("readiness") or "") == "ready"

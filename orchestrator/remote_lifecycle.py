@@ -709,26 +709,9 @@ async def ensure_remote_started(
         return {"ok": False, "action": "skipped", "reason": "remote_enabled=false", "settings": settings}
     if disabled:
         return {"ok": False, "action": "skipped", "reason": "remote explicitly disabled", "disabled": disabled, "settings": settings}
-    actuator = await ensure_remote_restart_actuator(settings.root, **source_options)
-    if not actuator.get("ok") and actuator.get("action") != "restart_actuator_unavailable":
-        bridge_logger.warning(
-            "Fixed HASHI restart actuator could not be refreshed: %s",
-            actuator.get("reason") or actuator.get("action"),
-        )
     owned = await _find_owned_remote(settings)
     if owned:
         result = {"ok": True, "action": "already_running", "settings": settings, **owned}
-        claim = read_runtime_claim(settings.root) or {}
-        if (
-            settings.supervised
-            and bool(claim.get("supervised"))
-            and sys.platform.startswith("linux")
-        ):
-            # Refresh the registered unit on normal HASHI upgrades without
-            # restarting an already healthy Remote process.
-            refresh = await activate_remote_supervisor(settings.root)
-            result["supervisor_refresh"] = refresh
-            result["service_name"] = str(refresh.get("service_name") or "")
         if owned.get("remote_ready") is False:
             result.update(
                 {
@@ -738,6 +721,15 @@ async def ensure_remote_started(
                 }
             )
         return result
+    # Fixed task/supervisor deployment is an activation concern.  A healthy
+    # process returns above without task registration, PowerShell, service
+    # refresh or any other lifecycle side effect.
+    actuator = await ensure_remote_restart_actuator(settings.root, **source_options)
+    if not actuator.get("ok") and actuator.get("action") != "restart_actuator_unavailable":
+        bridge_logger.warning(
+            "Fixed HASHI restart actuator could not be refreshed: %s",
+            actuator.get("reason") or actuator.get("action"),
+        )
     if settings.supervised:
         control = await control_remote_supervisor(settings.root, action="start", **source_options)
         if not control.get("ok") and control.get("action") == "supervisor_unavailable":

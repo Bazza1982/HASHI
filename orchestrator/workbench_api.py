@@ -15307,17 +15307,9 @@ class WorkbenchApiServer:
             "agents": running_agents,
         }
         startup = dict(getattr(orchestrator, "startup_status", {}) or {})
-        manager = getattr(orchestrator, "startup_manager", None)
-        if (manager is not None and startup.get("services_ready")
-                and startup.get("phase") in {"ready", "degraded"}
-                and not getattr(orchestrator, "_handoff_draining", False)):
-            reconcile_remote = getattr(manager, "reconcile_remote_status", None)
-            if callable(reconcile_remote):
-                remote_result = reconcile_remote(publish=False)
-                if inspect.isawaitable(remote_result):
-                    await remote_result
-            manager.reconcile_connector_status(publish=False)
-            startup = dict(orchestrator.startup_status)
+        # Health is a read-only projection. Connector and Remote lifecycle
+        # owners update their own state; a status request must never perform
+        # network probes, Agent-wide scans, task registration or activation.
         if startup:
             payload["ready"] = bool(startup.get("ready", False))
             payload["degraded"] = bool(startup.get("degraded", False))
@@ -15413,6 +15405,13 @@ class WorkbenchApiServer:
             for runtime in self._runtime_list()
             if getattr(runtime, "is_function_worker_proxy", False)
         ]
+        activity = getattr(
+            getattr(orchestrator, "function_workers", None),
+            "activity_snapshot",
+            None,
+        )
+        if callable(activity):
+            payload["function_worker_activity"] = activity()
         capability_broker = getattr(orchestrator, "capability_broker", None)
         payload["device_capabilities"] = (
             capability_broker.status()

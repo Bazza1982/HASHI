@@ -77,6 +77,18 @@ function New-Object {
 function Unregister-ScheduledTask { throw 'Unmocked task deletion' }
 """
     encoded = base64.b64encode((isolation + script).encode("utf-16-le")).decode("ascii")
+    env = os.environ.copy()
+    # Platform contract fixtures own their exact instance/task inputs.  Do not
+    # inherit the HASHI instance that happens to be running the test process.
+    for name in (
+        "HASHI_INSTANCE_ID",
+        "HASHI_REMOTE_TASK_USER",
+        "HASHI_REMOTE_MAX_TERMINAL_LEVEL",
+        "HASHI_REMOTE_DISCOVERY",
+        "HASHI_REMOTE_PORT",
+        "HASHI_REMOTE_NO_TLS",
+    ):
+        env.pop(name, None)
     return subprocess.run(
         [
             "powershell.exe",
@@ -86,7 +98,7 @@ function Unregister-ScheduledTask { throw 'Unmocked task deletion' }
             "-EncodedCommand",
             encoded,
         ],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, env=env,
     )
 
 

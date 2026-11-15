@@ -13,19 +13,16 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("remote_ok", [True, False])
-async def test_shared_functions_commit_restores_remote_and_gates_health(tmp_path, monkeypatch, remote_ok):
+async def test_shared_functions_commit_leaves_remote_lifecycle_untouched(tmp_path, monkeypatch, remote_ok):
     from unittest.mock import AsyncMock
     from orchestrator.runtime_app_host import RuntimeAppHost
     from orchestrator.startup_manager import StartupManager
     from orchestrator import remote_lifecycle
 
-    started, release = asyncio.Event(), asyncio.Event()
+    release = asyncio.Event()
     settings = SimpleNamespace(enabled=True, supervised=False, port=18474)
     async def launch(*args, **kwargs):
-        started.set()
-        await release.wait()
-        return {"ok": remote_ok, "action": "started_child" if remote_ok else "remote_activation_failed",
-                "settings": settings, "reason": "" if remote_ok else "fixture activation failed"}
+        pytest.fail("max shared replacement must not touch Remote lifecycle")
     monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", launch)
     monkeypatch.setattr(remote_lifecycle, "inspect_remote", AsyncMock(return_value={
         "ok": False, "action": "remote_activation_failed", "settings": settings}))
@@ -46,19 +43,13 @@ async def test_shared_functions_commit_restores_remote_and_gates_health(tmp_path
     activated = _first_connector_activation(host)
     commit = asyncio.create_task(host.commit())
     try:
-        # Old shared Functions have retired, so bundled Remote is absent.
-        # Commit is local; external restoration must not hold its RPC open.
-        await asyncio.wait_for(started.wait(), timeout=.4)
-        assert commit.done() and commit.result()["committed"]
-        pending = json.loads((await server.handle_health(_FakeRequest())).text)
-        assert not pending["ready"]
-        release.set()
-        result = await commit
+        result = await asyncio.wait_for(commit, timeout=.4)
+        assert result["committed"]
         await asyncio.wait_for(activated.wait(), timeout=1)
         payload = json.loads((await server.handle_health(_FakeRequest())).text)
-        assert payload["remote"]["available"] is remote_ok
-        assert payload["ready"] is remote_ok
-        assert payload["degraded"] is not remote_ok
+        assert "remote" not in payload
+        assert payload["ready"] is True
+        assert payload["degraded"] is False
         assert result["degraded"] is True  # Connections were still pending at commit.
     finally:
         release.set()
@@ -94,7 +85,6 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
     from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
     from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
 
-    monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
     monkeypatch.setattr("orchestrator.telegram_ingress.TELEGRAM_RETRY_SECONDS", 0.01)
     recovery_allowed = asyncio.Event()
     handles = {}
@@ -509,7 +499,7 @@ async def test_health_explains_degraded_remote_without_failing_liveness(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_health_reconciles_recovered_remote_before_projecting_status(tmp_path):
+async def test_health_is_read_only_and_does_not_reconcile_remote(tmp_path):
     server = _server(tmp_path, profile="personal")
     owner = SimpleNamespace(
         instance_id="HASHI3",
@@ -554,11 +544,11 @@ async def test_health_reconciles_recovered_remote_before_projecting_status(tmp_p
     response = await server.handle_health(_FakeRequest())
     payload = json.loads(response.text)
 
-    assert manager.remote_calls == 1
-    assert payload["ready"] is True
-    assert payload["degraded"] is False
-    assert payload["status"] == "ready"
-    assert payload["issues"] == []
+    assert manager.remote_calls == 0
+    assert payload["ready"] is False
+    assert payload["degraded"] is True
+    assert payload["status"] == "degraded"
+    assert payload["issues"][0]["component"] == "remote"
 
 
 @pytest.mark.asyncio
@@ -617,6 +607,8 @@ async def test_health_after_local_clone_removal_keeps_unrelated_failures(tmp_pat
                         "total": len(states), "completed": len(states),
                         "ready_agents": 2, "failed_agents": int(failed), "issues": issues})
     app.startup_manager = StartupManager(app, None)
+    # Connector lifecycle owners reconcile state; health only projects it.
+    app.startup_manager.reconcile_connector_status(publish=False)
     server = _server(tmp_path, profile="personal")
     server.orchestrator = app
     payload = json.loads((await server.handle_health(_FakeRequest())).text)
