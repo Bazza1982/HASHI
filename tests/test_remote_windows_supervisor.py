@@ -730,7 +730,8 @@ function Register-ScheduledTask {{
     ]
     assert result.returncode == exit_code, result.stderr
     log = (root / "logs/hashi-remote-supervisor.log").read_bytes()
-    text = log.decode("utf-16") if log.startswith(b"\xff\xfe") else log.decode("utf-8-sig")
+    assert not log.startswith(b"\xff\xfe")
+    text = log.decode("utf-8-sig")
     for marker in (
         "REMOTE_STDOUT_OK",
         "REMOTE_STDERR_OK",
@@ -758,7 +759,8 @@ exit $LASTEXITCODE
 """)
     assert result.returncode == 0, result.stderr
     data = log.read_bytes()
-    text = data.decode("utf-16") if data.startswith(b"\xff\xfe") else data.decode("utf-8-sig")
+    assert not data.startswith(b"\xff\xfe")
+    text = data.decode("utf-8-sig")
     assert json.loads(text.strip()) == {"args": ["--help"], "bytecode_disabled": True}
     assert not (tmp_path / "__pycache__").exists()
 

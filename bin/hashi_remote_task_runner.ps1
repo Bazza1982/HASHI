@@ -64,5 +64,6 @@ if ($PythonArgsBase64) {
 # error records. Keep it in the log without aborting a healthy child process.
 $ErrorActionPreference = "Continue"
 # Legacy registrations must also preserve the sealed interpreter file closure.
-& $Python -B @ArgumentList *>> $LogPath
+& $Python -B @ArgumentList 2>&1 |
+    Out-File -LiteralPath $LogPath -Append -Encoding utf8
 exit $LASTEXITCODE

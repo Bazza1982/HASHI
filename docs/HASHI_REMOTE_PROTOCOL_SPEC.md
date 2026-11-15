@@ -175,6 +175,10 @@ response stages are DEBUG diagnostics and are not serialized while normal INFO
 logging is active. Failure events, exceptions and intermediate HTTP 4xx/5xx
 statuses remain INFO evidence. This keeps request and authentication failures
 observable without multiplying normal proxy traffic into ten durable records.
+The Windows supervisor preserves the child's UTF-8 stream when appending these
+records; PowerShell's UTF-16 redirection default is not part of the log
+contract. Existing mixed-encoding incident evidence is retained rather than
+rewritten or deleted.
 
 2026-09-27 HASHI1 repair record: the user requested this restart slowdown
 repair. The registry comparison fix is committed on local `main` as

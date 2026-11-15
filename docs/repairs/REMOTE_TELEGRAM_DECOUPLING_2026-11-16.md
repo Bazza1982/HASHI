@@ -40,6 +40,7 @@ Functions, Worker or local Workbench readiness.
 | Five-minute static bootstrap re-probed peers already registered as offline. | It duplicated liveness/handshake recovery and produced 14 route probes in one healthy four-minute acceptance segment that crossed the bootstrap boundary. | Bootstrap probes only unregistered instances. Registered peers remain with the liveness/handshake owner, which already reads current routes and applies peer/endpoint backoff. |
 | Route and status helpers reparsed `instances.json` on every lookup, and bootstrap read live endpoints before knowing whether an unknown peer existed. | One handshake/liveness pass could parse identical configuration once per peer; an all-known bootstrap still performed payload I/O. | A metadata signature, sampled at most once per second, preserves the parsed instance projection until the source changes. Bootstrap reads live endpoints lazily only for an unregistered instance. |
 | A successful Workbench gateway request wrote an INFO record for every receive/authenticate/forward/body/response stage. | The observed `chat-projection/*` client traffic produced about ten durable records per successful GET, amplifying legitimate traffic into multi-megabyte log growth. | Successful intermediate stages are DEBUG and skipped before JSON serialization at the normal INFO level. One completion summary remains INFO; failures, exceptions and 4xx/5xx stages remain INFO. |
+| The Windows task runner appended native output with `*>>`. | Windows PowerShell 5.1 ignored `$OutputEncoding` for file redirection and wrote UTF-16LE, doubling ASCII-dominant log bytes and creating mixed historical encoding after restarts. | Native stdout/stderr is merged into `Out-File -Encoding utf8`; exit-code, structured argv, Unicode path and `-B` contracts remain covered. Existing incident logs are not rewritten or deleted. |
 
 ## Independent recovery contracts
 
@@ -134,8 +135,44 @@ offline peer; the instance-source cache regression likewise failed by observing
 two payload reads for an unchanged file, then failed again when a single status
 burst still performed two metadata checks. Both pass after the fix, together with
 unknown-peer bootstrap and existing healthy/discovery-owner cases (5/5).
-The complete `test_remote*` focused inventory is 480 passing tests and 11
+The complete `test_remote*` focused inventory is 481 passing tests and 11
 platform/live skips; this includes Remote peer,
 discovery, shared-token endpoint, lifecycle, supervisor, routing, delivery and
 Workbench gateway coverage. Live idle evidence is recorded separately after
 the updated Remote process is adopted.
+
+## Final live acceptance
+
+The final gateway lifecycle build (`39986480`) was adopted through the
+HASHI4-only Remote task in 17.891 seconds. During that Remote-only restart,
+150/150 direct Workbench probes remained ready with all 24 Agents (7.45 ms
+median, 13.17 ms p95). Core PID 16292, Functions PID 24596 and every Worker PID
+were unchanged; only Remote moved to PID 26252. The accepted runtime claim
+reported commit `39986480ed0b7a840db379e322729630c844fa42`.
+
+A 1,831-second final soak sampled every 30 seconds. All 60 samples succeeded;
+Workbench, Remote and all 24 ACTIVE Workers stayed ready and every Core,
+Functions, Remote and Worker PID stayed unchanged. Workbench latency was 31.38
+ms median / 47.54 ms p95 / 50.49 ms maximum; Remote health was 54.73 ms median /
+68.22 ms p95 / 70.83 ms maximum. The temporary InvalidToken Agent remained
+local/degraded with `automatic_retry=false` throughout.
+
+Functions activity had zero delta for topology requests, topology publications,
+topology Worker RPCs, connector activation requests and connector Worker RPCs.
+Remote protocol deltas were 55 idle control wakes, 14 liveness passes, six
+handshake passes and six bootstrap passes. Unchanged instance metadata caused
+202 cheap source checks but only three payload reads. Discovery ran 60 bounded
+maintenance cycles with zero advertisement updates and zero credential reloads.
+The registry performed three 600-second checkpoint writes/syncs while
+suppressing 48 unchanged discovery writes, 13 heartbeat writes and 70 other
+unchanged writes.
+
+The soak included real external Workbench traffic and therefore is a traffic
+soak, not a claim of network silence: 6,294 authenticated gateway requests were
+observed. They produced exactly 6,294 completion summaries and zero successful
+intermediate-stage records. Before the task-runner encoding correction this
+segment occupied 5,103,412 UTF-16LE bytes; the UTF-8 runner regression proves
+the same ASCII-dominant stream is no longer doubled. Core consumed 12.78 CPU
+seconds, Functions 318.84, Remote 31.17 and the 24 Workers together 1,663.48;
+these figures include the 6,294 real projections and are not attributed to
+background idle loops.
