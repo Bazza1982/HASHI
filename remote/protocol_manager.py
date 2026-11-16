@@ -176,7 +176,7 @@ class ProtocolManager:
         self._credential_config_error = ""
         self._task: asyncio.Task | None = None
         self._bootstrap_task: asyncio.Task | None = None
-        self._peer_maintenance_task: asyncio.Task | None = None
+        self._control_maintenance_task: asyncio.Task | None = None
         self._control_wakeup = asyncio.Event()
         self._running = False
         self._last_bootstrap_run = 0.0
@@ -777,11 +777,11 @@ class ProtocolManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        peer_maintenance = getattr(self, "_peer_maintenance_task", None)
-        if peer_maintenance:
-            peer_maintenance.cancel()
-            await asyncio.gather(peer_maintenance, return_exceptions=True)
-            self._peer_maintenance_task = None
+        control_maintenance = getattr(self, "_control_maintenance_task", None)
+        if control_maintenance:
+            control_maintenance.cancel()
+            await asyncio.gather(control_maintenance, return_exceptions=True)
+            self._control_maintenance_task = None
         if self._bootstrap_task:
             self._bootstrap_task.cancel()
             await asyncio.gather(self._bootstrap_task, return_exceptions=True)
@@ -1015,28 +1015,50 @@ class ProtocolManager:
             deduped[key] = entry
         return deduped
 
-    def _start_peer_maintenance_task(
-        self, *, run_liveness: bool, run_handshake: bool
+    def _start_control_maintenance_task(
+        self,
+        *,
+        run_core_health: bool,
+        run_liveness: bool,
+        run_handshake: bool,
     ) -> bool:
-        current = getattr(self, "_peer_maintenance_task", None)
+        current = getattr(self, "_control_maintenance_task", None)
         if current is not None and not current.done():
             return False
-        if not run_liveness and not run_handshake:
+        if not run_core_health and not run_liveness and not run_handshake:
             return False
-        self._peer_maintenance_task = asyncio.create_task(
-            self._run_peer_maintenance(
+        self._control_maintenance_task = asyncio.create_task(
+            self._run_control_maintenance(
+                run_core_health=run_core_health,
                 run_liveness=run_liveness,
                 run_handshake=run_handshake,
             ),
-            name="remote-peer-maintenance",
+            name="remote-control-maintenance",
         )
         return True
 
-    async def _run_peer_maintenance(
-        self, *, run_liveness: bool, run_handshake: bool
+    async def _run_control_maintenance(
+        self,
+        *,
+        run_core_health: bool,
+        run_liveness: bool,
+        run_handshake: bool,
     ) -> None:
-        """Run slow peer probes outside the message-processing critical path."""
+        """Run slow control probes outside the message-processing critical path."""
         try:
+            if run_core_health:
+                self._count_activity("core_health_checks")
+                try:
+                    await self._refresh_core_online()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Local Workbench health maintenance failed: %s", exc)
+                finally:
+                    _checked_at, online = getattr(
+                        self, "_core_health_cache", (0.0, False)
+                    )
+                    self._core_health_cache = (time.time(), bool(online))
             if run_liveness:
                 try:
                     attempts = await self._refresh_peer_liveness_once()
@@ -1060,8 +1082,11 @@ class ProtocolManager:
                 finally:
                     self._last_handshake_run = time.time()
         finally:
-            if getattr(self, "_peer_maintenance_task", None) is asyncio.current_task():
-                self._peer_maintenance_task = None
+            if (
+                getattr(self, "_control_maintenance_task", None)
+                is asyncio.current_task()
+            ):
+                self._control_maintenance_task = None
             self._wake_control_loop()
 
     async def _control_loop(self) -> None:
@@ -1077,20 +1102,17 @@ class ProtocolManager:
                 if now - self._last_bootstrap_run >= self._bootstrap_retry_seconds:
                     self._start_bootstrap_task()
                     self._last_bootstrap_run = now
-                self._start_peer_maintenance_task(
+                core_health_cache = getattr(
+                    self, "_core_health_cache", (0.0, False)
+                )
+                self._start_control_maintenance_task(
+                    run_core_health=now - float(core_health_cache[0]) >= 30,
                     run_liveness=now - self._last_refresh_run >= 120,
                     run_handshake=(
                         getattr(self, "_force_handshake", False)
                         or now - self._last_handshake_run >= 30
                     ),
                 )
-                core_health_cache = getattr(
-                    self, "_core_health_cache", (0.0, False)
-                )
-                core_health_checked_at = float(core_health_cache[0])
-                if now - core_health_checked_at >= 30:
-                    self._count_activity("core_health_checks")
-                    await self._refresh_core_online()
                 if now - getattr(self, "_last_agent_snapshot_check", 0.0) >= 30:
                     self._count_activity("agent_snapshot_checks")
                     self._refresh_local_agent_snapshot_if_changed()
