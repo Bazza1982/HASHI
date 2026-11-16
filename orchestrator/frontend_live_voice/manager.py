@@ -259,7 +259,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self.external_call_busy = lambda owner_id: False
         self.frontend_call_state = None  # Optional Connector port; media stays with /phone.
         self.global_config = global_config
-        self.secrets = dict(secrets or {})
+        self.secrets = secrets if isinstance(secrets, Mapping) and not isinstance(secrets, dict) else dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
         self._connection_providers: dict[str, VoiceProvider] = {}
         self._provider_availability: dict[str, str] = {}
@@ -2983,6 +2983,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._provider_availability[identity] = code
         while len(self._provider_availability) > 16:
             self._provider_availability.pop(next(iter(self._provider_availability)))
+
+    def forget_provider_failure(self, phone: Mapping[str, Any], key: str) -> None:
+        """An explicit repair permits another attempt; it does not prove voice readiness."""
+        identity = self._provider_availability_key(phone, key)
+        if self._provider_availability.get(identity):
+            self._provider_availability.pop(identity, None)
 
     def _phone_availability(self, phone: Mapping[str, Any] | None, configuration_error: str | None) -> dict[str, Any]:
         enabled = self._feature_enabled if self._availability_override is None else self._availability_override

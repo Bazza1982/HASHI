@@ -547,13 +547,16 @@ class WorkbenchApiServer:
         register_agentpresence_controls(self)
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
+        from orchestrator.frontend_media_setup import CurrentVoiceSecrets, VoiceSetupSecretResolver
+        self.voice_secrets = CurrentVoiceSecrets(secrets_path, self.secrets)
+        self.voice_secret_resolver = VoiceSetupSecretResolver(self.voice_secrets, self.connector_secret_resolver)
         from orchestrator.frontend_live_voice.manager import LiveVoiceManager
         from orchestrator.frontend_live_voice.routes import register_live_voice_routes
 
         self.live_voice_manager = LiveVoiceManager(
             session_store=self.session_store,
             global_config=self.global_config,
-            secrets=self.secrets,
+            secrets=self.voice_secrets,
             admit_run=self._admit_live_voice_run,
             poll_run_activity=self._poll_live_voice_run_activity,
             judge_action=self._judge_live_voice_action,
@@ -574,6 +577,8 @@ class WorkbenchApiServer:
         )
         from orchestrator.frontend_call.routes import register_call_api
         register_call_api(self)
+        from orchestrator.frontend_media_setup import register_media_setup_api
+        register_media_setup_api(self)
         from orchestrator.standby.routes import register_standby_api
         register_standby_api(self)
         from orchestrator.permissions.human_approval import register_human_approval

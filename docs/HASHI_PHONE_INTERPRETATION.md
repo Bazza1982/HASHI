@@ -41,8 +41,10 @@ This does not claim to implement GPT-Live's conversational or delegation model.
 The configured Compute service advertises `hashi.phone.webrtc` and
 `hashi.phone.sideband`. The adapter resolves an exact configured
 node/service/model through the existing [Compute service directory](HASHI_COMPUTE_SERVICE_DIRECTORY.md#compatibility-and-truthfulness). It freezes the
-resolved sideband endpoint for that provider session; browser fields cannot
-choose a provider URL. Credential headers come from the canonical Compute client.
+resolved sideband endpoint for that provider session. Start/resume fields cannot
+supply or override a provider URL. Authenticated instance setup delegates validated
+node origins and discovery paths to the canonical Compute configuration owner.
+Credential headers come from the canonical Compute client.
 
 The sidecar separately exposes the OpenAI translation WebSocket event subset:
 `session.created`, `session.update`, `session.input_audio_buffer.append`,
@@ -52,11 +54,14 @@ The service resamples for the model and WebRTC transport.
 
 ## Instance configuration
 
-Configure these variables in the shared Frontend Function host environment:
-`HASHI_SIMULMT_COMPUTE_CONFIG`, `HASHI_SIMULMT_NODE`, and
-`HASHI_SIMULMT_SERVICE`. They select an existing versioned
-`compute_services.json` file and exact node/service IDs, without introducing
-another configuration writer. The provider is unavailable without this selection.
+The authenticated [media service setup](HASHI_MEDIA_SERVICE_SETUP.md) writes the
+optional `bindings.translate` node/service reference in canonical
+`compute_services.json` through `ComputeServicesConfig`. The normal shared
+Frontend Function uses the instance directory and reads configured references
+without a restart. Existing `HASHI_SIMULMT_COMPUTE_CONFIG`, `HASHI_SIMULMT_NODE`
+and `HASHI_SIMULMT_SERVICE` remain compatible; an explicit directory binding
+wins over the legacy environment node/service selection. No connection is
+invented when both are missing.
 
 The node uses the deployed Compute origin and the formal discovery path
 `/v1/translation/manifest`; health path is `/health`. It can be local or LAN.
