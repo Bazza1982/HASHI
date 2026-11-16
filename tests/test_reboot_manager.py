@@ -2058,7 +2058,9 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
         "lifecycle_state": "online",
         "locale": "en",
     }
-    assert render_notice(single, starting=True) == "🔄 Starting hot reboot. This takes about 30 seconds."
+    assert render_notice(single, starting=True) == (
+        "🔄 Starting hot reboot. This usually completes within 10 seconds."
+    )
     assert "Zelda" in render_notice(single)
     assert render_notice(single, locale="zh-CN") == "✅ Zelda热重启成功，耗时0秒。"
 
@@ -2070,7 +2072,7 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     }
     starting = render_notice(many, starting=True)
     completed = render_notice(many)
-    assert starting == "🔄 Starting hot reboot. This takes about 2 minutes."
+    assert starting == "🔄 Starting hot reboot. This usually completes within 1 minute."
     assert "20 agents online" in completed and "Remote" not in completed
     assert "/reboot status" not in starting
 

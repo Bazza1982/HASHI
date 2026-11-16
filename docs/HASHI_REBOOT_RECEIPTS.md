@@ -100,7 +100,7 @@ route gates and checks the old Workers rather than assuming restoration.
 
 Chinese examples (runtime messages have no persona greeting):
 
-- `🔄 开始热重启。这大约需要2分钟时间。`
+- `🔄 开始热重启。通常会在1分钟内完成。`
 - `✅ 月如热重启成功，耗时3秒。`
 - `✅ 完整热重启成功，耗时12秒，20个代理在线。`
 - `⚠️ 完整热重启部分成功：19/20 个代理已切换并在线；月如：后端尚未就绪。`

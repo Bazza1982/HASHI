@@ -73,8 +73,15 @@ def test_shipped_suite_is_valid_and_never_automates_lifecycle() -> None:
 
     assert suite["suite_id"] == "hashi-frontend-essential"
     assert suite["policy"]["automatic_lifecycle_actions"] is False
-    assert {"reboot_min", "reboot_max", "restart_with_draft"} <= {
-        item["id"] for item in suite["items"]
+    items = {item["id"]: item for item in suite["items"]}
+    assert {"reboot_min", "reboot_max", "restart_with_draft"} <= set(items)
+    assert {
+        item_id: items[item_id]["performance_budget_seconds"]
+        for item_id in ("reboot_min", "reboot_max", "restart_with_draft")
+    } == {
+        "reboot_min": 10,
+        "reboot_max": 60,
+        "restart_with_draft": 120,
     }
 
 
