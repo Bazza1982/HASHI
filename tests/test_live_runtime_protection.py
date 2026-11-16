@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -62,7 +63,7 @@ def _reason(result) -> str:
     return str((result.details or {}).get("reason") or "")
 
 
-def test_runtime_protection_cache_key_does_not_read_unchanged_selector(
+def test_runtime_protection_cache_key_notices_same_stat_selector_change(
     tmp_path, monkeypatch,
 ):
     import orchestrator.runtime_protection_targets as targets
@@ -70,7 +71,7 @@ def test_runtime_protection_cache_key_does_not_read_unchanged_selector(
     prefix = tmp_path / "runtime" / "core"
     prefix.mkdir(parents=True)
     selector = prefix.parent / "hashi-runtime-release.json"
-    selector.write_text("{}", encoding="utf-8")
+    selector.write_text('{"release":1}', encoding="utf-8")
     core = RuntimeFingerprint(
         implementation="cpython",
         python="3.13.0",
@@ -94,14 +95,14 @@ def test_runtime_protection_cache_key_does_not_read_unchanged_selector(
     )
     monkeypatch.setattr(targets, "current_process_runtime", lambda: None)
 
-    def unexpected_read(*args, **kwargs):
-        raise AssertionError("selector bytes were read for a cache-key check")
+    before_stat = selector.stat()
+    before = targets.protection_context_key(core)
+    selector.write_text('{"release":2}', encoding="utf-8")
+    os.utime(selector, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+    after = targets.protection_context_key(core)
 
-    monkeypatch.setattr(Path, "open", unexpected_read)
-
-    key = targets.protection_context_key(core)
-
-    assert key[2][0] != "unavailable"
+    assert before[2][:2] == after[2][:2]
+    assert before[2][2] != after[2][2]
 
 
 def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundary(tmp_path, monkeypatch):

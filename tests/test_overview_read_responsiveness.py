@@ -28,6 +28,7 @@ async def test_slow_agent_projection_does_not_block_independent_http_request(tmp
     server._parked_topic_guarded_writes_ready = lambda *_: False
     server.session_store = SimpleNamespace(
         get_agent_workzone_set=lambda **kwargs: {"revision": 0, "slots": []},
+        resolve_primary_sessions=lambda **kwargs: {},
     )
 
     def slow_projection(*_args, **_kwargs):
