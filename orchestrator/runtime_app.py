@@ -12,7 +12,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from orchestrator.runtime_contract import enforce_runtime_contract
+from orchestrator.runtime_contract import (
+    admitted_process_runtime_fingerprint,
+    current_process_runtime,
+    enforce_runtime_contract,
+)
 
 from orchestrator.bootstrap_logging import (
     emit_bridge_audit,
@@ -49,7 +53,12 @@ class UniversalOrchestrator:
         self.global_cfg = None
         self.secrets = {}
         self.agent_authority_roots: dict[str, str] = {}
-        self.runtime_fingerprint = enforce_runtime_contract(paths.code_root)
+        admitted = current_process_runtime()
+        self.runtime_fingerprint = (
+            admitted_process_runtime_fingerprint(admitted, code_root=paths.code_root)
+            if admitted is not None
+            else enforce_runtime_contract(paths.code_root)
+        )
         self.function_generation = {
             "generation_id": "bootstrap",
             "module_count": 0,
@@ -406,6 +415,14 @@ class UniversalOrchestrator:
             }
         )
         self.startup_status = startup_status
+        # Remote is an optional communication sidecar.  Begin its independent
+        # lifecycle only after Backend API, Workers and local services are
+        # already usable; max shared replacement candidates leave it untouched.
+        schedule_remote = getattr(
+            self.startup_manager, "schedule_remote_lifecycle", None
+        )
+        if callable(schedule_remote):
+            schedule_remote(global_cfg)
         if not getattr(self, "_handoff_draining", False):
             self._report_startup()
 

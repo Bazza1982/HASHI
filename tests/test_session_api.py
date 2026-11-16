@@ -2504,7 +2504,10 @@ async def test_tui_legacy_transcript_reads_shared_canonical_session(tmp_path):
     ]
 
 
-def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
+@pytest.mark.asyncio
+async def test_workbench_deferred_startup_maintenance_reconciles_lost_session_runs(
+    tmp_path,
+):
     server, _runtime = _server(tmp_path)
     session = server.session_store.ensure_default_session(
         owner_id="user:7", agent_id="lily"
@@ -2523,6 +2526,11 @@ def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     )
 
     restarted, _runtime = _server(tmp_path)
+
+    run = restarted.session_store.get_run(accepted.run_id, owner_id="user:7")
+    assert run["state"] == "running"
+
+    await restarted._run_startup_maintenance()
 
     run = restarted.session_store.get_run(accepted.run_id, owner_id="user:7")
     assert run["state"] == "interrupted"

@@ -35,7 +35,7 @@ DEFAULT_HEARTBEAT_ID = "lin_yueru-loop-hashi-remote-watchdog-7d"
 DEFAULT_REMOTE_PORT = 8767
 DEFAULT_SENDER = "lin_yueru"
 STABILITY_WINDOW = timedelta(days=7)
-PROCESS_SIGNATURE = f"python3 -m remote --hashi-root {ROOT} --supervised"
+PROCESS_SIGNATURE = f"python3 -B -m remote --hashi-root {ROOT} --supervised"
 
 
 @dataclass
@@ -259,6 +259,7 @@ def _run_command(args: list[str], timeout: int = 60) -> subprocess.CompletedProc
 def _probe_target(sender: str, target: ProbeTarget) -> dict[str, Any]:
     check_cmd = [
         "python3",
+        "-B",
         str(ROOT / "tools" / "hchat_send.py"),
         "--check",
         "--to",
@@ -273,6 +274,7 @@ def _probe_target(sender: str, target: ProbeTarget) -> dict[str, Any]:
         text = f"watchdog probe from {sender}@HASHI2 at {_now().isoformat()}"
         send_cmd = [
             "python3",
+            "-B",
             str(ROOT / "tools" / "hchat_send.py"),
             "--to",
             target.address,

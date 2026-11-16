@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "approval_mode": "owner_approved",
+  "change_id": "core-v6-quiesce-receipt-recovery",
+  "authorization_reference": "Current human owner's explicit continuation request req-hashiko-2026-11-15_221221-0007, received 2026-11-16 Australia/Sydney, directs the narrow kernel_process.py partial-quiesce timeout repair on HASHI PR 166",
+  "implementer": "OpenAI Codex / Hashiko root agent operating on HASHI4 core5-fix",
+  "reviewer": "OpenAI Codex / Hashiko root agent - AI technical reviewer and implementer (not an independent human)",
+  "owner": "Current HASHI4 repository owner (human user in request req-hashiko-2026-11-15_221221-0007)",
+  "owner_decision": "approved",
+  "owner_decision_reference": "Request req-hashiko-2026-11-15_221221-0007 explicitly requires safe recovery when quiesce may have partially completed but its receipt times out. This approves the branch candidate work, not merge, deployment, production restart, or adoption.",
+  "technical_review_reference": "docs/core-reviews/2026-11-16-v6-quiesce-recovery-addendum.md on branch core5-fix",
+  "reviewed_at": "2026-11-16T11:30:23+11:00",
+  "verdict": "approved",
+  "product_version": "6.0.0a1",
+  "core_digest": "sha256:b627c549cb5fa7e1bbaeab17e4955e585b7ce2c09f13069645ada7595fb848df",
+  "reviewed_files_sha256": {
+    "pyproject.toml": "sha256:11859394938ee09cb1d625039f5a2253ecc68723716adbb26d0fcba005b5efa8"
+  },
+  "summary": "Owner-approved Core v6 PR continuation for the exact protected digest. The accurately identified AI implementer also performed this focused technical review; it is not independent-human review. The only new protected behavior safely resumes a still-live previous Functions process after any attempted quiesce whose receipt is lost or times out, while retaining existing candidate cleanup, retirement rollback, precise failure receipts, runtime qualification, and instance isolation. Focused regressions passed. No production action, merge, or adoption is approved."
+}

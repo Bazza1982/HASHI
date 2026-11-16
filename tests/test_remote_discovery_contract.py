@@ -44,6 +44,20 @@ def _peer(**changes):
     return PeerInfo(**values)
 
 
+def test_lan_listener_suppresses_unchanged_zeroconf_refresh(monkeypatch):
+    updates = []
+    peer = _peer(instance_id="HASHI5", host="192.0.2.5")
+    listener = lan._HashiListener("HASHI4", updates.append)
+    zeroconf = SimpleNamespace(get_service_info=lambda *_args: object())
+    monkeypatch.setattr(lan, "_service_info_to_peer", lambda *_args: peer)
+
+    listener.add_service(zeroconf, "_hashi._tcp.local.", "HASHI5")
+    listener.update_service(zeroconf, "_hashi._tcp.local.", "HASHI5")
+
+    assert len(updates) == 1
+    assert updates[0] == [peer]
+
+
 def test_versioned_txt_field_round_trips_utf8_out_of_order_with_wire_budget():
     payload = json.dumps(
         [{"host": f"10.20.30.{index}", "scope": "lan", "source": "界面扫描"}
@@ -380,6 +394,10 @@ async def test_malformed_token_reload_keeps_active_credential_until_valid_revisi
     )
     app._last_shared_token_revision = "initial-revision"
     app._last_advertised_agent_snapshot = "v1:fresh"
+    source_signatures = iter([("file", 1), ("file", 2)])
+    monkeypatch.setattr(
+        app, "_shared_token_source_signature", lambda: next(source_signatures)
+    )
     monkeypatch.setattr("remote.main.load_shared_token_snapshot", lambda _root: next(snapshots))
     monkeypatch.setattr(app, "_build_self_peer", lambda **_kwargs: _peer())
     set_shared_token("working-secret")

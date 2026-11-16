@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO
 
-# Installed MCP children requalify and bind before importing product tooling.
+# Installed MCP children fast-admit and bind before importing product tooling.
 # The parent passes its pinned admission reference, never an Agent-selected root.
 if (__name__ == "__main__" and (Path(sys.prefix) / "runtime-policy").is_dir()
         and ("--runtime-manifest" not in sys.argv or "--owner-proxy-required" not in sys.argv)):
@@ -25,11 +25,11 @@ if __name__ == "__main__" and "--runtime-manifest" in sys.argv:
     bootstrap.add_argument("--runtime-manifest-digest", required=True)
     binding, _ = bootstrap.parse_known_args()
     from orchestrator.runtime_contract import (
-        FUNCTIONS_ROLE, qualified_runtime_from_reference, bind_process_runtime,
+        FUNCTIONS_ROLE, admitted_runtime_from_reference, bind_process_runtime,
         enforce_runtime_contract,
     )
     root = Path(__file__).resolve().parents[2]
-    qualified = qualified_runtime_from_reference(
+    qualified = admitted_runtime_from_reference(
         {"path":str(binding.runtime_manifest), "digest":binding.runtime_manifest_digest},
         code_root=root, role=FUNCTIONS_ROLE)
     bind_process_runtime(qualified, code_root=root)

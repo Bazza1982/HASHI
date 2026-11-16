@@ -622,7 +622,7 @@ async def test_ensure_remote_started_activates_missing_supervisor_by_default(
 
 
 @pytest.mark.asyncio
-async def test_ensure_remote_started_refreshes_healthy_supervisor_registration(
+async def test_ensure_remote_started_reuses_healthy_remote_without_lifecycle_work(
     monkeypatch,
     tmp_path,
 ):
@@ -636,6 +636,7 @@ async def test_ensure_remote_started_refreshes_healthy_supervisor_registration(
         supervised=True,
     )
     activation_calls = []
+    actuator_calls = []
 
     async def fake_owned(_settings):
         return {"port": 8766, "health": {"ok": True}, "health_host": "127.0.0.1"}
@@ -644,15 +645,21 @@ async def test_ensure_remote_started_refreshes_healthy_supervisor_registration(
         activation_calls.append(root)
         return {"ok": True, "action": "supervisor_activated"}
 
+    async def fake_actuator(root, **kwargs):
+        actuator_calls.append((root, kwargs))
+        return {"ok": True, "action": "restart_actuator_ready"}
+
     monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
     monkeypatch.setattr(remote_lifecycle, "activate_remote_supervisor", fake_activate)
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_restart_actuator", fake_actuator)
 
     result = await remote_lifecycle.ensure_remote_started(tmp_path)
 
     assert result["ok"] is True
     assert result["action"] == "already_running"
-    assert result["supervisor_refresh"]["ok"] is True
-    assert activation_calls == [tmp_path]
+    assert "supervisor_refresh" not in result
+    assert activation_calls == []
+    assert actuator_calls == []
 
 
 @pytest.mark.asyncio

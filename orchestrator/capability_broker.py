@@ -490,6 +490,32 @@ class CapabilityBroker(ManualDesktopBroker):
                 ],
             }
 
+    def topology_status(self) -> dict[str, Any]:
+        """Return only structural capability facts for Worker topology.
+
+        Registration and lease expiry are health/liveness facts owned by this
+        broker.  Broadcasting their timestamps would turn every healthy device
+        heartbeat into an all-Worker topology update.  Workers can request the
+        current authoritative status through ``core.capability.status`` when
+        they need temporal health or lease details.
+        """
+
+        snapshot = self.status()
+        capabilities = []
+        for item in snapshot.get("capabilities", ()):
+            capabilities.append(
+                {
+                    key: value
+                    for key, value in dict(item).items()
+                    if key not in {"registered_at", "expires_at"}
+                }
+            )
+        return {
+            "protocol_version": snapshot.get("protocol_version"),
+            "instance_id": snapshot.get("instance_id"),
+            "capabilities": capabilities,
+        }
+
     def has_capability(self, capability_kind: str) -> bool:
         with self._lock:
             self._prune()

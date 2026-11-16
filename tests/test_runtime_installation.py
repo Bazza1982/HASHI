@@ -15,11 +15,13 @@ from orchestrator.runtime_contract import (
     CORE_SOURCE_PATHS,
     FUNCTIONS_ROLE,
     RuntimeContractError,
+    admit_qualified_runtime,
     core_source_digest,
     current_runtime_fingerprint,
     load_qualified_runtime,
     load_runtime_policy,
     locked_standard_dependencies,
+    runtime_verification_stats,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +48,13 @@ def installation(tmp_path, role=FUNCTIONS_ROLE):
     executable = root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"synthetic admission fixture; never executable")
-    (base / "python.exe").write_bytes(b"synthetic immutable CPython base")
+    base_executable = base / (
+        "python.exe"
+        if sys.platform == "win32"
+        else f"bin/python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    base_executable.parent.mkdir(parents=True, exist_ok=True)
+    base_executable.write_bytes(b"synthetic immutable CPython base")
     (root / "pyvenv.cfg").write_text(
         f"home = {base}\ninclude-system-site-packages = false\n", encoding="utf-8")
     policy = load_runtime_policy(ROOT, role=role)
@@ -81,6 +89,118 @@ def test_approved_role_installation_has_a_byte_bound_independent_identity(tmp_pa
     assert qualified.runtime_id == qualified.fingerprint.runtime_id
     assert qualified.runtime_id.startswith(("cr:" if role == CORE_HOST_ROLE else "fr:") + "sha256:")
     assert qualified.executable.is_file()
+
+
+def test_deep_verification_accepts_204_incidental_pep3147_caches(tmp_path):
+    path, value, _, site = installation(tmp_path)
+    sources = []
+    for index in range(204):
+        source = site / f"cache_fixture_{index}.py"
+        source.write_text(f"VALUE = {index}\n", encoding="utf-8")
+        sources.append(source)
+    value["environment_files"] = seal_table(path.parent, path)
+    digest = write_manifest(path, value)
+    for source in sources:
+        cache = source.parent / "__pycache__" / (
+            source.stem + ".cpython-312.pyc"
+        )
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_bytes(b"incidental cache fixture")
+
+    runtime_verification_stats(reset=True)
+    approved = load_qualified_runtime(
+        path, expected_digest=digest, code_root=ROOT
+    )
+    stats = runtime_verification_stats()
+
+    assert approved.runtime_id.startswith("fr:sha256:")
+    assert stats["deep_scan_count"] == 2
+    assert stats["deep_cache_extras_ignored"] == 204
+
+
+def test_deep_verification_rejects_sourceless_cache_extra(tmp_path):
+    path, _, digest, site = installation(tmp_path)
+    cache = site / "__pycache__/unsealed.cpython-312.pyc"
+    cache.parent.mkdir(exist_ok=True)
+    cache.write_bytes(b"not backed by a sealed source")
+    with pytest.raises(RuntimeContractError, match="closure"):
+        load_qualified_runtime(path, expected_digest=digest, code_root=ROOT)
+
+
+def test_deep_verification_accepts_optimized_cache_for_sealed_dotted_source(tmp_path):
+    path, value, _, site = installation(tmp_path)
+    source = site / "sealed.module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    value["environment_files"] = seal_table(path.parent, path)
+    digest = write_manifest(path, value)
+    cache = site / "__pycache__/sealed.module.cpython-312.opt-1.pyc"
+    cache.parent.mkdir(exist_ok=True)
+    cache.write_bytes(b"incidental optimized cache fixture")
+
+    approved = load_qualified_runtime(path, expected_digest=digest, code_root=ROOT)
+
+    assert approved.runtime_id.startswith("fr:sha256:")
+
+
+def test_fast_admission_hashes_only_execution_critical_files(tmp_path, monkeypatch):
+    path, _, digest, _ = installation(tmp_path)
+    monkeypatch.setattr(
+        "orchestrator.runtime_contract.core_source_digest",
+        lambda *_: pytest.fail("fast admission repeated protected-source hashing"),
+    )
+    runtime_verification_stats(reset=True)
+    admitted = admit_qualified_runtime(
+        path, expected_digest=digest, code_root=ROOT
+    )
+    stats = runtime_verification_stats()
+
+    assert admitted.runtime_id.startswith("fr:sha256:")
+    assert stats["deep_scan_count"] == 0
+    assert stats["deep_bytes_hashed"] == 0
+    assert stats["fast_admission_count"] == 1
+    assert 2 <= stats["fast_files_hashed"] <= 3
+
+
+def test_fast_admission_rejects_unsealed_top_level_import_entry(tmp_path):
+    path, _, digest, site = installation(tmp_path)
+    (site / "injected.py").write_text("raise RuntimeError('never import')\n")
+    with pytest.raises(RuntimeContractError, match="unsealed top-level"):
+        admit_qualified_runtime(path, expected_digest=digest, code_root=ROOT)
+
+
+def test_fast_admission_allows_empty_unsealed_venv_scaffold_directory(tmp_path):
+    path, _, digest, _ = installation(tmp_path, CORE_HOST_ROLE)
+    include = path.parent / (
+        "Include"
+        if sys.platform == "win32"
+        else f"include/python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    site = path.parent / (
+        "Lib/site-packages"
+        if sys.platform == "win32"
+        else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    include.mkdir(parents=True)
+    site.mkdir(parents=True)
+
+    admitted = admit_qualified_runtime(
+        path,
+        expected_digest=digest,
+        code_root=ROOT,
+        role=CORE_HOST_ROLE,
+    )
+
+    assert admitted.runtime_id.startswith("cr:sha256:")
+
+
+def test_fast_admission_rejects_populated_unsealed_scaffold_directory(tmp_path):
+    path, _, digest, _ = installation(tmp_path)
+    include = path.parent / "Include"
+    include.mkdir()
+    (include / "injected.py").write_text("raise RuntimeError('never import')\n")
+
+    with pytest.raises(RuntimeContractError, match="unsealed top-level"):
+        admit_qualified_runtime(path, expected_digest=digest, code_root=ROOT)
 
 
 @pytest.mark.parametrize("defect,expected", [
@@ -138,7 +258,8 @@ def test_unqualified_installation_is_rejected_before_a_launch(tmp_path, defect, 
     elif defect == "changed-executable":
         Path(runtime["executable"]).write_bytes(b"changed")
     elif defect == "changed-base":
-        (Path(value["base_root"]) / "python.exe").write_bytes(b"changed")
+        base_file = next(iter(value["base_files"]))
+        (Path(value["base_root"]) / base_file).write_bytes(b"changed")
     elif defect == "wrong-abi":
         runtime["platform_abi"] = "unapproved-abi"
         reseal = True

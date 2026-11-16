@@ -564,17 +564,18 @@ def test_launcher_argv_user_session_prefixes_launcher(tmp_path):
     cmd = [str(MOCK_AGY), "-p", "hello"]
     argv = adapter._launcher_argv(cmd)
     assert argv[0] == sys.executable
-    assert argv[1].replace("\\", "/").endswith(
+    assert argv[1] == "-B"
+    assert argv[2].replace("\\", "/").endswith(
         "adapters/agy_user_session_launcher.py"
     )
-    assert Path(argv[1]).is_file()
-    if argv[2] == "--cwd":
-        assert argv[3] == str(tmp_path)
-        assert argv[4] == "--"
-        assert tuple(argv[5:]) == tuple(cmd)
+    assert Path(argv[2]).is_file()
+    if argv[3] == "--cwd":
+        assert argv[4] == str(tmp_path)
+        assert argv[5] == "--"
+        assert tuple(argv[6:]) == tuple(cmd)
     else:
-        assert argv[2] == "--"
-        assert tuple(argv[3:]) == tuple(cmd)
+        assert argv[3] == "--"
+        assert tuple(argv[4:]) == tuple(cmd)
 
 
 def test_launch_mode_unknown_falls_back_to_direct(tmp_path):

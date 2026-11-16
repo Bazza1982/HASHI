@@ -16,13 +16,10 @@ from pathlib import Path
 from orchestrator.function_generation import candidate_import_guard
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.function_worker_protocol import JsonConnectionPeer
-from orchestrator.kernel_artifact import verify_artifact
+from orchestrator.kernel_artifact import validate_artifact_identity
 from orchestrator.runtime_contract import CORE_HOST_ROLE, RuntimeContractError, RuntimeFingerprint
 from orchestrator import runtime_handoff
 from orchestrator.lifecycle_timing import timed
-
-
-CONNECTOR_RETRY_SECONDS = 5
 
 
 class RuntimeAppHost:
@@ -50,11 +47,13 @@ class RuntimeAppHost:
         if core_runtime is not None and core_runtime.role != CORE_HOST_ROLE:
             raise RuntimeContractError("Admitted Core receipt has the wrong runtime role")
         manifest = self.bootstrap["manifest"]
+        validate_artifact_identity(
+            Path(self.bootstrap["generation_root"]), manifest
+        )
         with candidate_import_guard():
             for entry in manifest["entries"]:
                 importlib.import_module(entry["module"])
             validate_function_contract()
-        verify_artifact(Path(self.bootstrap["generation_root"]), manifest)
         from orchestrator.pathing import build_bridge_paths
         from orchestrator.runtime_app import UniversalOrchestrator
         from orchestrator.bootstrap_logging import configure_terminal_console
@@ -109,7 +108,6 @@ class RuntimeAppHost:
         from orchestrator.function_worker_supervisor import (
             generation_artifact_source_commit,
             generation_from_dict,
-            verify_generation_artifact,
         )
 
         generation_root = Path(self.bootstrap["generation_root"])
@@ -137,7 +135,6 @@ class RuntimeAppHost:
                 },
             }
         )
-        verify_generation_artifact(generation_root, startup_generation)
         self.app._startup_artifact = (
             startup_generation,
             generation_root,
@@ -235,24 +232,28 @@ class RuntimeAppHost:
                         )
                     self.bootstrapped_agents.add(name)
             except Exception as exc:
-                errors[name] = f"{type(exc).__name__}: {exc}"
+                from orchestrator.telegram_ingress_diagnostics import safe_error
+
+                failure = safe_error(exc, stage="activation")
+                reason = str(failure.get("reason") or "connector_error")
+                message = str(failure.get("message") or reason)
+                errors[name] = f"{type(exc).__name__}: {message}"
+                if reason in {"invalid_token", "forbidden"}:
+                    if hasattr(ingress, "permanent_failure_reason"):
+                        ingress.permanent_failure_reason = reason
 
         async with self.connector_lock:
             app._connector_activation_pending = True
             try:
                 app.startup_manager.reconcile_connector_status(pending=True, publish=False)
-                if getattr(app, "_shared_replacement_continuity", False):
-                    # Preparation must leave the old owner's Remote alone.
-                    # After retirement, the committed Functions owner restores
-                    # its configured sidecar before announcing readiness.
-                    try:
-                        await app.startup_manager._ensure_remote_lifecycle()
-                        remote = getattr(app, "remote_lifecycle_status", {}) or {}
-                        if remote.get("enabled") is not False and not remote.get("available"):
-                            errors["remote"] = str(remote.get("action") or "unavailable")
-                    except Exception as exc:
-                        errors["remote"] = f"{type(exc).__name__}: {exc}"
-                await app.function_workers.broadcast_topology()
+                # Worker-local outbound connectors are granted independently of
+                # topology publication. The RPC only starts the selected
+                # Worker's own connector task and never gates local readiness.
+                activate_workers = getattr(
+                    app.function_workers, "activate_worker_connectors", None
+                )
+                if callable(activate_workers):
+                    activate_workers()
                 await asyncio.gather(
                     *(
                         activate_ingress(name, ingress)
@@ -273,15 +274,6 @@ class RuntimeAppHost:
                 app._connector_activation_pending = False
             app.startup_manager.reconcile_connector_status(errors)
         return errors
-
-    async def _retry_connectors(self):
-        while not self.stopping.is_set() and not self.app._handoff_draining:
-            await asyncio.sleep(CONNECTOR_RETRY_SECONDS)
-            if self.app._handoff_draining:
-                return
-            if not await self._activate_connectors():
-                runtime_handoff.persist(self.app)
-                return
 
     @timed("shared.commit")
     async def commit(self):
@@ -327,10 +319,8 @@ class RuntimeAppHost:
 
     async def _start_committed_connectors(self):
         try:
-            errors = await self._activate_connectors()
+            await self._activate_connectors()
             runtime_handoff.persist(self.app)
-            if errors:
-                await self._retry_connectors()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -338,7 +328,6 @@ class RuntimeAppHost:
             import logging
             logging.getLogger("BridgeU.Orchestrator").exception(
                 "Committed connector activation failed; local services remain online")
-            await self._retry_connectors()
 
     @staticmethod
     def _shared_drain_blockers(app):

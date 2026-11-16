@@ -75,6 +75,7 @@ def cmd_start(args):
     # 构建命令
     cmd = [
         sys.executable,
+        "-B",
         str(FLOW_DIR / "flow_cli.py"),
         "run", str(full_path),
         "--yes", "--silent",

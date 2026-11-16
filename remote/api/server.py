@@ -36,7 +36,6 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
@@ -138,11 +137,50 @@ def _workbench_gateway_error_facts(exc: BaseException) -> dict[str, Any]:
     }
 
 
+_WORKBENCH_GATEWAY_VERBOSE_SUCCESS_EVENTS = frozenset(
+    {
+        "proxy_received",
+        "proxy_authenticated",
+        "forward_started",
+        "local_request_started",
+        "local_response_headers",
+        "local_response_body_started",
+        "local_response_body_completed",
+        "proxy_response_ready",
+        "asgi_response_started",
+    }
+)
+
+
+def _workbench_gateway_log_level(event: str, facts: dict[str, Any]) -> int:
+    status = facts.get("status")
+    failure_status = (
+        isinstance(status, int) and not isinstance(status, bool) and status >= 400
+    )
+    failure_fact = any(
+        facts.get(key) is not None for key in ("error_code", "exception_type")
+    )
+    if (
+        event in _WORKBENCH_GATEWAY_VERBOSE_SUCCESS_EVENTS
+        and not failure_status
+        and not failure_fact
+    ):
+        return logging.DEBUG
+    return logging.INFO
+
+
 def _workbench_gateway_log(event: str, **facts: Any) -> None:
     """Best-effort, content-free lifecycle evidence for the loopback relay."""
     try:
+        level = _workbench_gateway_log_level(event, facts)
+        if not logger.isEnabledFor(level):
+            return
         record = {"event": event, **{key: value for key, value in facts.items() if value is not None}}
-        logger.info("workbench gateway %s", json.dumps(record, ensure_ascii=True, sort_keys=True))
+        logger.log(
+            level,
+            "workbench gateway %s",
+            json.dumps(record, ensure_ascii=True, sort_keys=True),
+        )
     except Exception:
         return
 
@@ -333,10 +371,11 @@ TUI_PROXY_OPERATIONS = {
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-# Covers normal service stop/start and product readiness, not Agent turn work.
-# Independent Core/Functions qualification and all Workers can exceed four
-# minutes on Windows. Keep a bounded cold-start window and all terminal checks.
-RESTART_VERIFICATION_TIMEOUT_SECONDS = 600.0
+# One deadline covers task preflight, runtime qualification, launch acceptance,
+# and product readiness. A rejected launcher must never consume this window.
+COLD_RESTART_TRANSACTION_TIMEOUT_SECONDS = 300.0
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 300.0
+_restart_launch_request: dict[str, Any] | None = None
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -1787,11 +1826,18 @@ def _hashi_start_command() -> list[str]:
     if system == "windows":
         actuator = root / "bin" / "hashi_restart_ctl.ps1"
         if actuator.exists():
+            from remote.restart_runtime import (
+                restart_runtime_data_root,
+                selected_restart_python,
+            )
+
             return [
                 "powershell.exe", "-NoProfile", "-NonInteractive",
                 "-ExecutionPolicy", "Bypass", "-File", str(actuator), "start",
-                "-Python", sys.executable, "-HashiRoot", str(_control_hashi_root),
+                "-Python", selected_restart_python(root),
+                "-HashiRoot", str(_control_hashi_root),
                 "-CodeRoot", str(root),
+                "-RuntimeDataRoot", restart_runtime_data_root(),
             ]
         bat = root / "bin" / "bridge-u.bat"
         if bat.exists():
@@ -1880,7 +1926,22 @@ def _start_hashi_process() -> dict[str, Any]:
     )
 
 
-def _hashi_restart_command() -> list[str]:
+class RestartLaunchError(RuntimeError):
+    def __init__(self, stage: str, reason_code: str, message: str):
+        super().__init__(message)
+        self.stage = stage
+        self.reason_code = reason_code
+
+
+def _hashi_restart_command(
+    *,
+    action: str = "trigger",
+    operation_id: str | None = None,
+    receipt_path: Path | None = None,
+    timeout_seconds: int | None = None,
+    python_executable: str | None = None,
+    runtime_data_root: str | None = None,
+) -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
@@ -1888,7 +1949,17 @@ def _hashi_restart_command() -> list[str]:
     if platform.system().lower() == "windows":
         restart_ctl = code_root / "bin" / "hashi_restart_ctl.ps1"
         if restart_ctl.exists():
-            return [
+            if python_executable is None or runtime_data_root is None:
+                from remote.restart_runtime import (
+                    restart_runtime_data_root as resolve_restart_runtime_data_root,
+                    selected_restart_python,
+                )
+
+            if python_executable is None:
+                python_executable = selected_restart_python(code_root)
+            if runtime_data_root is None:
+                runtime_data_root = resolve_restart_runtime_data_root()
+            command = [
                 "powershell.exe",
                 "-NoProfile",
                 "-NonInteractive",
@@ -1896,14 +1967,23 @@ def _hashi_restart_command() -> list[str]:
                 "Bypass",
                 "-File",
                 str(restart_ctl),
-                "trigger",
+                action,
                 "-Python",
-                sys.executable,
+                python_executable,
                 "-HashiRoot",
                 str(root),
                 "-CodeRoot",
                 str(code_root),
+                "-RuntimeDataRoot",
+                runtime_data_root,
             ]
+            if operation_id:
+                command.extend(["-OperationId", operation_id])
+            if receipt_path is not None:
+                command.extend(["-ReceiptPath", str(receipt_path)])
+            if timeout_seconds is not None:
+                command.extend(["-TimeoutSeconds", str(int(timeout_seconds))])
+            return command
         ctl = code_root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
@@ -1931,13 +2011,180 @@ def _hashi_restart_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
 
 
-def _qualified_restart_runtime() -> dict[str, Any] | None:
+def _restart_controller_environment() -> dict[str, str]:
+    if not _control_hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment.update(
+        BRIDGE_HOME=str(root),
+        BRIDGE_CODE_ROOT=str(code_root),
+        PYTHONDONTWRITEBYTECODE="1",
+        HASHI_ENABLE_LEGACY_FIXED_RUNTIME="1",
+    )
+    return environment
+
+
+def _precheck_hashi_restart() -> dict[str, str] | None:
+    """Fail before deep qualification when the fixed Windows tasks are unusable."""
+
+    if platform.system().lower() != "windows" or not _control_hashi_root:
+        return None
+    root = Path(_control_hashi_root)
+    code_root = Path(_control_code_root or root)
+    if not (code_root / "bin" / "hashi_restart_ctl.ps1").is_file():
+        return None
+    from remote.restart_runtime import (
+        restart_runtime_data_root,
+        selected_restart_python,
+    )
+
+    python_executable = selected_restart_python(code_root)
+    runtime_data_root = restart_runtime_data_root()
+    command = _hashi_restart_command(
+        action="precheck",
+        python_executable=python_executable,
+        runtime_data_root=runtime_data_root,
+    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(code_root),
+            env=_restart_controller_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RestartLaunchError(
+            "invalid_task_definition",
+            "restart_task_precheck_timeout",
+            "Fixed restart task precheck did not finish within 10 seconds",
+        ) from exc
+    if result.returncode:
+        detail = " ".join(str(result.stdout or "").split())[-1000:]
+        raise RestartLaunchError(
+            "invalid_task_definition",
+            "restart_task_definition_invalid",
+            detail or f"Fixed restart task precheck exited with {result.returncode}",
+        )
+    return {
+        "python_executable": python_executable,
+        "runtime_data_root": runtime_data_root,
+    }
+
+
+def _qualified_restart_runtime(
+    *,
+    expected_functions_python: str | None = None,
+) -> dict[str, Any] | None:
     from remote.restart_runtime import qualified_restart_runtime
 
-    return qualified_restart_runtime(Path(_control_code_root or _control_hashi_root))
+    root = Path(_control_code_root or _control_hashi_root)
+    if expected_functions_python is None:
+        return qualified_restart_runtime(root)
+    return qualified_restart_runtime(
+        root, expected_functions_python=expected_functions_python
+    )
 
 
 def _restart_hashi_process() -> dict[str, Any]:
+    request = _restart_launch_request
+    if request is not None and platform.system().lower() == "windows":
+        if not _control_hashi_root:
+            raise RestartLaunchError(
+                "launcher_rejected", "restart_root_unavailable", "Hashi root is unavailable"
+            )
+        root = Path(_control_hashi_root)
+        code_root = Path(_control_code_root or root)
+        operation_id = str(request["operation_id"])
+        timeout_seconds = max(1, min(30, int(request["timeout_seconds"])))
+        receipt_path = (
+            root / "state" / "instance" / "cold-restart" /
+            f"receipt-{operation_id.lower()}.json"
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        command_options: dict[str, Any] = {
+            "operation_id": operation_id,
+            "receipt_path": receipt_path,
+            "timeout_seconds": timeout_seconds,
+        }
+        if request.get("python_executable"):
+            command_options["python_executable"] = str(request["python_executable"])
+        if request.get("runtime_data_root"):
+            command_options["runtime_data_root"] = str(request["runtime_data_root"])
+        command = _hashi_restart_command(**command_options)
+        log_path = root / "logs" / "remote_rescue_hashi_restart.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log_handle:
+            process = subprocess.Popen(
+                command,
+                cwd=str(code_root),
+                env=_restart_controller_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                return_code = process.wait(timeout=timeout_seconds + 2)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.wait(timeout=5)
+                raise RestartLaunchError(
+                    "launcher_rejected",
+                    "launch_acceptance_timeout",
+                    "Cold restart controller did not confirm launch acceptance",
+                ) from exc
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RestartLaunchError(
+                "launcher_rejected",
+                "launch_receipt_missing",
+                f"Cold restart controller exited with {return_code} without a valid launch receipt",
+            ) from exc
+        if receipt.get("operation_id") != operation_id.lower():
+            raise RestartLaunchError(
+                "launcher_rejected",
+                "launch_receipt_mismatch",
+                "Cold restart launch receipt operation identity mismatch",
+            )
+        if return_code or receipt.get("state") != "launch_accepted":
+            stage = str(receipt.get("failure_stage") or "launcher_rejected")
+            raise RestartLaunchError(
+                stage,
+                "launch_rejected",
+                str(receipt.get("error") or f"Cold restart controller exited with {return_code}"),
+            )
+        evidence = receipt.get("evidence") or {}
+        core_pid = int(evidence.get("core_pid") or 0)
+        if core_pid <= 0:
+            raise RestartLaunchError(
+                "new_process_failed_to_start",
+                "core_pid_missing",
+                "Launch receipt did not identify the admitted Core process",
+            )
+        return {
+            "pid": core_pid,
+            "controller_pid": process.pid,
+            "controller_exit_code": return_code,
+            "command": command,
+            "log_path": str(log_path),
+            "launcher_kind": Path(command[0]).name.lower(),
+            "platform": platform.system().lower(),
+            "acceptance_receipt": receipt,
+        }
+
     command = _hashi_restart_command()
     controlled_restart = any(
         Path(value).name.casefold()
@@ -2255,9 +2502,11 @@ def _desktop_workbench_host(instance_id: str, port: int) -> str:
         try:
             request = urllib_request.Request(identity_url, method="GET", headers={"X-Workbench-Token": token})
             with urllib_request.urlopen(request, timeout=1.0) as response:
-                if response.status != 200: continue
+                if response.status != 200:
+                    continue
                 raw = response.read(1025)
-            if len(raw) > 1024: continue
+            if len(raw) > 1024:
+                continue
             identity = json.loads(raw)
         except (URLError, TimeoutError, OSError, ValueError):
             continue
@@ -2637,36 +2886,71 @@ def _retry_restart_notification(record):
     return _write_restart_record(record)
 
 
-_restart_notification_scan_after: tuple[Path, str] | None = None
+_restart_notification_seen: dict[str, int] = {}
+_restart_notification_due: dict[str, float] = {}
 
 
 def _recover_restart_notifications():
-    global _restart_notification_scan_after
-
     if not _control_hashi_root:
-        return
+        return 300.0
     directory = _restart_records_dir()
     if not directory.exists():
-        return
+        return 300.0
     paths = sorted(directory.glob("*.json"), key=lambda path: path.name)
-    if _restart_notification_scan_after is not None:
-        previous_directory, after_name = _restart_notification_scan_after
-        if previous_directory == directory:
-            remaining = [path for path in paths if path.name > after_name]
-            if remaining:
-                paths = remaining
-    # Bound payload reads, not the lifetime coverage. Advance past historical,
-    # deferred and invalid records too; wrap after the last filename. A process
-    # restart can safely reset this disposable cursor because notice identity
-    # and delivery state remain in each durable restart receipt.
-    for path in paths[:512]:
-        _restart_notification_scan_after = (directory, path.name)
+    now = time.time()
+    next_due: float | None = None
+    live_names = {str(path.resolve()) for path in paths}
+    for stale in set(_restart_notification_seen) - live_names:
+        _restart_notification_seen.pop(stale, None)
+        _restart_notification_due.pop(stale, None)
+    # Receipt payloads are read only when new/changed or when their exact retry
+    # deadline arrives. Historical delivered receipts are not reread forever.
+    payload_reads = 0
+    for path in paths:
         try:
-            if path.stat().st_size > 512 * 1024:
+            cache_key = str(path.resolve())
+            stat = path.stat()
+            due = float(_restart_notification_due.get(cache_key, 0.0) or 0.0)
+            if (
+                _restart_notification_seen.get(cache_key) == stat.st_mtime_ns
+                and (not due or due > now)
+            ):
+                if due:
+                    next_due = due if next_due is None else min(next_due, due)
                 continue
-            _retry_restart_notification(_read_restart_record(path.stem))
+            if payload_reads >= 512:
+                # Preserve full durable coverage without an unbounded burst.
+                # Already-processed paths will be cache hits on the next pass.
+                resume_at = now + 1.0
+                next_due = (
+                    resume_at if next_due is None else min(next_due, resume_at)
+                )
+                continue
+            payload_reads += 1
+            if stat.st_size > 512 * 1024:
+                _restart_notification_seen[cache_key] = stat.st_mtime_ns
+                continue
+            record = _retry_restart_notification(_read_restart_record(path.stem))
+            try:
+                _restart_notification_seen[cache_key] = path.stat().st_mtime_ns
+            except OSError:
+                _restart_notification_seen.pop(cache_key, None)
+            delivery = dict(record.get("notification") or {})
+            due = float(delivery.get("next_attempt_at") or 0.0)
+            if (
+                record.get("notify_origin")
+                and record.get("state") in {"completed", "failed", "rejected"}
+                and delivery.get("state") != "delivered"
+                and int(delivery.get("attempts") or 0) < 8
+                and due > now
+            ):
+                _restart_notification_due[cache_key] = due
+                next_due = due if next_due is None else min(next_due, due)
+            else:
+                _restart_notification_due.pop(cache_key, None)
         except (ValueError, OSError, KeyError, TypeError):
             logger.warning("Restart notification remains pending: %s", path.stem)
+    return max(1.0, min(300.0, (next_due - now) if next_due else 300.0))
 
 
 @asynccontextmanager
@@ -2674,10 +2958,11 @@ async def _restart_notification_lifespan(_app):
     async def recover():
         while True:
             try:
-                await asyncio.to_thread(_recover_restart_notifications)
+                delay = await asyncio.to_thread(_recover_restart_notifications)
             except (ValueError, OSError):
                 logger.warning("Restart notification recovery storage is unavailable")
-            await asyncio.sleep(30)
+                delay = 300.0
+            await asyncio.sleep(max(1.0, float(delay or 300.0)))
     task = asyncio.create_task(recover())
     try:
         yield
@@ -3186,11 +3471,12 @@ def create_app(
                 "rescue_reboot_enabled": rescue_start_enabled,
                 "rescue_start_requirement": "authenticated_instance_control",
             }
+        protocol_state = _protocol_manager.get_protocol_status()
         return {
             "ok": True,
-            **_protocol_manager.get_protocol_status(),
+            **protocol_state,
             "capabilities": _protocol_capabilities_with_api_endpoints(
-                list((_protocol_manager.get_protocol_status() or {}).get("capabilities") or [])
+                list((protocol_state or {}).get("capabilities") or [])
             ),
             "protocol_auth_mode": protocol_auth_mode(),
             "shared_token_configured": has_shared_token(),
@@ -4521,15 +4807,36 @@ def create_app(
             return JSONResponse(status_code=409, content=record)
         terminal_persisted = False
         async def execute():
+            global _restart_launch_request
             nonlocal record, terminal_persisted
-            phase = "runtime_qualification"
+            transaction_deadline = (
+                time.monotonic() + COLD_RESTART_TRANSACTION_TIMEOUT_SECONDS
+            )
+            launch_operation_id = uuid.uuid4().hex
+            phase = "task_definition_precheck"
             record["phase"] = phase
+            record["launch_operation_id"] = launch_operation_id
             record = _write_restart_record(record)
             try:
+                restart_target = await asyncio.to_thread(_precheck_hashi_restart)
+                restart_python = (
+                    restart_target.get("python_executable")
+                    if restart_target is not None
+                    else None
+                )
+                phase = "runtime_qualification"
+                record["phase"] = phase
+                record = _write_restart_record(record)
                 # Freeze the installer-qualified destination before any destructive
                 # action. A cold restart can adopt an approved new Core generation;
                 # comparing it to the still-running old generation is incorrect.
-                qualified = await asyncio.to_thread(_qualified_restart_runtime)
+                if restart_python is None:
+                    qualified = await asyncio.to_thread(_qualified_restart_runtime)
+                else:
+                    qualified = await asyncio.to_thread(
+                        _qualified_restart_runtime,
+                        expected_functions_python=restart_python,
+                    )
                 if qualified is not None:
                     record["expected"]["runtime_version"] = {
                         key: qualified[key] for key in _RUNTIME_VERSION_FIELDS
@@ -4538,15 +4845,40 @@ def create_app(
                 record["phase"] = "launch"
                 record = _write_restart_record(record)
                 phase = "launch"
-                started = _restart_hashi_process()
+                remaining = transaction_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RestartLaunchError(
+                        "launcher_rejected",
+                        "restart_deadline_expired",
+                        "Cold-restart deadline expired before process launch",
+                    )
+                _restart_launch_request = {
+                    "operation_id": launch_operation_id,
+                    "timeout_seconds": max(1, min(30, int(remaining))),
+                    "python_executable": restart_python or sys.executable,
+                    "runtime_data_root": (
+                        restart_target.get("runtime_data_root")
+                        if restart_target is not None
+                        else ""
+                    ),
+                }
+                try:
+                    started = await asyncio.to_thread(_restart_hashi_process)
+                finally:
+                    _restart_launch_request = None
             except Exception as exc:
                 logger.exception("HASHI rescue restart failed")
+                failure_stage = str(getattr(exc, "stage", phase))
                 record.update(
                     {
                         "state": "failed",
-                        "phase": phase,
+                        "phase": failure_stage,
                         "completed_at": _utc_timestamp(),
                         "error": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "reason_code": str(
+                            getattr(exc, "reason_code", "restart_operation_failed")
+                        ),
                     }
                 )
                 record = _write_restart_record(record)
@@ -4565,7 +4897,7 @@ def create_app(
                     requester_agent=record["requester_agent"],
                     request_source=record["request_source"],
                     old_pid=old_pid,
-                    failure_stage=phase,
+                    failure_stage=failure_stage,
                 )
                 return JSONResponse(
                     status_code=500,
@@ -4581,11 +4913,13 @@ def create_app(
                         "log_path": started["log_path"],
                         "launcher_kind": started.get("launcher_kind"),
                         "platform": started.get("platform"),
+                        "controller_pid": started.get("controller_pid"),
+                        "controller_exit_code": started.get("controller_exit_code"),
+                        "acceptance_receipt": started.get("acceptance_receipt"),
                     },
                 }
             )
             record = _write_restart_record(record)
-            deadline = time.monotonic() + RESTART_VERIFICATION_TIMEOUT_SECONDS
             status = await asyncio.to_thread(_hashi_control_status)
             evidence = _restart_evidence(
                 status,
@@ -4596,7 +4930,18 @@ def create_app(
                 previous_runtime=_runtime_version(before),
                 qualified_target=record["expected"].get("runtime_source") == "installer-qualified-target",
             )
-            while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
+            # This phase cap is always nested inside the one transaction
+            # deadline, so qualification, launch, and readiness waits cannot
+            # accumulate. Tests and explicitly shorter operational policies may
+            # reduce the readiness slice without invalidating launch itself.
+            verification_deadline = min(
+                transaction_deadline,
+                time.monotonic() + max(0.0, RESTART_VERIFICATION_TIMEOUT_SECONDS),
+            )
+            while (
+                not _restart_evidence_complete(evidence)
+                and time.monotonic() < verification_deadline
+            ):
                 await asyncio.sleep(0.5)
                 status = await asyncio.to_thread(_hashi_control_status)
                 evidence = _restart_evidence(
@@ -5402,4 +5747,4 @@ def create_app(
         return _agent_move_response(request, result)
 
     return app
-# HASHI-Fingerprint: hfp_2147e26bcc4b4ed6b4d22f8ab591809b
+# HASHI-Fingerprint: hfp_74f60e9736404b2cb1d7ad2d5990d98f

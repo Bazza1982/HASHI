@@ -8,6 +8,8 @@ import sqlite3
 import time
 from .speech_budget import ACTIVE_SPEECH_BUDGET, SpeechBudgetEstimator
 
+SEEN_WRITE_INTERVAL_SECONDS = 30.0
+
 class SpeechTaskError(Exception):
     def __init__(self, code, *, retryable=False, accepted=None):
         super().__init__(code)
@@ -19,13 +21,19 @@ class SpeechTasks:
         root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(root / "speech.sqlite3")
         self.db.row_factory = sqlite3.Row
+        self._maintenance_event = asyncio.Event()
         self.db.execute("""CREATE TABLE IF NOT EXISTS speech_tasks (
             id TEXT PRIMARY KEY, fingerprint TEXT, phase TEXT, state TEXT,
             created REAL, seen REAL, expires REAL, budget TEXT, attempts INTEGER,
             result TEXT, error TEXT)""")
         self.db.execute("CREATE TABLE IF NOT EXISTS speech_retries (failed_id TEXT PRIMARY KEY, attempt_id TEXT UNIQUE)")
-        self.db.execute("UPDATE speech_tasks SET state='uncertain',error='speech_owner_restarted' WHERE state IN ('queued','running','retry_wait','cancelling')")
-        self.db.commit()
+        interrupted = self.db.execute(
+            "SELECT 1 FROM speech_tasks "
+            "WHERE state IN ('queued','running','retry_wait','cancelling') LIMIT 1"
+        ).fetchone()
+        if interrupted is not None:
+            self.db.execute("UPDATE speech_tasks SET state='uncertain',error='speech_owner_restarted' WHERE state IN ('queued','running','retry_wait','cancelling')")
+            self.db.commit()
         self.estimator = SpeechBudgetEstimator(self.db)
         self.running = {}
         self.retry_delay = retry_delay
@@ -36,21 +44,23 @@ class SpeechTasks:
         self.db.execute("UPDATE speech_tasks SET " + ",".join(k+"=?" for k in values) + " WHERE id=?",
                         (*values.values(), ident))
         self.db.commit()
+        self._maintenance_event.set()
 
-    def status(self, ident):
+    def status(self, ident, *, touch=False):
         row = self.db.execute("SELECT * FROM speech_tasks WHERE id=?", (ident,)).fetchone()
         if row is None:
             raise SpeechTaskError("speech_task_not_found", accepted=False)
         now = time.time()
         state = row["state"]
         if state == "completed" and row["expires"] < now:
-            self._update(ident, state="expired", result=None)
             state = "expired"
-        self._update(ident, seen=now)
+        if touch and now - float(row["seen"] or 0) >= SEEN_WRITE_INTERVAL_SECONDS:
+            self._update(ident, seen=now)
+        budget = json.loads(row["budget"])
         value = dict(request_id=ident, state=state, phase=row["phase"],
-                     budget=json.loads(row["budget"]), attempts=row["attempts"],
-                     can_retry=state == "failed", remaining_seconds=max(0., row["created"] + json.loads(row["budget"]).get("total_seconds", 0.) - now))
-        if state == "completed":
+                     budget=budget, attempts=row["attempts"],
+                     can_retry=state == "failed", remaining_seconds=max(0., row["created"] + budget.get("total_seconds", 0.) - now))
+        if state == "completed" and row["result"] is not None:
             value["result"] = json.loads(row["result"])
         if row["error"]:
             value["error_code"] = row["error"]
@@ -89,7 +99,7 @@ class SpeechTasks:
                         (ident,fingerprint,phase,"queued",now,now,now+600,json.dumps(budget.public())))
         self.db.commit()
         self.running[ident] = asyncio.create_task(self._run(ident,text,phase,selection,budget,execute))
-        if self.maintenance is None:
+        if self.maintenance is None or self.maintenance.done():
             self.maintenance = asyncio.create_task(self._maintain())
         return self.status(ident)
 
@@ -161,14 +171,42 @@ class SpeechTasks:
     async def _maintain(self):
         try:
             while True:
-                await asyncio.sleep(10)
                 now = time.time()
                 for row in self.db.execute("SELECT id FROM speech_tasks WHERE state IN ('queued','running','retry_wait') AND seen<?",(now-60,)).fetchall():
                     self.cancel(row[0])
-                self.db.execute("UPDATE speech_tasks SET state='expired',result=NULL WHERE state='completed' AND expires<?",(now,))
-                self.db.commit()
+                expired = self.db.execute(
+                    "SELECT 1 FROM speech_tasks "
+                    "WHERE state='completed' AND expires<? LIMIT 1", (now,)
+                ).fetchone()
+                if expired is not None:
+                    self.db.execute("UPDATE speech_tasks SET state='expired',result=NULL WHERE state='completed' AND expires<?",(now,))
+                    self.db.commit()
+                next_active = self.db.execute(
+                    "SELECT MIN(seen + 60) FROM speech_tasks "
+                    "WHERE state IN ('queued','running','retry_wait')"
+                ).fetchone()[0]
+                next_expiry = self.db.execute(
+                    "SELECT MIN(expires) FROM speech_tasks WHERE state='completed'"
+                ).fetchone()[0]
+                deadlines = [
+                    float(value)
+                    for value in (next_active, next_expiry)
+                    if value is not None
+                ]
+                if not deadlines:
+                    return
+                self._maintenance_event.clear()
+                timeout = max(0.01, min(deadlines) - time.time())
+                try:
+                    await asyncio.wait_for(
+                        self._maintenance_event.wait(), timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
+        finally:
+            self.maintenance = None
 
     async def close(self):
         self.closed = True

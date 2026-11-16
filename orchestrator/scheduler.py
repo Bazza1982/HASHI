@@ -41,6 +41,9 @@ LEGACY_RECOVERY_MIGRATION_MAX_AGE_S = 24 * 60 * 60
 MAX_DELAY_MINUTES = 7 * 24 * 60
 MAX_DELAY_MESSAGE_CHARS = 16_000
 MAX_PENDING_DELAYS_PER_AGENT = 100
+SCHEDULER_EXTERNAL_RECHECK_SECONDS = 60.0
+SCHEDULER_AUXILIARY_RECHECK_SECONDS = 60.0
+SCHEDULER_DUE_RETRY_SECONDS = 15.0
 
 try:
     from croniter import croniter
@@ -286,6 +289,14 @@ class TaskScheduler:
             canonical_timezone_name(timezone_name) if timezone_name else None
         )
         self.timezone_name = self.configured_timezone_name or UTC_TIMEZONE_NAME
+        self._tasks_cache: dict[str, Any] | None = None
+        self._tasks_signature: tuple[Any, ...] | None = None
+        self._wake_event = asyncio.Event()
+        self._next_auxiliary_scan_at = 0.0
+        self._scheduled_retry_not_before = 0.0
+        register_wakeup = getattr(self.skill_manager, "set_scheduler_wakeup", None)
+        if callable(register_wakeup):
+            register_wakeup(self.wake)
         self.state = self._load_state()
         self.state.setdefault("heartbeats", {})
         self.state.setdefault("crons", {})
@@ -306,6 +317,25 @@ class TaskScheduler:
         # ticks must keep normal due jobs independent, even when several share
         # the same interval or cron boundary.
         self._startup_recovery_pending = True
+
+    def wake(self) -> None:
+        """Wake the existing scheduler after an in-process durable mutation."""
+
+        self._wake_event.set()
+
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _task_file_signature(self) -> tuple[Any, ...]:
+        return (
+            self._file_signature(self.tasks_path),
+            self._file_signature(self.active_heartbeats_path),
+        )
 
     def _job_timezone_name(self, job: Mapping[str, Any]) -> str:
         return canonical_timezone_name(job.get("timezone") or self.timezone_name)
@@ -331,6 +361,100 @@ class TaskScheduler:
         if self.orchestrator is not None:
             return {rt.name: rt for rt in getattr(self.orchestrator, "runtimes", []) if getattr(rt, "startup_success", False)}
         return dict(self.runtimes)
+
+    def _next_scheduled_deadline(
+        self,
+        tasks: Mapping[str, Any],
+        *,
+        now: float,
+        now_dt: datetime,
+    ) -> float | None:
+        if self._startup_recovery_pending:
+            return now
+        deadlines: list[float] = []
+        for batch in (self.state.get("recovery_batches") or {}).values():
+            if (
+                isinstance(batch, dict)
+                and batch.get("status") in {"pending", "running"}
+                and batch.get("notice_status") != "sent"
+            ):
+                deadlines.append(float(batch.get("notice_attempted_at") or 0) + 60)
+        for record in self._delayed_message_records().values():
+            if isinstance(record, dict):
+                deadlines.append(float(record.get("due_at") or now))
+        for key, state_key in (("heartbeats", "heartbeats"), ("nudges", "nudges")):
+            for job in tasks.get(key, []):
+                if not isinstance(job, dict) or not job.get("enabled", False):
+                    continue
+                interval = max(1, int(job.get("interval_seconds") or 60))
+                last_run = float(self.state.get(state_key, {}).get(job.get("id"), 0) or 0)
+                deadlines.append(now if not last_run else last_run + interval)
+        for job in tasks.get("crons", []):
+            if not isinstance(job, dict) or not job.get("enabled", False):
+                continue
+            schedule = _resolve_schedule(job)
+            if not schedule:
+                continue
+            timezone_name = self._job_timezone_name(job)
+            last_run = self._get_cron_last_run(
+                str(job.get("id") or ""), timezone_name=timezone_name
+            )
+            if not last_run:
+                deadlines.append(now)
+                continue
+            cron_now = now_dt.astimezone(timezone_for_name(timezone_name))
+            if _should_fire(schedule, last_run, cron_now) is not None:
+                deadlines.append(now)
+                continue
+            try:
+                deadlines.append(
+                    next_cron_occurrence(
+                        schedule,
+                        now=cron_now,
+                        timezone_name=timezone_name,
+                    ).timestamp()
+                )
+            except ValueError:
+                continue
+        if not deadlines:
+            return None
+        deadline = min(deadlines)
+        if deadline <= now < self._scheduled_retry_not_before:
+            return self._scheduled_retry_not_before
+        return deadline
+
+    def _scheduled_work_due(
+        self,
+        tasks: Mapping[str, Any],
+        *,
+        now: float,
+        now_dt: datetime,
+    ) -> bool:
+        deadline = self._next_scheduled_deadline(tasks, now=now, now_dt=now_dt)
+        return deadline is not None and deadline <= now
+
+    def _next_wait_seconds(self, tasks: Mapping[str, Any]) -> float:
+        now = time.time()
+        now_dt = datetime.now(timezone.utc)
+        deadlines = [
+            now + SCHEDULER_EXTERNAL_RECHECK_SECONDS,
+            max(now, self._next_auxiliary_scan_at),
+        ]
+        scheduled = self._next_scheduled_deadline(
+            tasks, now=now, now_dt=now_dt
+        )
+        if scheduled is not None:
+            deadlines.append(scheduled)
+        return max(0.01, min(deadlines) - now)
+
+    async def _wait_for_work(self, tasks: Mapping[str, Any]) -> None:
+        try:
+            await asyncio.wait_for(
+                self._wake_event.wait(), timeout=self._next_wait_seconds(tasks)
+            )
+        except asyncio.TimeoutError:
+            return
+        self._wake_event.clear()
 
     async def _refresh_worker_scheduler_context(self) -> None:
         """Publish changed recovery facts to active Function Workers."""
@@ -518,6 +642,7 @@ class TaskScheduler:
             if not self._save_state():
                 records.pop(delay_id, None)
                 raise RuntimeError("Could not persist delayed message state.")
+            self.wake()
             scheduler_logger.info(
                 "Scheduled delayed message %s for %s in %s minute(s).",
                 delay_id,
@@ -576,6 +701,7 @@ class TaskScheduler:
         if not self._save_state():
             records.update(selected)
             raise RuntimeError("Could not persist delayed-message cancellation.")
+        self.wake()
         scheduler_logger.info(
             "Cancelled %s delayed message(s) for %s.",
             len(selected),
@@ -834,6 +960,10 @@ class TaskScheduler:
                 )
             )
 
+        signature = self._task_file_signature()
+        if self._tasks_cache is not None and signature == self._tasks_signature:
+            return self._tasks_cache
+
         if not self.tasks_path.exists():
             tasks = new_config_json(
                 self.tasks_path,
@@ -895,6 +1025,8 @@ class TaskScheduler:
                 scheduler_logger.error(f"Failed to load managed active heartbeats: {e}")
 
         tasks["heartbeats"] = heartbeats
+        self._tasks_cache = tasks
+        self._tasks_signature = self._task_file_signature()
         return tasks
 
     def _save_tasks(self, tasks: dict):
@@ -904,6 +1036,8 @@ class TaskScheduler:
                     "tasks are an unreadable fallback; refusing replacement"
                 )
             write_config_json(self.tasks_path, tasks)
+            self._tasks_signature = None
+            self.wake()
             return True
         except Exception as e:
             scheduler_logger.error(f"Failed to save tasks: {e}")
@@ -1747,6 +1881,54 @@ class TaskScheduler:
             agent_name=agent_name,
         )
 
+    async def _run_auxiliary_pass(
+        self,
+        runtime_map: Mapping[str, Any],
+        now_dt: datetime,
+        *,
+        lease_held: bool,
+    ) -> None:
+        for rt in runtime_map.values():
+            handler = getattr(rt, "process_parked_topic_followups", None)
+            if handler is None:
+                continue
+            try:
+                await asyncio.wait_for(
+                    handler(now_dt), timeout=PARKED_FOLLOWUP_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                scheduler_logger.error(
+                    f"Parked-topic follow-up for {rt.name} timed out after {PARKED_FOLLOWUP_TIMEOUT_S}s; scheduler will continue."
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                scheduler_logger.error(
+                    f"Parked-topic follow-up for {rt.name} failed: {exc}",
+                    exc_info=True,
+                )
+        try:
+            superloop_stats = advance_superloops_once(
+                self.tasks_path.parent / "superloops",
+                lease_store=None if lease_held else self.enterprise_lease_store,
+                lease_name=self.enterprise_lease_name,
+                lease_holder=self.enterprise_lease_holder,
+                lease_ttl_seconds=self.enterprise_lease_ttl_seconds,
+            )
+            if superloop_stats.get("waits_satisfied") or superloop_stats.get(
+                "loops_advanced"
+            ):
+                scheduler_logger.info(
+                    "Superloop tick: checked=%s waits_satisfied=%s loops_advanced=%s",
+                    superloop_stats.get("loops_checked", 0),
+                    superloop_stats.get("waits_satisfied", 0),
+                    superloop_stats.get("loops_advanced", 0),
+                )
+        except Exception as exc:
+            scheduler_logger.error(
+                f"Superloop scheduler tick failed: {exc}", exc_info=True
+            )
+
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
         while True:
@@ -1754,16 +1936,38 @@ class TaskScheduler:
                 await asyncio.sleep(0.1)
                 continue
             lease_held = False
+            tasks: Mapping[str, Any] | None = None
             try:
+                tasks = self._load_tasks()
+                now = time.time()
+                now_dt = datetime.now(timezone.utc)
+                scheduled_due = self._scheduled_work_due(
+                    tasks, now=now, now_dt=now_dt
+                )
+                auxiliary_due = now >= self._next_auxiliary_scan_at
+                if not scheduled_due:
+                    if auxiliary_due:
+                        if self.enterprise_lease_store is not None:
+                            lease_held = self._acquire_enterprise_scheduler_lease()
+                        if self.enterprise_lease_store is None or lease_held:
+                            await self._run_auxiliary_pass(
+                                self._runtime_map(), now_dt, lease_held=lease_held
+                            )
+                            self._next_auxiliary_scan_at = (
+                                time.time() + SCHEDULER_AUXILIARY_RECHECK_SECONDS
+                            )
+                        else:
+                            self._next_auxiliary_scan_at = (
+                                time.time() + SCHEDULER_DUE_RETRY_SECONDS
+                            )
+                    await self._wait_for_work(tasks)
+                    continue
+
                 if self.enterprise_lease_store is not None:
                     lease_held = self._acquire_enterprise_scheduler_lease()
                     if not lease_held:
                         await asyncio.sleep(15)
                         continue
-
-                tasks = self._load_tasks()
-                now = time.time()
-                now_dt = datetime.now(timezone.utc)
 
                 state_changed = False
 
@@ -2091,52 +2295,39 @@ class TaskScheduler:
                 # cron/heartbeat recovery and are appended only when due.
                 await self.dispatch_due_delayed_messages(runtime_map, now_ts=now)
 
-                # Process parked-topic follow-ups without creating ad hoc task rows.
-                for rt in runtime_map.values():
-                    handler = getattr(rt, "process_parked_topic_followups", None)
-                    if handler is None:
-                        continue
-                    try:
-                        await asyncio.wait_for(handler(now_dt), timeout=PARKED_FOLLOWUP_TIMEOUT_S)
-                    except asyncio.TimeoutError:
-                        scheduler_logger.error(
-                            f"Parked-topic follow-up for {rt.name} timed out after {PARKED_FOLLOWUP_TIMEOUT_S}s; scheduler will continue."
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        scheduler_logger.error(
-                            f"Parked-topic follow-up for {rt.name} failed: {e}",
-                            exc_info=True,
-                        )
-
-                # Advance long-running superloops from persisted loop state.
-                try:
-                    superloop_stats = advance_superloops_once(
-                        self.tasks_path.parent / "superloops",
-                        lease_store=None if lease_held else self.enterprise_lease_store,
-                        lease_name=self.enterprise_lease_name,
-                        lease_holder=self.enterprise_lease_holder,
-                        lease_ttl_seconds=self.enterprise_lease_ttl_seconds,
+                if auxiliary_due:
+                    await self._run_auxiliary_pass(
+                        runtime_map, now_dt, lease_held=lease_held
                     )
-                    if superloop_stats.get("waits_satisfied") or superloop_stats.get("loops_advanced"):
-                        scheduler_logger.info(
-                            "Superloop tick: checked=%s waits_satisfied=%s loops_advanced=%s",
-                            superloop_stats.get("loops_checked", 0),
-                            superloop_stats.get("waits_satisfied", 0),
-                            superloop_stats.get("loops_advanced", 0),
-                        )
-                except Exception as e:
-                    scheduler_logger.error(f"Superloop scheduler tick failed: {e}", exc_info=True)
+                    self._next_auxiliary_scan_at = (
+                        time.time() + SCHEDULER_AUXILIARY_RECHECK_SECONDS
+                    )
 
                 if state_changed:
                     self._save_state()
+                retry_now = time.time()
+                remaining_due = self._next_scheduled_deadline(
+                    tasks,
+                    now=retry_now,
+                    now_dt=datetime.now(timezone.utc),
+                )
+                self._scheduled_retry_not_before = (
+                    retry_now + SCHEDULER_DUE_RETRY_SECONDS
+                    if remaining_due is not None and remaining_due <= retry_now
+                    else 0.0
+                )
 
             except Exception as e:
+                self._scheduled_retry_not_before = (
+                    time.time() + SCHEDULER_DUE_RETRY_SECONDS
+                )
                 scheduler_logger.error(f"Scheduler error: {e}")
             finally:
                 if lease_held:
                     self._release_enterprise_scheduler_lease()
 
-            await asyncio.sleep(15)
+            if tasks is not None:
+                await self._wait_for_work(tasks)
+            else:
+                await asyncio.sleep(1)
 # HASHI-Fingerprint: hfp_26c20bac63b84b01901791e953cd04fe

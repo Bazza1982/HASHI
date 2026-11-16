@@ -92,11 +92,28 @@ def resolve_path(raw, roots, cwd):
 
 
 def _guard(runtime, path):
-    from orchestrator.live_runtime_protection import evaluate_live_runtime_request, load_live_runtime_policy
+    from orchestrator.live_runtime_protection import (
+        evaluate_live_runtime_request,
+        load_live_runtime_policy,
+        policy_cache_key,
+    )
     try:
         owner = getattr(runtime, "orchestrator", None)
-        policy = load_live_runtime_policy(runtime.global_config, runtime_prefix=None,
-            core_runtime=getattr(owner, "core_runtime_fingerprint", None))
+        core_runtime = getattr(owner, "core_runtime_fingerprint", None)
+        cache_key = policy_cache_key(
+            runtime.global_config, runtime_prefix=None, core_runtime=core_runtime
+        )
+        cached = getattr(runtime, "_getfile_runtime_policy_cache", None)
+        if not isinstance(cached, tuple) or len(cached) != 2 or cached[0] != cache_key:
+            policy = load_live_runtime_policy(
+                runtime.global_config,
+                runtime_prefix=None,
+                core_runtime=core_runtime,
+                previous_policy=cached[1] if isinstance(cached, tuple) and len(cached) == 2 else None,
+            )
+            runtime._getfile_runtime_policy_cache = (cache_key, policy)
+        else:
+            policy = cached[1]
         if evaluate_live_runtime_request(policy, tool_name="file_read",
                 arguments={"path": str(path)}, workspace_dir=runtime.workspace_dir) is not None:
             raise GetFileError("denied")

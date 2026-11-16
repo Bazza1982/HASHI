@@ -105,7 +105,7 @@ class OutboundPrivacyGate:
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
-                str(python_path), str(sidecar),
+                str(python_path), "-B", str(sidecar),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,

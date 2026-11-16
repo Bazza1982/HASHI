@@ -37,8 +37,6 @@ from orchestrator.function_worker_protocol import (
     FunctionWorkerProtocolError,
     JsonConnectionPeer,
 )
-from orchestrator.runtime_contract import load_runtime_policy
-from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
 from orchestrator.runtime_process import RuntimeProcess, launch_function_process_async
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
@@ -1330,6 +1328,20 @@ class FunctionWorkerSupervisor:
         self._recovery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._topology_task: asyncio.Task[Any] | None = None
         self._topology_revision = 0
+        self._topology_publish_lock = asyncio.Lock()
+        self._published_topology: dict[int, str] = {}
+        self._connector_start_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._connector_activation_attempted: set[int] = set()
+        self._activity = {
+            "topology_requests": 0,
+            "topology_worker_rpcs": 0,
+            "topology_publications": 0,
+            "topology_unchanged_skips": 0,
+            "topology_suppressed_draining": 0,
+            "connector_activation_requests": 0,
+            "connector_worker_rpcs": 0,
+            "connector_activation_suppressed_draining": 0,
+        }
         self._retirement_tasks: dict[FunctionWorkerClient, asyncio.Task[Any]] = {}
         self._qualification_lock = asyncio.Lock()
         self._artifact_lock = asyncio.Lock()
@@ -1346,6 +1358,12 @@ class FunctionWorkerSupervisor:
         self._last_telegram_status_warning: (
             tuple[tuple[tuple[str, str], ...], float] | None
         ) = None
+
+    def _count_activity(self, name: str, amount: int = 1) -> None:
+        activity = getattr(self, "_activity", None)
+        if activity is None:
+            activity = self._activity = {}
+        activity[name] = int(activity.get(name, 0) or 0) + int(amount)
 
     def qualify_generation(self) -> VerifiedFunctionGeneration:
         started = time.perf_counter()
@@ -1610,9 +1628,15 @@ class FunctionWorkerSupervisor:
             endpoint_registry.snapshot() if endpoint_registry is not None else {}
         )
         capability_broker = getattr(self.kernel, "capability_broker", None)
-        capabilities = (
-            capability_broker.status() if capability_broker is not None else {}
-        )
+        if capability_broker is None:
+            capabilities = {}
+        else:
+            topology_status = getattr(capability_broker, "topology_status", None)
+            capabilities = (
+                topology_status()
+                if callable(topology_status)
+                else capability_broker.status()
+            )
         return {
             "runtimes": runtimes,
             "shared_functions": {
@@ -1682,8 +1706,13 @@ class FunctionWorkerSupervisor:
                 config = SimpleNamespace(extra=dict(row.get("extra") or {}))
         api_root = bot_api_root(config)
         existing = self._telegram_ingress.get(name)
-        if (existing is not None and existing.is_running and existing.token == str(token)
-                and getattr(existing, "api_root", None) == api_root):
+        if (existing is not None and existing.token == str(token)
+                and getattr(existing, "api_root", None) == api_root
+                and (
+                    existing.is_running
+                    or getattr(existing, "permanent_failure_reason", None) is not None
+                    or getattr(self.kernel, "_handoff_draining", False)
+                )):
             return True
         same_bot = existing is not None and existing.token == str(token)
         previous_offset = None
@@ -1884,7 +1913,7 @@ class FunctionWorkerSupervisor:
             result = await client.call(
                 "worker.telegram_status",
                 {"connected": bool(connected)},
-                timeout=30.0,
+                timeout=2.0,
             )
         except Exception as exc:
             failed = True
@@ -1922,11 +1951,6 @@ class FunctionWorkerSupervisor:
             artifact = generation_root
         nonce = uuid4().hex
         worker_runtime = self.kernel.runtime_fingerprint.to_dict()
-        live_runtime = cached_current_runtime_fingerprint(
-            load_runtime_policy(self.kernel.paths.code_root),
-            code_root=self.kernel.paths.code_root,
-        )
-        worker_runtime["dependency_digest"] = live_runtime.dependency_digest
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
@@ -1941,7 +1965,13 @@ class FunctionWorkerSupervisor:
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
         with span("worker.launch_and_admission", agent=agent_name):
-            process, parent_connection = await launch_function_process_async(bootstrap)
+            # The supervisor qualified/materialized this exact generation once
+            # before admitting any Agent.  Worker launches reuse that
+            # in-process fact and retain private-channel identity admission.
+            process, parent_connection = await launch_function_process_async(
+                bootstrap,
+                generation_already_verified=True,
+            )
         client = FunctionWorkerClient(
             supervisor=self,
             agent_name=agent_name,
@@ -2097,6 +2127,9 @@ class FunctionWorkerSupervisor:
         """Coalesce post-commit notifications; no peer/network on the caller path."""
         if self._shutting_down:
             return
+        if getattr(self.kernel, "_handoff_draining", False):
+            return
+        FunctionWorkerSupervisor._count_activity(self, "topology_requests")
         self._topology_revision += 1
         if self._topology_task is None or self._topology_task.done():
             self._topology_task = asyncio.create_task(
@@ -2125,6 +2158,9 @@ class FunctionWorkerSupervisor:
         for client in clients:
             if client in self._retirement_tasks:
                 continue
+            key = id(client)
+            getattr(self, "_published_topology", {}).pop(key, None)
+            getattr(self, "_connector_activation_attempted", set()).discard(key)
             task = asyncio.create_task(client.shutdown(force=True),
                                        name=f"worker-retire:{client.agent_name}")
             self._retirement_tasks[client] = task
@@ -2135,53 +2171,199 @@ class FunctionWorkerSupervisor:
                                         client.agent_name, type(done.exception()).__name__)
             task.add_done_callback(settled)
 
-    async def _publish_worker_topology(self, handle, client, snapshot) -> None:
+    async def _publish_worker_topology(
+        self, handle, client, snapshot, snapshot_digest
+    ) -> None:
         if handle.client is not client or self._shutting_down:
             return
+        FunctionWorkerSupervisor._count_activity(self, "topology_worker_rpcs")
         await client.call("worker.topology", snapshot, timeout=30.0)
-        # Only the committed, accepting stable route may own external effects.
-        # Older Worker versions retain their existing connector lifecycle.
+        if handle.client is client and not self._shutting_down:
+            self._published_topology[id(client)] = snapshot_digest
+
+    def activate_worker_connectors(self, agent_name: Any = None) -> None:
+        """Grant connector ownership explicitly after a committed route change.
+
+        Topology publication deliberately does not call this method.  Connector
+        recovery is a separate lifecycle operation and therefore cannot turn an
+        unchanged topology notification into external network work.
+        """
+
+        # Initial and replacement Agent routes are assembled while the shared
+        # Functions process is fenced.  Each Agent lifecycle reaches this
+        # owner, but no connector may be granted until the shared commit.  Do
+        # not traverse every installed route for those guaranteed no-ops; the
+        # one post-commit activation owns the complete installed set.
+        if getattr(self.kernel, "_handoff_draining", False):
+            FunctionWorkerSupervisor._count_activity(
+                self, "connector_activation_suppressed_draining"
+            )
+            return
+        FunctionWorkerSupervisor._count_activity(
+            self, "connector_activation_requests"
+        )
+        if agent_name is None:
+            selected = None
+        elif isinstance(agent_name, str):
+            selected = {agent_name}
+        else:
+            selected = {str(name) for name in agent_name}
+        for handle in list(self.kernel.runtimes):
+            if not isinstance(handle, AgentRuntimeHandle):
+                continue
+            if selected is not None and handle.name not in selected:
+                continue
+            self._schedule_worker_connectors(handle, handle.client)
+
+    async def activate_committed_connectors(
+        self,
+        agent_name: Any = None,
+        *,
+        refresh_configuration: bool = False,
+    ) -> None:
+        """Reconcile only connectors owned by committed Agent routes.
+
+        A focused reboot may adopt a new credential revision.  Refreshing the
+        instance configuration belongs here, not in topology publication.  A
+        healthy ingress with the same token is reused by ``start_telegram_ingress``.
+        """
+
+        if agent_name is None:
+            selected = None
+        elif isinstance(agent_name, str):
+            selected = {agent_name}
+        else:
+            selected = {str(name) for name in agent_name}
+
+        if refresh_configuration:
+            reload_configuration = getattr(self.kernel, "_load_config_bundle", None)
+            if callable(reload_configuration):
+                try:
+                    reload_configuration()
+                except Exception as exc:
+                    bridge_logger.warning(
+                        "Connector configuration refresh failed: error_type=%s",
+                        type(exc).__name__,
+                    )
+
+        selected_names: list[str] = []
+        for handle in list(self.kernel.runtimes):
+            if not isinstance(handle, AgentRuntimeHandle):
+                continue
+            if selected is not None and handle.name not in selected:
+                continue
+            selected_names.append(handle.name)
+            token = self._telegram_token(handle.name)
+            try:
+                if token:
+                    await self.start_telegram_ingress(
+                        handle.name,
+                        token,
+                        drop_pending_updates=False,
+                    )
+                elif refresh_configuration:
+                    await self.stop_telegram_ingress(handle.name)
+            except Exception as exc:
+                bridge_logger.warning(
+                    "Shared Telegram ingress activation failed: agent=%s error=%s",
+                    handle.name,
+                    type(exc).__name__,
+                )
+        self.activate_worker_connectors(selected_names)
+
+    def activity_snapshot(self) -> dict[str, int]:
+        """Return small monotonic counters for idle/control-plane acceptance."""
+
+        return dict(getattr(self, "_activity", {}))
+
+    def _schedule_worker_connectors(self, handle, client) -> None:
+        """Start Worker-local connectors without gating topology publication."""
         if (handle.client is client and not handle.route_is_gated
                 and not getattr(self.kernel, "_handoff_draining", False)
                 and handle.metadata.get("telegram_async_connectors")):
-            await client.call("worker.connectors_start", {
-                "worker_nonce": client.nonce, "generation_id": client.generation_id,
-            }, timeout=10.0)
+            key = id(client)
+            if key in self._connector_activation_attempted:
+                return
+            existing = self._connector_start_tasks.get(key)
+            if existing is not None and not existing.done():
+                return
+            self._connector_activation_attempted.add(key)
+
+            async def activate() -> None:
+                try:
+                    FunctionWorkerSupervisor._count_activity(
+                        self, "connector_worker_rpcs"
+                    )
+                    await client.call("worker.connectors_start", {
+                        "worker_nonce": client.nonce,
+                        "generation_id": client.generation_id,
+                    }, timeout=10.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    bridge_logger.warning(
+                        "Worker-local connector activation failed: agent=%s error=%s",
+                        handle.name,
+                        type(exc).__name__,
+                    )
+
+            task = asyncio.create_task(
+                activate(), name=f"worker-connectors:{handle.name}"
+            )
+            self._connector_start_tasks[key] = task
+            task.add_done_callback(
+                lambda _done, key=key: self._connector_start_tasks.pop(key, None)
+            )
 
     async def broadcast_topology(self) -> bool:
-        # Candidate Workers load current credentials independently. Refresh the
-        # shared Functions snapshot through its owner after their pointer swap,
-        # rather than retaining the secrets captured at shared-process startup.
-        credentials_current = True
-        reload_configuration = getattr(self.kernel, "_load_config_bundle", None)
-        if callable(reload_configuration):
-            try:
-                reload_configuration()
-            except Exception as exc:
-                credentials_current = False
-                bridge_logger.warning(
-                    "Telegram configuration refresh failed: error_type=%s",
-                    type(exc).__name__,
-                )
+        async with self._topology_publish_lock:
+            return await self._broadcast_topology_once()
+
+    async def _broadcast_topology_once(self) -> bool:
+        # Topology is a pure, generation/revision-deduplicated publication.
+        # Credential loading and connector lifecycle are owned by their explicit
+        # configuration and route-commit paths, never by this broadcast.
+        # Direct service/configuration notifications can arrive while a shared
+        # replacement is still fenced.  Publishing those transient snapshots
+        # used to send the same 24-Worker topology several times during one
+        # adoption.  The committed owner schedules one final publication.
+        if getattr(self.kernel, "_handoff_draining", False):
+            FunctionWorkerSupervisor._count_activity(
+                self, "topology_suppressed_draining"
+            )
+            return True
         calls = []
         for handle in list(self.kernel.runtimes):
             if not isinstance(handle, AgentRuntimeHandle):
                 continue
-            token = self._telegram_token(handle.name) if credentials_current else ""
-            if token:
-                await self.start_telegram_ingress(
-                    handle.name, token, drop_pending_updates=False
-                )
             snapshot = self.topology_snapshot(agent_name=handle.name)
+            snapshot_digest = hashlib.sha256(
+                json.dumps(
+                    snapshot,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            if self._published_topology.get(id(handle.client)) == snapshot_digest:
+                continue
             calls.append(
-                self._publish_worker_topology(handle, handle.client, snapshot)
+                self._publish_worker_topology(
+                    handle, handle.client, snapshot, snapshot_digest
+                )
             )
         if calls:
+            FunctionWorkerSupervisor._count_activity(
+                self, "topology_publications"
+            )
             results = await asyncio.gather(*calls, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
                     bridge_logger.warning("Function Worker topology refresh failed: %s", result)
             return not any(isinstance(result, BaseException) for result in results)
+        FunctionWorkerSupervisor._count_activity(
+            self, "topology_unchanged_skips"
+        )
         return True
 
     def update_active_metadata(
@@ -2751,6 +2933,7 @@ class FunctionWorkerSupervisor:
                 metadata = await self.activate_new_worker(candidate)
                 await handle.commit_cutover(candidate, metadata)
                 await self.broadcast_topology()
+                self.activate_worker_connectors(handle.name)
                 bridge_logger.info(
                     "Function Worker recovered: agent=%s old_pid=%s new_pid=%s generation=%s",
                     handle.name,
@@ -2784,6 +2967,14 @@ class FunctionWorkerSupervisor:
         if topology_task is not None:
             topology_task.cancel()
             await asyncio.gather(topology_task, return_exceptions=True)
+        connector_tasks = list(self._connector_start_tasks.values())
+        self._connector_start_tasks.clear()
+        self._connector_activation_attempted.clear()
+        self._published_topology.clear()
+        for task in connector_tasks:
+            task.cancel()
+        if connector_tasks:
+            await asyncio.gather(*connector_tasks, return_exceptions=True)
         retirement_tasks = list(self._retirement_tasks.values())
         if retirement_tasks:
             await asyncio.gather(*retirement_tasks, return_exceptions=True)

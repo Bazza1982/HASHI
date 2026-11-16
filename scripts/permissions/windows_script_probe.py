@@ -144,7 +144,7 @@ def _probe(expected_sid):
             + "flags={}\n"
             + "try:\n private.read_bytes()\nexcept PermissionError:\n flags['read_blocked']=True\n"
             + "try:\n private.write_bytes(b'forbidden')\nexcept PermissionError:\n flags['write_blocked']=True\n"
-            + "print('before-child',file=sys.stderr,flush=True)\ntry:\n subprocess.run([sys.executable,'-I','-S','-c','pass'],check=True,timeout=2)\n"
+            + "print('before-child',file=sys.stderr,flush=True)\ntry:\n subprocess.run([sys.executable,'-I','-B','-S','-c','pass'],check=True,timeout=2)\n"
             + "except OSError as error:\n flags['child_blocked']=getattr(error,'winerror',None) in (5,1816)\n"
             + "print('before-network',file=sys.stderr,flush=True)\nnetwork=[]\n"
             + "for family,target in ((socket.AF_INET,('192.0.2.1',9)),(socket.AF_INET6,('2001:db8::1',9))):\n"

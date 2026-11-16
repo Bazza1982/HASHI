@@ -3628,7 +3628,7 @@ class FlexibleAgentRuntime:
                 owner = self._speech_tasks = SpeechTasks(Path(self.workspace_dir) / "state" / "speech-tasks")
             try:
                 if operation == "status":
-                    return owner.status(request_id)
+                    return owner.status(request_id, touch=True)
                 if operation == "cancel":
                     return owner.cancel(request_id)
                 selection = self.voice_manager._load()

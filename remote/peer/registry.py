@@ -119,7 +119,140 @@ class PeerRegistry:
         self._state_path = self._state_dir / f"peers_state_{self._self_id.lower()}.json"
         self._observations: dict[str, dict[str, PeerInfo]] = {}
         self._peers: dict[str, PeerInfo] = {}
+        self._last_refresh_persist_at = 0.0
+        self._activity = {
+            "state_writes": 0,
+            "instance_syncs": 0,
+            "discovery_writes_suppressed": 0,
+            "heartbeat_writes_suppressed": 0,
+            "state_writes_suppressed": 0,
+        }
         self._load_state()
+
+    def activity_snapshot(self) -> dict[str, int]:
+        return dict(self._activity)
+
+    @staticmethod
+    def _refresh_persistence_signature(peer: PeerInfo) -> tuple:
+        props = dict(peer.properties or {})
+        failures = int(props.get("consecutive_failures") or 0)
+        return (
+            str(peer.host),
+            int(peer.port),
+            int(peer.workbench_port),
+            # Failure counts have functional transitions only at the first
+            # failure and at the offline threshold (two failures).  Retain the
+            # exact in-memory count for diagnostics, but do not rewrite peer
+            # state and instances.json for every later failed probe.
+            min(failures, 2),
+            # The exact endpoint/error text is diagnostic and may rotate while
+            # the peer remains in the same functional offline state.  The
+            # failure bucket and live status already preserve that transition.
+            bool(props.get("last_refresh_error")),
+            str(props.get("host_identity") or ""),
+            str(props.get("environment_kind") or ""),
+            json.dumps(props.get("address_candidates") or [], sort_keys=True),
+            json.dumps(props.get("observed_candidates") or [], sort_keys=True),
+        )
+
+    @staticmethod
+    def _handshake_persistence_signature(peer: PeerInfo) -> tuple:
+        """Return durable handshake facts without heartbeat timestamps."""
+
+        props = dict(peer.properties or {})
+        props["consecutive_failures"] = min(
+            int(props.get("consecutive_failures") or 0), 2
+        )
+        for key in (
+            "last_handshake_at",
+            "last_seen_error",
+            "last_seen_ok",
+            "route_observed_at",
+            # Preserve the newest text in memory for status diagnostics, but
+            # do not rewrite durable state merely because a different failed
+            # address produced a different OS error.
+            "last_error",
+            "last_refresh_error",
+            # This projection is derived from the retained handshake state,
+            # failure bucket and timestamps.  Persisting online/stale ageing as
+            # an independent fact made authenticated heartbeats flap disk state.
+            "live_status",
+        ):
+            props.pop(key, None)
+        if not props.get("preferred_backend"):
+            props.pop("preferred_backend", None)
+        if not props.get("alternate_backends"):
+            props.pop("alternate_backends", None)
+        directory = props.get("remote_agent_directory")
+        if isinstance(directory, dict):
+            props["remote_agent_directory"] = {
+                "version": str(directory.get("version") or ""),
+                "directory_state": str(directory.get("directory_state") or ""),
+            }
+        agents = props.get("remote_agents")
+        if isinstance(agents, list):
+            props["remote_agents"] = [
+                {
+                    str(key): value
+                    for key, value in item.items()
+                    if key != "updated_at"
+                }
+                for item in agents
+                if isinstance(item, dict)
+            ]
+        return (
+            str(peer.host),
+            int(peer.port),
+            int(peer.workbench_port),
+            str(peer.protocol_version),
+            str(peer.hashi_version),
+            str(peer.display_name),
+            str(peer.display_handle),
+            str(peer.platform),
+            tuple(sorted(str(value) for value in peer.capabilities)),
+            json.dumps(props, sort_keys=True, ensure_ascii=False),
+        )
+
+    def _registry_persistence_signature(self) -> tuple:
+        """Return structural peer facts, excluding discovery heartbeat time."""
+
+        return tuple(
+            (
+                iid,
+                self._handshake_persistence_signature(peer),
+                tuple(
+                    (
+                        backend,
+                        self._handshake_persistence_signature(observation),
+                    )
+                    for backend, observation in sorted(
+                        self._observations.get(iid, {}).items()
+                    )
+                ),
+            )
+            for iid, peer in sorted(self._peers.items())
+        )
+
+    def observation_is_equivalent(
+        self,
+        peer: PeerInfo,
+        *,
+        backend: str,
+    ) -> bool:
+        """Return whether an observation adds any durable routing/trust fact."""
+
+        iid = normalize_instance_id(peer.instance_id)
+        current = self._observations.get(iid, {}).get(
+            str(backend or "").strip().lower()
+        )
+        equivalent = bool(
+            current is not None
+            and self._handshake_persistence_signature(current)
+            == self._handshake_persistence_signature(peer)
+        )
+        if equivalent:
+            self._activity["discovery_writes_suppressed"] += 1
+        return equivalent
 
     def _peer_state_is_expired(self, instance_id: str, item: dict, *, now: int | None = None) -> bool:
         iid = str(instance_id or "").strip().upper()
@@ -155,6 +288,7 @@ class PeerRegistry:
         backend: str | None = None,
     ) -> None:
         """Apply one backend's complete peer snapshot or an incremental observation."""
+        previous_signature = self._registry_persistence_signature()
         valid_peers = []
         now_ts = int(time.time())
         for peer in peers:
@@ -189,8 +323,15 @@ class PeerRegistry:
                 if not by_backend:
                     del self._observations[iid]
         self._rebuild_canonical_peers()
-        self._sync_to_instances_json()
-        self._save_state()
+        current_signature = self._registry_persistence_signature()
+        now_monotonic = time.monotonic()
+        persist_due = now_monotonic - self._last_refresh_persist_at >= 600.0
+        if previous_signature != current_signature or persist_due:
+            self._sync_to_instances_json()
+            self._save_state()
+            self._last_refresh_persist_at = now_monotonic
+        else:
+            self._activity["discovery_writes_suppressed"] += 1
 
     def get_peers(self) -> list[PeerInfo]:
         return list(self._peers.values())
@@ -297,6 +438,7 @@ class PeerRegistry:
         peer = self._peers.get(iid)
         if peer is None:
             return
+        previous_signature = self._refresh_persistence_signature(peer)
         now_ts = int(checked_at or time.time())
         props = self._normalize_live_props(peer.properties or {})
         if ok:
@@ -330,8 +472,15 @@ class PeerRegistry:
             props["live_status"] = self._derive_live_status(props, now=now_ts)
         peer.properties = props
         self._peers[iid] = peer
-        self._sync_to_instances_json()
-        self._save_state()
+        current_signature = self._refresh_persistence_signature(peer)
+        now_monotonic = time.monotonic()
+        persist_due = now_monotonic - self._last_refresh_persist_at >= 600.0
+        if previous_signature != current_signature or persist_due:
+            self._sync_to_instances_json()
+            self._save_state()
+            self._last_refresh_persist_at = now_monotonic
+        else:
+            self._activity["heartbeat_writes_suppressed"] += 1
 
     def mark_handshake_result(
         self,
@@ -359,6 +508,7 @@ class PeerRegistry:
         peer = self._peers.get(iid)
         if peer is None:
             return
+        previous_signature = self._handshake_persistence_signature(peer)
         observations = self._observations.get(iid) or {}
         fallback = observations.get("bootstrap_fallback")
         has_live_discovery = any(name in observations for name in ("lan", "tailscale"))
@@ -443,8 +593,15 @@ class PeerRegistry:
             props["observed_candidates"] = list(observed_candidates)
         peer.properties = props
         self._peers[iid] = peer
-        self._sync_to_instances_json()
-        self._save_state()
+        current_signature = self._handshake_persistence_signature(peer)
+        now_monotonic = time.monotonic()
+        persist_due = now_monotonic - self._last_refresh_persist_at >= 600.0
+        if previous_signature != current_signature or persist_due:
+            self._sync_to_instances_json()
+            self._save_state()
+            self._last_refresh_persist_at = now_monotonic
+        else:
+            self._activity["state_writes_suppressed"] += 1
 
     def _load_state(self) -> None:
         if not self._state_path.exists():
@@ -498,6 +655,11 @@ class PeerRegistry:
                 }
             }
             self._state_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            activity = getattr(self, "_activity", None)
+            if activity is not None:
+                activity["state_writes"] = int(
+                    activity.get("state_writes", 0) or 0
+                ) + 1
         except Exception as exc:
             logger.warning("Registry: failed to save peer state: %s", exc)
 
@@ -1518,6 +1680,11 @@ class PeerRegistry:
             if changed:
                 data["instances"] = instances
                 _write_json_atomic(self._instances_path, data)
+                activity = getattr(self, "_activity", None)
+                if activity is not None:
+                    activity["instance_syncs"] = int(
+                        activity.get("instance_syncs", 0) or 0
+                    ) + 1
                 logger.info("Registry: instances.json updated (%d peers)", len(self._peers))
 
         except Exception as e:

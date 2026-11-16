@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +117,7 @@ class SkillManager:
         }
     )
     RUNTIME_TOGGLE_IDS = frozenset({"debug", "recall"})
+    CACHE_RECHECK_SECONDS = 30.0
 
     def __init__(self, project_root: Path, tasks_path: Path):
         self.project_root = Path(project_root)
@@ -128,12 +130,61 @@ class SkillManager:
         self.skill_recovery_dir = self.project_root / "state" / "skill_recovery"
         self.skill_usage_path = self.project_root / "state" / "skill_usage.jsonl"
         self._skill_validation_errors: list[str] = []
+        self._skills_cache: list[SkillDefinition] | None = None
+        self._skills_snapshot: tuple[Any, ...] | None = None
+        self._skills_checked_at = 0.0
+        self._workspace_state_cache: dict[
+            Path, tuple[float, tuple[int, int] | None, dict[str, Any]]
+        ] = {}
+        self._scheduler_wakeup = None
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
 
     def _read_text(self, path: Path) -> str:
         return path.read_text(encoding="utf-8-sig")
+
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _catalog_snapshot(self) -> tuple[Any, ...]:
+        if not self.skills_dir.exists():
+            children: tuple[Any, ...] = ()
+        else:
+            rows = []
+            for skill_dir in sorted(
+                (path for path in self.skills_dir.iterdir() if path.is_dir()),
+                key=lambda path: path.name,
+            ):
+                rows.append(
+                    (
+                        skill_dir.name,
+                        self._file_signature(skill_dir),
+                        self._file_signature(skill_dir / "SKILL.md"),
+                    )
+                )
+            children = tuple(rows)
+        return (
+            self._file_signature(self.skills_dir),
+            self._file_signature(self.skill_registry_path),
+            children,
+        )
+
+    def _invalidate_skill_cache(self) -> None:
+        self._skills_checked_at = 0.0
+        self._skills_snapshot = None
+
+    def set_scheduler_wakeup(self, callback) -> None:
+        self._scheduler_wakeup = callback if callable(callback) else None
+
+    def _notify_scheduler(self) -> None:
+        if self._scheduler_wakeup is not None:
+            self._scheduler_wakeup()
 
     def _parse_frontmatter(
         self, text: str, *, source: Path
@@ -315,6 +366,15 @@ class SkillManager:
                 raise ValueError("new managed Skill state must be an object")
             payload = new_config_json(path, payload)
         write_config_json(path, payload)
+        if path == self.skill_registry_path:
+            self._invalidate_skill_cache()
+        if path.name == "skill_state.json" and isinstance(payload, dict):
+            cached = json.loads(json.dumps(payload, ensure_ascii=False))
+            self._workspace_state_cache[path] = (
+                time.monotonic(),
+                self._file_signature(path),
+                cached,
+            )
 
     def _load_skill_registry(self, *, strict: bool = False) -> dict[str, Any]:
         payload = self._load_json(
@@ -340,13 +400,26 @@ class SkillManager:
         self.skill_registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._save_json(self.skill_registry_path, payload)
 
-    def list_skills(self) -> list[SkillDefinition]:
+    def refresh_skills(self, *, force: bool = True) -> list[SkillDefinition]:
+        now = time.monotonic()
+        if (
+            not force
+            and self._skills_cache is not None
+            and now - self._skills_checked_at < self.CACHE_RECHECK_SECONDS
+        ):
+            return list(self._skills_cache)
+        snapshot = self._catalog_snapshot()
+        self._skills_checked_at = now
+        if self._skills_cache is not None and snapshot == self._skills_snapshot:
+            return list(self._skills_cache)
         registry_entries = self._load_skill_registry().get("skills", {})
         if not self.skills_dir.exists():
             self._skill_validation_errors = [
                 f"Managed Skill `{skill_id}` is missing from {self.skills_dir}"
                 for skill_id in sorted(registry_entries)
             ]
+            self._skills_cache = []
+            self._skills_snapshot = snapshot
             return []
         skills: list[SkillDefinition] = []
         errors: list[str] = []
@@ -372,7 +445,12 @@ class SkillManager:
             if not expected.exists():
                 errors.append(f"Managed Skill `{skill_id}` is missing from {expected}")
         self._skill_validation_errors = errors
-        return skills
+        self._skills_cache = skills
+        self._skills_snapshot = snapshot
+        return list(skills)
+
+    def list_skills(self) -> list[SkillDefinition]:
+        return self.refresh_skills(force=False)
 
     def skill_validation_errors(self) -> list[str]:
         self.list_skills()
@@ -413,7 +491,7 @@ class SkillManager:
         return matches[0] if len(matches) == 1 else None
 
     def get_disabled_skill_ids(self, workspace_dir: Path) -> set[str]:
-        state = self._load_json(self._skill_state_path(workspace_dir), {})
+        state = self._read_workspace_skill_state(workspace_dir)
         disabled = state.get("disabled_skills", {}) if isinstance(state, dict) else {}
         if isinstance(disabled, list):
             raw_ids = {str(item) for item in disabled}
@@ -422,6 +500,21 @@ class SkillManager:
         else:
             raw_ids = set()
         return {self._canonical_skill_id(item) for item in raw_ids}
+
+    def _read_workspace_skill_state(self, workspace_dir: Path) -> dict[str, Any]:
+        path = self._skill_state_path(workspace_dir)
+        now = time.monotonic()
+        cached = self._workspace_state_cache.get(path)
+        if cached is not None and now - cached[0] < self.CACHE_RECHECK_SECONDS:
+            return cached[2]
+        signature = self._file_signature(path)
+        if cached is not None and signature == cached[1]:
+            self._workspace_state_cache[path] = (now, signature, cached[2])
+            return cached[2]
+        payload = self._load_json(path, {})
+        state = payload if isinstance(payload, dict) else {}
+        self._workspace_state_cache[path] = (now, signature, state)
+        return state
 
     def is_skill_enabled(self, workspace_dir: Path, skill_id: str) -> bool:
         return self._canonical_skill_id(skill_id) not in self.get_disabled_skill_ids(
@@ -864,7 +957,7 @@ class SkillManager:
         )
 
     def get_active_toggle_ids(self, workspace_dir: Path) -> set[str]:
-        state = self._load_json(self._skill_state_path(workspace_dir), {})
+        state = self._read_workspace_skill_state(workspace_dir)
         active = state.get("active_skills", {})
         if isinstance(active, list):
             raw_ids = {str(item) for item in active}
@@ -956,6 +1049,7 @@ class SkillManager:
 
     def _save_tasks(self, payload: dict[str, Any]):
         self._save_json(self.tasks_path, payload)
+        self._notify_scheduler()
 
     def _task_key_for_kind(self, kind: str) -> str:
         if kind == "cron":
@@ -991,9 +1085,11 @@ class SkillManager:
                 {"heartbeats": jobs},
                 expected_revision=payload.revision,
             )
+            self._notify_scheduler()
             return
         payload["heartbeats"] = jobs
         self._save_json(self.active_heartbeats_path, payload)
+        self._notify_scheduler()
 
     def _ensure_active_heartbeats_migrated(self):
         tasks = self._load_tasks()

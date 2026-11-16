@@ -6,10 +6,10 @@ The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
 defines the two orthogonal dimensions—four functional modules and four
 engineering layers—and governs every lower-level design in this directory.
 
-> **Development source:** HASHI `v5.0.0-alpha.1` (Python `5.0.0a1`) separates
-> protected Core and its Python environment from the replaceable Functions
-> environment. See [the v5 upgrade notes](RELEASE_NOTES_v5.0.0-alpha.1.md) for
-> why the major changed, other changes since v4, migration and remaining gates.
+> **Development source:** HASHI `v6.0.0-alpha.1` (Python `6.0.0a1`) retains
+> protected Core/Functions separation while simplifying startup admission and
+> recovery. See [the v6 recovery notes](RELEASE_NOTES_v6.0.0-alpha.1.md) for
+> the migration, operational evidence and remaining gates.
 > Source availability, published packages and running-instance adoption are
 > separate; [release/distribution status](RELEASES.md) records that distinction.
 >

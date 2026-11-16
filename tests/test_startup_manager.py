@@ -107,6 +107,35 @@ async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave(monkey
     )
 
 
+@pytest.mark.asyncio
+async def test_remote_lifecycle_schedule_is_single_owner_and_skips_hot_candidate():
+    kernel = _Kernel()
+    manager = StartupManager(kernel, logging.NullHandler())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def ensure(global_config=None):
+        calls.append(global_config)
+        entered.set()
+        await release.wait()
+
+    manager._ensure_remote_lifecycle = ensure
+    config = SimpleNamespace(instance_id="HASHI3")
+
+    first = manager.schedule_remote_lifecycle(config)
+    second = manager.schedule_remote_lifecycle(config)
+    assert first is not None and second is first
+    await entered.wait()
+    assert calls == [config]
+    release.set()
+    await first
+
+    kernel._shared_replacement_candidate = True
+    assert manager.schedule_remote_lifecycle(config) is None
+    assert calls == [config]
+
+
 def test_ready_status_uses_live_worker_ingress_and_service_endpoints(capsys):
     class Process:
         @staticmethod

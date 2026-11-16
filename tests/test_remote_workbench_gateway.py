@@ -116,7 +116,7 @@ def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeyp
 def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(
     tmp_path, monkeypatch, caplog
 ):
-    caplog.set_level(logging.INFO, logger=remote_server.logger.name)
+    caplog.set_level(logging.DEBUG, logger=remote_server.logger.name)
     client, token = _client(tmp_path)
     captured: dict = {}
 
@@ -165,6 +165,29 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(
         < names.index("proxy_response_ready")
     )
     assert names.index("proxy_response_ready") < names.index("asgi_response_completed")
+    info_names = [
+        json.loads(record.getMessage().removeprefix("workbench gateway "))["event"]
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+        and record.getMessage().startswith("workbench gateway ")
+    ]
+    assert info_names == ["asgi_response_completed"]
+
+
+def test_gateway_verbose_stage_keeps_failure_at_info(caplog):
+    caplog.set_level(logging.INFO, logger=remote_server.logger.name)
+
+    remote_server._workbench_gateway_log(
+        "proxy_response_ready", status=503, error_code="workbench_unavailable"
+    )
+
+    assert _gateway_events(caplog) == [
+        {
+            "error_code": "workbench_unavailable",
+            "event": "proxy_response_ready",
+            "status": 503,
+        }
+    ]
 
 
 def test_gateway_proxy_seals_remote_scope_for_session_run_after_authentication(

@@ -32,7 +32,7 @@ def build_image_smoke_plan(
         {
             "id": "packaging-doctor",
             "description": "Validate optional Kubernetes backend packaging contract.",
-            "argv": ["python", "tools/enterprise_k8s_backend_doctor.py", "--json"],
+            "argv": ["python", "-B", "tools/enterprise_k8s_backend_doctor.py", "--json"],
             "required": True,
         },
         {
@@ -60,6 +60,7 @@ def build_image_smoke_plan(
                 "--rm",
                 image_tag,
                 "python",
+                "-B",
                 "-c",
                 "import kubernetes; print(kubernetes.__version__)",
             ],
@@ -74,6 +75,7 @@ def build_image_smoke_plan(
                 "--rm",
                 image_tag,
                 "python",
+                "-B",
                 "hashi.py",
                 "enterprise",
                 "k8s-lease-rehearse",
@@ -94,6 +96,7 @@ def build_image_smoke_plan(
                 "KUBECONFIG=/kubeconfig",
                 image_tag,
                 "python",
+                "-B",
                 "hashi.py",
                 "enterprise",
                 "k8s-lease-rehearse",

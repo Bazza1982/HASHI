@@ -38,7 +38,8 @@ _MOVE_CONTINUATION_STATUSES = frozenset(
 )
 _MAX_RECORDS = 128
 _MAX_STATE_BYTES = 512 * 1024
-_WATCH_INTERVAL_SECONDS = 0.25
+_CROSS_PROCESS_RECOVERY_SECONDS = 30.0
+_CROSS_PROCESS_INBOX_CHECK_SECONDS = 1.0
 _MAX_DELIVERY_ATTEMPTS = 5
 _MAX_EXECUTION_ATTEMPTS = 5
 
@@ -59,15 +60,17 @@ class AgentMoveManager:
         )
         self._tasks: dict[str, asyncio.Task] = {}
         self._watch_task: asyncio.Task | None = None
+        self._watch_event = asyncio.Event()
         self._stopping = False
         self._last_scan_error: str | None = None
+        self._state_signature = self._state_file_signature()
 
     async def start(self) -> None:
         """Resume only operations interrupted by process replacement/crash."""
 
         self._stopping = False
         try:
-            records = self._load_operations()
+            records = self._load_operations_snapshot()
         except (AgentMoveError, OSError) as exc:
             records = {}
             self._last_scan_error = f"{type(exc).__name__}: {exc}"
@@ -80,7 +83,7 @@ class AgentMoveManager:
                 self._spawn(package_id)
         if self._watch_task is None or self._watch_task.done():
             self._watch_task = asyncio.create_task(
-                self._watch_submissions(),
+                self._watch_submissions(records),
                 name="agent-move-submissions",
             )
 
@@ -196,10 +199,13 @@ class AgentMoveManager:
                 return record
             await asyncio.sleep(0.01)
 
-    async def _watch_submissions(self) -> None:
+    async def _watch_submissions(
+        self,
+        records: Mapping[str, Mapping[str, Any]],
+    ) -> None:
         while True:
             try:
-                for package_id, record in self._load_operations().items():
+                for package_id, record in records.items():
                     if _ready_to_execute(record):
                         self._spawn(package_id)
                     elif record.get("status") in {"completed", "needs_recovery"}:
@@ -213,7 +219,50 @@ class AgentMoveManager:
                         error,
                     )
                     self._last_scan_error = error
-            await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
+            delay = _next_watcher_delay(records)
+            await self._wait_for_submission_change(delay)
+            records = self._load_operations_snapshot()
+
+    def _load_operations_snapshot(self) -> dict[str, dict]:
+        signature_before = self._state_file_signature()
+        records = self._load_operations()
+        signature_after = self._state_file_signature()
+        # Atomic replacement can race the read. Retain the earlier signature
+        # in that narrow case so the next metadata check reloads immediately.
+        self._state_signature = (
+            signature_after
+            if signature_before == signature_after
+            else signature_before
+        )
+        return records
+
+    def _state_file_signature(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self.state_path.stat()
+        except OSError:
+            return None
+        return int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_ino)
+
+    async def _wait_for_submission_change(self, delay: float) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.01, float(delay))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(
+                    self._watch_event.wait(),
+                    timeout=min(_CROSS_PROCESS_INBOX_CHECK_SECONDS, remaining),
+                )
+            except asyncio.TimeoutError:
+                signature = self._state_file_signature()
+                if signature != self._state_signature:
+                    self._state_signature = signature
+                    return
+                continue
+            self._watch_event.clear()
+            return
 
     async def _deliver_result(
         self,
@@ -309,6 +358,7 @@ class AgentMoveManager:
                 package_id,
                 type(error).__name__,
             )
+        self._watch_event.set()
 
     async def _execute(self, package_id: str) -> None:
         try:
@@ -443,7 +493,8 @@ class AgentMoveManager:
             record["updated_at"] = utc_now_iso()
             operations[package_id] = record
             self._write_operations_unlocked(operations, keep=package_id)
-            return record
+        self._watch_event.set()
+        return record
 
     def _load_operations(self) -> dict[str, dict[str, Any]]:
         with self._state_lock():
@@ -560,6 +611,38 @@ def _ready_to_execute(record: Mapping[str, Any]) -> bool:
         return float(record.get("next_attempt_at") or 0.0) <= time.time()
     except (TypeError, ValueError):
         return False
+
+
+def _next_watcher_delay(records: Mapping[str, Mapping[str, Any]]) -> float:
+    """Sleep until real retry work or the bounded cross-process fallback."""
+
+    now = time.time()
+    deadlines: list[float] = []
+    for record in records.values():
+        if str(record.get("status") or "") == "retry_wait":
+            try:
+                deadline = float(record.get("next_attempt_at") or 0.0)
+            except (TypeError, ValueError):
+                deadline = 0.0
+            if deadline > now:
+                deadlines.append(deadline)
+        if record.get("status") not in {"completed", "needs_recovery"}:
+            continue
+        delivery = record.get("delivery")
+        if not isinstance(delivery, Mapping) or delivery.get("status") != "pending":
+            continue
+        try:
+            deadline = float(delivery.get("next_attempt_at") or 0.0)
+        except (TypeError, ValueError):
+            deadline = 0.0
+        if deadline > now:
+            deadlines.append(deadline)
+    if not deadlines:
+        return _CROSS_PROCESS_RECOVERY_SECONDS
+    return max(
+        0.01,
+        min(_CROSS_PROCESS_RECOVERY_SECONDS, min(deadlines) - now),
+    )
 
 
 def enqueue_agent_move(

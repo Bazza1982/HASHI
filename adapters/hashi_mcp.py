@@ -84,7 +84,6 @@ def current_hashi_mcp_invocation(adapter: Any) -> HashiMcpInvocation | None:
 def _qualified_mcp_parent(adapter, registry, audit_context):
     from orchestrator.runtime_contract import (
         FUNCTIONS_ROLE, RuntimeContractError, current_process_runtime,
-        qualified_runtime_from_reference, compare_runtime_fingerprints,
     )
     admitted = current_process_runtime()
     if admitted is None:
@@ -93,16 +92,15 @@ def _qualified_mcp_parent(adapter, registry, audit_context):
         if type(facade).__module__ == "orchestrator.function_worker_host":
             raise RuntimeContractError("runtime_protection_context_unavailable: private Functions receipt missing")
         return None  # Existing standalone developer/legacy embedding, not an installed Worker.
-    try:
-        current = qualified_runtime_from_reference(
-            {"path":str(admitted.manifest_path), "digest":admitted.manifest_digest},
-            code_root=Path(adapter.global_config.project_root).resolve(), role=FUNCTIONS_ROLE)
-        compare_runtime_fingerprints(admitted.fingerprint, current.fingerprint)
-    except RuntimeContractError as exc:
+    if admitted.fingerprint.role != FUNCTIONS_ROLE:
         raise RuntimeContractError(
-            "runtime_integrity_failed: current Functions installation needs controlled recovery"
-        ) from exc
-    return current
+            "runtime_integrity_failed: current process is not the admitted Functions role"
+        )
+    # The Worker already bound this exact private parent receipt during process
+    # admission. Re-reading and recursively hashing the same installation for
+    # every tool invocation proves no new process fact; the MCP child performs
+    # its own fast admission before importing product tooling.
+    return admitted
 
 
 def prepare_hashi_mcp(

@@ -403,13 +403,16 @@ class AntigravityCLIAdapter(BaseBackend):
         if workdir:
             return (
                 sys.executable,
+                "-B",
                 str(self._launcher_script),
                 "--cwd",
                 workdir,
                 "--",
                 *tuple(cmd),
             )
-        return (sys.executable, str(self._launcher_script), "--", *tuple(cmd))
+        return (
+            sys.executable, "-B", str(self._launcher_script), "--", *tuple(cmd)
+        )
 
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,

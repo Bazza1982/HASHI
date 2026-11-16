@@ -11,9 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 BRIDGE_HOME="${BRIDGE_HOME:-$SCRIPT_DIR}"
 PYTHON_EXE="${PYTHON_EXE:-python3}"
-PID_FILE="$("$PYTHON_EXE" "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+PID_FILE="$("$PYTHON_EXE" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
     --code-root "$SCRIPT_DIR" --bridge-home "$BRIDGE_HOME" --field pid-path)"
-INSTANCE_ID="$("$PYTHON_EXE" "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+INSTANCE_ID="$("$PYTHON_EXE" -B "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
     --code-root "$SCRIPT_DIR" --bridge-home "$BRIDGE_HOME" --field instance-id)"
 
 QUIET=0

@@ -136,7 +136,7 @@ def write_wsl_host_wrapper(
         "cd /d %LOCALAPPDATA%\n"
         "C:\\Windows\\System32\\wsl.exe "
         f"-d {distro_name} bash -lc "
-        f"\"cd '{repo_root}' && /usr/bin/env python3 "
+        f"\"cd '{repo_root}' && /usr/bin/env python3 -B "
         f"-m tools.browser_native_host --stdio "
         f"--socket {socket_path} --log-file '{log_path}'\"\n"
     )

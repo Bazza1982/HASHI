@@ -90,7 +90,7 @@ Write-Log "Copied extension to $ExtensionInstallDir"
 $WrapperContent = @"
 @echo off
 cd /d %LOCALAPPDATA%
-C:\\Windows\\System32\\wsl.exe -d {distro_name} bash -lc "cd '{linux_repo_root}' && /usr/bin/env python3 -m tools.browser_native_host --stdio --socket '{socket_path}' --log-file '{linux_repo_root}/logs/browser_native_host.log'"
+C:\\Windows\\System32\\wsl.exe -d {distro_name} bash -lc "cd '{linux_repo_root}' && /usr/bin/env python3 -B -m tools.browser_native_host --stdio --socket '{socket_path}' --log-file '{linux_repo_root}/logs/browser_native_host.log'"
 "@
 Set-Content -Path $WrapperPath -Value $WrapperContent -Encoding ASCII
 Write-Log "Wrote native host wrapper: $WrapperPath"

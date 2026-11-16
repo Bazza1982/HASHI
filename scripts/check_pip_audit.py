@@ -71,6 +71,7 @@ def main() -> int:
         commands.append(
             [
                 sys.executable,
+                "-B",
                 "-m",
                 "pip_audit",
                 "-r",
@@ -81,7 +82,7 @@ def main() -> int:
             ]
         )
     commands.append(
-        [sys.executable, "-m", "pip_audit", "--desc", "--progress-spinner", "off"]
+        [sys.executable, "-B", "-m", "pip_audit", "--desc", "--progress-spinner", "off"]
     )
 
     saw_timeout = False

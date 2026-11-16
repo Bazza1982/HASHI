@@ -16,8 +16,8 @@ CODE_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_ROOT))
 
 from orchestrator.runtime_contract import (
-    CORE_HOST_ROLE, RuntimeContractError, bind_process_runtime,
-    enforce_runtime_contract, load_core_runtime_selection,
+    RuntimeContractError, bind_process_runtime,
+    load_core_runtime_selection,
 )
 
 from orchestrator.instance_lock import InstanceLock
@@ -31,10 +31,8 @@ from orchestrator.kernel_process import (
 
 def main(argv=None) -> int:
     try:
-        enforce_runtime_contract(CODE_ROOT, role=CORE_HOST_ROLE)
         selection = load_core_runtime_selection(CODE_ROOT)
-        bind_process_runtime(selection.core, code_root=CODE_ROOT)
-        runtime = enforce_runtime_contract(CODE_ROOT, role=CORE_HOST_ROLE)
+        runtime = bind_process_runtime(selection.core, code_root=CODE_ROOT)
     except RuntimeContractError as exc:
         print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
         return 78

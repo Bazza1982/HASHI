@@ -107,6 +107,7 @@ async def synthesize_ogg(text: str, args: argparse.Namespace) -> Path:
 def send_telegram(ogg_path: Path, args: argparse.Namespace) -> None:
     cmd = [
         sys.executable,
+        "-B",
         str(ROOT / "tools" / "telegram_send_file_cli.py"),
         "--path",
         str(ogg_path),

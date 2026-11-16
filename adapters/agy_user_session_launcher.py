@@ -927,7 +927,7 @@ def _spawn_via_interactive_task(
             _write_private_bytes(tmp / "input.bin", stdin_bytes)
         _write_private_text(tmp / "heartbeat", str(time.time()))
         runner_arguments = subprocess.list2cmdline(
-            [str(LAUNCHER_SCRIPT_PATH), "--task-runner", str(tmp), task_name]
+            ["-B", str(LAUNCHER_SCRIPT_PATH), "--task-runner", str(tmp), task_name]
         )
         task_xml = _manual_task_xml(
             user_name, user_sid, sys.executable, runner_arguments

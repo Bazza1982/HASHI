@@ -17,7 +17,7 @@ $PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
 $PreviousPythonPath = $env:PYTHONPATH
 try {
     $env:PYTHONPATH = $RepoRoot
-    $Namespace = (& $PythonExe -c "from tools.browser_bridge_transport import BRIDGE_NAMESPACE; print(BRIDGE_NAMESPACE)").Trim()
+    $Namespace = (& $PythonExe -B -c "from tools.browser_bridge_transport import BRIDGE_NAMESPACE; print(BRIDGE_NAMESPACE)").Trim()
 }
 finally {
     $env:PYTHONPATH = $PreviousPythonPath

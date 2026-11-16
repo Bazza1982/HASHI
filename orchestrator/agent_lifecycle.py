@@ -196,6 +196,22 @@ class AgentLifecycleManager:
                             agent_name,
                             False,
                         )
+                # Connector ownership is granted by the committed Agent route,
+                # not as a side effect of topology publication.
+                activate_connectors = getattr(
+                    self.kernel.function_workers,
+                    "activate_worker_connectors",
+                    None,
+                )
+                if callable(activate_connectors):
+                    try:
+                        activate_connectors(agent_name)
+                    except Exception as exc:
+                        bridge_logger.warning(
+                            "Connector activation scheduling failed for %s: %s",
+                            agent_name,
+                            exc,
+                        )
                 self.kernel.function_workers.schedule_topology()
 
                 if handle.telegram_connected and (

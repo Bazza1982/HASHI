@@ -152,6 +152,14 @@ def resolve_remote_runtime_sids(root: Path) -> tuple[str, ...]:
     otherwise a writer running under a different account can strand Remote.
     Resolution failures deliberately propagate before publication.
     """
+    if os.name == "nt":
+        # A deliberately disabled connector has no runtime principal to serve.
+        # Reuse the authoritative lifecycle configuration and avoid making an
+        # unrelated Task Scheduler query part of Core/Functions readiness.
+        from orchestrator.remote_lifecycle import load_settings
+
+        if not load_settings(root).enabled:
+            return ()
     return _windows_remote_runtime_sids(root)
 
 

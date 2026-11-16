@@ -261,7 +261,7 @@ exit /b 0
 
 :enable_ansi_console
 if /i "%OS%"=="Windows_NT" (
-    "!PYTHON_EXE!" -c "import ctypes; k=ctypes.windll.kernel32; h=k.GetStdHandle(-11); m=ctypes.c_uint(); ok=k.GetConsoleMode(h, ctypes.byref(m)); k.SetConsoleMode(h, m.value | 4) if ok else None" >nul 2>&1
+    "!PYTHON_EXE!" -B -c "import ctypes; k=ctypes.windll.kernel32; h=k.GetStdHandle(-11); m=ctypes.c_uint(); ok=k.GetConsoleMode(h, ctypes.byref(m)); k.SetConsoleMode(h, m.value | 4) if ok else None" >nul 2>&1
     reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 )
 exit /b 0
@@ -380,8 +380,8 @@ rem Resolve the PID path from this configured instance_id. Other HASHI
 rem instances on the same computer are deliberately outside this scope.
 set "INSTANCE_PID_FILE="
 set "INSTANCE_ID=HASHI"
-for /f "delims=" %%P in ('"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field pid-path') do set "INSTANCE_PID_FILE=%%P"
-for /f "delims=" %%P in ('"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field instance-id') do set "INSTANCE_ID=%%P"
+for /f "delims=" %%P in ('"!PYTHON_EXE!" -B "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field pid-path') do set "INSTANCE_PID_FILE=%%P"
+for /f "delims=" %%P in ('"!PYTHON_EXE!" -B "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field instance-id') do set "INSTANCE_ID=%%P"
 if not defined INSTANCE_PID_FILE (
     echo !C_WARN!Could not resolve the instance-scoped PID path.!C_RESET!
     exit /b 1

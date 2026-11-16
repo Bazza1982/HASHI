@@ -743,7 +743,6 @@ class RebootManager:
             self.kernel, "is_stopping", False
         ):
             return
-        moment = time.time() if now is None else now
         state_dir = self._runtime_state_dir()
         self._promote_legacy_shared_replacements(state_dir)
         for record in self.receipts.records():
@@ -1563,10 +1562,11 @@ class RebootManager:
             self._record_stage(record, "candidate_start", candidate_started)
             counts = self._metrics_for(record)["work_counts"]
             counts["candidate_worker_count"] = len(candidates)
-            # Protected bootstrap verifies the actual artifact once per Worker.
+            # Worker admission rechecks only the nonce-bound generation
+            # receipt. It does not read or hash the artifact again.
             counts["manifest_hash_count"] = int(
                 counts.get("manifest_hash_count", 0)
-            ) + len(candidates)
+            )
         return candidates
 
     @staticmethod
@@ -1930,6 +1930,31 @@ class RebootManager:
         except Exception:
             warnings.append("topology_publish_failed")
             bridge_logger.exception("Topology notification failed after reboot commit")
+        try:
+            # Connector recovery follows the committed route as a separate,
+            # non-blocking lifecycle action. Topology publication remains pure.
+            activate_committed = getattr(
+                self.kernel.function_workers,
+                "activate_committed_connectors",
+                None,
+            )
+            activate_workers = getattr(
+                self.kernel.function_workers,
+                "activate_worker_connectors",
+                None,
+            )
+            if callable(activate_committed):
+                await activate_committed(
+                    selected_targets,
+                    refresh_configuration=True,
+                )
+            elif callable(activate_workers):
+                activate_workers(selected_targets)
+        except Exception:
+            warnings.append("connector_activation_deferred")
+            bridge_logger.exception(
+                "Worker connector activation was deferred after reboot commit"
+            )
         # All old routes are fenced and every old Worker is QUIESCED. Their
         # bounded teardown is owned by the supervisor, outside local readiness.
         self.kernel.function_workers.retire_workers(old_clients.values())

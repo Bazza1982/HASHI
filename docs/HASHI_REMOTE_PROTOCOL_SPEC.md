@@ -103,12 +103,13 @@ metadata/credential invalidation; a first-time handshake still reports
 `handshake_in_progress`. This prevents a healthy trusted route from briefly
 appearing untrusted merely because its proof is being refreshed.
 
-Backend API startup issues are historical observations, not permanent current
-health. While a Remote lifecycle issue is latched, the health projection may
-perform a throttled, read-only ownership and `/health` inspection. A currently
-ready (or intentionally disabled) Remote clears only the matching Remote issue;
-Agent and connector failures and unrelated startup issues remain intact. The
-inspection never starts, stops, or replaces Remote.
+Backend API startup issues are historical observations, not authority to run a
+lifecycle operation. Backend API and Workbench health projections are strictly
+read-only: they do not probe Remote, refresh a supervisor, register a task,
+start a process or reconcile every connector. Remote's own health endpoint and
+explicit lifecycle/diagnostic operations provide current Remote state. A later
+explicit reconciliation may clear only the matching Remote issue; Agent,
+connector and unrelated startup issues remain intact.
 
 Static `instances.json` discovery is an observable bootstrap fallback. A peer
 reached through it is marked as such and must not be reported as proof that
@@ -120,6 +121,70 @@ representation are the same state for change detection; an unchanged projection
 must not rewrite the file or emit a peer-update event. Actual route, trust, or
 liveness changes still persist. This prevents repeated discovery and status
 checks from multiplying registry writes after a restart.
+
+### Lifecycle and idle-work isolation (2026-11-16)
+
+Remote is an optional independently supervised sidecar. Initial Core startup
+schedules its lifecycle only after local services and Workers are usable.
+Single-Agent restart and shared Functions hot replacement neither stop nor
+start it; a healthy owned Remote returns from lifecycle inspection before any
+fixed-task, PowerShell or supervisor refresh. Remote failure degrades only its
+communication capability and never vetoes Core, Functions, Worker or local
+Workbench readiness.
+
+The protocol manager has one control-loop owner. With no in-flight work its
+default maintenance deadline is 30 seconds; durable in-flight work, pending
+status receipts, credential/configuration changes and Agent-directory changes
+wake that same loop immediately. Local Core/directory checks are at most once
+per 30 seconds, peer liveness once per 120 seconds, accepted-handshake
+revalidation once per 300 seconds, and static bootstrap retry once per 300
+seconds. Active in-flight correlation alone enables the 0.5-second processing
+cadence; idle operation does not poll at that rate. The discovery maintenance
+owner runs every 30 seconds, reads the
+protocol manager's cached Agent-directory projection, and performs no
+advertisement call when the revision and retry state are unchanged. An
+unchanged `agents.json` signature avoids another payload read. Tailscale uses
+one polling owner with a 60-second healthy interval and exponential failure
+backoff capped at 300 seconds.
+
+Static peer seeds are deduplicated first by canonical instance identity and
+then endpoint. Last successful routes are preferred across both address and
+port. Bootstrap tries a bounded number of alternate routes for each unknown
+instance within one per-instance deadline, and probes different instances with
+bounded concurrency outside the control-loop critical path. Failed
+instance/host/port tuples open an exponential circuit from 5 to 300 seconds;
+while every candidate is open, route resolution fails immediately instead of
+synchronously probing or imposing a 10–30 second tail on a local status/API
+request. Background bootstrap and liveness own the bounded network probes and
+verify the expected instance identity before accepting a route.
+
+Static bootstrap probes only an instance that is not yet represented in the
+peer registry. Once registered, liveness and handshake are the sole recovery
+owners and consume the current route candidates with their existing peer and
+endpoint backoff; the five-minute bootstrap pass must not become a third
+recovery loop for an offline peer. The instances source uses a cheap metadata
+signature, checks that signature at most once per second, and reparses its
+payload only when the signature changes. A pass in which every configured peer
+is already known does not read the live-endpoint payload.
+
+Peer-registry heartbeat refreshes update memory on every observation, but an
+unchanged healthy projection writes durable state at most once per 600 seconds.
+Restart-notification recovery reads only new, changed or due receipt payloads,
+limits payload work to 512 per pass, wakes at the exact pending retry deadline,
+and otherwise sleeps up to 300 seconds. Protocol, discovery and registry expose
+small monotonic activity counters for idle acceptance; no additional watchdog
+or monitoring service is introduced.
+
+The authenticated Workbench gateway emits one INFO completion summary for a
+successful request. Successful intermediate receive, authenticate, forward and
+response stages are DEBUG diagnostics and are not serialized while normal INFO
+logging is active. Failure events, exceptions and intermediate HTTP 4xx/5xx
+statuses remain INFO evidence. This keeps request and authentication failures
+observable without multiplying normal proxy traffic into ten durable records.
+The Windows supervisor preserves the child's UTF-8 stream when appending these
+records; PowerShell's UTF-16 redirection default is not part of the log
+contract. Existing mixed-encoding incident evidence is retained rather than
+rewritten or deleted.
 
 2026-09-27 HASHI1 repair record: the user requested this restart slowdown
 repair. The registry comparison fix is committed on local `main` as
@@ -666,7 +731,8 @@ This protocol is intended to ship entirely inside `Hashi Remote`.
 Operational goal:
 
 - enable with `/remote off` then `/remote on`
-- or during normal `/reboot`
+- or schedule initial sidecar activation after local cold-start readiness
+- preserve a healthy Remote across single-Agent and shared Functions hot restart
 - never require cold restart of the whole HASHI system
 
 When shared Functions starts the bundled Remote from a qualified Functions

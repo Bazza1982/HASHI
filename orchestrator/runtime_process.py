@@ -17,18 +17,17 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 
 from orchestrator.function_worker_protocol import (
     MAX_FRAME_BYTES, decode_envelope, encode_envelope,
 )
-from orchestrator.kernel_artifact import verify_artifact
+from orchestrator.kernel_artifact import validate_artifact_identity, verify_artifact
 from orchestrator.runtime_contract import (
     CORE_HOST_ROLE, FUNCTIONS_ROLE, QualifiedRuntime, RuntimeContractError,
     RuntimeFingerprint, compare_runtime_boundary, compare_runtime_fingerprints,
-    bind_process_runtime, current_process_runtime,
-    enforce_runtime_contract, load_qualified_runtime, qualified_runtime_from_reference,
+    admit_qualified_runtime, admitted_runtime_from_reference,
+    bind_process_runtime, current_process_runtime, enforce_runtime_contract,
 )
 
 _START_LOCK = threading.Lock()
@@ -421,13 +420,9 @@ def _selected_runtime(code_root: Path, bootstrap: dict, selected: QualifiedRunti
         compare_runtime_fingerprints(expected, observed)
         return expected, None
     if isinstance(selected, dict):
-        qualified = qualified_runtime_from_reference(selected, code_root=code_root)
+        qualified = admitted_runtime_from_reference(selected, code_root=code_root)
     else:
-        qualified = load_qualified_runtime(
-            selected.manifest_path, expected_digest=selected.manifest_digest,
-            code_root=code_root, role=FUNCTIONS_ROLE,
-        )
-        compare_runtime_fingerprints(selected.fingerprint, qualified.fingerprint)
+        qualified = selected
     compare_runtime_fingerprints(expected, qualified.fingerprint)
     if bootstrap.get("core_runtime"):
         core = RuntimeFingerprint.from_mapping(bootstrap["core_runtime"])
@@ -457,11 +452,12 @@ def _validate_admission(process, result, nonce, generation, expected, qualified)
         selected_image = Path(expected.executable).resolve()
         allowed_images = {base_image}
         # A venv redirector is not the interpreter. A receipt naming its PID
-        # must never authorize product execution. Direct copied CPython images
-        # are admitted only when their bytes match the sealed base executable.
-        if selected_image == base_image or (
-                hashlib.sha256(selected_image.read_bytes()).digest()
-                == hashlib.sha256(base_image.read_bytes()).digest()):
+        # must never authorize product execution.  Symlinked POSIX launchers
+        # resolve to the sealed base identity; Windows venv redirectors do not.
+        # The installer already hashed both images, so byte-comparing them for
+        # every Worker would repeat installation qualification without proving
+        # a distinct process fact.
+        if selected_image == base_image:
             allowed_images.add(selected_image)
         if image not in allowed_images:
             raise RuntimeContractError("Child OS executable does not match the selected runtime")
@@ -477,9 +473,17 @@ def _validate_admission(process, result, nonce, generation, expected, qualified)
     process.admission = dict(result)
 
 
-def _request_generation(bootstrap, purpose):
+def _request_generation(bootstrap, purpose, *, verify_generation_bytes=False):
     if purpose == "generation":
-        verify_artifact(Path(bootstrap["generation_root"]), bootstrap["manifest"])
+        artifact = Path(bootstrap["generation_root"])
+        if verify_generation_bytes:
+            # Direct callers have no prior qualification receipt.  Verify the
+            # exact bytes before a child can reach product imports.  Product
+            # lifecycle owners pass an explicit in-process qualification fact
+            # after doing this once for the adopted generation.
+            verify_artifact(artifact, bootstrap["manifest"])
+        else:
+            validate_artifact_identity(artifact, bootstrap["manifest"])
         module, separator, _ = str(bootstrap["entrypoint"]).partition(":")
         if not separator or module not in {e["module"] for e in bootstrap["manifest"]["entries"]}:
             raise ValueError("entrypoint is outside the qualified generation")
@@ -491,13 +495,23 @@ def _request_generation(bootstrap, purpose):
 
 
 def launch_function_process(bootstrap: dict, *, runtime: QualifiedRuntime | dict | None = None,
-                            timeout: float = 30.0, cancel_event=None, purpose="generation"):
+                            timeout: float = 30.0, cancel_event=None, purpose="generation",
+                            generation_already_verified: bool = False):
     """Launch the exact selected FR, then authenticate it before product imports."""
     code_root = Path(bootstrap["code_root"]).resolve()
     if code_root != _BOOTSTRAP.parents[1]:
         raise RuntimeContractError("Bootstrap code root does not match the protected entry")
     expected, qualified = _selected_runtime(code_root, bootstrap, runtime)
-    generation = _request_generation(bootstrap, purpose)
+    # ``generation_already_verified`` is a parent-side lifecycle fact.  It is
+    # never accepted from the child bootstrap or an external receipt.  The
+    # default remains fail-closed for direct/ad-hoc launch callers.
+    generation = _request_generation(
+        bootstrap,
+        purpose,
+        verify_generation_bytes=(
+            purpose == "generation" and not generation_already_verified
+        ),
+    )
     nonce = secrets.token_hex(32)
     params = {"nonce": nonce, "bootstrap": bootstrap, "purpose": purpose,
               "installation": ({"path": str(qualified.manifest_path), "digest": qualified.manifest_digest}
@@ -641,15 +655,14 @@ def receive_private_bootstrap(handle: int):
         code_root = Path(bootstrap["code_root"]).resolve()
         if code_root != _BOOTSTRAP.parents[1]:
             raise RuntimeContractError("Private bootstrap root mismatch")
-        observed = enforce_runtime_contract(code_root, role=FUNCTIONS_ROLE)
         installation = params["installation"]
         if installation is not None:
-            qualified = load_qualified_runtime(
+            qualified = admit_qualified_runtime(
                 Path(installation["path"]), expected_digest=installation["digest"],
                 code_root=code_root, role=FUNCTIONS_ROLE)
-            observed = replace(observed, installation_digest=qualified.fingerprint.installation_digest)
-            compare_runtime_fingerprints(qualified.fingerprint, observed)
-            bind_process_runtime(qualified, code_root=code_root)
+            observed = bind_process_runtime(qualified, code_root=code_root)
+        else:
+            observed = enforce_runtime_contract(code_root, role=FUNCTIONS_ROLE)
         compare_runtime_fingerprints(RuntimeFingerprint.from_mapping(bootstrap["runtime"]), observed)
         generation = _request_generation(bootstrap, params["purpose"])
         result = {"nonce": nonce, "pid": os.getpid(), "runtime": observed.to_dict(),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -182,7 +183,7 @@ async def test_shared_function_restart_recovers_running_operation(
 async def test_move_retries_forward_past_legacy_attempt_limit(tmp_path, monkeypatch):
     kernel, _stopped = _kernel(tmp_path)
     monkeypatch.setattr(move_manager, "_MAX_EXECUTION_ATTEMPTS", 1)
-    monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(move_manager, "_CROSS_PROCESS_RECOVERY_SECONDS", 0.01)
     attempts = 0
     monkeypatch.setattr(
         move_manager,
@@ -231,7 +232,7 @@ async def test_transient_failure_retries_with_persisted_attempt_count(
     kernel, _stopped = _kernel(tmp_path)
     attempts = []
     rolled_back = {}
-    monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(move_manager, "_CROSS_PROCESS_RECOVERY_SECONDS", 0.01)
     monkeypatch.setattr(
         move_manager,
         "get_outbound_move",
@@ -275,7 +276,7 @@ async def test_transient_failure_retries_with_persisted_attempt_count(
 async def test_unconfirmed_source_stop_never_activates_target(tmp_path, monkeypatch):
     kernel, _stopped = _kernel(tmp_path)
     monkeypatch.setattr(move_manager, "_MAX_EXECUTION_ATTEMPTS", 1)
-    monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(move_manager, "_CROSS_PROCESS_RECOVERY_SECONDS", 0.01)
     stop_attempts = 0
 
     async def fail_stop(_agent_name: str, reason: str = ""):
@@ -348,6 +349,7 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
     manager = move_manager.AgentMoveManager(kernel)
     await manager.start()
     try:
+        started = asyncio.get_running_loop().time()
         accepted = move_manager.enqueue_agent_move(
             tmp_path,
             {},
@@ -355,7 +357,8 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
             requested_by="cli",
             origin={"surface": "cli"},
         )
-        completed = await manager.wait("clone-cli")
+        completed = await asyncio.wait_for(manager.wait("clone-cli"), timeout=3.0)
+        latency = asyncio.get_running_loop().time() - started
     finally:
         await manager.stop()
 
@@ -363,6 +366,33 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
     assert completed["status"] == "completed"
     assert completed["origin"] == {"surface": "cli"}
     assert calls == ["confirm"]
+    assert latency < 2.5
+
+
+@pytest.mark.asyncio
+async def test_idle_manager_reads_recovery_state_once_until_bounded_fallback(
+    tmp_path, monkeypatch
+):
+    kernel, _stopped = _kernel(tmp_path)
+    manager = move_manager.AgentMoveManager(kernel)
+    calls = 0
+    original = manager._load_operations
+
+    def counted_load():
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(manager, "_load_operations", counted_load)
+    monkeypatch.setattr(move_manager, "_CROSS_PROCESS_RECOVERY_SECONDS", 60.0)
+
+    await manager.start()
+    try:
+        await __import__("asyncio").sleep(0.05)
+    finally:
+        await manager.stop()
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio

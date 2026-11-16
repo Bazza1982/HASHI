@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 from urllib import request as urllib_request
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 
 from orchestrator.hchat_attachment_contract import (
     HCHAT_ATTACHMENT_CLAIM_KEY,
@@ -121,6 +121,9 @@ TERMINAL_INFLIGHT_STATES = {
     "confirmation_expired",
     "confirmation_superseded",
 }
+_BOOTSTRAP_INSTANCE_BUDGET_SECONDS = 4.0
+_BOOTSTRAP_MAX_ROUTE_PROBES = 4
+_BOOTSTRAP_CONCURRENCY = 4
 
 
 def build_default_capabilities(*, rescue_start_enabled: bool = True) -> list[str]:
@@ -141,7 +144,7 @@ class ProtocolManager:
         local_capabilities: list[str] | None = None,
         max_allowed_ttl: int = 8,
         handshake_timeout_seconds: int = 8,
-        poll_interval_seconds: float = 0.5,
+        poll_interval_seconds: float = 30.0,
         settle_window_seconds: float = 2.0,
         use_tls: bool = True,
         discovery_status_provider: Callable[[], dict[str, Any]] | None = None,
@@ -153,11 +156,11 @@ class ProtocolManager:
         self._capabilities = list(local_capabilities or DEFAULT_CAPABILITIES)
         self._max_allowed_ttl = max(1, int(max_allowed_ttl))
         self._handshake_timeout_seconds = max(2, int(handshake_timeout_seconds))
-        self._poll_interval_seconds = max(0.2, float(poll_interval_seconds))
+        self._poll_interval_seconds = max(1.0, float(poll_interval_seconds))
         self._settle_window_seconds = max(0.5, float(settle_window_seconds))
         self._use_tls = bool(use_tls)
         self._discovery_status_provider = discovery_status_provider
-        self._bootstrap_retry_seconds = 60.0
+        self._bootstrap_retry_seconds = 300.0
         self._state_dir = Path.home() / ".hashi-remote"
         self._state_dir.mkdir(parents=True, exist_ok=True)
         instance_key = str(instance_info.get("instance_id") or "hashi").lower()
@@ -172,11 +175,22 @@ class ProtocolManager:
         self._credential_config_state = "configured" if self._shared_token else "absent"
         self._credential_config_error = ""
         self._task: asyncio.Task | None = None
+        self._bootstrap_task: asyncio.Task | None = None
+        self._control_maintenance_task: asyncio.Task | None = None
+        self._control_wakeup = asyncio.Event()
         self._running = False
         self._last_bootstrap_run = 0.0
         self._last_handshake_run = 0.0
         self._last_refresh_run = 0.0
+        self._last_agent_snapshot_check = 0.0
+        self._last_superloop_review = 0.0
         self._last_agent_snapshot_version = ""
+        self._last_agent_file_signature: tuple[int, int] | None = None
+        self._last_instances_file_signature: tuple | None = None
+        self._instances_cache_loaded = False
+        self._instances_cache: dict[str, Any] = {}
+        self._last_instances_source_check_monotonic = 0.0
+        self._instances_source_check_interval_seconds = 1.0
         self._last_agent_directory_state = "core_offline"
         self._force_handshake = False
         self._agent_snapshot_cache: list[dict[str, Any]] = []
@@ -189,6 +203,25 @@ class ProtocolManager:
         self._workbench_identity_cache: dict[
             tuple[str, int], tuple[float, bool]
         ] = {}
+        self._route_probe_state: dict[tuple[str, str, int], dict[str, float]] = {}
+        self._last_successful_routes: dict[str, tuple[str, int]] = {}
+        self._activity: dict[str, int] = {
+            "control_wakeups": 0,
+            "bootstrap_runs": 0,
+            "bootstrap_known_peer_skips": 0,
+            "route_probes": 0,
+            "route_circuit_skips": 0,
+            "liveness_backoff_skips": 0,
+            "handshake_backoff_skips": 0,
+            "liveness_runs": 0,
+            "handshake_runs": 0,
+            "core_health_checks": 0,
+            "agent_snapshot_checks": 0,
+            "agent_snapshot_file_reads": 0,
+            "instances_source_checks": 0,
+            "instances_file_reads": 0,
+            "inflight_cycles": 0,
+        }
 
     def get_protocol_status(self) -> dict:
         peers = []
@@ -250,7 +283,160 @@ class ProtocolManager:
             "inflight_total_count": total_inflight_count,
             "inflight_terminal_count": total_inflight_count - active_inflight_count,
             "max_allowed_ttl": self._max_allowed_ttl,
+            "activity": dict(getattr(self, "_activity", {})),
+            "peer_registry_activity": (
+                self._peer_registry.activity_snapshot()
+                if self._peer_registry is not None
+                and callable(getattr(self._peer_registry, "activity_snapshot", None))
+                else {}
+            ),
         }
+
+    def _count_activity(self, name: str, amount: int = 1) -> None:
+        activity = getattr(self, "_activity", None)
+        if activity is None:
+            activity = self._activity = {}
+        activity[name] = int(activity.get(name, 0) or 0) + int(amount)
+
+    def _wake_control_loop(self) -> None:
+        wakeup = getattr(self, "_control_wakeup", None)
+        if wakeup is not None:
+            wakeup.set()
+
+    def _start_bootstrap_task(self, *, initial_delay: float = 0.0) -> bool:
+        current = getattr(self, "_bootstrap_task", None)
+        if current is not None and not current.done():
+            return False
+        task = asyncio.create_task(
+            self._bootstrap_known_peers(initial_delay=initial_delay),
+            name="remote-peer-bootstrap",
+        )
+
+        def _completed(completed: asyncio.Task) -> None:
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("Remote peer bootstrap failed: %s", exc)
+            self._wake_control_loop()
+
+        task.add_done_callback(_completed)
+        self._bootstrap_task = task
+        return True
+
+    @staticmethod
+    def _peer_retry_backoff_seconds(peer) -> float:
+        """Return bounded retry delay for a peer already known to be offline."""
+
+        props = dict(getattr(peer, "properties", {}) or {})
+        try:
+            failures = max(0, int(props.get("consecutive_failures") or 0))
+        except (TypeError, ValueError):
+            failures = 0
+        if failures < 2:
+            return 0.0
+        # One quick confirmation is retained. Continued failure backs off to
+        # five minutes without creating another retry owner or timer task.
+        return min(300.0, 30.0 * (2 ** min(failures - 2, 4)))
+
+    def _peer_retry_due(self, peer, *, now: float | None = None) -> bool:
+        delay = self._peer_retry_backoff_seconds(peer)
+        if delay <= 0:
+            return True
+        props = dict(getattr(peer, "properties", {}) or {})
+        try:
+            last_failure = max(
+                float(props.get("last_seen_error") or 0),
+                float(props.get("last_handshake_at") or 0),
+            )
+        except (TypeError, ValueError):
+            last_failure = 0.0
+        if last_failure <= 0:
+            return True
+        return float(time.time() if now is None else now) - last_failure >= delay
+
+    @staticmethod
+    def _route_probe_key(instance_id: str, host: str, port: int) -> tuple[str, str, int]:
+        return (
+            str(instance_id or "").strip().upper(),
+            str(host or "").strip().lower(),
+            int(port or 0),
+        )
+
+    def _route_probe_allowed(
+        self,
+        instance_id: str,
+        host: str,
+        port: int,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        state = getattr(self, "_route_probe_state", {}).get(
+            self._route_probe_key(instance_id, host, port), {}
+        )
+        allowed = float(state.get("next_probe_at", 0.0) or 0.0) <= float(
+            time.time() if now is None else now
+        )
+        if not allowed:
+            self._count_activity("route_circuit_skips")
+        return allowed
+
+    def _record_route_probe(
+        self,
+        instance_id: str,
+        host: str,
+        port: int,
+        *,
+        ok: bool,
+    ) -> None:
+        key = self._route_probe_key(instance_id, host, port)
+        states = getattr(self, "_route_probe_state", None)
+        if states is None:
+            states = self._route_probe_state = {}
+        self._count_activity("route_probes")
+        if ok:
+            states.pop(key, None)
+            routes = getattr(self, "_last_successful_routes", None)
+            if routes is None:
+                routes = self._last_successful_routes = {}
+            routes[key[0]] = (str(host), int(port))
+            return
+        previous = states.get(key, {})
+        failures = int(previous.get("failures", 0) or 0) + 1
+        # Five seconds permits quick recovery from a transient loss; repeated
+        # failures open the endpoint circuit for at most five minutes.
+        delay = min(300.0, 5.0 * (2 ** min(failures - 1, 6)))
+        states[key] = {
+            "failures": float(failures),
+            "next_probe_at": time.time() + delay,
+        }
+
+    def _ordered_candidate_hosts(
+        self,
+        instance_id: str,
+        port: int,
+        hosts: list[str],
+    ) -> list[str]:
+        ordered = list(dict.fromkeys(str(host) for host in hosts if str(host).strip()))
+        preferred = getattr(self, "_last_successful_routes", {}).get(
+            str(instance_id or "").strip().upper()
+        )
+        if preferred and int(preferred[1]) == int(port) and preferred[0] in ordered:
+            ordered.remove(preferred[0])
+            ordered.insert(0, preferred[0])
+        return ordered
+
+    def _select_candidate_host(
+        self,
+        instance_id: str,
+        port: int,
+        hosts: list[str],
+    ) -> str:
+        for host in self._ordered_candidate_hosts(instance_id, port, hosts):
+            if self._route_probe_allowed(instance_id, host, int(port)):
+                return host
+        return ""
 
     def reload_shared_token(self, token: str | None) -> bool:
         """Adopt a credential change and invalidate every established trust result."""
@@ -267,6 +453,7 @@ class ProtocolManager:
                     peer.instance_id,
                     state="rehydrate_required",
                 )
+        self._wake_control_loop()
         return True
 
     def record_shared_token_config_state(self, state: str, error: str = "") -> None:
@@ -278,9 +465,15 @@ class ProtocolManager:
             "invalid",
         }
         normalized = str(state or "unknown").strip().lower()
+        previous = (
+            getattr(self, "_credential_config_state", "unknown"),
+            getattr(self, "_credential_config_error", ""),
+        )
         self._credential_config_state = normalized if normalized in allowed_states else "unknown"
         # The loader emits classifications only; never surface exception text or bytes.
         self._credential_config_error = str(error or "")[:120]
+        if previous != (self._credential_config_state, self._credential_config_error):
+            self._wake_control_loop()
 
     @property
     def display_handle(self) -> str:
@@ -441,6 +634,21 @@ class ProtocolManager:
         self.get_local_agents_snapshot()
         return dict(self._agent_snapshot_meta)
 
+    def get_cached_local_agent_directory_state(self) -> dict[str, Any]:
+        """Project the last owner-refreshed directory state without new I/O."""
+
+        return dict(
+            getattr(
+                self,
+                "_agent_snapshot_meta",
+                {
+                    "version": "",
+                    "directory_state": "core_offline",
+                    "updated_at": 0,
+                },
+            )
+        )
+
     def get_local_agents_snapshot(self) -> list[dict]:
         if not getattr(self, "_hashi_root", None):
             self._agent_snapshot_meta = {"version": "", "directory_state": "core_offline", "updated_at": int(time.time())}
@@ -449,6 +657,7 @@ class ProtocolManager:
         core_online = self._core_online()
         cache = list(getattr(self, "_agent_snapshot_cache", []) or [])
         if not agents_path.exists():
+            self._last_agent_file_signature = None
             directory_state = self._agent_directory_state(agents_readable=False, core_online=core_online, has_cache=bool(cache))
             snapshot = [dict(item, directory_state=directory_state) for item in cache]
             self._agent_snapshot_meta = {
@@ -458,7 +667,29 @@ class ProtocolManager:
             }
             return snapshot
         try:
+            stat = agents_path.stat()
+            signature = (int(stat.st_mtime_ns), int(stat.st_size))
+            if (
+                signature == getattr(self, "_last_agent_file_signature", None)
+                and getattr(self, "_last_agent_snapshot_version", "")
+            ):
+                directory_state = self._agent_directory_state(
+                    agents_readable=True,
+                    core_online=core_online,
+                    has_cache=True,
+                )
+                snapshot = [
+                    dict(item, directory_state=directory_state) for item in cache
+                ]
+                self._agent_snapshot_cache = snapshot
+                self._agent_snapshot_meta = {
+                    "version": self._last_agent_snapshot_version,
+                    "directory_state": directory_state,
+                    "updated_at": int(time.time()),
+                }
+                return snapshot
             raw = agents_path.read_bytes()
+            self._count_activity("agent_snapshot_file_reads")
             data = json.loads(raw.decode("utf-8-sig"))
         except Exception:
             directory_state = self._agent_directory_state(agents_readable=False, core_online=core_online, has_cache=bool(cache))
@@ -469,6 +700,7 @@ class ProtocolManager:
                 "updated_at": int(time.time()),
             }
             return snapshot
+        self._last_agent_file_signature = signature
         version = self._agent_snapshot_version(agents_path, raw)
         directory_state = self._agent_directory_state(agents_readable=True, core_online=core_online, has_cache=bool(cache))
         snapshot = []
@@ -507,6 +739,7 @@ class ProtocolManager:
         self._last_agent_directory_state = current_state
         if changed:
             self._force_handshake = True
+            self._wake_control_loop()
             logger.info("Agent directory snapshot changed: %s/%s -> %s/%s", previous, previous_state, current, current_state)
         return changed
 
@@ -514,6 +747,11 @@ class ProtocolManager:
         if self._running:
             return
         self._running = True
+        # Seed the cache once. Thereafter the protocol control loop is the sole
+        # directory-refresh owner; discovery advertising reads this projection
+        # instead of duplicating Core health and agents.json work.
+        self._refresh_local_agent_snapshot_if_changed()
+        self._last_agent_snapshot_check = time.time()
         # Reset any stale handshake_in_progress states left over from a previous run.
         # These would otherwise block the handshake cycle indefinitely.
         if self._peer_registry:
@@ -524,11 +762,14 @@ class ProtocolManager:
         # Bootstrap known peers from instances.json before first handshake cycle.
         # This ensures peers are reachable even when mDNS multicast fails
         # (e.g. WSL2 → physical LAN boundary).
-        asyncio.create_task(self._bootstrap_known_peers(initial_delay=2.0))
+        self._last_bootstrap_run = time.time()
+        self._control_wakeup.clear()
+        self._start_bootstrap_task(initial_delay=2.0)
         self._task = asyncio.create_task(self._control_loop())
 
     async def stop(self) -> None:
         self._running = False
+        self._wake_control_loop()
         if self._task:
             self._task.cancel()
             try:
@@ -536,60 +777,100 @@ class ProtocolManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        control_maintenance = getattr(self, "_control_maintenance_task", None)
+        if control_maintenance:
+            control_maintenance.cancel()
+            await asyncio.gather(control_maintenance, return_exceptions=True)
+            self._control_maintenance_task = None
+        if self._bootstrap_task:
+            self._bootstrap_task.cancel()
+            await asyncio.gather(self._bootstrap_task, return_exceptions=True)
+            self._bootstrap_task = None
 
     async def _bootstrap_known_peers(self, *, initial_delay: float = 0.0) -> None:
         """
-        Probe peers listed in instances.json and register reachable ones.
+        Probe unregistered peers listed in instances.json and register reachable ones.
 
         This is a fallback for environments where mDNS multicast doesn't cross
         network boundaries (e.g. WSL2 to physical LAN). Any instance that has
         a remote_port and a reachable host is injected into the peer registry so
-        the normal handshake cycle can then proceed with it.
+        the normal handshake cycle can then proceed with it. Once a peer is in
+        the registry, liveness and handshake are its sole recovery owners; they
+        already consume current route candidates and apply peer/endpoint backoff.
         """
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)  # Give discovery backends a moment before first bootstrap
+        self._count_activity("bootstrap_runs")
         self._last_bootstrap_run = time.time()
         local_id = str(self._instance_info.get("instance_id") or "").upper()
         instances = self._dedupe_bootstrap_instances(self._load_instances())
-        live_endpoints = read_live_endpoints(self._hashi_root)
-        for key, entry in instances.items():
+        live_endpoints = read_live_endpoints(self._hashi_root) if instances else {}
+        semaphore = asyncio.Semaphore(_BOOTSTRAP_CONCURRENCY)
+
+        async def probe_entry(key: str, entry: dict) -> None:
             if not isinstance(entry, dict):
-                continue
+                return
             instance_id = str(entry.get("instance_id") or key).upper()
             if not is_valid_instance_id(instance_id):
                 logger.debug("Bootstrap: skipping invalid instance identity from seed: %s", instance_id or key)
-                continue
+                return
             if instance_id == local_id:
-                continue
+                return
             existing_peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
-            if existing_peer and self._bootstrap_existing_peer_is_healthy(existing_peer):
-                continue  # Already known via a healthy discovery path.
-            if existing_peer and self._bootstrap_existing_peer_has_live_discovery(existing_peer):
-                continue  # Live discovery already owns this peer; don't re-inject fallback routes.
+            if existing_peer:
+                self._count_activity("bootstrap_known_peer_skips")
+                return
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
                 logger.debug("Bootstrap: %s has no live or fallback probe ports, skipping", instance_id)
-                continue
+                return
             seen_hosts = self._candidate_hosts_for_entry(entry)
-
-            for host in seen_hosts:
-                selected_port = None
-                for remote_port in probe_ports:
-                    reachable = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda h=host, p=int(remote_port), iid=instance_id: self._probe_instance_route(h, p, iid, timeout=2),
-                    )
-                    if reachable:
-                        selected_port = int(remote_port)
+            routes: list[tuple[str, int]] = []
+            for remote_port in probe_ports:
+                for host in self._ordered_candidate_hosts(
+                    instance_id, int(remote_port), seen_hosts
+                ):
+                    route = (host, int(remote_port))
+                    if route not in routes and self._route_probe_allowed(
+                        instance_id, host, int(remote_port)
+                    ):
+                        routes.append(route)
+            preferred = getattr(self, "_last_successful_routes", {}).get(instance_id)
+            if preferred in routes:
+                routes.remove(preferred)
+                routes.insert(0, preferred)
+            async with semaphore:
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + _BOOTSTRAP_INSTANCE_BUDGET_SECONDS
+                )
+                for host, remote_port in routes[:_BOOTSTRAP_MAX_ROUTE_PROBES]:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
                         break
-                if selected_port:
+                    probe_timeout = max(0.1, min(2.0, remaining))
+                    reachable = await asyncio.to_thread(
+                        self._probe_instance_route,
+                        host,
+                        int(remote_port),
+                        instance_id,
+                        timeout=probe_timeout,
+                    )
+                    self._record_route_probe(
+                        instance_id,
+                        host,
+                        int(remote_port),
+                        ok=bool(reachable),
+                    )
+                    if not reachable:
+                        continue
                     from remote.peer.base import PeerInfo
                     peer = PeerInfo(
                         instance_id=instance_id,
                         display_name=str(live_entry.get("display_name") or entry.get("display_name") or instance_id),
                         host=host,
-                        port=selected_port,
+                        port=int(remote_port),
                         workbench_port=int(
                             live_entry.get("workbench_port")
                             or entry.get("workbench_port")
@@ -611,10 +892,14 @@ class ProtocolManager:
                     )
                     if self._peer_registry:
                         self._peer_registry.on_peers_changed([peer])
-                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, selected_port)
-                    break
-                else:
-                    logger.debug("Bootstrap: %s @ %s ports=%s not reachable", instance_id, host, probe_ports)
+                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, int(remote_port))
+                    self._wake_control_loop()
+                    return
+            logger.debug("Bootstrap: %s routes=%s not reachable", instance_id, routes[:_BOOTSTRAP_MAX_ROUTE_PROBES])
+
+        await asyncio.gather(*(
+            probe_entry(key, entry) for key, entry in instances.items()
+        ))
 
     def _bootstrap_probe_ports(self, entry: dict, live_entry: dict | None = None) -> list[int]:
         ports: list[int] = []
@@ -637,19 +922,6 @@ class ProtocolManager:
         if platform in {"windows", "linux", "darwin", "macos"} or environment in {"windows", "linux", "darwin", "macos"}:
             add(DEFAULT_REMOTE_PORT)
         return ports
-
-    def _bootstrap_existing_peer_is_healthy(self, peer) -> bool:
-        properties = dict(getattr(peer, "properties", None) or {})
-        live_status = str(properties.get("live_status") or "").strip().lower()
-        handshake_state = str(properties.get("handshake_state") or "").strip().lower()
-        if live_status == "online":
-            return True
-        return handshake_state == "handshake_accepted"
-
-    def _bootstrap_existing_peer_has_live_discovery(self, peer) -> bool:
-        properties = dict(getattr(peer, "properties", None) or {})
-        preferred = str(properties.get("preferred_backend") or properties.get("discovery") or "").strip().lower()
-        return preferred in {"lan", "tailscale"}
 
     def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
@@ -704,9 +976,21 @@ class ProtocolManager:
     def _dedupe_bootstrap_instances(self, instances: dict) -> dict:
         if not isinstance(instances, dict):
             return {}
-        best_by_endpoint: dict[tuple[str, int, int], tuple[str, dict]] = {}
+        # One instance identity owns one bootstrap candidate.  Multiple legacy
+        # aliases/addresses for the same instance must not each impose their
+        # own synchronous timeout budget.
+        best_by_instance: dict[str, tuple[str, dict]] = {}
         for key, entry in instances.items():
             if not isinstance(entry, dict):
+                continue
+            iid = str(entry.get("instance_id") or key).strip().upper()
+            chosen = best_by_instance.get(iid)
+            if chosen is None or self._bootstrap_entry_score(entry) > self._bootstrap_entry_score(chosen[1]):
+                best_by_instance[iid] = (key, entry)
+        instance_keys = {key for key, _entry in best_by_instance.values()}
+        best_by_endpoint: dict[tuple[str, int, int], tuple[str, dict]] = {}
+        for key, entry in instances.items():
+            if not isinstance(entry, dict) or key not in instance_keys:
                 continue
             endpoint_key = self._bootstrap_entry_endpoint_key(entry)
             if endpoint_key is None:
@@ -719,6 +1003,8 @@ class ProtocolManager:
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
+            if key not in instance_keys:
+                continue
             endpoint_key = self._bootstrap_entry_endpoint_key(entry)
             if endpoint_key is not None and key not in keep_keys:
                 instance_id = str(entry.get("instance_id") or key).upper()
@@ -729,49 +1015,168 @@ class ProtocolManager:
             deduped[key] = entry
         return deduped
 
+    def _start_control_maintenance_task(
+        self,
+        *,
+        run_core_health: bool,
+        run_liveness: bool,
+        run_handshake: bool,
+    ) -> bool:
+        current = getattr(self, "_control_maintenance_task", None)
+        if current is not None and not current.done():
+            return False
+        if not run_core_health and not run_liveness and not run_handshake:
+            return False
+        self._control_maintenance_task = asyncio.create_task(
+            self._run_control_maintenance(
+                run_core_health=run_core_health,
+                run_liveness=run_liveness,
+                run_handshake=run_handshake,
+            ),
+            name="remote-control-maintenance",
+        )
+        return True
+
+    async def _run_control_maintenance(
+        self,
+        *,
+        run_core_health: bool,
+        run_liveness: bool,
+        run_handshake: bool,
+    ) -> None:
+        """Run slow control probes outside the message-processing critical path."""
+        try:
+            if run_core_health:
+                self._count_activity("core_health_checks")
+                try:
+                    await self._refresh_core_online()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Local Workbench health maintenance failed: %s", exc)
+                finally:
+                    _checked_at, online = getattr(
+                        self, "_core_health_cache", (0.0, False)
+                    )
+                    self._core_health_cache = (time.time(), bool(online))
+            if run_liveness:
+                try:
+                    attempts = await self._refresh_peer_liveness_once()
+                    if attempts:
+                        self._count_activity("liveness_runs")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Remote peer liveness maintenance failed: %s", exc)
+                finally:
+                    self._last_refresh_run = time.time()
+            if run_handshake or getattr(self, "_force_handshake", False):
+                try:
+                    attempts = await self._handshake_once()
+                    if attempts:
+                        self._count_activity("handshake_runs")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Remote peer handshake maintenance failed: %s", exc)
+                finally:
+                    self._last_handshake_run = time.time()
+        finally:
+            if (
+                getattr(self, "_control_maintenance_task", None)
+                is asyncio.current_task()
+            ):
+                self._control_maintenance_task = None
+            self._wake_control_loop()
+
     async def _control_loop(self) -> None:
         while self._running:
+            wakeup = getattr(self, "_control_wakeup", None)
+            if wakeup is None:
+                wakeup = self._control_wakeup = asyncio.Event()
+            wakeup.clear()
+            active_inflight = False
             try:
+                self._count_activity("control_wakeups")
                 now = time.time()
                 if now - self._last_bootstrap_run >= self._bootstrap_retry_seconds:
-                    await self._bootstrap_known_peers()
+                    self._start_bootstrap_task()
                     self._last_bootstrap_run = now
-                if now - self._last_refresh_run >= 30:
-                    await self._refresh_peer_liveness_once()
-                    self._last_refresh_run = now
                 core_health_cache = getattr(
                     self, "_core_health_cache", (0.0, False)
                 )
-                core_health_checked_at = float(core_health_cache[0])
-                if now - core_health_checked_at >= 5:
-                    await self._refresh_core_online()
-                self._refresh_local_agent_snapshot_if_changed()
-                if now - self._last_handshake_run >= 5:
-                    await self._handshake_once()
-                    self._last_handshake_run = now
-                await self._process_inflight_once()
+                self._start_control_maintenance_task(
+                    run_core_health=now - float(core_health_cache[0]) >= 30,
+                    run_liveness=now - self._last_refresh_run >= 120,
+                    run_handshake=(
+                        getattr(self, "_force_handshake", False)
+                        or now - self._last_handshake_run >= 30
+                    ),
+                )
+                if now - getattr(self, "_last_agent_snapshot_check", 0.0) >= 30:
+                    self._count_activity("agent_snapshot_checks")
+                    self._refresh_local_agent_snapshot_if_changed()
+                    self._last_agent_snapshot_check = now
+                active_inflight = any(
+                    str((item or {}).get("state") or "")
+                    not in TERMINAL_INFLIGHT_STATES
+                    or bool((item or {}).get("delivery_status_pending"))
+                    for item in getattr(self, "_inflight", {}).values()
+                )
+                if active_inflight or now - getattr(self, "_last_superloop_review", 0.0) >= 30:
+                    self._count_activity("inflight_cycles")
+                    await self._process_inflight_once()
+                    self._last_superloop_review = now
             except Exception as exc:
                 logger.warning("Protocol control loop failed: %s", exc)
-            await asyncio.sleep(self._poll_interval_seconds)
+            if not self._running:
+                break
+            try:
+                await asyncio.wait_for(
+                    wakeup.wait(),
+                    timeout=0.5 if active_inflight else self._poll_interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
 
-    async def _refresh_peer_liveness_once(self) -> None:
+    async def _refresh_peer_liveness_once(self) -> int:
         if not self._peer_registry:
-            return
+            return 0
         semaphore = asyncio.Semaphore(4)
 
-        async def refresh(peer) -> bool:
+        async def refresh(peer) -> bool | None:
             async with semaphore:
                 return await self._refresh_single_peer_liveness(peer)
 
-        await asyncio.gather(*(refresh(peer) for peer in self._peer_registry.get_peers()))
+        results = await asyncio.gather(
+            *(refresh(peer) for peer in self._peer_registry.get_peers())
+        )
+        return sum(result is not None for result in results)
 
-    async def _refresh_single_peer_liveness(self, peer, *, timeout: float = 4) -> bool:
+    async def _refresh_single_peer_liveness(
+        self, peer, *, timeout: float = 4
+    ) -> bool | None:
         if not self._peer_registry or peer is None:
             return False
-        candidate_hosts = self._candidate_hosts_for_peer(peer)
+        if not self._peer_retry_due(peer):
+            self._count_activity("liveness_backoff_skips")
+            return None
+        ordered_hosts = self._ordered_candidate_hosts(
+            peer.instance_id,
+            int(peer.port),
+            self._candidate_hosts_for_peer(peer),
+        )
+        selected_host = self._select_candidate_host(
+            peer.instance_id, int(peer.port), ordered_hosts
+        )
+        candidate_hosts = [selected_host] if selected_host else []
+        if not candidate_hosts:
+            return None
         last_exc = None
         refreshed = False
+        attempted = False
         for host in candidate_hosts:
+            attempted = True
             for url in self._candidate_urls(host, peer.port, "/health"):
                 try:
                     health = await asyncio.get_running_loop().run_in_executor(
@@ -803,14 +1208,21 @@ class ProtocolManager:
                         host_identity=str(network_profile.get("host_identity") or ""),
                         environment_kind=str(network_profile.get("environment_kind") or ""),
                     )
+                    self._record_route_probe(
+                        peer.instance_id, host, int(peer.port), ok=True
+                    )
                     refreshed = True
                     break
                 except Exception as exc:
                     last_exc = exc
                     logger.debug("Liveness refresh: %s via %s failed: %s", peer.instance_id, url, exc)
+            if not refreshed:
+                self._record_route_probe(
+                    peer.instance_id, host, int(peer.port), ok=False
+                )
             if refreshed:
                 break
-        if not refreshed:
+        if not refreshed and attempted:
             self._peer_registry.mark_refresh_result(
                 peer.instance_id,
                 ok=False,
@@ -856,28 +1268,33 @@ class ProtocolManager:
             logger.info("Status liveness refresh: checked=%s refreshed=%s skipped=%s", checked, refreshed, skipped)
         return {"checked": checked, "refreshed": refreshed, "skipped": skipped}
 
-    async def _handshake_once(self) -> None:
+    async def _handshake_once(self) -> int:
         if not self._peer_registry:
-            return
+            return 0
+        attempt_count = 0
         for peer in self._peer_registry.get_peers():
             state = str((peer.properties or {}).get("handshake_state") or "handshake_pending")
             last_handshake_at = float((peer.properties or {}).get("last_handshake_at") or 0)
-            should_revalidate = state == "handshake_accepted" and (time.time() - last_handshake_at) >= 30
+            handshake_age = time.time() - last_handshake_at
+            should_revalidate = state in {
+                "handshake_accepted",
+                "handshake_rejected",
+            } and handshake_age >= 300
             should_revalidate = should_revalidate or bool(getattr(self, "_force_handshake", False))
-            if state == "handshake_in_progress":
+            if state == "handshake_in_progress" and handshake_age < 30:
                 continue
-            if state == "handshake_accepted" and not should_revalidate:
+            if state in {"handshake_accepted", "handshake_rejected"} and not should_revalidate:
                 continue
-            # A periodic revalidation must not erase the last accepted trust
-            # state while the new handshake is in flight.  The previous code
-            # briefly published zero trusted peers, so an unrelated startup
-            # health probe could latch a false Remote degradation.  First-time
-            # handshakes still expose their in-progress state as before.
-            if state != "handshake_accepted":
-                self._peer_registry.mark_handshake_result(
-                    peer.instance_id,
-                    state="handshake_in_progress",
-                )
+            if (
+                state in {"handshake_timed_out", "unreachable"}
+                and not getattr(self, "_force_handshake", False)
+                and not self._peer_retry_due(peer)
+            ):
+                self._count_activity("handshake_backoff_skips")
+                continue
+            # Keep the last durable state while an outbound attempt is in
+            # flight.  A transient in-progress write both caused unnecessary
+            # disk churn and could briefly erase accepted trust from health.
             local_profile = self._local_network_profile()
             payload = {
                 "from_instance": self._instance_info.get("instance_id"),
@@ -899,15 +1316,33 @@ class ProtocolManager:
                 "address_candidates": list(local_profile.get("address_candidates") or []),
                 "observed_candidates": list(local_profile.get("observed_candidates") or []),
             }
-            candidate_hosts = self._candidate_hosts_for_peer(peer)
+            ordered_hosts = self._ordered_candidate_hosts(
+                peer.instance_id,
+                int(peer.port),
+                self._candidate_hosts_for_peer(peer),
+            )
+            selected_host = self._select_candidate_host(
+                peer.instance_id, int(peer.port), ordered_hosts
+            )
+            candidate_hosts = [selected_host] if selected_host else []
+
+            if not candidate_hosts:
+                continue
 
             succeeded = False
+            attempted = False
+            attempt_count += 1
             for host in candidate_hosts:
+                attempted = True
                 for url in self._candidate_urls(host, peer.port, "/protocol/handshake"):
                     try:
                         result = await asyncio.get_running_loop().run_in_executor(
                             None,
-                            lambda u=url: self._post_json(u, payload, timeout=self._handshake_timeout_seconds),
+                            lambda u=url: self._post_json(
+                                u,
+                                payload,
+                                timeout=min(3.0, self._handshake_timeout_seconds),
+                            ),
                         )
                         remote_instance = str(result.get("instance_id") or "").strip().upper()
                         if remote_instance and remote_instance != peer.instance_id.upper():
@@ -923,6 +1358,9 @@ class ProtocolManager:
                                 peer.instance_id,
                                 state="handshake_rejected",
                                 last_error=str(result.get("reason") or "rejected"),
+                            )
+                            self._record_route_probe(
+                                peer.instance_id, host, int(peer.port), ok=True
                             )
                             succeeded = True
                             break
@@ -984,20 +1422,28 @@ class ProtocolManager:
                             remote_agent_directory=dict(result.get("agent_directory") or {}),
                             remote_supervisor=dict(result.get("remote_supervisor") or {}),
                         )
+                        self._record_route_probe(
+                            peer.instance_id, host, int(peer.port), ok=True
+                        )
                         succeeded = True
                         break
                     except Exception as exc:
                         logger.debug("Handshake: %s via %s failed: %s", peer.instance_id, url, exc)
+                if not succeeded:
+                    self._record_route_probe(
+                        peer.instance_id, host, int(peer.port), ok=False
+                    )
                 if succeeded:
                     break
 
-            if not succeeded:
+            if not succeeded and attempted:
                 self._peer_registry.mark_handshake_result(
                     peer.instance_id,
                     state="handshake_timed_out",
                     last_error=f"all hosts unreachable: {candidate_hosts}",
                 )
         self._force_handshake = False
+        return attempt_count
 
     def handle_handshake(self, payload: dict) -> dict:
         from_instance = str(payload.get("from_instance") or "").strip().upper()
@@ -1045,11 +1491,69 @@ class ProtocolManager:
                     "directory_state": str((payload.get("agent_directory") or {}).get("directory_state") or ""),
                 },
             )
-            self._peer_registry.on_peers_changed([peer])
-            logger.info(
-                "Handshake: reverse-registered %s @ %s:%d",
-                from_instance, effective_host, remote_port,
+            observation_is_equivalent = getattr(
+                self._peer_registry, "observation_is_equivalent", None
             )
+            equivalent = bool(
+                callable(observation_is_equivalent)
+                and observation_is_equivalent(
+                    peer,
+                    backend="handshake_inbound",
+                )
+            )
+            if not equivalent:
+                self._peer_registry.on_peers_changed([peer])
+                logger.info(
+                    "Handshake: reverse-registered %s @ %s:%d",
+                    from_instance,
+                    effective_host,
+                    remote_port,
+                )
+            else:
+                logger.debug(
+                    "Handshake: refreshed unchanged inbound peer %s",
+                    from_instance,
+                )
+            mark_handshake_result = getattr(
+                self._peer_registry, "mark_handshake_result", None
+            )
+            if callable(mark_handshake_result):
+                mark_handshake_result(
+                    from_instance,
+                    state="handshake_accepted",
+                    protocol_version=str(
+                        payload.get("protocol_version") or PROTOCOL_VERSION
+                    ),
+                    capabilities=list(payload.get("capabilities") or []),
+                    hashi_version=str(payload.get("hashi_version") or "unknown"),
+                    display_name=str(
+                        payload.get("display_name")
+                        or payload.get("display_handle")
+                        or from_instance
+                    ),
+                    display_handle=str(
+                        payload.get("display_handle")
+                        or f"@{from_instance.lower()}"
+                    ),
+                    remote_port=remote_port,
+                    workbench_port=int(
+                        payload.get("workbench_port") or DEFAULT_WORKBENCH_PORT
+                    ),
+                    platform=str(payload.get("platform") or "unknown"),
+                    host_identity=str(payload.get("host_identity") or ""),
+                    environment_kind=str(
+                        payload.get("environment_kind") or ""
+                    ),
+                    address_candidates=address_candidates,
+                    observed_candidates=observed_candidates,
+                    remote_agents=list(payload.get("agents") or []),
+                    remote_agent_directory=dict(
+                        payload.get("agent_directory") or {}
+                    ),
+                    remote_supervisor=dict(
+                        payload.get("remote_supervisor") or {}
+                    ),
+                )
 
         local_profile = self._local_network_profile()
         return {
@@ -3272,10 +3776,50 @@ class ProtocolManager:
         except Exception:
             return {}
 
+    @staticmethod
+    def _instances_file_signature(path: Path) -> tuple:
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return ("absent",)
+        except OSError as exc:
+            return ("unreadable", type(exc).__name__, int(exc.errno or 0))
+        return (
+            "file",
+            int(stat_result.st_mtime_ns),
+            int(stat_result.st_ctime_ns),
+            int(stat_result.st_size),
+            int(getattr(stat_result, "st_ino", 0) or 0),
+        )
+
     def _load_instances(self) -> dict:
         path = self._hashi_root / "instances.json"
+        now = time.monotonic()
+        if (
+            getattr(self, "_instances_cache_loaded", False)
+            and now
+            - float(getattr(self, "_last_instances_source_check_monotonic", 0.0))
+            < float(getattr(self, "_instances_source_check_interval_seconds", 1.0))
+        ):
+            return getattr(self, "_instances_cache", {})
+        self._last_instances_source_check_monotonic = now
+        self._count_activity("instances_source_checks")
+        signature = self._instances_file_signature(path)
+        if (
+            getattr(self, "_instances_cache_loaded", False)
+            and signature == getattr(self, "_last_instances_file_signature", None)
+        ):
+            return getattr(self, "_instances_cache", {})
         data = self._load_json(path)
-        return data.get("instances", {}) if isinstance(data, dict) else {}
+        instances = data.get("instances", {}) if isinstance(data, dict) else {}
+        if not isinstance(instances, dict):
+            instances = {}
+        self._last_instances_file_signature = signature
+        self._instances_cache_loaded = True
+        self._instances_cache = instances
+        if signature and signature[0] == "file":
+            self._count_activity("instances_file_reads")
+        return instances
 
     def _same_machine_hint(self, entry: dict) -> bool:
         if not isinstance(entry, dict):
@@ -3334,21 +3878,6 @@ class ProtocolManager:
             "local_instance": str(self._instance_info.get("instance_id") or "").upper(),
         }
 
-    def _probe_route(self, host: str, port: int, timeout: int = 2) -> bool:
-        for url in self._candidate_urls(host, port, "/health"):
-            req = urllib_request.Request(url, method="GET")
-            try:
-                context = ssl._create_unverified_context() if str(url).startswith("https://") else None
-                with urllib_request.urlopen(req, timeout=timeout, context=context):
-                    return True
-            except HTTPError:
-                return True
-            except URLError:
-                continue
-            except Exception:
-                continue
-        return False
-
     def _probe_instance_route(self, host: str, port: int, expected_instance_id: str, timeout: int = 2) -> bool:
         expected = str(expected_instance_id or "").strip().upper()
         for url in self._candidate_urls(host, port, "/health"):
@@ -3372,15 +3901,18 @@ class ProtocolManager:
         return self._candidate_urls(route["host"], route["port"], path)
 
     def _resolve_peer_route(self, instance_id: str):
-        peer = self._peer_registry.get_peer(str(instance_id or "")) if self._peer_registry else None
-        entry = self._load_instances().get(str(instance_id or "").lower())
+        normalized = str(instance_id or "").strip().upper()
+        peer = self._peer_registry.get_peer(normalized) if self._peer_registry else None
+        entry = self._load_instances().get(normalized.lower())
         if peer is not None:
             candidates = self._candidate_hosts_for_peer(peer)
-            selected_host = str(peer.host or "").strip() or (candidates[0] if candidates else "")
-            for host in candidates:
-                if self._probe_route(host, int(peer.port)):
-                    selected_host = host
-                    break
+            selected_host = self._select_candidate_host(
+                normalized,
+                int(peer.port),
+                candidates or [str(peer.host or "").strip()],
+            )
+            if not selected_host:
+                return None
             return {"host": selected_host, "port": peer.port, "instance_id": peer.instance_id}
         if not isinstance(entry, dict):
             return None
@@ -3390,11 +3922,13 @@ class ProtocolManager:
         candidates = self._candidate_hosts_for_entry(entry)
         if not candidates:
             return None
-        selected_host = candidates[0]
-        for host in candidates:
-            if self._probe_route(host, int(port)):
-                selected_host = host
-                break
+        selected_host = self._select_candidate_host(
+            normalized,
+            int(port),
+            candidates,
+        )
+        if not selected_host:
+            return None
         return {
             "host": selected_host,
             "port": int(port),
@@ -3449,4 +3983,5 @@ class ProtocolManager:
             json.dumps({"messages": self._inflight}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        self._wake_control_loop()
 # HASHI-Fingerprint: hfp_608bf402d1414783838e3abc04107bc9

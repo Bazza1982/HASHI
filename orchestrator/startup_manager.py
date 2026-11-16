@@ -102,6 +102,7 @@ class StartupManager:
         self.console_handler = console_handler
         self._startup_header_shown = False
         self._startup_animation_completed = False
+        self._remote_lifecycle_task: asyncio.Task[Any] | None = None
 
     def _presentation_identity(self, global_cfg=None) -> tuple[str, object]:
         paths = getattr(self.kernel, "paths", None)
@@ -182,8 +183,6 @@ class StartupManager:
         except Exception:
             wa_cfg = {}
 
-        await self._ensure_remote_lifecycle(global_cfg)
-
         if not initial_agent_names:
             self._show_startup_header(global_cfg)
             print("\n" + "=" * 64)
@@ -205,11 +204,11 @@ class StartupManager:
 
         if not self.kernel.runtimes:
             print("\n" + "*" * 64)
-            print("  CRITICAL ERROR: All agents failed to connect to Telegram.")
+            print("  CRITICAL ERROR: All Function Workers failed to start.")
             print("  Please check that:")
-            print("  1. Your Bot Tokens in 'secrets.json' are correct.")
-            print("  2. Your internet connection is active.")
-            print("  3. The Telegram API is not being blocked.")
+            print("  1. The selected backend engines are available.")
+            print("  2. The qualified Functions generation is usable.")
+            print("  3. Worker startup errors in the instance log are resolved.")
             print("*" * 64 + "\n")
             main_logger.critical("All agents failed to start. Exiting.")
             return False, wa_cfg
@@ -254,8 +253,8 @@ class StartupManager:
     async def _ensure_remote_lifecycle(self, global_config=None) -> None:
         if getattr(self.kernel, "_shared_replacement_candidate", False):
             # An uncommitted candidate cannot touch the old owner's Remote.
-            # RuntimeAppHost.commit restores configured Remote only after
-            # retirement, inside the pending connector/readiness boundary.
+            # The independent Remote supervisor keeps the healthy sidecar;
+            # shared replacement commit does not restart or inspect it.
             return
         if global_config is None:
             global_config = getattr(self.kernel, "global_cfg", None) or getattr(
@@ -338,6 +337,32 @@ class StartupManager:
         self.kernel.startup_status = status
         message = _format_remote_issue(issue)
         bridge_logger.warning(message)
+
+    def schedule_remote_lifecycle(self, global_config=None) -> asyncio.Task[Any] | None:
+        """Start or inspect Remote after local services are already usable.
+
+        A shared hot-replacement candidate deliberately does nothing: the
+        healthy sidecar remains owned by its independent supervisor.  The task
+        is single-owner and non-overlapping for cold/initial startup.
+        """
+
+        if getattr(self.kernel, "_shared_replacement_candidate", False):
+            return None
+        current = self._remote_lifecycle_task
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(
+            self._ensure_remote_lifecycle(global_config),
+            name="remote-lifecycle-activation",
+        )
+        self._remote_lifecycle_task = task
+
+        def clear(completed: asyncio.Task[Any]) -> None:
+            if self._remote_lifecycle_task is completed:
+                self._remote_lifecycle_task = None
+
+        task.add_done_callback(clear)
+        return task
 
     async def reconcile_remote_status(self, *, publish: bool = True) -> None:
         """Clear a latched startup Remote issue after live Remote recovery."""
@@ -576,9 +601,13 @@ class StartupManager:
                 return None, None
             pinned = getattr(self.kernel, "_startup_artifact", None)
             if pinned is not None:
-                from orchestrator.function_worker_supervisor import verify_generation_artifact
+                from orchestrator.kernel_artifact import validate_artifact_identity
                 generation, generation_root = pinned
-                await asyncio.to_thread(verify_generation_artifact, generation_root, generation)
+                await asyncio.to_thread(
+                    validate_artifact_identity,
+                    generation_root,
+                    generation.manifest.to_dict(),
+                )
             else:
                 generation, generation_root = await prepare()
             startup_progress.update(
@@ -911,10 +940,16 @@ class StartupManager:
         issues = [issue for issue in previous_issues if issue.get("code") not in {
             "agent_telegram_unavailable", "connector_activation"}]
         if unavailable:
+            ingress_owners = getattr(workers, "_telegram_ingress", {})
+            retryable = any(
+                (ingress := ingress_owners.get(name)) is not None
+                and not getattr(ingress, "permanent_failure_reason", None)
+                for name in unavailable
+            )
             issues.append({
                 "code": "agent_telegram_unavailable", "component": "telegram",
                 "severity": "warning", "summary": f"{len(unavailable)} agent(s) have no active Telegram connection.",
-                "automatic_retry": bool(any(name in getattr(workers, "_telegram_ingress", {}) for name in unavailable)),
+                "automatic_retry": retryable,
                 "details": {"agents": sorted(unavailable)},
             })
         if errors:
@@ -926,23 +961,17 @@ class StartupManager:
         order = [name for name in status.get("agent_order", states) if name not in removed]
         order.extend(name for name in states if name not in order)
         ready_agents = sum(state in {"online", "local"} for state in states.values())
-        # Local readiness is an independent projection of installed Workers
-        # and services. Telegram warnings cannot veto local readiness.
-        remote = dict(getattr(self.kernel, "remote_lifecycle_status", {}) or status.get("remote") or {})
-        route_unready = remote.get("enabled") is not False and (
-            remote.get("available") is False or (
-                pending and getattr(self.kernel, "_shared_replacement_continuity", False)
-                and not remote.get("available")
-            )
-        )
-        unrelated_connector_failure = any(name not in runtimes for name in errors)
-        local_ready = not route_unready and not unrelated_connector_failure and bool(status.get("services_ready")) and not status.get("failed_agents") and all(
+        # Local readiness is an independent projection of installed Workers and
+        # local services. Remote, Telegram, WhatsApp and other external
+        # connectors may degrade independently but cannot veto it.
+        local_ready = bool(status.get("services_ready")) and not status.get("failed_agents") and all(
             self._runtime_is_online(runtimes.get(name), state)
             for name, state in states.items()
         ) and not any(
             issue.get("severity") in {"warning", "error", "critical"}
-            and issue.get("component") != "telegram"
-            and issue.get("code") not in {"agent_telegram_unavailable", "connector_activation"}
+            and issue.get("component") not in {
+                "telegram", "remote", "whatsapp", "connectors"
+            }
             for issue in issues
         )
         status.update(agent_order=order, total=len(states), ready_agents=ready_agents,

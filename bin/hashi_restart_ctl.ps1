@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("ensure", "register", "start", "trigger", "unregister", "status")]
+    [ValidateSet("ensure", "register", "precheck", "start", "trigger", "unregister", "status")]
     [string]$Action = "status",
 
     [string]$HashiRoot,
@@ -8,7 +8,11 @@ param(
     [string]$Python,
     [string]$TaskUserId,
     [string]$InstanceId,
-    [string]$RuntimeDataRoot = $env:HASHI_DATA_ROOT
+    [string]$RuntimeDataRoot = $env:HASHI_DATA_ROOT,
+    [string]$OperationId,
+    [string]$ReceiptPath,
+    [ValidateRange(1, 300)]
+    [int]$TimeoutSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,8 +61,10 @@ $RuntimeController = Join-Path $CodeRoot "bin\bridge_ctl.ps1"
 if (-not (Test-Path -LiteralPath $RuntimeController -PathType Leaf)) {
     throw "Missing fixed HASHI runtime controller: $RuntimeController"
 }
+$LifecycleDirectory = Join-Path $HashiRoot "state\instance\cold-restart"
+$RequestPath = Join-Path $LifecycleDirectory "request.json"
 $LogPath = Join-Path $HashiRoot "logs\hashi-restart-task.log"
-$RestartTaskLimit = New-TimeSpan -Minutes 10
+$RestartTaskLimit = New-TimeSpan -Minutes 5
 $RunnerArgs = @(
     "-NoProfile",
     "-NonInteractive",
@@ -68,7 +74,8 @@ $RunnerArgs = @(
     "-HashiRoot", "`"$HashiRoot`"",
     "-CodeRoot", "`"$CodeRoot`"",
     "-LogPath", "`"$LogPath`"",
-    "-RuntimeTaskName", "`"$RuntimeTaskName`""
+    "-RuntimeTaskName", "`"$RuntimeTaskName`"",
+    "-RequestPath", "`"$RequestPath`""
 )
 $RunnerArgumentString = $RunnerArgs -join " "
 $RuntimeArgs = @(
@@ -80,7 +87,8 @@ $RuntimeArgs = @(
     "-BridgeHome", "`"$HashiRoot`"",
     "-Action", "start",
     "-Resume",
-    "-ApiGateway"
+    "-ApiGateway",
+    "-StartupRequestPath", ('"' + $RequestPath + '"')
 )
 if ($RuntimeDataRoot) {
     if (-not [IO.Path]::IsPathRooted($RuntimeDataRoot)) {
@@ -159,6 +167,41 @@ function Test-FixedRuntimeTask {
             [System.StringComparison]::OrdinalIgnoreCase
         )
     )
+}
+
+function Write-AtomicJson {
+    param([string]$Path, $Value)
+    $Parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $Parent | Out-Null
+    $Temporary = $Path + "." + [Guid]::NewGuid().ToString("N") + ".tmp"
+    try {
+        [IO.File]::WriteAllText(
+            $Temporary,
+            ($Value | ConvertTo-Json -Depth 8 -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $Temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-FixedRestartConfiguration {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -eq $Task) {
+        throw "Missing fixed restart task '$TaskName'"
+    }
+    if (-not (Test-FixedRestartTask -Task $Task)) {
+        throw "Incompatible fixed restart task '$TaskName'"
+    }
+    $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $RuntimeTask) {
+        throw "Missing fixed runtime task '$RuntimeTaskName'"
+    }
+    if (-not (Test-FixedRuntimeTask -Task $RuntimeTask)) {
+        throw "Incompatible fixed runtime task '$RuntimeTaskName'"
+    }
+    return @($Task, $RuntimeTask)
 }
 
 function Grant-FixedTaskReadAccess {
@@ -338,6 +381,16 @@ switch ($Action) {
             Grant-FixedTaskReadAccess -Name $TaskName -UserId $Task.Principal.UserId
         }
     }
+    "precheck" {
+        $FixedTasks = Assert-FixedRestartConfiguration
+        [PSCustomObject]@{
+            ok = $true
+            stage = "task_definition_precheck"
+            instance_id = [string]$SupervisorIdentity.instance_id
+            restart_task = $TaskName
+            runtime_task = $RuntimeTaskName
+        } | ConvertTo-Json -Compress
+    }
     "start" {
         $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction SilentlyContinue
         if ($null -eq $RuntimeTask) {
@@ -352,31 +405,62 @@ switch ($Action) {
         Write-Host "Triggered fixed HASHI runtime task '$RuntimeTaskName'"
     }
     "trigger" {
-        $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        if ($null -eq $Task) {
-            # A non-elevated/manual Core needs no privilege bridge. Keep the
-            # exact same fixed controller and root boundary in that configuration.
-            Write-Warning "Fixed restart task '$TaskName' is not registered; using same-privilege fixed restart."
-            & powershell.exe `
-                -NoProfile `
-                -NonInteractive `
-                -ExecutionPolicy Bypass `
-                -File $RuntimeController `
-                -BridgeHome $HashiRoot `
-                -Action restart `
-                -Resume `
-                -ApiGateway
-            exit $LASTEXITCODE
+        $FixedTasks = Assert-FixedRestartConfiguration
+        if (-not $OperationId) { $OperationId = [Guid]::NewGuid().ToString("N") }
+        if ($OperationId -notmatch '^[a-fA-F0-9]{32}$') {
+            throw "Invalid cold-restart operation id"
         }
-        if (-not (Test-FixedRestartTask -Task $Task)) {
-            throw "Refusing mismatched fixed restart task '$TaskName'"
+        if (-not $ReceiptPath) {
+            $ReceiptPath = Join-Path $LifecycleDirectory ("receipt-" + $OperationId.ToLowerInvariant() + ".json")
         }
-        $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction SilentlyContinue
-        if (-not (Test-FixedRuntimeTask -Task $RuntimeTask)) {
-            throw "Refusing missing or mismatched fixed runtime task '$RuntimeTaskName'"
+        $ReceiptPath = [IO.Path]::GetFullPath($ReceiptPath)
+        $HomePrefix = $HashiRoot.TrimEnd('\') + '\'
+        if (-not $ReceiptPath.StartsWith($HomePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Cold-restart receipt must remain inside the HASHI instance home"
         }
+        New-Item -ItemType Directory -Force -Path $LifecycleDirectory | Out-Null
+        Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction SilentlyContinue
+        $Request = [ordered]@{
+            schema = 1
+            operation_id = $OperationId.ToLowerInvariant()
+            instance_id = [string]$SupervisorIdentity.instance_id
+            code_root = $CodeRoot
+            hashi_root = $HashiRoot
+            receipt_path = $ReceiptPath
+            requested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            deadline_epoch_ms = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds).ToUnixTimeMilliseconds()
+        }
+        Write-AtomicJson -Path $RequestPath -Value $Request
         Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-Host "Triggered fixed HASHI restart task '$TaskName'"
+        $AcceptanceClock = [Diagnostics.Stopwatch]::StartNew()
+        while ($AcceptanceClock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+            if (Test-Path -LiteralPath $ReceiptPath -PathType Leaf) {
+                try {
+                    $Receipt = Get-Content -LiteralPath $ReceiptPath -Raw | ConvertFrom-Json
+                    if ([string]$Receipt.operation_id -eq $Request.operation_id) {
+                        if (-not ([string]$SupervisorIdentity.instance_id).Equals(
+                            [string]$Receipt.instance_id,
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                            throw "Cold restart launch receipt instance identity mismatch"
+                        }
+                        if ([string]$Receipt.state -eq "launch_accepted") {
+                            $Receipt | ConvertTo-Json -Depth 8 -Compress
+                            exit 0
+                        }
+                        if ([string]$Receipt.state -eq "failed") {
+                            $FailureStage = [string]$Receipt.failure_stage
+                            $FailureReason = [string]$Receipt.error
+                            throw "Cold restart failed at $FailureStage`: $FailureReason"
+                        }
+                    }
+                } catch {
+                    if ($_.Exception.Message -like "Cold restart*") { throw }
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Cold restart task did not produce a launch acceptance receipt within $TimeoutSeconds seconds"
     }
     "unregister" {
         $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

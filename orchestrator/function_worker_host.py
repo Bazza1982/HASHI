@@ -33,7 +33,9 @@ from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
 from orchestrator import runtime_background_status
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
+    admitted_process_runtime_fingerprint,
     compare_runtime_fingerprints,
+    current_process_runtime,
     enforce_runtime_contract,
 )
 from orchestrator.service_endpoints import endpoint_from_snapshot
@@ -829,7 +831,14 @@ class FunctionWorkerHost:
                 "Function Worker bootstrap protocol does not match Core"
             )
         with span("worker.runtime_contract"):
-            actual_runtime = enforce_runtime_contract(self.code_root)
+            admitted = current_process_runtime()
+            actual_runtime = (
+                admitted_process_runtime_fingerprint(
+                    admitted, code_root=self.code_root
+                )
+                if admitted is not None
+                else enforce_runtime_contract(self.code_root)
+            )
             compare_runtime_fingerprints(self.expected_runtime, actual_runtime)
             if actual_runtime.worker_protocol != FUNCTION_WORKER_PROTOCOL_VERSION:
                 raise FunctionWorkerStateError(
@@ -1020,6 +1029,12 @@ class FunctionWorkerHost:
                 "telegram_outbound_connected": bool(
                     runtime.telegram_connected
                     and getattr(getattr(runtime, "app", None), "running", False)
+                ),
+                "telegram_connector_attempts": int(
+                    getattr(runtime, "_telegram_connector_attempts", 0) or 0
+                ),
+                "telegram_connector_permanent_failure": getattr(
+                    runtime, "_telegram_connector_permanent_failure", None
                 ),
                 "telegram_ingress_connected": bool(
                     getattr(runtime, "telegram_ingress_connected", False)
