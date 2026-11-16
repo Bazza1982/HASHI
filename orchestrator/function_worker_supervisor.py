@@ -2373,7 +2373,23 @@ class FunctionWorkerSupervisor:
     ) -> None:
         handle = self.kernel._runtime_map().get(client.agent_name)
         if isinstance(handle, AgentRuntimeHandle):
+            previous_connector_health = (
+                handle.telegram_connected,
+                bool(handle.metadata.get("telegram_connector_permanent_failure")),
+            )
             handle.update_metadata(client, metadata)
+            current_connector_health = (
+                handle.telegram_connected,
+                bool(handle.metadata.get("telegram_connector_permanent_failure")),
+            )
+            if current_connector_health == previous_connector_health:
+                return
+            startup = getattr(self.kernel, "startup_manager", None)
+            reconcile = getattr(startup, "reconcile_connector_status", None)
+            if (callable(reconcile) and getattr(self.kernel, "_shared_committed", False)
+                    and not getattr(self.kernel, "_handoff_draining", False)
+                    and not getattr(self.kernel, "_connector_activation_pending", False)):
+                reconcile()
 
     async def handle_worker_event(
         self,

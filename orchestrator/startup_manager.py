@@ -897,7 +897,7 @@ class StartupManager:
         return alive and startup_state in {"online", "local"}
 
     def reconcile_connector_status(self, errors=None, *, pending=False, publish=True) -> None:
-        """Derive startup health from current ingress; retain unrelated failures."""
+        """Derive startup health from current ingress; retain active failures."""
         status = dict(getattr(self.kernel, "startup_status", {}) or {})
         previous_issues = list(status.get("issues") or [])
         states = dict(status.get("agent_states") or {})
@@ -911,14 +911,21 @@ class StartupManager:
         # Keep failed/pending entries so missing Workers cannot hide startup failures.
         removed = {name for name, state in states.items()
                    if state in {"online", "local"} and name not in runtimes}
+        resolved_activation_errors = set(removed)
         for name in removed:
             states.pop(name, None)
             reasons.pop(name, None)
         for name, handle in runtimes.items():
             ingress = dict(snapshot(name) or {}) if callable(snapshot) else {}
             configured = ingress.get("configured", name in getattr(workers, "_telegram_ingress", {}))
-            connected = bool(ingress.get("running") and ingress.get("connected")
-                             and getattr(handle, "telegram_connected", False))
+            ingress_connected = bool(
+                ingress.get("running") and ingress.get("connected")
+            )
+            connected = bool(
+                ingress_connected and getattr(handle, "telegram_connected", False)
+            )
+            if not configured or ingress_connected:
+                resolved_activation_errors.add(name)
             if configured:
                 if connected:
                     states[name] = "online"
@@ -936,7 +943,12 @@ class StartupManager:
                 states[name] = "local"
                 reasons.pop(name, None)
 
-        errors = dict(status.get("connector_errors") or {}) if errors is None else dict(errors)
+        if errors is None:
+            errors = dict(status.get("connector_errors") or {})
+            for name in resolved_activation_errors:
+                errors.pop(name, None)
+        else:
+            errors = dict(errors)
         issues = [issue for issue in previous_issues if issue.get("code") not in {
             "agent_telegram_unavailable", "connector_activation"}]
         if unavailable:
@@ -944,6 +956,9 @@ class StartupManager:
             retryable = any(
                 (ingress := ingress_owners.get(name)) is not None
                 and not getattr(ingress, "permanent_failure_reason", None)
+                and not getattr(runtimes.get(name), "metadata", {}).get(
+                    "telegram_connector_permanent_failure"
+                )
                 for name in unavailable
             )
             issues.append({

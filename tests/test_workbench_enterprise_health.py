@@ -218,6 +218,100 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             await item.stop(notify_status=False)
 
 
+@pytest.mark.asyncio
+async def test_health_clears_recovered_connector_activation_errors(tmp_path):
+    from orchestrator.startup_manager import StartupManager
+
+    snapshots = {
+        name: {"configured": True, "running": False, "connected": False}
+        for name in ("alpha", "beta")
+    }
+    handles = {
+        name: SimpleNamespace(
+            telegram_connected=False,
+            backend_ready=True,
+            client=SimpleNamespace(closed=False),
+            metadata={
+                "worker_phase": "ACTIVE",
+                "worker_accepting": True,
+                "telegram_connector_permanent_failure": (
+                    "invalid_token" if name == "alpha" else None
+                ),
+            },
+        )
+        for name in snapshots
+    }
+    ingress = {
+        name: SimpleNamespace(
+            permanent_failure_reason="invalid_token" if name == "alpha" else None
+        )
+        for name in snapshots
+    }
+    app = SimpleNamespace(
+        runtimes=[],
+        api_gateway=None,
+        _runtime_map=lambda: handles,
+        function_workers=SimpleNamespace(
+            _telegram_ingress=ingress,
+            telegram_ingress_snapshot=lambda name: dict(snapshots[name]),
+        ),
+        startup_status={
+            "phase": "degraded",
+            "services_ready": True,
+            "agent_order": list(handles),
+            "agent_states": {name: "local" for name in handles},
+            "failed_agents": 0,
+            "issues": [],
+        },
+    )
+    app.startup_manager = StartupManager(app, None)
+    app.startup_manager.reconcile_connector_status({
+        "alpha": "InvalidToken: credential rejected",
+        "beta": "TimeoutError: Telegram unavailable",
+    }, publish=False)
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = app
+
+    failed = json.loads((await server.handle_health(_FakeRequest())).text)
+    assert failed["startup"]["connector_errors"] == {
+        "alpha": "InvalidToken: credential rejected",
+        "beta": "TimeoutError: Telegram unavailable",
+    }
+    assert "connector_activation" in {issue["code"] for issue in failed["issues"]}
+
+    # Correcting alpha's Token re-arms its connector; current readiness then
+    # owns the old activation error rather than preserving its history.
+    handles["alpha"].metadata["telegram_connector_permanent_failure"] = None
+    ingress["alpha"].permanent_failure_reason = None
+    handles["alpha"].telegram_connected = True
+    snapshots["alpha"].update(running=True, connected=True)
+    app.startup_manager.reconcile_connector_status(publish=False)
+
+    partially_recovered = json.loads(
+        (await server.handle_health(_FakeRequest())).text
+    )
+    assert partially_recovered["startup"]["connector_errors"] == {
+        "beta": "TimeoutError: Telegram unavailable"
+    }
+    activation = next(
+        issue for issue in partially_recovered["issues"]
+        if issue["code"] == "connector_activation"
+    )
+    assert activation["details"] == {
+        "beta": "TimeoutError: Telegram unavailable"
+    }
+
+    handles["beta"].telegram_connected = True
+    snapshots["beta"].update(running=True, connected=True)
+    app.startup_manager.reconcile_connector_status(publish=False)
+
+    recovered = json.loads((await server.handle_health(_FakeRequest())).text)
+    assert recovered["ready"] is True
+    assert recovered["degraded"] is False
+    assert recovered["startup"]["connector_errors"] == {}
+    assert not recovered["issues"]
+
+
 def _server(tmp_path: Path, *, profile: str) -> WorkbenchApiServer:
     config_path = tmp_path / "agents.json"
     config_path.write_text(
