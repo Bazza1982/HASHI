@@ -83,6 +83,13 @@ def test_shipped_suite_is_valid_and_never_automates_lifecycle() -> None:
         "reboot_max": 60,
         "restart_with_draft": 120,
     }
+    reboot_max_acceptance = "\n".join(
+        items["reboot_max"]["operator_steps"]
+        + items["reboot_max"]["pass_criteria"]
+    )
+    assert "FC, required Workers, and local messaging" in reboot_max_acceptance
+    assert "Remote" not in reboot_max_acceptance
+    assert "remote_topology" in items
 
 
 def test_suite_validation_rejects_lifecycle_automation_and_cycles() -> None:

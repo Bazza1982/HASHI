@@ -88,7 +88,9 @@
   - measure lifecycle duration from accepted operation to the same selected
     instance being online and able to answer a benign follow-up request
   - `/reboot min` completes within 10 seconds
-  - `/reboot max` completes within 60 seconds
+  - `/reboot max` completes within 60 seconds when FC, required Workers, and
+    local messaging are ready; assess Remote continuity separately and do not
+    gate this FC readiness budget on it
   - `/restart` completes within 120 seconds, including frontend reconnection to
     the same selected instance
   - treat a budget breach in a controlled healthy environment as a release

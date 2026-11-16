@@ -121,12 +121,12 @@
       "operator_steps": [
         "Capture a pre-reboot snapshot with this runner.",
         "Use the visible /reboot card to select max.",
-        "Measure from lifecycle acceptance until all selected Agents, shared Functions, and Remote are ready.",
-        "Wait for an online terminal receipt covering shared Functions, Workers, and Remote; capture a post-reboot snapshot and compare with Core PID=same and Core digest=same.",
-        "Confirm the selected Agent and remote topology are responsive."
+        "Measure from lifecycle acceptance until FC, required Workers, and local messaging are ready.",
+        "Wait for an online terminal receipt covering FC, required Workers, and local messaging readiness; capture a post-reboot snapshot and compare with Core PID=same and Core digest=same.",
+        "Confirm the selected Agent and local messaging are responsive."
       ],
       "pass_criteria": [
-        "All required Function and Worker generations return online with Remote healthy.",
+        "FC, required Workers, and local messaging are ready.",
         "The measured end-to-end duration is no more than 60 seconds.",
         "The Core PID and all protected Core source hashes remain unchanged.",
         "No unrelated frontend Session is lost."

@@ -422,10 +422,42 @@ class ProtocolManager:
         preferred = getattr(self, "_last_successful_routes", {}).get(
             str(instance_id or "").strip().upper()
         )
-        if preferred and int(preferred[1]) == int(port) and preferred[0] in ordered:
-            ordered.remove(preferred[0])
-            ordered.insert(0, preferred[0])
-        return ordered
+        states = getattr(self, "_route_probe_state", {})
+        original_order = {host: index for index, host in enumerate(ordered)}
+
+        def rank(host: str) -> tuple[int, float, int]:
+            state = states.get(self._route_probe_key(instance_id, host, port))
+            if state:
+                # An address that failed most recently follows unfailed
+                # alternatives even after its circuit becomes eligible again.
+                # If every address has failed, the oldest failure is retried
+                # first so one normal maintenance probe rotates fairly.
+                return (
+                    2,
+                    float(state.get("next_probe_at", 0.0) or 0.0),
+                    original_order[host],
+                )
+            if (
+                preferred
+                and int(preferred[1]) == int(port)
+                and preferred[0] == host
+            ):
+                return (0, 0.0, original_order[host])
+            return (1, 0.0, original_order[host])
+
+        return sorted(ordered, key=rank)
+
+    def _eligible_candidate_hosts(
+        self,
+        instance_id: str,
+        port: int,
+        hosts: list[str],
+    ) -> list[str]:
+        return [
+            host
+            for host in self._ordered_candidate_hosts(instance_id, port, hosts)
+            if self._route_probe_allowed(instance_id, host, int(port))
+        ]
 
     def _select_candidate_host(
         self,
@@ -433,10 +465,8 @@ class ProtocolManager:
         port: int,
         hosts: list[str],
     ) -> str:
-        for host in self._ordered_candidate_hosts(instance_id, port, hosts):
-            if self._route_probe_allowed(instance_id, host, int(port)):
-                return host
-        return ""
+        candidates = self._eligible_candidate_hosts(instance_id, port, hosts)
+        return candidates[0] if candidates else ""
 
     def reload_shared_token(self, token: str | None) -> bool:
         """Adopt a credential change and invalidate every established trust result."""
@@ -1680,21 +1710,33 @@ class ProtocolManager:
             forward_payload["route_trace"] = list(route_trace) + [local_instance]
             forward_payload["hop_count"] = int(payload.get("hop_count") or 0) + 1
             forward_payload["ttl"] = normalized_ttl - 1
-            fwd_hosts = self._candidate_hosts_for_peer(peer)
+            fwd_hosts = self._eligible_candidate_hosts(
+                to_instance,
+                int(peer.port),
+                self._candidate_hosts_for_peer(peer),
+            )
             fwd_exc = None
             for fwd_host in fwd_hosts:
+                reached = False
                 for fwd_url in self._candidate_urls(fwd_host, peer.port, "/protocol/message"):
                     try:
                         result = await asyncio.get_running_loop().run_in_executor(
                             None,
                             lambda u=fwd_url: self._post_json(u, forward_payload, timeout=4),
                         )
+                        reached = True
                         if self._response_is_error(result):
                             raise RuntimeError(result)
+                        self._record_route_probe(
+                            to_instance, fwd_host, int(peer.port), ok=True
+                        )
                         return 202, result
                     except Exception as exc:
                         fwd_exc = exc
                         logger.debug("Forward: %s via %s failed: %s", to_instance, fwd_url, exc)
+                self._record_route_probe(
+                    to_instance, fwd_host, int(peer.port), ok=reached
+                )
             return 502, self._error_payload(
                 "forward_failed",
                 f"Failed to forward to {to_instance} (tried {fwd_hosts}): {fwd_exc}",
@@ -1998,18 +2040,31 @@ class ProtocolManager:
                     payload=payload,
                 )
             last_exc = None
-            for host in self._candidate_hosts_for_peer(peer):
+            hosts = self._eligible_candidate_hosts(
+                to_instance,
+                int(peer.port),
+                self._candidate_hosts_for_peer(peer),
+            )
+            for host in hosts:
+                reached = False
                 for url in self._candidate_urls(host, peer.port, "/protocol/message"):
                     try:
                         result = await asyncio.get_running_loop().run_in_executor(
                             None,
                             lambda u=url: self._post_json(u, forward_payload, timeout=4),
                         )
+                        reached = True
                         if self._response_is_error(result):
                             raise RuntimeError(result)
+                        self._record_route_probe(
+                            to_instance, host, int(peer.port), ok=True
+                        )
                         return 202, result
                     except Exception as exc:
                         last_exc = exc
+                self._record_route_probe(
+                    to_instance, host, int(peer.port), ok=reached
+                )
             return 502, self._error_payload(
                 "forward_failed",
                 f"Failed to forward delivery status to {to_instance}: {last_exc}",
@@ -3231,6 +3286,9 @@ class ProtocolManager:
                 None,
                 lambda: self._post_json(urls[0], payload, timeout=10),
             )
+            self._record_route_probe(
+                instance_id, route["host"], int(route["port"]), ok=True
+            )
             if self._response_confirms_terminal_duplicate(result, payload):
                 return True
             if self._response_is_error(result):
@@ -3238,6 +3296,9 @@ class ProtocolManager:
                 return False
             return bool(result.get("ok", True))
         except Exception as exc:
+            self._record_route_probe(
+                instance_id, route["host"], int(route["port"]), ok=False
+            )
             logger.warning(
                 "Delivery status %s for %s has unknown outcome: %s",
                 status,
@@ -3337,6 +3398,9 @@ class ProtocolManager:
                 None,
                 lambda: self._post_json(url, payload, timeout=10),
             )
+            self._record_route_probe(
+                instance_id, route["host"], int(route["port"]), ok=True
+            )
             if self._response_confirms_terminal_duplicate(result, payload):
                 logger.info(
                     "Reply %s was already terminal at %s; accepting duplicate rejection as delivery success",
@@ -3350,6 +3414,9 @@ class ProtocolManager:
                 return False
             return bool(result.get("ok", True))
         except Exception as exc:
+            self._record_route_probe(
+                instance_id, route["host"], int(route["port"]), ok=False
+            )
             logger.warning(
                 "Reply send via %s has unknown outcome; no alternate replay: %s",
                 url,
