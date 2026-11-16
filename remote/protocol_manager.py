@@ -121,6 +121,9 @@ TERMINAL_INFLIGHT_STATES = {
     "confirmation_expired",
     "confirmation_superseded",
 }
+_BOOTSTRAP_INSTANCE_BUDGET_SECONDS = 4.0
+_BOOTSTRAP_MAX_ROUTE_PROBES = 4
+_BOOTSTRAP_CONCURRENCY = 4
 
 
 def build_default_capabilities(*, rescue_start_enabled: bool = True) -> list[str]:
@@ -173,6 +176,7 @@ class ProtocolManager:
         self._credential_config_error = ""
         self._task: asyncio.Task | None = None
         self._bootstrap_task: asyncio.Task | None = None
+        self._control_wakeup = asyncio.Event()
         self._running = False
         self._last_bootstrap_run = 0.0
         self._last_handshake_run = 0.0
@@ -292,6 +296,33 @@ class ProtocolManager:
         if activity is None:
             activity = self._activity = {}
         activity[name] = int(activity.get(name, 0) or 0) + int(amount)
+
+    def _wake_control_loop(self) -> None:
+        wakeup = getattr(self, "_control_wakeup", None)
+        if wakeup is not None:
+            wakeup.set()
+
+    def _start_bootstrap_task(self, *, initial_delay: float = 0.0) -> bool:
+        current = getattr(self, "_bootstrap_task", None)
+        if current is not None and not current.done():
+            return False
+        task = asyncio.create_task(
+            self._bootstrap_known_peers(initial_delay=initial_delay),
+            name="remote-peer-bootstrap",
+        )
+
+        def _completed(completed: asyncio.Task) -> None:
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("Remote peer bootstrap failed: %s", exc)
+            self._wake_control_loop()
+
+        task.add_done_callback(_completed)
+        self._bootstrap_task = task
+        return True
 
     @staticmethod
     def _peer_retry_backoff_seconds(peer) -> float:
@@ -421,6 +452,7 @@ class ProtocolManager:
                     peer.instance_id,
                     state="rehydrate_required",
                 )
+        self._wake_control_loop()
         return True
 
     def record_shared_token_config_state(self, state: str, error: str = "") -> None:
@@ -432,9 +464,15 @@ class ProtocolManager:
             "invalid",
         }
         normalized = str(state or "unknown").strip().lower()
+        previous = (
+            getattr(self, "_credential_config_state", "unknown"),
+            getattr(self, "_credential_config_error", ""),
+        )
         self._credential_config_state = normalized if normalized in allowed_states else "unknown"
         # The loader emits classifications only; never surface exception text or bytes.
         self._credential_config_error = str(error or "")[:120]
+        if previous != (self._credential_config_state, self._credential_config_error):
+            self._wake_control_loop()
 
     @property
     def display_handle(self) -> str:
@@ -700,6 +738,7 @@ class ProtocolManager:
         self._last_agent_directory_state = current_state
         if changed:
             self._force_handshake = True
+            self._wake_control_loop()
             logger.info("Agent directory snapshot changed: %s/%s -> %s/%s", previous, previous_state, current, current_state)
         return changed
 
@@ -723,14 +762,13 @@ class ProtocolManager:
         # This ensures peers are reachable even when mDNS multicast fails
         # (e.g. WSL2 → physical LAN boundary).
         self._last_bootstrap_run = time.time()
-        self._bootstrap_task = asyncio.create_task(
-            self._bootstrap_known_peers(initial_delay=2.0),
-            name="remote-peer-bootstrap",
-        )
+        self._control_wakeup.clear()
+        self._start_bootstrap_task(initial_delay=2.0)
         self._task = asyncio.create_task(self._control_loop())
 
     async def stop(self) -> None:
         self._running = False
+        self._wake_control_loop()
         if self._task:
             self._task.cancel()
             try:
@@ -760,49 +798,58 @@ class ProtocolManager:
         self._last_bootstrap_run = time.time()
         local_id = str(self._instance_info.get("instance_id") or "").upper()
         instances = self._dedupe_bootstrap_instances(self._load_instances())
-        live_endpoints: dict | None = None
-        for key, entry in instances.items():
+        live_endpoints = read_live_endpoints(self._hashi_root) if instances else {}
+        semaphore = asyncio.Semaphore(_BOOTSTRAP_CONCURRENCY)
+
+        async def probe_entry(key: str, entry: dict) -> None:
             if not isinstance(entry, dict):
-                continue
+                return
             instance_id = str(entry.get("instance_id") or key).upper()
             if not is_valid_instance_id(instance_id):
                 logger.debug("Bootstrap: skipping invalid instance identity from seed: %s", instance_id or key)
-                continue
+                return
             if instance_id == local_id:
-                continue
+                return
             existing_peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
             if existing_peer:
                 self._count_activity("bootstrap_known_peer_skips")
-                continue
-            if live_endpoints is None:
-                live_endpoints = read_live_endpoints(self._hashi_root)
+                return
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
                 logger.debug("Bootstrap: %s has no live or fallback probe ports, skipping", instance_id)
-                continue
+                return
             seen_hosts = self._candidate_hosts_for_entry(entry)
-            selected_host = ""
-            selected_ports: list[int] = []
-            for host in seen_hosts:
-                allowed_ports = [
-                    int(remote_port)
-                    for remote_port in probe_ports
-                    if self._route_probe_allowed(
+            routes: list[tuple[str, int]] = []
+            for remote_port in probe_ports:
+                for host in self._ordered_candidate_hosts(
+                    instance_id, int(remote_port), seen_hosts
+                ):
+                    route = (host, int(remote_port))
+                    if route not in routes and self._route_probe_allowed(
                         instance_id, host, int(remote_port)
-                    )
-                ]
-                if allowed_ports:
-                    selected_host = host
-                    selected_ports = allowed_ports
-                    break
-
-            for host in ([selected_host] if selected_host else []):
-                selected_port = None
-                for remote_port in selected_ports:
-                    reachable = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda h=host, p=int(remote_port), iid=instance_id: self._probe_instance_route(h, p, iid, timeout=2),
+                    ):
+                        routes.append(route)
+            preferred = getattr(self, "_last_successful_routes", {}).get(instance_id)
+            if preferred in routes:
+                routes.remove(preferred)
+                routes.insert(0, preferred)
+            async with semaphore:
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + _BOOTSTRAP_INSTANCE_BUDGET_SECONDS
+                )
+                for host, remote_port in routes[:_BOOTSTRAP_MAX_ROUTE_PROBES]:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    probe_timeout = max(0.1, min(2.0, remaining))
+                    reachable = await asyncio.to_thread(
+                        self._probe_instance_route,
+                        host,
+                        int(remote_port),
+                        instance_id,
+                        timeout=probe_timeout,
                     )
                     self._record_route_probe(
                         instance_id,
@@ -810,16 +857,14 @@ class ProtocolManager:
                         int(remote_port),
                         ok=bool(reachable),
                     )
-                    if reachable:
-                        selected_port = int(remote_port)
-                        break
-                if selected_port:
+                    if not reachable:
+                        continue
                     from remote.peer.base import PeerInfo
                     peer = PeerInfo(
                         instance_id=instance_id,
                         display_name=str(live_entry.get("display_name") or entry.get("display_name") or instance_id),
                         host=host,
-                        port=selected_port,
+                        port=int(remote_port),
                         workbench_port=int(
                             live_entry.get("workbench_port")
                             or entry.get("workbench_port")
@@ -841,10 +886,14 @@ class ProtocolManager:
                     )
                     if self._peer_registry:
                         self._peer_registry.on_peers_changed([peer])
-                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, selected_port)
-                    break
-                else:
-                    logger.debug("Bootstrap: %s @ %s ports=%s not reachable", instance_id, host, probe_ports)
+                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, int(remote_port))
+                    self._wake_control_loop()
+                    return
+            logger.debug("Bootstrap: %s routes=%s not reachable", instance_id, routes[:_BOOTSTRAP_MAX_ROUTE_PROBES])
+
+        await asyncio.gather(*(
+            probe_entry(key, entry) for key, entry in instances.items()
+        ))
 
     def _bootstrap_probe_ports(self, entry: dict, live_entry: dict | None = None) -> list[int]:
         ports: list[int] = []
@@ -962,12 +1011,16 @@ class ProtocolManager:
 
     async def _control_loop(self) -> None:
         while self._running:
+            wakeup = getattr(self, "_control_wakeup", None)
+            if wakeup is None:
+                wakeup = self._control_wakeup = asyncio.Event()
+            wakeup.clear()
             active_inflight = False
             try:
                 self._count_activity("control_wakeups")
                 now = time.time()
                 if now - self._last_bootstrap_run >= self._bootstrap_retry_seconds:
-                    await self._bootstrap_known_peers()
+                    self._start_bootstrap_task()
                     self._last_bootstrap_run = now
                 if now - self._last_refresh_run >= 120:
                     liveness_attempts = await self._refresh_peer_liveness_once()
@@ -1005,9 +1058,15 @@ class ProtocolManager:
                     self._last_superloop_review = now
             except Exception as exc:
                 logger.warning("Protocol control loop failed: %s", exc)
-            await asyncio.sleep(
-                0.5 if active_inflight else self._poll_interval_seconds
-            )
+            if not self._running:
+                break
+            try:
+                await asyncio.wait_for(
+                    wakeup.wait(),
+                    timeout=0.5 if active_inflight else self._poll_interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def _refresh_peer_liveness_once(self) -> int:
         if not self._peer_registry:
@@ -3853,4 +3912,5 @@ class ProtocolManager:
             json.dumps({"messages": self._inflight}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        self._wake_control_loop()
 # HASHI-Fingerprint: hfp_608bf402d1414783838e3abc04107bc9

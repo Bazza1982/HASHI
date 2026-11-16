@@ -417,7 +417,7 @@ class KernelRuntime:
             old, previous = self.active, self.release
             candidate, handoff = None, None
             retired = False
-            quiesced = False
+            quiesce_attempted = False
             candidate_pid = None
             product_code_execution_began = False
             candidate_generation = None
@@ -468,10 +468,11 @@ class KernelRuntime:
                 candidate_pid = getattr(candidate.process, "pid", None)
                 advance("handoff_quiesce")
                 self.publish("preparing_handoff", operation_id=operation_id)
-                # The child closes intake and drains. A rejected drain leaves
-                # old authority intact, so it can resume with no publication.
+                # The child can close intake before its receipt arrives. Once
+                # quiesce is attempted, any still-live old process is resumed
+                # on failure even when the receipt itself was lost.
+                quiesce_attempted = True
                 handoff = await old.peer.request("quiesce", timeout=180)
-                quiesced = True
                 advance("handoff_validation")
                 validate_artifact_identity(
                     Path(release["generation_root"]), release["manifest"]
@@ -531,7 +532,7 @@ class KernelRuntime:
                     timings["rollback"] = round(
                         (time.monotonic() - rollback_started) * 1000, 3
                     )
-                elif quiesced and old is not None and old.process.is_alive():
+                elif quiesce_attempted and old is not None and old.process.is_alive():
                     rollback = {"attempted": True, "succeeded": False, "mode": "resume_previous"}
                     rollback_started = time.monotonic()
                     try:

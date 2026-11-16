@@ -356,6 +356,13 @@ Confirmation is durably accepted by the shared Functions `AgentMoveManager`;
 acceptance is distinct from terminal completion. A missing background owner fails
 before the source is changed.
 
+In-process submissions wake that owner directly. Cross-process CLI submissions
+publish the same durable inbox atomically; while work is pending, the owner
+checks only the inbox file metadata at a bounded one-second cadence and reads
+the payload only after a change. Startup and a low-frequency 30-second fallback
+retain crash recovery without restoring the former quarter-second full-file
+idle scan.
+
 ## Conversation continuity
 
 Move schema 5 always uses `history_mode=move`: the exact configured owner's

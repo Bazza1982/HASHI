@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -323,7 +324,6 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
 ):
     kernel, _stopped = _kernel(tmp_path)
     calls = []
-    monkeypatch.setattr(move_manager, "_CROSS_PROCESS_RECOVERY_SECONDS", 0.01)
     monkeypatch.setattr(
         move_manager,
         "get_outbound_move",
@@ -349,6 +349,7 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
     manager = move_manager.AgentMoveManager(kernel)
     await manager.start()
     try:
+        started = asyncio.get_running_loop().time()
         accepted = move_manager.enqueue_agent_move(
             tmp_path,
             {},
@@ -356,7 +357,8 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
             requested_by="cli",
             origin={"surface": "cli"},
         )
-        completed = await manager.wait("clone-cli")
+        completed = await asyncio.wait_for(manager.wait("clone-cli"), timeout=3.0)
+        latency = asyncio.get_running_loop().time() - started
     finally:
         await manager.stop()
 
@@ -364,6 +366,7 @@ async def test_cli_inbox_submission_is_picked_up_after_submitter_exits(
     assert completed["status"] == "completed"
     assert completed["origin"] == {"surface": "cli"}
     assert calls == ["confirm"]
+    assert latency < 2.5
 
 
 @pytest.mark.asyncio

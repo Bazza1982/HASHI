@@ -39,6 +39,7 @@ _MOVE_CONTINUATION_STATUSES = frozenset(
 _MAX_RECORDS = 128
 _MAX_STATE_BYTES = 512 * 1024
 _CROSS_PROCESS_RECOVERY_SECONDS = 30.0
+_CROSS_PROCESS_INBOX_CHECK_SECONDS = 1.0
 _MAX_DELIVERY_ATTEMPTS = 5
 _MAX_EXECUTION_ATTEMPTS = 5
 
@@ -62,13 +63,14 @@ class AgentMoveManager:
         self._watch_event = asyncio.Event()
         self._stopping = False
         self._last_scan_error: str | None = None
+        self._state_signature = self._state_file_signature()
 
     async def start(self) -> None:
         """Resume only operations interrupted by process replacement/crash."""
 
         self._stopping = False
         try:
-            records = self._load_operations()
+            records = self._load_operations_snapshot()
         except (AgentMoveError, OSError) as exc:
             records = {}
             self._last_scan_error = f"{type(exc).__name__}: {exc}"
@@ -218,12 +220,49 @@ class AgentMoveManager:
                     )
                     self._last_scan_error = error
             delay = _next_watcher_delay(records)
+            await self._wait_for_submission_change(delay)
+            records = self._load_operations_snapshot()
+
+    def _load_operations_snapshot(self) -> dict[str, dict]:
+        signature_before = self._state_file_signature()
+        records = self._load_operations()
+        signature_after = self._state_file_signature()
+        # Atomic replacement can race the read. Retain the earlier signature
+        # in that narrow case so the next metadata check reloads immediately.
+        self._state_signature = (
+            signature_after
+            if signature_before == signature_after
+            else signature_before
+        )
+        return records
+
+    def _state_file_signature(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self.state_path.stat()
+        except OSError:
+            return None
+        return int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_ino)
+
+    async def _wait_for_submission_change(self, delay: float) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.01, float(delay))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
             try:
-                await asyncio.wait_for(self._watch_event.wait(), timeout=delay)
+                await asyncio.wait_for(
+                    self._watch_event.wait(),
+                    timeout=min(_CROSS_PROCESS_INBOX_CHECK_SECONDS, remaining),
+                )
             except asyncio.TimeoutError:
-                pass
+                signature = self._state_file_signature()
+                if signature != self._state_signature:
+                    self._state_signature = signature
+                    return
+                continue
             self._watch_event.clear()
-            records = self._load_operations()
+            return
 
     async def _deliver_result(
         self,

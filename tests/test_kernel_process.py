@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -287,6 +288,81 @@ async def test_replacement_failure_receipt_preserves_root_cause_and_rollback(
     assert outcome["stage_timings_ms"]["total"] >= 0
     assert kernel.active is restored and kernel.release is previous
     assert published[-1][1]["replacement_outcome"] == outcome
+
+
+@pytest.mark.asyncio
+async def test_uncertain_quiesce_receipt_resumes_live_previous_process(
+    tmp_path, monkeypatch
+):
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    class OldPeer:
+        def __init__(self):
+            self.calls = []
+            self.paused = False
+
+        async def request(self, method, *args, **kwargs):
+            self.calls.append(method)
+            if method == "quiesce":
+                self.paused = True
+                raise asyncio.TimeoutError("quiesce receipt lost")
+            if method == "resume":
+                self.paused = False
+                return {"ok": True}
+            if method == "execute":
+                if self.paused:
+                    raise RuntimeError("old process is still quiesced")
+                return {"ok": True}
+            return {"ok": True}
+
+    class Client:
+        def __init__(self, pid, peer):
+            self.process = Process(pid)
+            self.peer = peer
+
+        async def close(self):
+            self.process.alive = False
+
+    old = Client(101, OldPeer())
+    candidate = Client(202, SimpleNamespace(request=None))
+
+    async def prepare(_cls, _bootstrap):
+        return candidate
+
+    monkeypatch.setattr(kernel_module.ProcessClient, "prepare", classmethod(prepare))
+    runtime = SimpleNamespace(to_dict=lambda: {})
+    kernel = KernelRuntime(ROOT, tmp_path, runtime)
+    previous = {
+        "generation_root": str(tmp_path / "previous"),
+        "manifest": {"generation_id": "sha256:previous"},
+    }
+    replacement = {
+        "generation_root": str(tmp_path / "candidate"),
+        "manifest": {"generation_id": "sha256:candidate"},
+    }
+    kernel.active = old
+    kernel.release = previous
+    monkeypatch.setattr(kernel, "verify_supplied_release", lambda _release: None)
+    kernel.bootstrap = lambda *_args, **_kwargs: {}
+    kernel.publish = lambda *_args, **_kwargs: None
+
+    assert await kernel.replace(replacement, operation_id="e" * 32) is False
+    assert old.peer.calls == ["quiesce", "resume"]
+    assert await old.peer.request("execute") == {"ok": True}
+    assert kernel.active is old
+    assert kernel.release is previous
+    assert candidate.process.is_alive() is False
+    assert kernel.last_replacement_outcome["rollback"] == {
+        "attempted": True,
+        "succeeded": True,
+        "mode": "resume_previous",
+    }
 
 
 @pytest.mark.asyncio

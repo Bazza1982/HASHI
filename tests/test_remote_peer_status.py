@@ -2044,6 +2044,96 @@ def test_control_loop_retries_bootstrap_after_startup_window():
     assert calls == [0.0]
 
 
+@pytest.mark.asyncio
+async def test_control_loop_wakes_immediately_for_new_inflight_work(tmp_path):
+    manager = object.__new__(ProtocolManager)
+    now = time.time()
+    manager._running = True
+    manager._bootstrap_retry_seconds = 300.0
+    manager._last_bootstrap_run = now
+    manager._last_refresh_run = now
+    manager._last_handshake_run = now
+    manager._last_agent_snapshot_check = now
+    manager._last_superloop_review = now
+    manager._core_health_cache = (now, True)
+    manager._force_handshake = False
+    manager._poll_interval_seconds = 30.0
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager._activity = {}
+    manager._control_wakeup = asyncio.Event()
+    processed = asyncio.Event()
+
+    async def fake_process():
+        processed.set()
+        manager._running = False
+
+    manager._process_inflight_once = fake_process
+    task = asyncio.create_task(manager._control_loop())
+    try:
+        await asyncio.sleep(0.05)
+        manager._inflight["message-1"] = {"state": "awaiting_confirmation"}
+        manager._save_inflight()
+        await asyncio.wait_for(processed.wait(), timeout=0.5)
+        await asyncio.wait_for(task, timeout=0.5)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert manager._activity["control_wakeups"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_wall_clock
+async def test_control_loop_wakes_after_a_real_minute_idle(tmp_path):
+    manager = object.__new__(ProtocolManager)
+    now = time.time()
+    quiet_until = now + 120.0
+    manager._running = True
+    manager._bootstrap_retry_seconds = 300.0
+    manager._last_bootstrap_run = quiet_until
+    manager._last_refresh_run = quiet_until
+    manager._last_handshake_run = quiet_until
+    manager._last_agent_snapshot_check = quiet_until
+    manager._last_superloop_review = quiet_until
+    manager._core_health_cache = (quiet_until, True)
+    manager._force_handshake = False
+    manager._poll_interval_seconds = 30.0
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager._activity = {}
+    manager._control_wakeup = asyncio.Event()
+    processed = asyncio.Event()
+    process_calls = 0
+
+    async def fake_process():
+        nonlocal process_calls
+        process_calls += 1
+        processed.set()
+        manager._running = False
+
+    manager._process_inflight_once = fake_process
+    task = asyncio.create_task(manager._control_loop())
+    try:
+        await asyncio.sleep(60.2)
+        wakeups_while_idle = manager._activity.get("control_wakeups", 0)
+        started = asyncio.get_running_loop().time()
+        manager._inflight["message-1"] = {"state": "awaiting_confirmation"}
+        manager._save_inflight()
+        await asyncio.wait_for(processed.wait(), timeout=1.0)
+        latency = asyncio.get_running_loop().time() - started
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert 2 <= wakeups_while_idle <= 3
+    assert process_calls == 1
+    assert latency < 0.75
+
+
 def test_candidate_urls_follow_protocol_tls_setting(tmp_path):
     manager = ProtocolManager(
         hashi_root=tmp_path,
@@ -2188,6 +2278,143 @@ def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
     peer = captured[0]
     assert peer.host == "192.168.50.6"
     assert peer.port == 8766
+
+
+def test_bootstrap_known_peers_tries_second_address_within_one_instance_budget(tmp_path):
+    captured = []
+    probes = []
+
+    class RegistryStub:
+        def get_peer(self, _instance_id):
+            return None
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._activity = {}
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {}
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "Intel",
+            "platform": "windows",
+            "remote_port": 8766,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda _entry: ["192.0.2.1", "192.0.2.2"]
+    manager._bootstrap_probe_ports = lambda _entry, _live=None: [8766]
+    def probe(host, port, instance_id, timeout=2):
+        probes.append((host, int(port), instance_id))
+        if host == "192.0.2.1":
+            time.sleep(0.1)
+            return False
+        return host == "192.0.2.2"
+
+    manager._probe_instance_route = probe
+
+    started = time.perf_counter()
+    asyncio.run(manager._bootstrap_known_peers())
+    elapsed = time.perf_counter() - started
+
+    assert probes == [
+        ("192.0.2.1", 8766, "INTEL"),
+        ("192.0.2.2", 8766, "INTEL"),
+    ]
+    assert [(peer.host, peer.port) for peer in captured] == [("192.0.2.2", 8766)]
+    assert 0.09 <= elapsed < 0.5
+
+
+def test_bootstrap_known_peers_prefers_last_successful_address(tmp_path):
+    captured = []
+    probes = []
+
+    class RegistryStub:
+        def get_peer(self, _instance_id):
+            return None
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._activity = {}
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {"INTEL": ("192.0.2.2", 8766)}
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "Intel",
+            "platform": "windows",
+            "remote_port": 8766,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda _entry: ["192.0.2.1", "192.0.2.2"]
+    manager._bootstrap_probe_ports = lambda _entry, _live=None: [8766]
+    manager._probe_instance_route = lambda host, port, instance_id, timeout=2: (
+        probes.append((host, int(port), instance_id)) or host == "192.0.2.2"
+    )
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert probes == [("192.0.2.2", 8766, "INTEL")]
+    assert [(peer.host, peer.port) for peer in captured] == [("192.0.2.2", 8766)]
+
+
+def test_bootstrap_bounds_multiple_offline_instances_with_concurrent_probes(tmp_path):
+    probes = []
+
+    class RegistryStub:
+        def get_peer(self, _instance_id):
+            return None
+
+        def on_peers_changed(self, _peers):
+            raise AssertionError("offline peers must not be registered")
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._activity = {}
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {}
+    manager._load_instances = lambda: {
+        name.lower(): {
+            "instance_id": name,
+            "display_name": name,
+            "platform": "windows",
+            "lan_ip": f"192.0.2.{index}",
+            "remote_port": 8766,
+        }
+        for index, name in enumerate(("HASHI3", "HASHI7", "INTEL", "MSI"), 1)
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda entry: [entry["lan_ip"]]
+    manager._bootstrap_probe_ports = lambda _entry, _live=None: [8766]
+
+    def unavailable(host, port, instance_id, timeout=2):
+        probes.append((host, int(port), instance_id, timeout))
+        time.sleep(0.15)
+        return False
+
+    manager._probe_instance_route = unavailable
+    started = time.perf_counter()
+    asyncio.run(manager._bootstrap_known_peers())
+    elapsed = time.perf_counter() - started
+
+    assert len(probes) == 4
+    assert {probe[2] for probe in probes} == {"HASHI3", "HASHI7", "INTEL", "MSI"}
+    assert elapsed < 0.45
 
 
 def test_bootstrap_known_peers_leaves_existing_offline_peer_to_recovery_owner(tmp_path):

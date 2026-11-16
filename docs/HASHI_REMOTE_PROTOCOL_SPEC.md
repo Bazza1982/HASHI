@@ -133,11 +133,14 @@ communication capability and never vetoes Core, Functions, Worker or local
 Workbench readiness.
 
 The protocol manager has one control-loop owner. With no in-flight work its
-default wake interval is 30 seconds; local Core/directory checks are at most
-once per 30 seconds, peer liveness once per 120 seconds, accepted-handshake
+default maintenance deadline is 30 seconds; durable in-flight work, pending
+status receipts, credential/configuration changes and Agent-directory changes
+wake that same loop immediately. Local Core/directory checks are at most once
+per 30 seconds, peer liveness once per 120 seconds, accepted-handshake
 revalidation once per 300 seconds, and static bootstrap retry once per 300
 seconds. Active in-flight correlation alone enables the 0.5-second processing
-cadence. The discovery maintenance owner runs every 30 seconds, reads the
+cadence; idle operation does not poll at that rate. The discovery maintenance
+owner runs every 30 seconds, reads the
 protocol manager's cached Agent-directory projection, and performs no
 advertisement call when the revision and retry state are unchanged. An
 unchanged `agents.json` signature avoids another payload read. Tailscale uses
@@ -145,12 +148,15 @@ one polling owner with a 60-second healthy interval and exponential failure
 backoff capped at 300 seconds.
 
 Static peer seeds are deduplicated first by canonical instance identity and
-then endpoint. Last successful routes are preferred. Failed instance/host/port
-tuples open an exponential circuit from 5 to 300 seconds; while every candidate
-is open, route resolution fails immediately instead of synchronously probing
-or imposing a 10–30 second tail on a local status/API request. Background
-bootstrap and liveness own the bounded network probes and verify the expected
-instance identity before accepting a route.
+then endpoint. Last successful routes are preferred across both address and
+port. Bootstrap tries a bounded number of alternate routes for each unknown
+instance within one per-instance deadline, and probes different instances with
+bounded concurrency outside the control-loop critical path. Failed
+instance/host/port tuples open an exponential circuit from 5 to 300 seconds;
+while every candidate is open, route resolution fails immediately instead of
+synchronously probing or imposing a 10–30 second tail on a local status/API
+request. Background bootstrap and liveness own the bounded network probes and
+verify the expected instance identity before accepting a route.
 
 Static bootstrap probes only an instance that is not yet represented in the
 peer registry. Once registered, liveness and handshake are the sole recovery
