@@ -89,14 +89,17 @@
       "depends_on": [
         "dynamic_menu_persistence"
       ],
+      "performance_budget_seconds": 10,
       "operator_steps": [
         "Capture a pre-reboot snapshot with this runner.",
         "Use the visible /reboot card to select min for the recorded Agent.",
+        "Measure from lifecycle acceptance until the selected Agent is online and can answer the benign follow-up message.",
         "Wait for an online terminal receipt, capture a post-reboot snapshot, and compare them with Core PID=same and Core digest=same.",
         "Send a benign follow-up message and confirm the targeted Agent responds."
       ],
       "pass_criteria": [
         "The selected Agent Worker adopts the requested Function generation and returns online.",
+        "The measured end-to-end duration is no more than 10 seconds.",
         "The Core PID and all protected Core source hashes remain unchanged.",
         "The frontend command chain remains usable after adoption."
       ],
@@ -114,14 +117,17 @@
       "depends_on": [
         "reboot_min"
       ],
+      "performance_budget_seconds": 60,
       "operator_steps": [
         "Capture a pre-reboot snapshot with this runner.",
         "Use the visible /reboot card to select max.",
-        "Wait for an online terminal receipt covering shared Functions, Workers, and Remote; capture a post-reboot snapshot and compare with Core PID=same and Core digest=same.",
-        "Confirm the selected Agent and remote topology are responsive."
+        "Measure from lifecycle acceptance until FC, required Workers, and local messaging are ready.",
+        "Wait for an online terminal receipt covering FC, required Workers, and local messaging readiness; capture a post-reboot snapshot and compare with Core PID=same and Core digest=same.",
+        "Confirm the selected Agent and local messaging are responsive."
       ],
       "pass_criteria": [
-        "All required Function and Worker generations return online with Remote healthy.",
+        "FC, required Workers, and local messaging are ready.",
+        "The measured end-to-end duration is no more than 60 seconds.",
         "The Core PID and all protected Core source hashes remain unchanged.",
         "No unrelated frontend Session is lost."
       ],
@@ -139,14 +145,17 @@
       "depends_on": [
         "reboot_max"
       ],
+      "performance_budget_seconds": 120,
       "operator_steps": [
         "Open two frontend tabs for the same Session. In tab A, type a unique unsent draft and capture it without sending.",
         "Capture a pre-restart snapshot. In tab B, issue /restart and complete its confirmation flow.",
+        "Measure from lifecycle acceptance until the same selected instance reconnects and answers the benign follow-up message.",
         "Wait for reconnection, capture a post-restart snapshot, and compare with Core PID=changed and Core digest=same.",
         "Return to tab A and verify the draft text is byte-for-byte unchanged; then send a benign message to confirm the chain is live."
       ],
       "pass_criteria": [
         "The old Core exits and a different healthy Core PID serves the same instance.",
+        "The measured end-to-end duration is no more than 120 seconds.",
         "Protected Core source and the checked-out commit remain unchanged.",
         "The external frontend reconnects and preserves the exact unsent draft."
       ],

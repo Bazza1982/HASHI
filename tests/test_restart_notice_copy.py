@@ -45,12 +45,15 @@ def test_genuine_followup_failure_and_unconfirmed_results_keep_their_warnings():
     assert uncertain.startswith("⚠️") and "✅" not in uncertain
 
 
-@pytest.mark.parametrize(("locale", "hot", "cold"), [
-    ("en", "🔄 Starting hot reboot. This takes about 2 minutes.",
-     "🔄 Starting a full system restart. This takes about 5 minutes."),
-    ("zh-CN", "🔄 开始热重启。这大约需要2分钟时间。",
-     "🔄 开始完整系统重启。这大约需要5分钟时间。"),
-])
+RESTART_ESTIMATE_CASES = (
+    ("en", "🔄 Starting hot reboot. This usually completes within 1 minute.",
+     "🔄 Starting a full system restart. This usually completes within 2 minutes."),
+    ("zh-CN", "🔄 开始热重启。通常会在1分钟内完成。",
+     "🔄 开始完整系统重启。通常会在2分钟内完成。"),
+)
+
+
+@pytest.mark.parametrize(("locale", "hot", "cold"), RESTART_ESTIMATE_CASES)
 def test_estimates_come_from_fc_for_each_supported_runtime_locale(locale, hot, cold):
     assert locale in ui_language.SUPPORTED_LOCALES
     for mode in ("same", "number", "group", "max"):
@@ -65,6 +68,12 @@ def test_estimates_come_from_fc_for_each_supported_runtime_locale(locale, hot, c
     record["evidence"]["old_pid_exited"] = False
     unconfirmed = project_restart(record, instance_id="HASHI3", owner_id="user:7")
     assert unconfirmed["notice"] == ui_language.tr("api.restart.ack_unknown", locale=locale)
+
+
+def test_restart_estimates_cover_every_supported_runtime_locale():
+    assert {case[0] for case in RESTART_ESTIMATE_CASES} == set(
+        ui_language.SUPPORTED_LOCALES
+    )
 
 
 def test_fc_plain_projection_preserves_safe_display_names():

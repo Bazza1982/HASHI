@@ -1,5 +1,6 @@
 """Normal single-agent completion is a concise success, not a cleanup warning."""
 import pytest
+from orchestrator import ui_language
 from orchestrator.reboot_ui import render_notice
 from orchestrator.reboot_manager import RebootManager
 from tests.test_restart_notice_copy import hot_record
@@ -24,13 +25,22 @@ def test_min_success_is_direct_even_while_background_work_finishes(locale, expec
     assert record["warnings"] == warnings
 
 
-@pytest.mark.parametrize(("locale", "expected"), [
-    ("en", "🔄 Starting hot reboot. This takes about 30 seconds."),
-    ("zh-CN", "🔄 开始热重启。这大约需要30秒时间。"),
-])
-def test_min_start_estimate_is_thirty_seconds(locale, expected):
+MIN_START_ESTIMATES = (
+    ("en", "🔄 Starting hot reboot. This usually completes within 10 seconds."),
+    ("zh-CN", "🔄 开始热重启。通常会在10秒内完成。"),
+)
+
+
+@pytest.mark.parametrize(("locale", "expected"), MIN_START_ESTIMATES)
+def test_min_start_estimate_is_ten_seconds(locale, expected):
     record = hot_record(mode="min", targets=["agent1"], locale=locale)
     assert render_notice(record, starting=True) == expected
+
+
+def test_min_start_estimates_cover_every_supported_runtime_locale():
+    assert {case[0] for case in MIN_START_ESTIMATES} == set(
+        ui_language.SUPPORTED_LOCALES
+    )
 
 
 def test_background_retirement_alone_is_not_an_outage_in_broad_success():

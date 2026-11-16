@@ -29,6 +29,7 @@ sys.modules.setdefault(
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 import remote.peer.registry as peer_registry_module
+import remote.protocol_manager as protocol_manager_module
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, _service_info_to_peer
 from remote.peer.registry import PeerRegistry
@@ -1521,6 +1522,169 @@ def test_failed_peer_endpoints_are_circuit_broken_between_liveness_runs():
     assert len(calls) == 2
     assert len(refreshes) == 2
     assert manager._activity["route_circuit_skips"] >= 2
+
+
+def test_liveness_rotates_from_failed_preferred_route_at_normal_cycle(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(protocol_manager_module.time, "time", lambda: clock[0])
+    manager = object.__new__(ProtocolManager)
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {"HASHI7": ("192.0.2.70", 8766)}
+    manager._activity = {}
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+    )
+    refreshes = []
+    manager._peer_registry = SimpleNamespace(
+        mark_refresh_result=lambda *args, **kwargs: refreshes.append((args, kwargs))
+    )
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.0.2.70", "192.0.2.71"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    calls = []
+
+    def get_json(url, *, timeout):
+        calls.append((url, timeout))
+        if "192.0.2.70" in url:
+            raise TimeoutError("preferred route unavailable")
+        return {"ok": True, "instance": {"instance_id": "HASHI7"}}
+
+    manager._get_json = get_json
+
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer)) is False
+    clock[0] += 120.0
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer)) is True
+    clock[0] += 120.0
+    assert asyncio.run(manager._refresh_single_peer_liveness(peer)) is True
+
+    assert [url for url, _timeout in calls] == [
+        "http://192.0.2.70:8766/health",
+        "http://192.0.2.71:8766/health",
+        "http://192.0.2.71:8766/health",
+    ]
+    assert manager._last_successful_routes["HASHI7"] == ("192.0.2.71", 8766)
+    assert len(refreshes) == 3
+
+
+def test_handshake_rotates_from_failed_preferred_route_at_normal_cycle(monkeypatch):
+    clock = [2_000.0]
+    monkeypatch.setattr(protocol_manager_module.time, "time", lambda: clock[0])
+    manager = object.__new__(ProtocolManager)
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {"HASHI7": ("192.0.2.70", 8766)}
+    manager._activity = {}
+    manager._force_handshake = False
+    manager._handshake_timeout_seconds = 8
+    manager._instance_info = {
+        "instance_id": "HASHI3",
+        "remote_port": 8769,
+        "workbench_port": 18804,
+        "platform": "windows",
+    }
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+        properties={"handshake_state": "handshake_pending"},
+    )
+    handshakes = []
+    manager._peer_registry = SimpleNamespace(
+        get_peers=lambda: [peer],
+        mark_handshake_result=lambda *args, **kwargs: handshakes.append((args, kwargs)),
+        on_peers_changed=lambda _peers: None,
+    )
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.0.2.70", "192.0.2.71"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._local_network_profile = lambda: {}
+    manager._load_instances = lambda: {}
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {}
+    calls = []
+
+    def post_json(url, _payload, *, timeout):
+        calls.append((url, timeout))
+        if "192.0.2.70" in url:
+            raise TimeoutError("preferred route unavailable")
+        return {
+            "status": "handshake_accept",
+            "instance_id": "HASHI7",
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2"],
+            "agents": [],
+        }
+
+    manager._post_json = post_json
+
+    assert asyncio.run(manager._handshake_once()) == 1
+    clock[0] += 30.0
+    assert asyncio.run(manager._handshake_once()) == 1
+
+    assert [url for url, _timeout in calls] == [
+        "http://192.0.2.70:8766/protocol/handshake",
+        "http://192.0.2.71:8766/protocol/handshake",
+    ]
+    assert handshakes[-1][1]["state"] == "handshake_accepted"
+
+
+def test_forwarding_skips_expired_failed_preference_and_uses_healthy_route(monkeypatch):
+    clock = [3_000.0]
+    monkeypatch.setattr(protocol_manager_module.time, "time", lambda: clock[0])
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI3"}
+    manager._max_allowed_ttl = 8
+    manager._inflight = {}
+    manager._route_probe_state = {}
+    manager._last_successful_routes = {"HASHI7": ("192.0.2.70", 8766)}
+    manager._activity = {}
+    peer = PeerInfo(
+        instance_id="HASHI7",
+        display_name="HASHI7",
+        host="192.0.2.70",
+        port=8766,
+        workbench_port=18807,
+        platform="windows",
+    )
+    manager._peer_registry = SimpleNamespace(get_peer=lambda _instance_id: peer)
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.0.2.70", "192.0.2.71"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._record_route_probe("HASHI7", "192.0.2.70", 8766, ok=False)
+    clock[0] += 120.0
+    calls = []
+
+    def post_json(url, _payload, *, timeout):
+        calls.append((url, timeout))
+        if "192.0.2.70" in url:
+            raise TimeoutError("stale preferred route was retried")
+        return {"ok": True, "accepted": True}
+
+    manager._post_json = post_json
+    payload = {
+        "message_type": "agent_message",
+        "message_id": "forward-route-1",
+        "idempotency_key": "hchat:forward-route-1",
+        "conversation_id": "conv-route-1",
+        "from_instance": "HASHI1",
+        "from_agent": "sender",
+        "to_instance": "HASHI7",
+        "to_agent": "receiver",
+        "body": {"text": "route test"},
+        "ttl": 8,
+        "route_trace": ["HASHI1"],
+    }
+
+    status, result = asyncio.run(manager.handle_protocol_message(payload))
+
+    assert status == 202
+    assert result["ok"] is True
+    assert calls == [("http://192.0.2.71:8766/protocol/message", 4)]
+    assert manager._last_successful_routes["HASHI7"] == ("192.0.2.71", 8766)
 
 
 def test_offline_peer_retry_uses_existing_failure_state_for_bounded_backoff():
