@@ -176,6 +176,7 @@ class ProtocolManager:
         self._credential_config_error = ""
         self._task: asyncio.Task | None = None
         self._bootstrap_task: asyncio.Task | None = None
+        self._peer_maintenance_task: asyncio.Task | None = None
         self._control_wakeup = asyncio.Event()
         self._running = False
         self._last_bootstrap_run = 0.0
@@ -776,6 +777,11 @@ class ProtocolManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        peer_maintenance = getattr(self, "_peer_maintenance_task", None)
+        if peer_maintenance:
+            peer_maintenance.cancel()
+            await asyncio.gather(peer_maintenance, return_exceptions=True)
+            self._peer_maintenance_task = None
         if self._bootstrap_task:
             self._bootstrap_task.cancel()
             await asyncio.gather(self._bootstrap_task, return_exceptions=True)
@@ -1009,6 +1015,55 @@ class ProtocolManager:
             deduped[key] = entry
         return deduped
 
+    def _start_peer_maintenance_task(
+        self, *, run_liveness: bool, run_handshake: bool
+    ) -> bool:
+        current = getattr(self, "_peer_maintenance_task", None)
+        if current is not None and not current.done():
+            return False
+        if not run_liveness and not run_handshake:
+            return False
+        self._peer_maintenance_task = asyncio.create_task(
+            self._run_peer_maintenance(
+                run_liveness=run_liveness,
+                run_handshake=run_handshake,
+            ),
+            name="remote-peer-maintenance",
+        )
+        return True
+
+    async def _run_peer_maintenance(
+        self, *, run_liveness: bool, run_handshake: bool
+    ) -> None:
+        """Run slow peer probes outside the message-processing critical path."""
+        try:
+            if run_liveness:
+                try:
+                    attempts = await self._refresh_peer_liveness_once()
+                    if attempts:
+                        self._count_activity("liveness_runs")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Remote peer liveness maintenance failed: %s", exc)
+                finally:
+                    self._last_refresh_run = time.time()
+            if run_handshake or getattr(self, "_force_handshake", False):
+                try:
+                    attempts = await self._handshake_once()
+                    if attempts:
+                        self._count_activity("handshake_runs")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Remote peer handshake maintenance failed: %s", exc)
+                finally:
+                    self._last_handshake_run = time.time()
+        finally:
+            if getattr(self, "_peer_maintenance_task", None) is asyncio.current_task():
+                self._peer_maintenance_task = None
+            self._wake_control_loop()
+
     async def _control_loop(self) -> None:
         while self._running:
             wakeup = getattr(self, "_control_wakeup", None)
@@ -1022,11 +1077,13 @@ class ProtocolManager:
                 if now - self._last_bootstrap_run >= self._bootstrap_retry_seconds:
                     self._start_bootstrap_task()
                     self._last_bootstrap_run = now
-                if now - self._last_refresh_run >= 120:
-                    liveness_attempts = await self._refresh_peer_liveness_once()
-                    if liveness_attempts:
-                        self._count_activity("liveness_runs")
-                    self._last_refresh_run = now
+                self._start_peer_maintenance_task(
+                    run_liveness=now - self._last_refresh_run >= 120,
+                    run_handshake=(
+                        getattr(self, "_force_handshake", False)
+                        or now - self._last_handshake_run >= 30
+                    ),
+                )
                 core_health_cache = getattr(
                     self, "_core_health_cache", (0.0, False)
                 )
@@ -1038,14 +1095,6 @@ class ProtocolManager:
                     self._count_activity("agent_snapshot_checks")
                     self._refresh_local_agent_snapshot_if_changed()
                     self._last_agent_snapshot_check = now
-                if (
-                    getattr(self, "_force_handshake", False)
-                    or now - self._last_handshake_run >= 30
-                ):
-                    handshake_attempts = await self._handshake_once()
-                    if handshake_attempts:
-                        self._count_activity("handshake_runs")
-                    self._last_handshake_run = now
                 active_inflight = any(
                     str((item or {}).get("state") or "")
                     not in TERMINAL_INFLIGHT_STATES

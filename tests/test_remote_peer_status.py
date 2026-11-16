@@ -2085,6 +2085,84 @@ async def test_control_loop_wakes_immediately_for_new_inflight_work(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance_kind", ["handshake", "liveness"])
+async def test_control_loop_processes_new_work_while_peer_maintenance_stalls(
+    tmp_path, maintenance_kind
+):
+    manager = object.__new__(ProtocolManager)
+    now = time.time()
+    manager._running = True
+    manager._bootstrap_retry_seconds = 300.0
+    manager._last_bootstrap_run = now
+    manager._last_refresh_run = 0.0 if maintenance_kind == "liveness" else now
+    manager._last_handshake_run = 0.0 if maintenance_kind == "handshake" else now
+    manager._last_agent_snapshot_check = now
+    manager._last_superloop_review = now
+    manager._core_health_cache = (now, True)
+    manager._force_handshake = False
+    manager._poll_interval_seconds = 30.0
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager._activity = {}
+    manager._control_wakeup = asyncio.Event()
+    manager._peer_maintenance_task = None
+    maintenance_started = asyncio.Event()
+    release_maintenance = asyncio.Event()
+    processed = asyncio.Event()
+
+    async def stalled_maintenance():
+        maintenance_started.set()
+        await release_maintenance.wait()
+        return 1
+
+    async def idle_maintenance():
+        return 0
+
+    manager._refresh_peer_liveness_once = (
+        stalled_maintenance if maintenance_kind == "liveness" else idle_maintenance
+    )
+    manager._handshake_once = (
+        stalled_maintenance if maintenance_kind == "handshake" else idle_maintenance
+    )
+
+    async def fake_process():
+        processed.set()
+        manager._running = False
+
+    manager._process_inflight_once = fake_process
+    control_task = asyncio.create_task(manager._control_loop())
+    maintenance_task = None
+    try:
+        await asyncio.wait_for(maintenance_started.wait(), timeout=0.5)
+        maintenance_task = manager._peer_maintenance_task
+        assert maintenance_task is not None and not maintenance_task.done()
+
+        started = asyncio.get_running_loop().time()
+        manager._inflight["message-1"] = {"state": "awaiting_confirmation"}
+        manager._save_inflight()
+        await asyncio.wait_for(processed.wait(), timeout=0.5)
+        latency = asyncio.get_running_loop().time() - started
+
+        assert latency < 0.25
+        assert not maintenance_task.done()
+        await asyncio.wait_for(control_task, timeout=0.5)
+        release_maintenance.set()
+        await asyncio.wait_for(maintenance_task, timeout=0.5)
+    finally:
+        release_maintenance.set()
+        for task in (control_task, maintenance_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (control_task, maintenance_task) if task is not None),
+            return_exceptions=True,
+        )
+
+    assert manager._activity["inflight_cycles"] == 1
+    assert manager._activity[f"{maintenance_kind}_runs"] == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.real_wall_clock
 async def test_control_loop_wakes_after_a_real_minute_idle(tmp_path):
     manager = object.__new__(ProtocolManager)
