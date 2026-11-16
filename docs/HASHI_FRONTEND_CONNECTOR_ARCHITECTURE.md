@@ -199,6 +199,9 @@ Inbound receiver transitions and Worker-owned outbound readiness or permanent-
 failure transitions reconcile the stored connector-health projection in memory.
 Recovery therefore removes stale Agent warnings, while terminal failures stop
 claiming automatic retry, without a health-read side effect or periodic scan.
+The same reconciliation removes a prior per-Agent activation error only when
+that ingress is currently connected (or no longer configured); failures for
+other connectors remain active until their own owner reports recovery.
 
 ### Telegram command reply connection recovery (2026-10-31)
 
