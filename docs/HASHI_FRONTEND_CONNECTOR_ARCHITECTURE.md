@@ -195,6 +195,10 @@ reload connector configuration, enumerate all Agent connectors, publish
 topology, register tasks or start a transport. Small monotonic counters expose
 topology requests/RPC attempts and connector activation/RPC attempts so idle
 and restart acceptance can be measured without a new monitor service.
+Inbound receiver transitions and Worker-owned outbound readiness or permanent-
+failure transitions reconcile the stored connector-health projection in memory.
+Recovery therefore removes stale Agent warnings, while terminal failures stop
+claiming automatic retry, without a health-read side effect or periodic scan.
 
 ### Telegram command reply connection recovery (2026-10-31)
 

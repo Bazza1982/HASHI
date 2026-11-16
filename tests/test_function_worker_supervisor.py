@@ -49,6 +49,7 @@ from orchestrator.runtime_contract import (
     load_runtime_policy,
 )
 from orchestrator.scheduler import TaskScheduler
+from orchestrator.startup_manager import StartupManager
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -641,6 +642,87 @@ async def test_shutdown_status_change_does_not_call_exiting_worker():
     assert handle.metadata["telegram_ingress_connected"] is False
     assert handle.metadata["telegram_connected"] is True
     assert handle.metadata["telegram_outbound_connected"] is True
+
+
+def test_worker_connector_health_changes_reconcile_once_per_transition():
+    kernel = _Kernel()
+    client = _Client("alpha", 101)
+    handle = _handle(kernel, client)
+    kernel.runtimes.append(handle)
+    kernel._shared_committed = True
+    kernel._handoff_draining = False
+    kernel._connector_activation_pending = False
+    ingress = SimpleNamespace(permanent_failure_reason=None)
+    kernel.function_workers = SimpleNamespace(
+        _telegram_ingress={"alpha": ingress},
+        telegram_ingress_snapshot=lambda _name: {
+            "configured": True,
+            "running": True,
+            "connected": True,
+        },
+    )
+    kernel.startup_status = {
+        "services_ready": True,
+        "phase": "ready",
+        "agent_states": {"alpha": "local"},
+        "failed_agents": 0,
+        "issues": [],
+    }
+    startup = StartupManager(kernel, None)
+    kernel.startup_manager = startup
+    startup.reconcile_connector_status(publish=False)
+    assert any(
+        issue["code"] == "agent_telegram_unavailable"
+        for issue in kernel.startup_status["issues"]
+    )
+
+    reconciliations = 0
+    original_reconcile = startup.reconcile_connector_status
+
+    def counted_reconcile(*args, **kwargs):
+        nonlocal reconciliations
+        reconciliations += 1
+        return original_reconcile(*args, **kwargs)
+
+    startup.reconcile_connector_status = counted_reconcile
+    supervisor = FunctionWorkerSupervisor(kernel)
+    supervisor.update_active_metadata(client, {
+        **handle.metadata,
+        "telegram_connector_permanent_failure": "invalid_token",
+    })
+
+    assert reconciliations == 1
+    issue = next(
+        item for item in kernel.startup_status["issues"]
+        if item["code"] == "agent_telegram_unavailable"
+    )
+    assert issue["automatic_retry"] is False
+
+    supervisor.update_active_metadata(client, {
+        **handle.metadata,
+        "queue_depth": 1,
+    })
+    assert reconciliations == 1
+
+    supervisor.update_active_metadata(client, {
+        **handle.metadata,
+        "telegram_connector_permanent_failure": None,
+        "telegram_connected": True,
+        "telegram_outbound_connected": True,
+    })
+
+    assert reconciliations == 2
+    assert kernel.startup_status["agent_states"]["alpha"] == "online"
+    assert not any(
+        issue["code"] == "agent_telegram_unavailable"
+        for issue in kernel.startup_status["issues"]
+    )
+
+    supervisor.update_active_metadata(client, {
+        **handle.metadata,
+        "queue_depth": 2,
+    })
+    assert reconciliations == 2
 
 
 @pytest.mark.asyncio

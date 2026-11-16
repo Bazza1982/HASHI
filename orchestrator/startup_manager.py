@@ -944,6 +944,9 @@ class StartupManager:
             retryable = any(
                 (ingress := ingress_owners.get(name)) is not None
                 and not getattr(ingress, "permanent_failure_reason", None)
+                and not getattr(runtimes.get(name), "metadata", {}).get(
+                    "telegram_connector_permanent_failure"
+                )
                 for name in unavailable
             )
             issues.append({
