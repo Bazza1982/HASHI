@@ -61,7 +61,7 @@ async def test_model_finds_and_reveals_tools_without_changing_authority(tmp_path
     registry = _registry(
         tmp_path, allowed=["tool_find", "shell", "file_read", "workspace_inspect", "git_inspect"]
     )
-    view = OnDemandToolView(registry, goal="read a file")
+    view = OnDemandToolView(registry)
     before = {item["function"]["name"] for item in view.get_tool_definitions(tiers=["core"])}
     assert "tool_find" in before
     assert "workspace_inspect" not in before
@@ -187,6 +187,12 @@ async def test_data_inspect_json_csv_without_model_written_python(tmp_path):
     assert csv_data["samples"] == [{"name": "A", "value": "1"}]
     json_data = await _run(registry, "data_inspect", {"path": "info.json"})
     assert json_data["ok"] and set(json_data["keys"]) == {"name", "ready"}
+    (tmp_path / "wide.csv").write_text(
+        "name,notes\nA," + "x" * 25000 + "\n", encoding="utf-8"
+    )
+    large = await registry.execute("data_inspect", {"path": "wide.csv"}, "wide")
+    assert len(large.output) < 20000
+    assert json.loads(large.output)["ok"]
 
 
 @pytest.mark.asyncio

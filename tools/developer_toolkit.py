@@ -164,7 +164,10 @@ async def _code_search(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> s
                     continue
                 if not line:
                     continue
-                lines.append(line[:1000])
+                if sum(len(item) for item in lines) + len(line) > 14000:
+                    reason = "output_budget"
+                    break
+                lines.append(line[:600])
                 if len(lines) >= max_results:
                     reason = "result_limit"
                     break
@@ -177,7 +180,7 @@ async def _code_search(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> s
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
-        if proc.returncode not in (0, 1, -9) and not lines and reason == "completed":
+        if proc.returncode not in (0, 1, -9) and reason == "completed":
             return _error("ripgrep_failed", "ripgrep failed. Check the path or regex.",
                           next_step="Try a literal query (regex=false) or use shell.")
         return _json(ok=True, path=str(root), mode=mode, engine="ripgrep", matches=lines,
@@ -203,17 +206,17 @@ def _literal_search_fallback(query: str, root: Path, roots: tuple[Path, ...],
     paths: list[Path] = [root] if root.is_file() else []
     if root.is_dir():
         for current, folders, files in os.walk(root, followlinks=False):
-            if time.monotonic() >= deadline or scanned >= 10000:
+            if time.monotonic() >= deadline or len(paths) >= 6000:
                 reason = "tool_timeout" if time.monotonic() >= deadline else "file_budget"
                 break
             folders[:] = [name for name in folders if name not in _SCAN_IGNORES]
-            paths.extend(Path(current) / name for name in files)
+            paths.extend(Path(current) / name for name in files[:max(0, 6000 - len(paths))])
     for path in paths:
         if time.monotonic() >= deadline:
             reason = "tool_timeout"
             break
-        if len(matches) >= limit:
-            reason = "result_limit"
+        if len(matches) >= limit or sum(len(item) for item in matches) >= 14000:
+            reason = "result_limit" if len(matches) >= limit else "output_budget"
             break
         if glob and not fnmatch.fnmatch(path.name, glob):
             continue
@@ -253,7 +256,7 @@ def _git_command(repo: Path, argv: list[str], *, timeout: float = 12) -> subproc
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     environment["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(
-        ["git", "-C", str(repo), "--no-pager", *argv],
+        ["git", "-C", str(repo), "-c", "core.fsmonitor=false", "--no-pager", *argv],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, check=False, env=environment,
     )
@@ -418,6 +421,37 @@ def _text_replace(args: dict, write_roots: tuple[Path, ...], cwd: Path) -> str:
                  matches=count, changed=True)
 
 
+def _compact_preview(value: Any, depth: int = 0) -> Any:
+    """Keep every response valid JSON and inside the model-visible output budget."""
+    if isinstance(value, str):
+        return value[:220] + ("…" if len(value) > 220 else "")
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= 4:
+        return f"<{type(value).__name__} nested value>"
+    if isinstance(value, dict):
+        return {
+            str(key)[:100]: _compact_preview(item, depth + 1)
+            for key, item in list(value.items())[:12]
+        }
+    if isinstance(value, list):
+        return [_compact_preview(item, depth + 1) for item in value[:12]]
+    return str(value)[:220]
+
+
+def _sample_budget(rows: list[Any], budget: int = 9500) -> tuple[list[Any], bool]:
+    selected = []
+    total = 0
+    for raw in rows:
+        item = _compact_preview(raw)
+        encoded = json.dumps(item, ensure_ascii=False)
+        if selected and total + len(encoded) > budget:
+            return selected, True
+        selected.append(item)
+        total += len(encoded)
+    return selected, False
+
+
 def _data_inspect(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> str:
     if not args.get("path"):
         return _error("missing_path", "Supply data file path.")
@@ -440,8 +474,9 @@ def _data_inspect(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> str:
                 reader = csv.DictReader(stream, delimiter="," if fmt == "csv" else "\t")
                 fields = reader.fieldnames or []
                 rows = [row for _, row in zip(range(limit), reader)]
-            return _json(ok=True, format=fmt, path=str(path), columns=fields, samples=rows,
-                         sample_count=len(rows))
+            samples, clipped = _sample_budget(rows)
+            return _json(ok=True, format=fmt, path=str(path), columns=[name[:100] for name in fields[:100]],
+                         samples=samples, sample_count=len(samples), preview_truncated=clipped)
         if fmt == "jsonl":
             records = []
             with path.open("r", encoding="utf-8-sig") as stream:
@@ -450,18 +485,21 @@ def _data_inspect(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> str:
                         records.append(json.loads(line))
                     if len(records) >= limit:
                         break
+            samples, clipped = _sample_budget(records)
             return _json(ok=True, format=fmt, path=str(path),
-                         samples=records, sample_count=len(records))
+                         samples=samples, sample_count=len(samples), preview_truncated=clipped)
         with path.open("r", encoding="utf-8-sig") as stream:
             payload = json.load(stream)
         if isinstance(payload, list):
+            samples, clipped = _sample_budget(payload[:limit])
             return _json(ok=True, format=fmt, path=str(path), kind="array",
-                         total_items=len(payload), samples=payload[:limit])
+                         total_items=len(payload), samples=samples, preview_truncated=clipped)
         if isinstance(payload, dict):
+            sample = _compact_preview({k: payload[k] for k in list(payload)[:limit]})
             return _json(ok=True, format=fmt, path=str(path), kind="object",
-                         keys=list(payload)[:100], sample={k: payload[k] for k in list(payload)[:limit]})
+                         keys=[str(k)[:100] for k in list(payload)[:60]], sample=sample)
         return _json(ok=True, format=fmt, path=str(path), kind=type(payload).__name__,
-                     sample=payload)
+                     sample=_compact_preview(payload))
     except (OSError, UnicodeError, ValueError, csv.Error) as exc:
         return _error("parse_failed", f"Could not parse {path.name}: {type(exc).__name__}: {exc}")
 
