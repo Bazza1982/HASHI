@@ -93,3 +93,13 @@ async def test_actual_progress_clock_is_not_reset_by_heartbeat():
     assert snapshot['active_tools'][0]['activity']['root_count'] == 1
     assert 'private path' not in json.dumps(snapshot)
     await services.close()
+@pytest.mark.asyncio
+async def test_matches_advance_discovery_signal_not_just_mechanical_progress(tmp_path):
+    from tools.tool_activity import ToolActivity
+    activity = ToolActivity("file_search", "call-1", {"request_id": "r"}, {})
+    activity.update(counters={"files_enumerated": 10, "matches": 0})
+    assert activity.snapshot["progress"] == "observed"
+    assert activity.snapshot["match_progress"] == "unknown"
+    activity.update(counters={"files_enumerated": 11, "matches": 1})
+    assert activity.snapshot["match_progress"] == "observed"
+    assert activity.snapshot["last_match_at"] is not None

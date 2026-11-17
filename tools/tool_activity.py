@@ -88,6 +88,7 @@ class ToolActivity:
             'agent_id': str(context.get('agent_name') or ''),
             'selected_roots': [], 'scope_provenance': 'unknown',
             'last_worker_response': None, 'last_output': None, 'last_work_progress': None,
+            'last_match_at': None, 'match_progress': 'unknown',
             'counters': {}, 'liveness': 'unknown', 'progress': 'unknown',
         }
         self._task = None
@@ -140,6 +141,10 @@ class ToolActivity:
                    counters[k] > (old.get(k) or 0) for k in work_keys):
                 self.snapshot['last_work_progress'] = now
                 self.snapshot['progress'] = 'observed'
+            # New matches are discovery, not just mechanical scanning.
+            if isinstance(counters.get('matches'), (int, float)) and                     counters['matches'] > (old.get('matches') or 0):
+                self.snapshot['last_match_at'] = now
+                self.snapshot['match_progress'] = 'observed'
             self.snapshot['counters'] = dict(counters)
         if worker_response:
             self.snapshot['last_worker_response'] = now

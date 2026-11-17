@@ -58,6 +58,7 @@ _QUERY_TOOLS = frozenset(
         "web_fetch",
         "file_list",
         "file_search",
+        "repo_discover",
         "process_list",
         "request_diagnostics",
         "browser_active_tab",

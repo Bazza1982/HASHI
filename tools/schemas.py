@@ -57,9 +57,13 @@ TOOL_SCHEMAS = [
                 "defaults. Permissions still apply. Content mode does not extract PDF, "
                 "Office, archive or media contents. Results report coverage and may be "
                 "partial with a cursor; partial/zero results do not prove absence. "
-                "Project profile skips dependencies/caches; expanded and include_hidden "
-                "can include them. Shell may be used directly when it is a better fit. "
-                "Regex is currently unavailable; use literal, path glob, or scoped Shell."
+                "Each call has a recoverable execution budget (default 45s); a budget "
+                "stop returns partial matches, truthful coverage and a continuation "
+                "cursor when scanner state survives, so decide whether to continue, "
+                "narrow the roots, refine the query, or switch tools. Project profile "
+                "skips dependencies/caches; expanded and include_hidden can include "
+                "them. Shell may be used directly when it is a better fit. Regex is "
+                "currently unavailable; use literal, path glob, or scoped Shell."
             ),
             "parameters": {
                 "type": "object",
@@ -77,6 +81,7 @@ TOOL_SCHEMAS = [
                     "include_hidden": {"type": "boolean"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
                     "context_chars": {"type": "integer", "minimum": 0, "maximum": 2000},
+                    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Optional execution budget in seconds for this call only; capped by any configured timeout_max_seconds. Omission uses the configured or per-operation default (45s for file_search)."},
                     "cursor": {"type": "string", "description": "Opaque continuation. Repeat the same query/options/roots in the same Run."},
                     "scope_reason": {"type": "string", "maxLength": 500},
                     "options": {"type": "object", "properties": {
@@ -217,6 +222,7 @@ TOOL_SCHEMAS = [
                         "maximum": 200,
                         "description": "Maximum returned matches. Default 30.",
                     },
+                    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Optional execution budget in seconds for this call only; capped by any configured timeout_max_seconds. Omission uses the configured or per-operation default (45s for log_query)."},
                     "cursor": {"type": "string", "description": "Opaque continuation; repeat the same path, terms and options in the same Run."},
                     "context_chars": {
                         "type": "integer",
@@ -485,7 +491,9 @@ TOOL_SCHEMAS = [
                 "List files and directories at a given path. "
                 "Returns names/types/sizes and truthful coverage, with a cursor for more. "
                 "Nonrecursive by default, including hidden entries for compatibility. "
-                "Use file_search for recursive discovery."
+                "Each call has a recoverable execution budget (default 15s nonrecursive, "
+                "45s recursive); a budget stop returns partial coverage and a cursor when "
+                "scanner state survives. Use file_search for recursive discovery."
             ),
             "parameters": {
                 "type": "object",
@@ -504,6 +512,7 @@ TOOL_SCHEMAS = [
                     },
                     "include_hidden": {"type": "boolean", "description": "Include hidden entries; default true for existing directory-listing compatibility."},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Optional execution budget in seconds for this call only; capped by any configured timeout_max_seconds."},
                     "cursor": {"type": "string", "description": "Continue with identical path/pattern/recursive settings."},
                 },
                 "required": ["path"],
@@ -2631,6 +2640,45 @@ TOOL_SCHEMAS.extend(
     ]
 )
 
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "repo_discover",
+            "description": (
+                "Find local Git repository checkouts by directory name, remote "
+                "name or remote URL, without scanning repository contents. Inspects "
+                "candidate directories directly under the requested parents and reads "
+                "Git metadata (.git, worktree gitdir, remotes, branch). Read-only; "
+                "existing read permissions apply; no network access. Handles folders "
+                "whose name differs from their GitHub remote name. Default parents are "
+                "the Run's enabled Workzones. No continuation cursor: narrow roots or "
+                "raise timeout_seconds when a budget stop occurs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 1024,
+                              "description": "Substring matched case-insensitively against directory names, Git remote names and remote URLs."},
+                    "roots": {"type": "array", "minItems": 1, "maxItems": 32,
+                              "items": {"type": "string"},
+                              "description": "Parent directories inspected non-recursively. Default: this Run's enabled Workzones."},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100,
+                                    "description": "Maximum returned matches. Default 20."},
+                    "include_root_itself": {"type": "boolean",
+                                            "description": "Also inspect each parent itself. Default true."},
+                    "include_hidden": {"type": "boolean",
+                                       "description": "Include hidden candidate directories. Default false."},
+                    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0,
+                                        "description": "Optional execution budget in seconds for this call only; capped by any configured timeout_max_seconds. Default 30s."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
 
 # Both browser transports use the same HASHI capability/permission authority.
 # An explicit target never silently falls back to a different browser/profile.
