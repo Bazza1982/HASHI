@@ -64,9 +64,11 @@ HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
 [reboot](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md),
 [fail-fast](HASHI_REBOOT_RECEIPTS.md).
 
-`hashi update` retains complete runtime adoption. `hashi update --stage-only`,
-`hashi deploy` and owner-only `/hashideploy` prepare and qualify source without
-restarting anything, then return `Ready to reboot` or a useful error. See
+`hashi update` adopts source, Core, Workers and Remote together or fails.
+
+Source preparation is separately supported by `hashi update --stage-only`,
+`hashi deploy` and owner-only `/hashideploy`: qualify source without restarting,
+then return `Ready to reboot` or a useful error. See
 [source preparation and adoption](HASHI_SOURCE_RELEASE_CLOSURE.md).
 
 ## Configuration, identity, and persistence
