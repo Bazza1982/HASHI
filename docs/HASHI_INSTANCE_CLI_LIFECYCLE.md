@@ -43,4 +43,7 @@ The following operational constraints were relocated intact from the prior boots
 
 ### FYI v1 024 Complete instance update adoption
 
-`hashi update` adopts source, Core, Workers and Remote together or fails.
+`hashi update` retains complete runtime adoption. `hashi update --stage-only`,
+`hashi deploy` and owner-only `/hashideploy` prepare and qualify source without
+restarting anything, then return `Ready to reboot` or a useful error. See
+[source preparation and adoption](HASHI_SOURCE_RELEASE_CLOSURE.md).

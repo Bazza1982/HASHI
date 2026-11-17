@@ -135,24 +135,26 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--check", action="store_true")
     stop = commands.add_parser("stop", help="Gracefully stop an idle selected instance.")
     stop.add_argument("--timeout", type=_timeout, default=30, help="Graceful stop wait in seconds (1-300); no forced termination.")
-    update = commands.add_parser(
-        "update",
-        help="Fast-forward and fully adopt a verified source release.",
-    )
-    update.add_argument(
-        "--confirm",
-        required=True,
-        metavar="INSTANCE",
-        help="Exact selected instance name; the release restarts Core and Remote.",
-    )
-    update.add_argument("--remote", default="origin", help="Git remote to fetch.")
-    update.add_argument("--branch", default="main", help="Remote branch to adopt.")
-    update.add_argument(
-        "--timeout",
-        type=_release_timeout,
-        default=300,
-        help="Final adoption wait in seconds (60-900).",
-    )
+    for name, description in (
+        ("update", "Update source and adopt it; --stage-only prepares without restarting."),
+        ("deploy", "Prepare the latest source without restarting; wait for user adoption."),
+    ):
+        release = commands.add_parser(name, help=description)
+        release.add_argument(
+            "--confirm", required=True, metavar="INSTANCE",
+            help="Exact selected instance name; update without --stage-only restarts Core and Remote.",
+        )
+        release.add_argument("--remote", default="origin", help="Git remote to fetch.")
+        release.add_argument("--branch", default="main", help="Remote branch to prepare.")
+        release.add_argument(
+            "--timeout", type=_release_timeout, default=300,
+            help="Qualification/adoption wait in seconds (60-900).",
+        )
+        if name == "update":
+            release.add_argument("--stage-only", action="store_true",
+                                 help="Prepare source only; never restart or reload anything.")
+        else:
+            release.set_defaults(stage_only=True)
     commands.add_parser("onboard", help="Open local connection or Hashiko assistance.")
     commands.add_parser("ui", help="Open an installed external HASHI UI.")
     help_parser = commands.add_parser("help", help="Show this help.")
@@ -1230,7 +1232,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
             )
         if command == "stop":
             return stop_instance(registry, record, timeout=args.timeout)
-        if command == "update":
+        if command in {"update", "deploy"}:
             from tools.release_update import ReleaseUpdateError, run_source_release
 
             if args.confirm != record["name"]:
@@ -1240,29 +1242,37 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 )
             if record.get("managed") or record.get("source_kind") != "git":
                 raise InstanceRegistryError(
-                    "Closed-loop update is available only for a registered Git "
+                    "Source update is available only for a registered Git "
                     "source instance; packaged installs require a verified package."
                 )
             root = registry.resolved_code_root(record)
-            snapshot = inspect_instance(record, root)
-            if not (
-                snapshot.get("running")
-                and snapshot.get("healthy")
-                and snapshot.get("ready")
-                and snapshot.get("activity_verified")
-            ):
-                print(
-                    "HASHI: selected instance is not ready enough for a verified "
-                    "release; no source was changed.",
-                    file=sys.stderr,
+            if args.stage_only:
+                selected_id, selected_port, _gateway = configured_identity(
+                    root, Path(record["bridge_home"])
                 )
-                return EXIT_NOT_READY
-            if snapshot.get("busy"):
-                print(
-                    "HASHI: selected instance is busy; no source was changed.",
-                    file=sys.stderr,
-                )
-                return EXIT_BUSY
+                if selected_id.upper() != str(record["instance_id"]).upper():
+                    raise InstanceRegistryError("Selected instance configuration does not match the registry.")
+                snapshot = {"instance_id": selected_id, "api_port": selected_port}
+            else:
+                snapshot = inspect_instance(record, root)
+                if not (
+                    snapshot.get("running")
+                    and snapshot.get("healthy")
+                    and snapshot.get("ready")
+                    and snapshot.get("activity_verified")
+                ):
+                    print(
+                        "HASHI: selected instance is not ready enough for a verified "
+                        "release; no source was changed.",
+                        file=sys.stderr,
+                    )
+                    return EXIT_NOT_READY
+                if snapshot.get("busy"):
+                    print(
+                        "HASHI: selected instance is busy; no source was changed.",
+                        file=sys.stderr,
+                    )
+                    return EXIT_BUSY
             try:
                 result = run_source_release(
                     code_root=root,
@@ -1273,11 +1283,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     remote=args.remote,
                     branch=args.branch,
                     timeout=args.timeout,
+                    stage_only=args.stage_only,
                 )
             except ReleaseUpdateError as exc:
                 _emit(exc.to_payload(), as_json=args.json)
                 return EXIT_RUNTIME
-            record_effect("source_release_completed")
+            record_effect("source_prepared" if args.stage_only else "source_release_completed")
             _emit(result, as_json=args.json)
             return 0
         if command == "onboard":
