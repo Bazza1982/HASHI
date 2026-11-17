@@ -71,8 +71,8 @@ class Scanner:
         # A deadline stop must never produce a zero-progress continuation:
         # each invocation performs at least one batch before yielding.
         self.worked = False
-        # Resolve the trusted boundaries once. Per-entry authorization then
-        # stays lexical for ordinary entries and resolves only through links.
+        # Resolve trusted boundaries once; frames carry the physical prefix
+        # through links so ordinary descendants need no per-file resolve().
         self.read_roots = [Path(value).resolve() for value in config['authorized_roots']]
         self.blocked = [Path(value).resolve() for value in config.get('protected_read_paths', [])]
         self.selected = [Path(item['path']).resolve() for item in config['selected_roots']]
@@ -84,9 +84,8 @@ class Scanner:
             self.state['errors'].append({'path': str(path)[:512], 'code': code})
 
     def authorized(self, path: Path, resolved: Path | None = None) -> bool:
-        # Ordinary entries descend from an already-resolved selected root, so
-        # the lexical path is the resolved path; only linked entries need an
-        # actual resolve(). The boundaries themselves are pre-resolved.
+        # The caller supplies the physical path derived from its parent frame.
+        # Resolve only roots, links and legacy continuation state.
         if resolved is None:
             resolved = path.resolve()
         return (any(resolved == root or resolved.is_relative_to(root) for root in self.read_roots)
@@ -182,7 +181,7 @@ class Scanner:
         root['signature'] = signature(path)
         root['initialized'] = True
         if path.is_dir():
-            root['stack'].append(self.frame(path))
+            root['stack'].append(self.frame(path, resolved=str(path.resolve())))
         else:
             if self.ignored(path.name, path.name, False) or not self.selected_candidate(path.name):
                 self.count['skipped'] += 1
@@ -195,7 +194,8 @@ class Scanner:
     def text_batch(self, root):
         item = root['pending_file']
         path = Path(item['path'])
-        if not self.authorized(path, resolved=path if item.get('lexical') else None):
+        physical = Path(item['resolved']) if item.get('resolved') else path.resolve()
+        if not self.authorized(path, resolved=physical):
             self.error(path, 'permission_denied')
             root['pending_file'] = None
             return True
@@ -211,7 +211,7 @@ class Scanner:
                 self.count['skipped'] += 1
                 root['pending_file'] = None
                 return True
-            with path.open('rb') as probe:
+            with physical.open('rb') as probe:
                 if b'\0' in probe.read(8192):
                     self.count['skipped'] += 1
                     root['pending_file'] = None
@@ -222,7 +222,7 @@ class Scanner:
         def progress(count):
             self.count['characters_read'] = before + count
             self.progress()
-        result = scan_literal(path, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
+        result = scan_literal(physical, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
                               case_sensitive=self.cfg['case_sensitive'],
                               max_results=max(1, self.cfg['max_results'] - len(self.matches)),
                               context_chars=self.cfg['context_chars'], state=item['text_state'],
@@ -284,27 +284,22 @@ class Scanner:
             if self.ignored(relative, entry.name, directory_entry):
                 self.count['skipped'] += 1
                 continue
-            resolved = None
-            if linked:
-                # Links can escape the scope or create cycles; resolve the
-                # target once and reuse it for every boundary check.
-                resolved = path.resolve()
-                if not self.authorized(path, resolved=resolved):
-                    self.error(path, 'permission_denied')
-                    continue
-            elif not self.authorized(path, resolved=path):
+            # Ordinary children inherit their parent's physical prefix, even
+            # several levels below a link/junction. Resolve actual links only.
+            if 'resolved' not in frame:
+                frame['resolved'] = str(directory.resolve())
+            target = path.resolve() if linked else Path(frame['resolved']) / entry.name
+            if not self.authorized(path, resolved=target):
                 self.error(path, 'permission_denied')
                 continue
             if directory_entry:
-                target = resolved if resolved is not None else path
-                # Cycles only exist through links; the resolved ancestor set
-                # lives on the pushed frames and costs nothing for plain dirs.
+                # Every frame, including the root, participates in cycles.
                 if linked and any(frame2.get('resolved') is not None
                                    and Path(frame2['resolved']) == target
                                    for frame2 in root['stack']):
                     self.error(path, 'link_cycle')
                     continue
-                if target in self.selected and target != Path(root['path']).resolve():
+                if target in self.selected and target != Path(root['stack'][0]['resolved']):
                     continue  # nested selected root is scheduled independently
                 # Frame signatures use path.stat: DirEntry.stat snapshots can
                 # lag by nanoseconds and report st_dev=0 on Windows, which
@@ -318,7 +313,7 @@ class Scanner:
                     self.error(path, 'depth_budget')
                     continue
                 root['stack'].append(self.frame(
-                    path, sig=sig, resolved=str(target) if linked else None))
+                    path, sig=sig, resolved=str(target)))
                 if self.cfg['mode'] == 'path' and self.path_matches(relative) and self.selected_candidate(relative):
                     if not self.add({'path': str(path), 'type': 'dir', 'root': root['path']}):
                         return False
@@ -334,7 +329,7 @@ class Scanner:
                 continue
             root['pending_file'] = {'path': str(path), 'relative': relative,
                                     'signature': signature(path),
-                                    'text_state': None, 'lexical': not linked}
+                                    'text_state': None, 'resolved': str(target)}
             if not self.text_batch(root):
                 return False
             if self.cfg['mode'] == 'content':
@@ -353,6 +348,10 @@ class Scanner:
                     for frame in root['stack']:
                         if signature(Path(frame['path'])) != frame['signature']:
                             raise StaleCursor(frame['path'])
+                        physical = Path(frame['path']).resolve()
+                        if frame.get('resolved') and physical != Path(frame['resolved']):
+                            raise StaleCursor(frame['path'])
+                        frame['resolved'] = str(physical)
             pending = ([self.state.pop('pending_match')] if 'pending_match' in self.state else [])
             pending += self.state.pop('pending_matches', [])
             while pending:

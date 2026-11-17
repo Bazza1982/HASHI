@@ -176,9 +176,9 @@ async def test_repo_discover_partial_result_on_deadline_and_no_false_completion(
     # A deliberately slow fixture guarantees the scan crosses the tiny
     # per-call budget; discovery stops cooperatively and reports it honestly.
     real_inspect = repo_discover_module._inspect
-    def slow_inspect(candidate):
+    def slow_inspect(candidate, *args, **kwargs):
         time.sleep(0.002)
-        return real_inspect(candidate)
+        return real_inspect(candidate, *args, **kwargs)
     monkeypatch.setattr(repo_discover_module, "_inspect", slow_inspect)
     for i in range(120):
         (workzone / f"plain-{i:04d}").mkdir()

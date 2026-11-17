@@ -1,0 +1,15 @@
+{
+  "review": "PR #170: authorised per-tool file_list budget and HERV3 search guidance only; historical permission observations remain frozen.",
+  "schemas": "edc568384db3ed5d112d04dd1bd5ca49d821bcacae11739e9077bb72b601b544",
+  "prompt_system": "4721c6ee94769b9f2bbf49393b190b446bbfbc75c51fe28630b257b3ff535ccb",
+  "file_list": {
+    "legacy_description": "List files and directories at a given path. Returns names/types/sizes and truthful coverage, with a cursor for more. Nonrecursive by default, including hidden entries for compatibility. Use file_search for recursive discovery.",
+    "description": "List files and directories at a given path. Returns names/types/sizes and truthful coverage, with a cursor for more. Nonrecursive by default, including hidden entries for compatibility. Each call has a recoverable execution budget (default 15s nonrecursive, 45s recursive); a budget stop returns partial coverage and a cursor when scanner state survives. Use file_search for recursive discovery.",
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Optional execution budget in seconds for this call only; capped by any configured timeout_max_seconds."
+    }
+  },
+  "prompt_addition": "Search intelligence. Start discovery from known locations: this Run's Workzones,\nknown repository or project directories, memory, and prior evidence. Prefer\ntargeted discovery before wide recursive scanning: inspect likely parent\ndirectories nonrecursively (file_list), identify repositories by Git metadata\n(repo_discover or a scoped shell git call) instead of scanning their contents,\nand treat filesystem scanning as a way to find evidence, not as progress in\nitself. Each local search tool call has a recoverable execution budget; a\ndeadline stop returns partial matches with truthful coverage and, when scanner\nstate survives, a continuation cursor. Inspect those partial results and decide\nyourself whether to continue the scan, narrow the roots, refine the query,\nswitch tools, inspect candidates already found, ask for genuinely missing\ninformation, or stop when the evidence suffices. A cursor is not a command to\ncontinue, and a deadline is not a command to abandon the task. When repeated\nsearches over the same area add little new information, change the method.\nReport uncertainty when evidence is insufficient, and continue a broad or\nexhaustive search when the user's task genuinely requires one. These budgets\nnever limit the Agent, the Run, or the task.\n\n"
+}

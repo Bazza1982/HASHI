@@ -934,7 +934,7 @@ class ToolRegistry:
                              protection_complete=False,
                          )},
             )
-        if tool_name == "file_search":
+        if tool_name in {"file_search", "repo_discover"}:
             for root in arguments.get("roots") or []:
                 denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)
                 if denial is not None:
@@ -1934,9 +1934,11 @@ class ToolRegistry:
             roots = (Path(root).resolve(),)
         if tool_name == "repo_discover":
             from tools.repo_discover import execute_repo_discover
+            policy = self._live_runtime_policy_cache
             return await execute_repo_discover(arguments, read_roots=roots,
                 cwd=read_cwd, search_scope=search_scope, audit_context=context,
-                options=self._search_options())
+                options=self._search_options(),
+                protected_read_paths=getattr(policy, "protected_read_paths", ()))
         if tool_name == "file_search":
             from tools.file_search import execute_file_search
             policy = self._live_runtime_policy_cache

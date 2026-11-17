@@ -25,22 +25,75 @@ MAX_RESULTS_CAP = 100
 MAX_ROOTS = 32
 
 
-def _read_remotes(git_dir: Path, common_dir: Path | None) -> list[dict]:
-    """Parse [remote "..."] sections from the effective Git config files."""
-    configs: list[Path] = []
-    if common_dir is not None:
-        configs.append(common_dir / "config")
+class MetadataUnavailable(Exception):
+    """An existing read boundary or filesystem error prevents discovery."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+class MetadataReader:
+    """Apply the tool's existing read scope to every physical metadata path."""
+
+    def __init__(self, read_roots, protected_read_paths, cwd, *, allow_wsl=False):
+        self.read_roots = read_roots
+        self.protected = tuple(Path(path).resolve() for path in protected_read_paths)
+        self.cwd = cwd
+        self.allow_wsl = allow_wsl
+
+    def resolve(self, path: Path) -> Path:
+        from tools.builtins import _resolve_path
+        try:
+            actual = _resolve_path(str(path), self.read_roots, self.cwd,
+                                   allow_wsl_windows_drive_paths=self.allow_wsl)
+        except ValueError:
+            raise MetadataUnavailable("metadata_out_of_scope") from None
+        except (OSError, RuntimeError):
+            raise MetadataUnavailable("metadata_unavailable") from None
+        if any(actual == protected or actual.is_relative_to(protected)
+               for protected in self.protected):
+            raise MetadataUnavailable("metadata_protected")
+        return actual
+
+    def text(self, path: Path) -> str | None:
+        actual = self.resolve(path)
+        try:
+            return actual.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return None  # Optional metadata or an absent fallback is normal.
+        except OSError:
+            raise MetadataUnavailable("metadata_unavailable") from None
+
+
+def _remote_url(value: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+    value = value.strip().strip('"')
+    try:
+        parsed = urlsplit(value)
+        if parsed.netloc:
+            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
+                               parsed.path, "", ""))
+        # Git also permits SCP-style user@host:path remotes.
+        return value.rsplit("@", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    except ValueError:
+        return "[unavailable remote URL]"
+
+
+def _read_remotes(git_dir: Path, common_dir: Path | None,
+                  reader: MetadataReader) -> list[dict]:
+    """Read effective local configs only; never follow includes or credentials."""
+    configs = ([common_dir / "config"] if common_dir is not None else [])
     configs.append(git_dir / "config")
     if common_dir is not None:
         configs.append(git_dir / "config.worktree")
     remotes: dict[str, dict] = {}
-    for config in configs:
-        try:
-            lines = config.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+    for config in dict.fromkeys(configs):
+        content = reader.text(config)
+        if content is None:
             continue
         section: str | None = None
-        for raw in lines:
+        for raw in content.splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or line.startswith(";"):
                 continue
@@ -54,61 +107,60 @@ def _read_remotes(git_dir: Path, common_dir: Path | None) -> list[dict]:
             if section and "=" in line:
                 key, _, value = line.partition("=")
                 if key.strip().lower() == "url":
-                    remotes.setdefault(section, {})["url"] = value.strip()
+                    remotes.setdefault(section, {})["url"] = _remote_url(value)
     return [{"name": name, **values} for name, values in remotes.items() if values.get("url")]
 
 
-def _git_dirs_for(candidate: Path) -> tuple[Path | None, Path | None, bool]:
-    """Return (git_dir, common_dir, is_worktree) for one candidate directory."""
-    dot = candidate / ".git"
+def _git_dirs_for(candidate: Path, reader: MetadataReader
+                  ) -> tuple[Path | None, Path | None, bool]:
+    """Resolve and authorise pointers before examining their metadata."""
+    dot = reader.resolve(candidate / ".git")
     if dot.is_dir():
         return dot, None, False
     if dot.is_file():
-        try:
-            content = dot.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            return None, None, False
-        if content.startswith("gitdir:"):
-            target = content[len("gitdir:"):].strip()
+        content = reader.text(dot)
+        if content and content.strip().startswith("gitdir:"):
+            target = content.strip()[len("gitdir:"):].strip()
             git_dir = Path(target)
             if not git_dir.is_absolute():
                 git_dir = candidate / git_dir
-            git_dir = git_dir.resolve()
-            common_dir = git_dir
-            try:
-                relative = (git_dir / "commondir").read_text(
-                    encoding="utf-8", errors="replace").strip()
-                common_dir = (git_dir / relative).resolve()
-            except OSError:
-                pass
+            git_dir = reader.resolve(git_dir)
+            if not git_dir.is_dir():
+                raise MetadataUnavailable("metadata_unavailable")
+            relative = reader.text(git_dir / "commondir")
+            common_dir = reader.resolve(git_dir / relative.strip()) if relative else git_dir
+            if not common_dir.is_dir():
+                raise MetadataUnavailable("metadata_unavailable")
             return git_dir, common_dir, True
     return None, None, False
 
 
-def _branch_for(git_dir: Path, common_dir: Path | None) -> str | None:
-    for base in (common_dir, git_dir):
+def _branch_for(git_dir: Path, common_dir: Path | None,
+                reader: MetadataReader) -> str | None:
+    # A linked worktree's HEAD owns its branch; shared HEAD is only a fallback
+    # for missing metadata, never for denied reads or a detached worktree.
+    for base in dict.fromkeys((git_dir, common_dir)):
         if base is None:
             continue
-        try:
-            head = (base / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
+        content = reader.text(base / "HEAD")
+        if content is None:
             continue
+        head = content.strip()
         if head.startswith("ref: refs/heads/"):
             return head[len("ref: refs/heads/"):]
-        if head:
-            return head[:12]  # detached HEAD
+        return head[:12] if head else None
     return None
 
 
-def _inspect(candidate: Path) -> dict | None:
-    git_dir, common_dir, worktree = _git_dirs_for(candidate)
+def _inspect(candidate: Path, reader: MetadataReader) -> dict | None:
+    git_dir, common_dir, worktree = _git_dirs_for(candidate, reader)
     if git_dir is None:
         return None
     return {
         "path": str(candidate),
         "name": candidate.name,
-        "remotes": _read_remotes(git_dir, common_dir),
-        "branch": _branch_for(git_dir, common_dir),
+        "remotes": _read_remotes(git_dir, common_dir, reader),
+        "branch": _branch_for(git_dir, common_dir, reader),
         "worktree": worktree,
     }
 
@@ -127,7 +179,7 @@ def _matches(query: str, info: dict) -> bool:
 
 def _discover(roots: list[dict], resolved_read_roots: list[Path], query: str,
               max_results: int, include_root_itself: bool, include_hidden: bool,
-              deadline: float | None) -> dict:
+              deadline: float | None, reader: MetadataReader) -> dict:
     matches: list[dict] = []
     coverage: list[dict] = []
     errors: list[dict] = []
@@ -136,6 +188,18 @@ def _discover(roots: list[dict], resolved_read_roots: list[Path], query: str,
                 "skipped_out_of_scope": 0, "errors": 0}
     stop_reason = "completed"
     warnings: list[str] = []
+
+    def inspect(candidate: Path) -> dict | None:
+        counters["repos_inspected"] += 1
+        try:
+            return _inspect(candidate, reader)
+        except (MetadataUnavailable, OSError) as exc:
+            counters["errors"] += 1
+            if len(errors) < 12:
+                errors.append({"path": str(candidate)[:512],
+                               "code": exc.code if isinstance(exc, MetadataUnavailable)
+                               else "metadata_unavailable"})
+            return None
 
     def authorized(child: Path, linked: bool) -> bool:
         target = child.resolve() if linked else child
@@ -159,8 +223,7 @@ def _discover(roots: list[dict], resolved_read_roots: list[Path], query: str,
         root_coverage = {"path": str(path), "exhausted": False}
         coverage.append(root_coverage)
         if include_root_itself and path.is_dir():
-            info = _inspect(path)
-            counters["repos_inspected"] += 1
+            info = inspect(path)
             if info and _matches(query, info):
                 matches.append(info)
                 counters["matches"] += 1
@@ -186,8 +249,7 @@ def _discover(roots: list[dict], resolved_read_roots: list[Path], query: str,
                     if not authorized(child, linked):
                         counters["skipped_out_of_scope"] += 1
                         continue
-                    info = _inspect(child)
-                    counters["repos_inspected"] += 1
+                    info = inspect(child)
                     if info is None:
                         continue
                     if linked:
@@ -224,7 +286,7 @@ def _discover(roots: list[dict], resolved_read_roots: list[Path], query: str,
 
 
 async def execute_repo_discover(args, *, read_roots, cwd, search_scope, audit_context,
-                                options=None):
+                                options=None, protected_read_paths=()):
     from tools.builtins import BuiltinExecutionResult, _resolve_path
     query = str(args.get("query") or "").strip()
     if not query or len(query) > 1024:
@@ -270,9 +332,11 @@ async def execute_repo_discover(args, *, read_roots, cwd, search_scope, audit_co
     deadline = time.time() + timeout if timeout is not None else None
     started = time.monotonic()
     resolved_read_roots = [Path(root).resolve() for root in read_roots]
+    reader = MetadataReader(resolved_read_roots, protected_read_paths, cwd,
+                            allow_wsl=audit_context.get("allow_wsl_windows_drive_paths", False))
     data = await asyncio.to_thread(
         _discover, roots, resolved_read_roots, query, max_results,
-        include_root_itself, include_hidden, deadline)
+        include_root_itself, include_hidden, deadline, reader)
     data.update(query=query, max_results=max_results, elapsed_ms=int((time.monotonic() - started) * 1000),
                 execution_budget={**budget_policy, "effective_seconds": timeout},
                 can_continue=False, next_cursor=None)

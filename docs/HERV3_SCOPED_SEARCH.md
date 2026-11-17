@@ -308,9 +308,10 @@ Changes (all in Functions territory; protected Core untouched):
   process-tree termination, explicit `continuation_lost` reporting and
   actionable deadline warnings. Backward compatible: existing configured
   timeouts keep their exact semantics.
-- `tools/search_worker.py`: one `DirEntry.stat` per entry, lexical
-  authorization for ordinary entries (`resolve` only through links), cycle
-  checks only for linked directories, path-mode batches continue past files
+- `tools/search_worker.py`: one `DirEntry.stat` per entry, physical-prefix
+  authorization for ordinary descendants (`resolve` only at roots/links and
+  cursor frame validation), cycle checks for linked directories against all
+  ancestor frames, path-mode batches continue past files
   (≤64 entries per batch), deadline notice kept out of continuation state, and
   a guaranteed minimum of one batch per invocation so a deadline can never
   produce a zero-progress continuation loop.
@@ -335,3 +336,40 @@ Validation (synthetic fixtures, isolated D-drive environment, Windows native):
 see the PR description for commands and counts. No live-model claim is made
 where only deterministic fixtures were used; no production instance was
 accessed, modified, restarted or deployed.
+
+
+## 2026-11-18 — PR #170 independent-review repairs
+
+PAO Tools owns these Functions-layer repairs. Every scanner directory frame now
+retains its resolved physical prefix, including ordinary ancestors. A plain child
+inherits that prefix; only a link/junction needs target resolution. Descendant
+path and content checks use the physical path against the same selected/read
+roots and protected-read paths. Cursor frames retain and validate that mapping;
+cycles back to ordinary roots/ancestors terminate without per-file resolution.
+
+Repository discovery applies the existing read resolver and projected protected
+read paths before following or reading .git, gitdir, commondir, config,
+config.worktree and HEAD. Denied or unreadable metadata suppresses that candidate
+and yields partial coverage with a candidate-level error code; it never adds
+metadata directories to the read scope. Missing optional configs remain optional.
+The individual worktree HEAD precedes the common HEAD, with fallback only for
+missing metadata. Remote URL userinfo, query strings and fragments are omitted
+before matching or returning results. Config includes and network operations are
+not followed.
+
+The frozen L0 observation is unchanged. A separate reviewed delta pins the two
+authorised current hashes, and the test reverses only the exact file_list budget
+schema/description and HERV3 guidance additions to verify the historical hashes.
+Every other permission, tool, audit and runtime assertion remains mandatory.
+The added search tests belong to the existing Permission focused inventory;
+pyproject testpaths is restored, avoiding the unnecessary full-CI trigger.
+
+Regression fixtures cover allowed directory symlinks and Windows junctions,
+protected descendants never opened, path/content pagination and link cycles,
+ordinary-file resolution cost, metadata pointer/file scope and protection,
+access-denied reporting, credential-bearing remotes, and a real main/topic Git
+worktree. The same fixtures fail on reviewed HEAD ce8b25f9 and pass after repair.
+Validation is local on isolated native Windows CPython 3.12; Unix-specific
+acceptance remains separate. No hosted suite, production adoption, merge or
+deployment is part of this review repair. Repository discovery still has no
+continuation cursor; its existing partial-result and narrowing guidance remains.

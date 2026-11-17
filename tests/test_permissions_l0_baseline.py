@@ -91,4 +91,25 @@ async def test_l0_matches_frozen_main_without_constructing_permission_authority(
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "permission_l0_baseline.json").read_text(encoding="utf-8")
     )
-    assert observed == fixture["observation"]
+    authorised = json.loads(
+        (Path(__file__).parent / "fixtures" / "permission_l0_search_budget_delta.json")
+        .read_text(encoding="utf-8")
+    )
+    # Reverse ONLY the two reviewed presentation/schema changes and compare
+    # with the original frozen hashes. A tool, permission, required argument,
+    # other schema field or unrelated prompt edit still fails this baseline.
+    legacy_definitions = json.loads(json.dumps(definitions))
+    listing = next(item["function"] for item in legacy_definitions
+                   if item["function"]["name"] == "file_list")
+    assert listing["description"] == authorised["file_list"]["description"]
+    assert listing["parameters"]["properties"].pop("timeout_seconds") == (
+        authorised["file_list"]["timeout_seconds"])
+    listing["description"] = authorised["file_list"]["legacy_description"]
+    assert _digest(legacy_definitions) == fixture["observation"]["schemas"]
+    addition = authorised["prompt_addition"]
+    assert system.count(addition) == 1
+    assert _digest(system.replace(addition, "", 1)) == fixture["observation"]["prompt_system"]
+    expected = {**fixture["observation"],
+                "schemas": authorised["schemas"],
+                "prompt_system": authorised["prompt_system"]}
+    assert observed == expected
