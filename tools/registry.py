@@ -323,6 +323,13 @@ class ToolRegistry:
             # Local vision is opt-in and requires explicit provider config.
             if "vision_inspect" not in explicitly_allowed:
                 self._allowed.discard("vision_inspect")
+            # The small-model toolkit is opt-in presentation tooling. A
+            # wildcard must not silently broaden an instance's capabilities
+            # merely because the toolkit schemas exist globally; list the
+            # toolkit tools explicitly to adopt them.
+            for _toolkit_name in TOOLKIT_TOOL_NAMES:
+                if _toolkit_name not in explicitly_allowed:
+                    self._allowed.discard(_toolkit_name)
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}

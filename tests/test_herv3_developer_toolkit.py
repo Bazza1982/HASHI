@@ -232,3 +232,18 @@ async def test_git_inspection_cannot_walk_to_repo_outside_accessible_root(tmp_pa
     registry = _registry(nested, allowed=["git_inspect"])
     result = await registry.execute("git_inspect", {"operation": "status"}, "scope")
     assert result.is_error
+
+
+def test_wildcard_does_not_silently_adopt_toolkit_tools(tmp_path):
+    """A '*' allowlist keeps its prior behaviour: the new toolkit schemas do not
+    broaden a wildcard instance unless they are listed explicitly (same
+    precedent as media_read and vision_inspect)."""
+    wildcard = _registry(tmp_path, allowed=["*"])
+    for name in TOOLKIT_TOOL_NAMES:
+        assert not wildcard.is_allowed(name), name
+    assert not wildcard.is_allowed("media_read")
+    assert not wildcard.is_allowed("vision_inspect")
+    explicit = _registry(tmp_path, allowed=["*", "tool_find", "file_manage"])
+    assert explicit.is_allowed("tool_find")
+    assert explicit.is_allowed("file_manage")
+    assert not explicit.is_allowed("text_replace")

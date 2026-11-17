@@ -52,6 +52,13 @@ The branch preserves the original full-tool behaviour by default. For a single
 This is a standard backend row `tools` setting. Global `default_tools` can
 also carry this option, but **do not enable globally for initial tests**.
 
+Instances whose llowed_tools uses the * wildcard must additionally list the
+toolkit tools explicitly (for example 	ool_find, project_locate,
+code_search, git_inspect, ile_manage, 	ext_replace, data_inspect).
+A wildcard alone does not adopt the new tools, so instances without this
+configuration keep their prior behaviour unchanged (the same precedent as
+media_read and ision_inspect).
+
 In HERV3 on-demand mode, the initial model payload offers a small starter set
 and a few goal-matched suggestions. A `tool_find` call activates matching
 already-allowed tool schemas on the next provider call. This is a
