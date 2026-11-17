@@ -24,12 +24,15 @@ from orchestrator.background_job_policy import background_job_start_authorized
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 from tools.smart_tools import SmartToolRuntime
 from tools.office.contract import OFFICE_TOOL_NAMES, OFFICE_READ_ONLY_TOOLS
+from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES, TOOLKIT_READ_ONLY_TOOLS
 
 # Tool tiers — send only what's needed per turn to save context window.
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
+    "core": ["ask_user", "get_user_answer", "tool_find", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
+    "development": ["tool_find", "project_locate", "code_search", "git_inspect", "text_replace", "workspace_inspect", "verification_run", "apply_patch", "shell"],
+    "daily": ["tool_find", "file_manage", "data_inspect", "file_read", "file_write", "file_list", *OFFICE_TOOL_NAMES],
     "office_basic": list(OFFICE_TOOL_NAMES),
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
@@ -96,6 +99,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "file_list",
         "file_read",
         *OFFICE_READ_ONLY_TOOLS,
+        *TOOLKIT_READ_ONLY_TOOLS,
         "file_search",
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
@@ -836,6 +840,17 @@ class ToolRegistry:
         )
         if unavailable is not None:
             return unavailable
+        # Reuse canonical file-read/file-write checks for higher-level tools;
+        # no second authorization system is introduced.
+        if tool_name in TOOLKIT_TOOL_NAMES:
+            from tools.developer_toolkit import tool_path_requests
+            for path_action, raw_path in tool_path_requests(
+                tool_name, arguments, self._read_scope()[2]
+            ):
+                for check in (self._check_live_runtime_gate, self._check_enterprise_path_gate):
+                    denial = check(path_action, {"path": raw_path}, tool_call_id=tool_call_id)
+                    if denial is not None:
+                        return denial
         denial = self._check_system_exchange_loop_gate(
             tool_name,
             arguments,
@@ -1303,6 +1318,11 @@ class ToolRegistry:
         is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         if tool_name in OFFICE_TOOL_NAMES:
             is_error = (details or {}).get("office_result", {}).get("status") == "error"
+        elif tool_name in TOOLKIT_TOOL_NAMES:
+            try:
+                is_error = json.loads(output).get("ok") is False
+            except (ValueError, AttributeError):
+                is_error = output.startswith("Error:")
         result = ToolResult(
             tool_call_id=effective_call_id,
             output=output,
@@ -1924,6 +1944,9 @@ class ToolRegistry:
         if tool_name in OFFICE_TOOL_NAMES:
             from tools.office.integration import execute_office
             return await execute_office(self, tool_name, arguments, tool_call_id)
+        if tool_name in TOOLKIT_TOOL_NAMES:
+            from tools.developer_toolkit import execute_toolkit
+            return await execute_toolkit(self, tool_name, arguments)
         read_roots, search_scope, read_cwd = self._read_scope()
         if tool_name == "file_search":
             from tools.file_search import execute_file_search

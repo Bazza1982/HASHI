@@ -2646,6 +2646,10 @@ for _schema in TOOL_SCHEMAS:
 from tools.office.contract import office_tool_definitions
 TOOL_SCHEMAS.extend(office_tool_definitions())
 
+# Small-model daily/development toolkit shares the same PAO registry authority.
+from tools.developer_toolkit_schemas import TOOLKIT_SCHEMAS
+TOOL_SCHEMAS.extend(TOOLKIT_SCHEMAS)
+
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())

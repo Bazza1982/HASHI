@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Mapping
 from tools.office.contract import OFFICE_READ_ONLY_TOOLS
+from tools.developer_toolkit_schemas import TOOLKIT_READ_ONLY_TOOLS
 
 
 # Only tools whose implementation is observational belong here.  In particular,
@@ -15,6 +16,7 @@ _READ_EFFECT_TOOLS = frozenset(
     {
         "file_read",
         *OFFICE_READ_ONLY_TOOLS,
+        *TOOLKIT_READ_ONLY_TOOLS,
         "log_query",
         "media_read",
         "vision_inspect",
@@ -96,10 +98,10 @@ def observe_tool_effect(*, tool_name: str, call_id: str, arguments: dict,
 
 
     kind = "read" if tool_name in _READ_EFFECT_TOOLS else ""
-    target = str(arguments.get("path") or arguments.get("url") or arguments.get("query") or "")
+    target = str(arguments.get("path") or arguments.get("destination") or arguments.get("url") or arguments.get("query") or "")
     observed = str(output or "")
     digest = hashlib.sha256(observed.encode("utf-8")).hexdigest()
-    if tool_name in {"file_write", "apply_patch"}:
+    if tool_name in {"file_write", "apply_patch", "text_replace", "file_manage"}:
         from tools.builtins import _resolve_path
         try:
             path = _resolve_path(target, access_roots, workspace_dir)
