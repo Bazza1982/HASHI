@@ -35,7 +35,7 @@ def registry_for(tmp_path: Path, *, options=None):
                               {'slot_id': 'main', 'path': str(repo), 'enabled': True}]}},
                           resolve_access_root=lambda: tmp_path)
     manager._attach_tool_registry({'allowed': ['file_search', 'file_read', 'log_query',
-                                             'file_list', 'file_write', 'shell'],
+                                             'file_list', 'repo_discover', 'file_write', 'shell'],
                                   **(options or {})}, cfg)
     return manager.current_backend.tool_registry, repo, home
 

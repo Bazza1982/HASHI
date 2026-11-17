@@ -120,3 +120,38 @@ The feature is compatibility-gated and disabled when this block is absent.
 foreground subprocess; it is deliberately generous and does not bound a HER
 Turn, stage, Tool loop, or managed background job. When absent, omission of a
 caller timeout retains the no-default-deadline behavior.
+
+## Search execution budgets (2026-11-17)
+
+Local search tools carry recoverable per-call execution budgets. They are tool
+budgets, never Agent, Run, task or conversation limits:
+
+| Operation | Engineering default | Override |
+| --- | --- | --- |
+| `file_search` | 45 s | per-call `timeout_seconds` argument or `tool_options.file_search.timeout_seconds` |
+| `file_list` nonrecursive | 15 s | same keys |
+| `file_list` recursive | 45 s | same keys |
+| `log_query` | 45 s | same keys |
+| `repo_discover` | 30 s | same keys |
+
+Precedence: an explicit per-call `timeout_seconds` request wins; then the
+configured `timeout_seconds` (including the Smart Registry foreground fuse);
+then the per-operation default. A configured `timeout_max_seconds` caps
+per-call requests only. Existing installations with explicit search settings
+keep their exact behaviour; installations without any deadline configuration
+now receive the defaults above instead of an unbounded scan.
+
+On reaching its budget the scanner stops scheduling new work, serializes its
+partial matches, truthful coverage and continuation state, and returns them.
+The parent waits a short cleanup grace (default 2 s, configurable via
+`tool_options.file_search.cleanup_grace_seconds`) for that serialization;
+only if the worker fails to finish is the owned process tree terminated, and
+the result then explicitly reports `continuation_lost` without inventing a
+cursor. A deadline stop is never reported as complete coverage, and a cursor
+is never a command to continue: the model decides whether to continue, narrow
+the roots, refine the query, switch tools, or stop.
+
+`repo_discover` identifies local Git checkouts by directory name, remote name
+or remote URL without scanning repository contents (`.git` directories,
+worktree `gitdir` files, remotes and HEAD branch only). It is read-only, uses
+the existing read scope, and performs no network access.

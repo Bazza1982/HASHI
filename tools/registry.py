@@ -29,7 +29,7 @@ from tools.office.contract import OFFICE_TOOL_NAMES, OFFICE_READ_ONLY_TOOLS
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "documentation_read"],
+    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "repo_discover", "documentation_read"],
     "office_basic": list(OFFICE_TOOL_NAMES),
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
@@ -106,6 +106,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "memory_search",
         "log_query",
         "process_list",
+        "repo_discover",
         "request_diagnostics",
         "wiki_search",
         "documentation_read",
@@ -933,7 +934,7 @@ class ToolRegistry:
                              protection_complete=False,
                          )},
             )
-        if tool_name == "file_search":
+        if tool_name in {"file_search", "repo_discover"}:
             for root in arguments.get("roots") or []:
                 denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)
                 if denial is not None:
@@ -1388,6 +1389,7 @@ class ToolRegistry:
             "file_write",
             "file_list",
             "log_query",
+            "repo_discover",
             "apply_patch",
             "vision_inspect",
         }:
@@ -1397,7 +1399,7 @@ class ToolRegistry:
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
             return None
-        if tool_name == "file_search":
+        if tool_name in {"file_search", "repo_discover"}:
             raw_roots = arguments.get("roots")
             if raw_roots is None:
                 raw_roots = [item["path"] for item in self._read_scope()[1].get("preferred_roots", [])]
@@ -1925,14 +1927,21 @@ class ToolRegistry:
             from tools.office.integration import execute_office
             return await execute_office(self, tool_name, arguments, tool_call_id)
         read_roots, search_scope, read_cwd = self._read_scope()
+        context = self._effective_audit_context()
+        roots = read_roots
+        if context.get("org_id") and context.get("project_id"):
+            root = context.get("enterprise_workspace_root") or context.get("project_workspace_root") or self.access_root
+            roots = (Path(root).resolve(),)
+        if tool_name == "repo_discover":
+            from tools.repo_discover import execute_repo_discover
+            policy = self._live_runtime_policy_cache
+            return await execute_repo_discover(arguments, read_roots=roots,
+                cwd=read_cwd, search_scope=search_scope, audit_context=context,
+                options=self._search_options(),
+                protected_read_paths=getattr(policy, "protected_read_paths", ()))
         if tool_name == "file_search":
             from tools.file_search import execute_file_search
-            context = self._effective_audit_context()
             policy = self._live_runtime_policy_cache
-            roots = read_roots
-            if context.get("org_id") and context.get("project_id"):
-                root = context.get("enterprise_workspace_root") or context.get("project_workspace_root") or self.access_root
-                roots = (Path(root).resolve(),)
             return await execute_file_search(arguments, read_roots=roots,
                 cwd=read_cwd, search_scope=search_scope, audit_context=context,
                 continuations=self.search_continuations, options=self._search_options(),
