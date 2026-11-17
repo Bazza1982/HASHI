@@ -4,6 +4,7 @@ from __future__ import annotations
 import fnmatch
 from functools import cache
 import json
+import stat
 import os
 import sys
 import time
@@ -67,9 +68,14 @@ class Scanner:
         self.match_chars = 0
         self.last_progress = time.monotonic()
         self.stop_reason = 'completed'
-        self.read_roots = [Path(value) for value in config['authorized_roots']]
-        self.blocked = [Path(value) for value in config.get('protected_read_paths', [])]
-        self.selected = [Path(item['path']) for item in config['selected_roots']]
+        # A deadline stop must never produce a zero-progress continuation:
+        # each invocation performs at least one batch before yielding.
+        self.worked = False
+        # Resolve the trusted boundaries once. Per-entry authorization then
+        # stays lexical for ordinary entries and resolves only through links.
+        self.read_roots = [Path(value).resolve() for value in config['authorized_roots']]
+        self.blocked = [Path(value).resolve() for value in config.get('protected_read_paths', [])]
+        self.selected = [Path(item['path']).resolve() for item in config['selected_roots']]
         self.iterators: dict[str, object] = {}
 
     def error(self, path, code):
@@ -77,8 +83,12 @@ class Scanner:
         if len(self.state['errors']) < 12:
             self.state['errors'].append({'path': str(path)[:512], 'code': code})
 
-    def authorized(self, path: Path) -> bool:
-        resolved = path.resolve()
+    def authorized(self, path: Path, resolved: Path | None = None) -> bool:
+        # Ordinary entries descend from an already-resolved selected root, so
+        # the lexical path is the resolved path; only linked entries need an
+        # actual resolve(). The boundaries themselves are pre-resolved.
+        if resolved is None:
+            resolved = path.resolve()
         return (any(resolved == root or resolved.is_relative_to(root) for root in self.read_roots)
                 and any(resolved == root or resolved.is_relative_to(root) for root in self.selected)
                 and not any(resolved == root or resolved.is_relative_to(root) for root in self.blocked))
@@ -139,8 +149,12 @@ class Scanner:
                               'coverage': {'roots': [{'path': root['path'], 'exhausted': root['done'],
                                                       'failed': root['failed']} for root in self.state['roots']]}}), flush=True)
 
-    def frame(self, path):
-        return {'path': str(path), 'offset': 0, 'signature': signature(path)}
+    def frame(self, path, *, sig=None, resolved=None):
+        frame = {'path': str(path), 'offset': 0,
+                 'signature': sig if sig is not None else signature(path)}
+        if resolved is not None:
+            frame['resolved'] = resolved
+        return frame
 
     def iterator(self, frame):
         name = frame['path']
@@ -181,7 +195,7 @@ class Scanner:
     def text_batch(self, root):
         item = root['pending_file']
         path = Path(item['path'])
-        if not self.authorized(path):
+        if not self.authorized(path, resolved=path if item.get('lexical') else None):
             self.error(path, 'permission_denied')
             root['pending_file'] = None
             return True
@@ -256,37 +270,62 @@ class Scanner:
             path = Path(entry.path)
             relative = path.relative_to(Path(root['path'])).as_posix()
             linked = entry.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction())
-            directory_entry = entry.is_dir(follow_symlinks=self.cfg['follow_links'])
             if linked and not self.cfg['follow_links']:
                 self.count['skipped'] += 1
                 continue
+            try:
+                # One metadata call per entry; DirEntry.stat reuses the open
+                # directory handle instead of re-resolving the path each time.
+                st = entry.stat(follow_symlinks=self.cfg['follow_links'])
+            except OSError:
+                self.count['skipped'] += 1
+                continue
+            directory_entry = stat.S_ISDIR(st.st_mode)
             if self.ignored(relative, entry.name, directory_entry):
                 self.count['skipped'] += 1
                 continue
-            if not self.authorized(path):
+            resolved = None
+            if linked:
+                # Links can escape the scope or create cycles; resolve the
+                # target once and reuse it for every boundary check.
+                resolved = path.resolve()
+                if not self.authorized(path, resolved=resolved):
+                    self.error(path, 'permission_denied')
+                    continue
+            elif not self.authorized(path, resolved=path):
                 self.error(path, 'permission_denied')
                 continue
             if directory_entry:
-                target = path.resolve()
-                if any(target == Path(parent['path']).resolve() for parent in root['stack']):
+                target = resolved if resolved is not None else path
+                # Cycles only exist through links; the resolved ancestor set
+                # lives on the pushed frames and costs nothing for plain dirs.
+                if linked and any(frame2.get('resolved') is not None
+                                   and Path(frame2['resolved']) == target
+                                   for frame2 in root['stack']):
                     self.error(path, 'link_cycle')
                     continue
-                if target in self.selected and target != Path(root['path']):
+                if target in self.selected and target != Path(root['path']).resolve():
                     continue  # nested selected root is scheduled independently
-                if not self.cfg['cross_filesystems'] and signature(path)[0] != root['signature'][0]:
+                # Frame signatures use path.stat: DirEntry.stat snapshots can
+                # lag by nanoseconds and report st_dev=0 on Windows, which
+                # would falsely invalidate continuations or skip every
+                # directory as a foreign filesystem.
+                sig = signature(path)
+                if not self.cfg['cross_filesystems'] and sig[0] != root['signature'][0]:
                     self.count['skipped'] += 1
                     continue
                 if len(root['stack']) >= 128:
                     self.error(path, 'depth_budget')
                     continue
-                root['stack'].append(self.frame(path))
+                root['stack'].append(self.frame(
+                    path, sig=sig, resolved=str(target) if linked else None))
                 if self.cfg['mode'] == 'path' and self.path_matches(relative) and self.selected_candidate(relative):
                     if not self.add({'path': str(path), 'type': 'dir', 'root': root['path']}):
                         return False
                 if not self.cfg['recursive']:
                     root['stack'].pop()
                 continue
-            if not entry.is_file(follow_symlinks=self.cfg['follow_links']):
+            if not stat.S_ISREG(st.st_mode):
                 self.count['skipped'] += 1
                 continue
             self.count['files_enumerated'] += 1
@@ -294,8 +333,15 @@ class Scanner:
                 self.count['skipped'] += 1
                 continue
             root['pending_file'] = {'path': str(path), 'relative': relative,
-                                    'signature': signature(path), 'text_state': None}
-            return self.text_batch(root)
+                                    'signature': signature(path),
+                                    'text_state': None, 'lexical': not linked}
+            if not self.text_batch(root):
+                return False
+            if self.cfg['mode'] == 'content':
+                # Keep tight interruption granularity for body scans.
+                return True
+            # Path mode: continue the bounded batch so deadline checks stay
+            # useful without paying a loop iteration per file.
         return True
 
     def run(self):
@@ -317,11 +363,12 @@ class Scanner:
             roots = self.state['roots']
             while any(not root['done'] for root in roots):
                 self.progress()
-                if self.cfg.get('deadline') and time.time() >= self.cfg['deadline']:
+                if self.cfg.get('deadline') and time.time() >= self.cfg['deadline'] and self.worked:
                     self.stop_reason = 'deadline'
                     break
                 root = roots[self.state['turn'] % len(roots)]
                 self.state['turn'] += 1
+                self.worked = True
                 try:
                     if not self.batch(root):
                         break
@@ -338,9 +385,17 @@ class Scanner:
                 iterator.close()
 
     def result(self, *, stale=False):
+        warnings = list(self.state['warnings'])
+        if self.stop_reason == 'deadline':
+            # The deadline notice belongs to this round's result only; it must
+            # not persist into continuation state and falsify the completeness
+            # of a later fully-resumed scan.
+            message = 'Scan stopped before completing coverage'
+            if message not in warnings:
+                warnings.append(message)
         exhausted = (all(root['done'] for root in self.state['roots']) and
                      not self.state.get('pending_match') and not self.state.get('pending_matches'))
-        complete = exhausted and not self.count['errors'] and not self.state['warnings'] and not stale
+        complete = exhausted and not self.count['errors'] and not warnings and not stale
         if self.stop_reason == 'completed' and self.count['errors']:
             self.stop_reason = 'io_error'
         state = None if exhausted or stale else self.state
@@ -353,11 +408,19 @@ class Scanner:
                                        'failed': root['failed']} for root in self.state['roots']],
                              'errors': self.state['errors']},
                 'scope_exhausted': exhausted, 'coverage_complete': complete,
-                'stop_reason': self.stop_reason, 'warnings': self.state['warnings'],
+                'stop_reason': self.stop_reason, 'warnings': warnings,
                 'state': state}
 
 
 def main():
+    # Test-only fixture: lets a parent simulate an unresponsive worker to
+    # exercise the emergency cleanup path. Never set in production scans.
+    hang = os.environ.get('HASHI_SEARCH_WORKER_TEST_HANG_SECONDS')
+    if hang:
+        try:
+            time.sleep(float(hang))
+        except (TypeError, ValueError):
+            pass
     # The managed pipe protocol is UTF-8, independent of Windows ANSI locale
     # or inherited PYTHONIOENCODING. Do not reconfigure the importing parent.
     sys.stdout.reconfigure(encoding='utf-8', errors='strict')

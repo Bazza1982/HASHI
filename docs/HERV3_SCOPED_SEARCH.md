@@ -268,3 +268,70 @@ was leased by another task and no control takeover was attempted. Telegram
 connection/delivery and a human observing a progress message are separate facts;
 human display confirmation remains unverified. This was focused acceptance,
 not the separately governed full essential-live-test manifest.
+
+
+## 2026-11-17 — recoverable execution budgets, cooperative deadlines and repository discovery
+
+Follow-up engineering on `fix/herv3-search-intelligence-20261117` (PR pending;
+not merged, not deployed). Motivation: an Agent on DeepSeek V4 Pro spent
+excessive time locating local projects (SOK under `content_generation`, Hashi
+Compute) by repeatedly exploring `D:\Projects` with ever-broader `file_search`
+queries. Root causes confirmed in `tools/` and `orchestrator/her_v2/`:
+
+1. **No effective default deadline.** `registry._search_options` filled
+   `timeout_seconds` only from explicit `tool_options.file_search` or a
+   configured Smart Registry foreground fuse. With neither present, a scan ran
+   until natural completion (page/output budget only). `file_search`,
+   `file_list` and `log_query` unintentionally shared that single configuration.
+2. **Parent/worker deadline race.** `file_search.run_worker` killed the worker
+   the instant the deadline fired — the same instant the worker was trying to
+   serialize its deadline-limited result. The valid continuation state was
+   almost always lost; the synthesized result reported `can_continue=False`
+   and lost matches found since the last progress event.
+3. **Inefficient traversal on Windows.** `Path.resolve()` ran for every entry
+   and per directory ancestor (cycle check), and multiple `stat` calls
+   (`is_dir`, `is_file`, `signature`) per entry. A subtle Windows detail:
+   `DirEntry.stat().st_dev` is 0 while `Path.stat().st_dev` is the volume
+   serial, which must never be mixed in the cross-filesystem check.
+4. **Repository discovery by name only.** Searching folder/file names for
+   `SOK`, `Kent` or `Studio` cannot identify a checkout whose directory is
+   `content_generation` and whose GitHub remote is `Bazza1982/SOK`.
+5. **Mechanical progress signals.** Rising enumeration counters counted as
+   activity progress even when no matches were found; HERV3 had no
+   deadline/partial-result guidance in `v3_prompt`.
+
+Changes (all in Functions territory; protected Core untouched):
+
+- `tools/file_search.py`: `DEFAULT_SEARCH_BUDGET_SECONDS` (45/15/45/45/30),
+  `resolve_search_budget` (per-call request > configured > default, optional
+  `timeout_max_seconds` cap), parent cleanup grace window before emergency
+  process-tree termination, explicit `continuation_lost` reporting and
+  actionable deadline warnings. Backward compatible: existing configured
+  timeouts keep their exact semantics.
+- `tools/search_worker.py`: one `DirEntry.stat` per entry, lexical
+  authorization for ordinary entries (`resolve` only through links), cycle
+  checks only for linked directories, path-mode batches continue past files
+  (≤64 entries per batch), deadline notice kept out of continuation state, and
+  a guaranteed minimum of one batch per invocation so a deadline can never
+  produce a zero-progress continuation loop.
+- `tools/repo_discover.py` (new): read-only Git-metadata repository discovery;
+  no daemon, index, network access or new authorization. Finds
+  `content_generation` as SOK in ~0.16 s on a synthetic 400-directory fixture
+  without enumerating any repository contents, where recursive name search
+  enumerated 443 directories / 2,400 files and found nothing.
+- `tools/registry.py`/`schemas.py`/`smart_tools.py`/`builtins.py`: wiring,
+  schemas and per-call `timeout_seconds` arguments for all four search tools;
+  `repo_discover` added to the read-only catalog.
+- `tools/tool_activity.py` + `orchestrator/her_v2/turn_services.py`: match
+  discovery (`last_match_at`, `match_progress`) distinguished from mechanical
+  enumeration, exposed to activity observers as advisory counts only.
+- `orchestrator/her_v2/v3_prompt.py`: concise search-intelligence guidance —
+  known locations first, targeted discovery before wide recursion, Git-based
+  repository identification, partial-result/cursor decision ownership, strategy
+  change on low-yield repetition, exhaustive search when genuinely required.
+  No fixed tool sequence, search count, planner or blocker was added.
+
+Validation (synthetic fixtures, isolated D-drive environment, Windows native):
+see the PR description for commands and counts. No live-model claim is made
+where only deterministic fixtures were used; no production instance was
+accessed, modified, restarted or deployed.

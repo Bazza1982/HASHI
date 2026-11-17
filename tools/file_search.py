@@ -14,6 +14,86 @@ from tools.tool_activity import CURRENT_ACTIVITY, broad_scope_advisory
 
 MAX_ENVELOPE_CHARS = 16000
 
+# Engineering defaults for one local search operation. These are configuration
+# defaults, not policy or Agent limits: an installation can override each
+# budget through the existing per-tool configuration, and an individual call
+# may request a longer window when the task justifies it (optionally capped by
+# a configured timeout_max_seconds). No default constrains the Agent Run,
+# conversation, or task.
+DEFAULT_SEARCH_BUDGET_SECONDS = {
+    "file_search": 45.0,
+    "file_list": 15.0,
+    "file_list_recursive": 45.0,
+    "log_query": 45.0,
+    "repo_discover": 30.0,
+}
+
+# The parent waits this long past the cooperative deadline for the worker to
+# serialize its deadline-limited result (matches, coverage and continuation
+# state) before falling back to emergency process-tree cleanup. Emergency
+# cleanup cannot preserve a continuation cursor that was never captured.
+DEFAULT_CLEANUP_GRACE_SECONDS = 2.0
+
+
+def resolve_search_budget(args, *, options, operation, recursive=None):
+    """Resolve the cooperative execution budget for one search operation.
+
+    Precedence: an explicit per-call ``timeout_seconds`` request wins; then a
+    configured ``timeout_seconds`` (existing behaviour, including the Smart
+    Registry foreground fuse); then the per-operation engineering default.
+    A configured ``timeout_max_seconds`` caps explicit per-call requests only;
+    configured deadlines and defaults continue to apply unchanged.
+
+    Returns ``(deadline_seconds, policy)`` where policy describes the decision
+    for the structured result. Raises ValueError on invalid values.
+    """
+    options = options or {}
+    if recursive is None:
+        recursive = bool(args.get("_recursive")) if isinstance(args, dict) else False
+    cap = None
+    if options.get("timeout_max_seconds") is not None:
+        try:
+            candidate = float(options["timeout_max_seconds"])
+            if 0 < candidate < float("inf"):
+                cap = candidate
+        except (TypeError, ValueError):
+            pass
+    requested = args.get("timeout_seconds") if isinstance(args, dict) else None
+    if requested is not None:
+        try:
+            requested = float(requested)
+            if not 0 < requested < float("inf"):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("timeout_seconds must be a positive finite number of seconds")
+        if cap is not None and requested > cap:
+            policy = {"source": "per_call_request", "requested_seconds": requested,
+                      "capped": True, "timeout_max_seconds": cap}
+            return cap, policy
+        policy = {"source": "per_call_request", "requested_seconds": requested,
+                  "capped": False, "timeout_max_seconds": cap}
+        return requested, policy
+    if options.get("timeout_seconds") is not None:
+        try:
+            configured = float(options["timeout_seconds"])
+            if not 0 < configured < float("inf"):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("Configured search deadline must be a positive finite number")
+        policy = {"source": "configured_timeout", "requested_seconds": configured,
+                  "capped": False, "timeout_max_seconds": cap}
+        return configured, policy
+    default_key = operation
+    if operation == "file_list" and recursive:
+        default_key = "file_list_recursive"
+    default = DEFAULT_SEARCH_BUDGET_SECONDS.get(default_key)
+    if default is None:
+        return None, {"source": "none", "default_budget_seconds": None}
+    policy = {"source": "engineering_default", "default_budget_seconds": default,
+              "capped": False, "timeout_max_seconds": cap}
+    return default, policy
+
+
 
 class Continuations:
     """Ephemeral Function-local derived state; never a filesystem index."""
@@ -178,24 +258,50 @@ async def run_worker(config):
         proc.stdin.close()
         deadline = config.get('deadline')
         if deadline:
+            grace = config.get('cleanup_grace_seconds', DEFAULT_CLEANUP_GRACE_SECONDS)
+            try:
+                grace = float(grace)
+                if not 0 <= grace < float('inf'):
+                    grace = DEFAULT_CLEANUP_GRACE_SECONDS
+            except (TypeError, ValueError):
+                grace = DEFAULT_CLEANUP_GRACE_SECONDS
+            # Cooperative window: the worker stops scheduling new work at the
+            # same deadline, then serializes its partial result (continuation
+            # state included). Wait until the worker deadline itself...
             done, _ = await asyncio.wait({drain_task}, timeout=max(0.01, deadline-time.time()))
             if drain_task not in done:
-                cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, drain_task, pgid=group))
-                if result is None:
-                    counters = dict(activity.snapshot['counters']) if activity else {}
-                    result = {'matches': (partial or {}).get('matches', []),
-                              'counters': (partial or {}).get('counters', counters),
-                              'coverage': (partial or {}).get('coverage', {'roots': []}),
-                              'scope_exhausted': False, 'coverage_complete': False,
-                              'stop_reason': 'deadline', 'warnings': ['Scan stopped before completing coverage'],
-                              'state': None}
-                result['cleanup'] = cleanup
-                return result
+                # ...plus a short cleanup grace so a deadline-limited result
+                # that is already being written is collected, not destroyed.
+                done, _ = await asyncio.wait({drain_task}, timeout=max(0.0, grace))
+                if drain_task not in done:
+                    # Emergency path: the worker could not finish its result.
+                    # Terminate the owned tree; never invent a continuation
+                    # cursor that was never captured.
+                    cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, drain_task, pgid=group))
+                    if result is None:
+                        counters = dict(activity.snapshot['counters']) if activity else {}
+                        result = {'matches': (partial or {}).get('matches', []),
+                                  'counters': (partial or {}).get('counters', counters),
+                                  'coverage': (partial or {}).get('coverage', {'roots': [], 'errors': []}),
+                                  'scope_exhausted': False, 'coverage_complete': False,
+                                  'stop_reason': 'deadline', 'state': None,
+                                  'continuation_lost': True,
+                                  'warnings': [
+                                      'Scan stopped before completing coverage',
+                                      ('The scanner could not serialize its state within the cleanup '
+                                       'grace window, so no continuation cursor exists. Matches and '
+                                       'coverage reflect the last progress event; consider narrowing '
+                                       'the roots, refining the query, or running a fresh scan.')]}
+                    result['cleanup'] = cleanup
+                    return result
         await asyncio.shield(drain_task)
         if proc.returncode != 0 or result is None:
             raise ValueError('search worker failed: ' + stderr_tail.decode('utf-8', 'replace')[-2048:])
         result['cleanup'] = {'status': 'normal_completion', 'process_reaped': True,
                              'group_alive': False, 'errors': []}
+        if result.get('stop_reason') == 'deadline':
+            # The worker returned its cooperative deadline result intact.
+            result['cleanup']['cooperative_deadline'] = True
         return result
     except asyncio.CancelledError as exc:
         if activity:
@@ -261,15 +367,22 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                 activity.operation_id = operation_id
         except ValueError as exc:
             return failed(str(exc), code='cursor_stale')
-    timeout = options.get('timeout_seconds')
+    try:
+        timeout, budget_policy = resolve_search_budget(
+            args, options=options, operation=operation,
+            recursive=bool(config.get('recursive')))
+    except ValueError as exc:
+        return failed(str(exc), code='invalid_timeout')
     if timeout is not None:
-        try:
-            timeout = float(timeout)
-            if not 0 < timeout < float('inf'):
-                raise ValueError()
-            config['deadline'] = time.time() + timeout
-        except (TypeError, ValueError):
-            return failed('Configured search deadline must be a positive finite number')
+        config['deadline'] = time.time() + timeout
+    grace = options.get('cleanup_grace_seconds', DEFAULT_CLEANUP_GRACE_SECONDS)
+    try:
+        grace = float(grace)
+        if not 0 <= grace < float('inf'):
+            grace = DEFAULT_CLEANUP_GRACE_SECONDS
+    except (TypeError, ValueError):
+        grace = DEFAULT_CLEANUP_GRACE_SECONDS
+    config['cleanup_grace_seconds'] = grace
     started = time.monotonic()
     try:
         result = await run_worker(config)
@@ -284,8 +397,16 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                   workzone_revision=search_scope.get('workzone_revision'),
                   can_continue=state is not None, next_cursor='x' * 43 if state else None,
                   elapsed_ms=int((time.monotonic()-started)*1000),
+                  execution_budget={**budget_policy, 'effective_seconds': timeout,
+                                    'cleanup_grace_seconds': config.get('cleanup_grace_seconds')},
                   effective_policy={key: config[key] for key in (
                       'profile', 'include', 'exclude', 'include_hidden', 'follow_links', 'cross_filesystems')})
+    if result['stop_reason'] == 'deadline':
+        result['warnings'].append(
+            'Execution budget reached; coverage is incomplete. You may continue '
+            'this scan with next_cursor, narrow the roots, refine the query, switch '
+            'tools, or stop when you have enough evidence. A deadline is not a '
+            'command to abandon the task.')
     result['coverage']['excluded_content'] = 'Containers/media/binary; ordinary UTF-8 text only' if config['mode'] == 'content' else 'No file bodies read'
     from tools.search_worker import PROJECT_EXCLUDED_DIRS, PROJECT_EXCLUDED_FILES, CONTAINER_SUFFIXES
     result['coverage']['default_directory_exclusions'] = (

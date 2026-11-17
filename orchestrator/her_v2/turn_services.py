@@ -224,15 +224,17 @@ class TurnServices(CommentaryPort):
         old = tool.get("scan_counters") or {}
         if any(isinstance(counters.get(key), (int, float)) and
                counters[key] > (old.get(key) or 0) for key in (
-                   "files_enumerated", "directories_enumerated", "characters_read", "bytes_read")):
+                   "files_enumerated", "directories_enumerated", "characters_read", "bytes_read",
+                   "matches")):
             self.last_progress_at = self.clock()
             self.progress_revision += 1
         tool["scan_counters"] = dict(counters)
         tool["activity"] = {key: facts.get(key) for key in (
             "operation_type", "state", "liveness", "progress", "last_work_progress",
-            "last_output", "stop_reason", "coverage_complete")}
+            "last_match_at", "match_progress", "last_output", "stop_reason", "coverage_complete")}
         # Counts/provenance only: no query, hit excerpts or full path lists to AC.
         tool["activity"]["root_count"] = len(facts.get("selected_roots") or [])
+        tool["activity"]["matches"] = counters.get("matches")
         self.last_activity_at = self.clock()
 
     def snapshot(self) -> dict[str, Any]:

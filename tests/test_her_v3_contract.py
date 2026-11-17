@@ -49,6 +49,19 @@ def test_strategy_cards_are_optional_context_not_workflow():
     assert "do the task" in user
 
 
+def test_main_contract_carries_recoverable_search_guidance():
+    system, user = compile_main_prompt(
+        pcm_input={"current_request": "locate a project", "sections": [], "history": []},
+        fallback_request="fallback",
+        context={"habit_catalogue": []},
+    )
+    assert "recoverable execution budget" in system
+    assert "A cursor is not a command to" in system
+    assert "a deadline is not a command to abandon the task" in system
+    folded = " ".join(system.casefold().split())
+    assert "these budgets never limit the agent, the run, or the task" in folded
+
+
 def test_agent_companion_only_intervenes_on_high_confidence_trouble():
     payload = {
         "answers": {
