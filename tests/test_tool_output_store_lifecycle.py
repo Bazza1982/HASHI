@@ -755,3 +755,121 @@ async def test_workspace_inspection_reports_retention_failure_without_inventing_
     assert result.details["complete_content"] is False
     assert result.details["output_continuation"] is None
     assert result.details["matches"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regex", [False, True])
+@pytest.mark.parametrize("symbol", ["x", "海"])
+async def test_workspace_python_search_pages_complete_matching_results(tmp_path, monkeypatch, regex, symbol):
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    source = home / "many.txt"
+    source.write_text("".join(f"MATCH {index:05d} " + symbol * 65 + "\n" for index in range(5000))
+                      + "MATCH final-sentinel\n", encoding="utf-8")
+    sessions = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI3")
+    session = sessions.ensure_default_session(owner_id="user:7", agent_id="lily")
+    run = sessions.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="inspect-python", text="work", source="session-api", idempotency_key="inspect-python",
+    )
+    sessions.mark_request_running(run.request_id, worker_id="worker-1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": session["session_id"], "hashi_run_id": run.run_id,
+        "request_id": run.request_id, "_runtime": SimpleNamespace(session_store=sessions),
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    result = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "MATCH", "path": "many.txt", "regex": regex,
+    })
+    assert not result.is_error, result.output
+    assert result.details["coverage_complete"] is True
+    assert result.details["matches"] == 5001
+    reference = result.details["output_continuation"]
+    full, _ = _all_pages(registry._tool_output_store, run_binding(context), reference)
+    assert full.count("MATCH ") == 5001
+    assert "MATCH 00000" in full and "MATCH final-sentinel" in full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regex", [False, True])
+async def test_workspace_python_search_reports_unavailable_spool(tmp_path, monkeypatch, regex):
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    (home / "many.txt").write_text(("MATCH " + "x" * 70 + "\n") * 2000, encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    def no_storage():
+        raise OSError("simulated unavailable capture storage")
+    monkeypatch.setattr(registry._tool_output_store, "temporary_capture_file", no_storage)
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    result = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "MATCH", "path": "many.txt", "regex": regex,
+    })
+    assert result.details["coverage_complete"] is False
+    assert result.details["output_retention"] == "unavailable"
+    assert "search incomplete" in result.output
+    assert result.details["matches"] < 2000
+
+
+@pytest.mark.asyncio
+async def test_workspace_python_regex_cancellation_reaps_worker_with_spool(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    (home / "source.txt").write_text("a" * 3000 + "!\n", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    original_spawn = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    child = None
+
+    async def observed(*args, **kwargs):
+        nonlocal child
+        process = await original_spawn(*args, **kwargs)
+        if args and str(args[0]) == sys.executable:
+            child = process
+            started.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed)
+    task = asyncio.create_task(registry.execute("workspace_inspect", {
+        "operation": "search", "query": "(a+)+$", "path": "source.txt", "regex": True,
+    }))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert child is not None and child.returncode is not None
+    finally:
+        if child is not None and child.returncode is None:
+            child.kill()
+            await child.wait()

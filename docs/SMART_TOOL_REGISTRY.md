@@ -77,8 +77,13 @@ Without a bound Run or available storage, omitted output is explicitly reported.
 The developer-toolkit Git inspector uses the same continuation for status,
 branches, log, diff and credential-redacted remote addresses. Its log limit
 follows the requested count without a fixed 100-entry ceiling.
-The Python search fallback retains its own output limit and is not covered by
-this continuation guarantee.
+The Python search fallback also spools complete matched rows for Run-bound
+continuations, including regular expressions. A whole-file memory budget
+defaults to 32 MiB; set `HASHI_WORKSPACE_SEARCH_MEMORY_BYTES` to another
+nonnegative byte count, or zero to opt out. When a large regex file exceeds the
+budget, search reports incomplete coverage and points to `file_search`
+recovery. Unreadable or excluded files and excerpt-only matches remain explicit
+coverage limitations.
 On startup, the owner reconciles abandoned terminal Runs; a Run whose state
 cannot be proven is retained until it can be reconciled. A Registry without an
 Agent home uses a private temporary store for that Registry's lifetime.

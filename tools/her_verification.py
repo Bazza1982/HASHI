@@ -409,6 +409,20 @@ class _WorkspaceSearchCancelled(Exception):
     pass
 
 
+def _python_search_in_memory_limit() -> int | None:
+    """Bound the fallback's whole-file reads; zero opts out of the memory budget."""
+    raw = os.environ.get("HASHI_WORKSPACE_SEARCH_MEMORY_BYTES")
+    if raw is None:
+        return _MAX_PYTHON_SEARCH_FILE_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("HASHI_WORKSPACE_SEARCH_MEMORY_BYTES must be a nonnegative integer") from exc
+    if value < 0:
+        raise ValueError("HASHI_WORKSPACE_SEARCH_MEMORY_BYTES must be a nonnegative integer")
+    return value or None
+
+
 def _python_workspace_search(
     target: Path,
     *,
@@ -416,12 +430,14 @@ def _python_workspace_search(
     regex: bool,
     cancelled: threading.Event | None = None,
     collect_all: bool = False,
+    output_sink=None,
 ) -> tuple[str, int, dict[str, Any]]:
     """Portable search with streaming for large literal files and truthful gaps."""
 
     from tools.literal_search import scan_literal
 
     matcher = re.compile(query).search if regex else lambda line: query in line
+    memory_limit = _python_search_in_memory_limit()
     if target.is_file():
         paths = iter((target,))
         include_path = False
@@ -458,6 +474,8 @@ def _python_workspace_search(
     large_file_count = 0
     excerpt_count = 0
     output_limited = False
+    matched_count = 0
+    capture_failed = False
 
     def check_cancel(*_args):
         if cancelled is not None and cancelled.is_set():
@@ -473,12 +491,22 @@ def _python_workspace_search(
         omit(getattr(exc, "filename", target), type(exc).__name__)
 
     def add(row):
-        nonlocal output_chars, output_limited
+        nonlocal output_chars, output_limited, output_sink, capture_failed, matched_count
+        if output_sink is not None:
+            try:
+                output_sink.write((row + "\n").encode("utf-8"))
+            except OSError:
+                capture_failed = True
+                output_sink = None
         if output_chars + len(row) + 1 > _MAX_OUTPUT_CHARS:
             output_limited = True
-            return False
+            if output_sink is None:
+                return False
+            matched_count += 1
+            return True
         rows.append(row)
         output_chars += len(row) + 1
+        matched_count += 1
         return True
 
     for path in paths:
@@ -497,7 +525,7 @@ def _python_workspace_search(
             if binary:
                 continue
             prefix = f"{path.relative_to(root).as_posix()}:" if include_path else ""
-            if before.st_size > _MAX_PYTHON_SEARCH_FILE_BYTES:
+            if memory_limit is not None and before.st_size > memory_limit:
                 if regex:
                     omit(path, "large_regex_requires_file_search")
                     continue
@@ -527,7 +555,7 @@ def _python_workspace_search(
                         omit(path, "invalid_utf8_replaced")
                         encoding_warned = True
                     state = page["continuation"]
-                    if output_limited or state is None:
+                    if (output_limited and output_sink is None) or state is None:
                         break
             else:
                 raw = path.read_bytes()
@@ -548,24 +576,25 @@ def _python_workspace_search(
                 omit(path, "file_changed_during_search")
         except OSError as exc:
             omit(path, type(exc).__name__)
-        if output_limited:
+        if output_limited and output_sink is None:
             break
 
     coverage = {
-        "coverage_complete": not omitted_count and not output_limited,
+        "coverage_complete": not omitted_count and not (output_limited and output_sink is None),
         "omitted_count": omitted_count,
         "omitted": omitted,
         "omitted_paths_truncated": omitted_count > len(omitted),
         "large_files_scanned": large_file_count,
         "excerpt_count": excerpt_count,
         "output_limited": output_limited,
+        "capture_failed": capture_failed,
     }
-    if output_limited:
+    if output_limited and output_sink is None:
         rows.append("...[truncated; use file_search for paged results]")
-    return ("\n".join(rows) + "\n" if rows else ""), len(rows) - int(output_limited), coverage
+    return ("\n".join(rows) + "\n" if rows else ""), matched_count, coverage
 
 
-async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: bool):
+async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: bool, output_sink=None):
     from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
 
     proc = await asyncio.create_subprocess_exec(
@@ -574,9 +603,26 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
         stderr=asyncio.subprocess.PIPE, **process_group_kwargs(),
     )
     group = _bash_process_group_id(proc)
-    request = json.dumps({"path": str(target), "query": query, "collect_all": collect_all},
+    request = json.dumps({"path": str(target), "query": query, "collect_all": collect_all,
+                          "stream_results": output_sink is not None},
                          ensure_ascii=True).encode("utf-8")
-    task = asyncio.create_task(proc.communicate(request))
+    capture_errors: dict[str, str] = {}
+    if output_sink is None:
+        task = asyncio.create_task(proc.communicate(request))
+    else:
+        from tools.tool_activity import bounded_communicate
+
+        async def run_streaming():
+            assert proc.stdin is not None
+            proc.stdin.write(request)
+            await proc.stdin.drain()
+            proc.stdin.close()
+            return await bounded_communicate(
+                proc, limit=_MAX_OUTPUT_CHARS * 4, sinks={"stderr_bytes": output_sink},
+                capture_errors=capture_errors,
+            )
+
+        task = asyncio.create_task(run_streaming())
     try:
         stdout, stderr = await asyncio.shield(task)
     except asyncio.CancelledError as exc:
@@ -606,18 +652,24 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
                    for key in ("omitted_count", "large_files_scanned", "excerpt_count"))
             or type(coverage.get("output_limited")) is not bool):
         raise ValueError("workspace regex worker returned invalid data")
+    if capture_errors:
+        coverage["capture_failed"] = True
+        if coverage["output_limited"]:
+            coverage["coverage_complete"] = False
     return response["output"], response["matches"], coverage
 
 
 async def _run_python_workspace_search(
-    target: Path, *, query: str, regex: bool, collect_all: bool = False,
+    target: Path, *, query: str, regex: bool, collect_all: bool = False, output_sink=None,
 ):
     if regex:
-        return await _run_python_workspace_regex(target, query=query, collect_all=collect_all)
+        return await _run_python_workspace_regex(
+            target, query=query, collect_all=collect_all, output_sink=output_sink,
+        )
     cancelled = threading.Event()
     task = asyncio.create_task(asyncio.to_thread(
         _python_workspace_search, target, query=query, regex=regex, cancelled=cancelled,
-        collect_all=collect_all,
+        collect_all=collect_all, output_sink=output_sink,
     ))
     try:
         return await asyncio.shield(task)
@@ -654,6 +706,82 @@ def _page_coverage_details(
         }
     else:
         metadata[key + "_reference_unavailable"] = True
+
+
+async def _inspect_python_search(
+    target: Path, *, query: str, regex: bool, retain_coverage, retained_output,
+) -> BuiltinExecutionResult:
+    """Use private Run-bound spooling for the portable workspace-search fallback."""
+    with ExitStack() as files:
+        capture = None
+        if retained_output is not None:
+            try:
+                capture = files.enter_context(retained_output[0].temporary_capture_file())
+            except OSError:
+                files.close()
+        try:
+            output, matches, coverage = await _run_python_workspace_search(
+                target, query=query, regex=regex, collect_all=retain_coverage is not None,
+                output_sink=capture,
+            )
+        except re.error as exc:
+            return _result(f"Error: workspace search failed: invalid regex: {exc}",
+                           operation="search", exit_code=2, search_backend="python")
+        except (OSError, ValueError) as exc:
+            return _result(f"Error: workspace search failed: {exc}",
+                           operation="search", exit_code=2, search_backend="python")
+
+        _page_coverage_details(coverage, key="omitted", truncated_key="omitted_paths_truncated",
+                               retain_coverage=retain_coverage)
+        reference = None
+        if coverage["output_limited"] and capture is not None and not coverage.get("capture_failed"):
+            from tools.builtins import _decoded_stream
+
+            try:
+                reference = await asyncio.to_thread(
+                    retained_output[0].retain_text_chunks, retained_output[1], retained_output[2],
+                    _decoded_stream(capture, "utf-8"),
+                )
+            except (OSError, ValueError, TimeoutError):
+                reference = None
+        if coverage["output_limited"] and not reference:
+            coverage["coverage_complete"] = False
+
+        extra: dict[str, Any] = {}
+        if not coverage["coverage_complete"] or coverage["large_files_scanned"] or coverage["output_limited"]:
+            extra = {**coverage, "complete_content": coverage["coverage_complete"]
+                     and not coverage["excerpt_count"] and not coverage["output_limited"]}
+        if not coverage["coverage_complete"]:
+            extra["recovery"] = "Use file_search for paged results or large regex files"
+        empty = ("No matches." if coverage["coverage_complete"] else
+                 "No matches in inspected files; search coverage is incomplete.")
+        rendered = output or empty
+        if coverage["output_limited"]:
+            low, high = 0, min(len(rendered), 12000)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(json.dumps(rendered[:middle], ensure_ascii=False)) <= 12000:
+                    low = middle
+                else:
+                    high = middle - 1
+            if reference:
+                rendered = (rendered[:low] + f"\n[truncated by HASHI; use tool_output_read "
+                            f"reference={reference} offset=0; retained while this Run is active]")
+                extra.update(output_continuation=reference, output_retention=retained_output[0].retention)
+            else:
+                rendered = (rendered[:low] + "\n[search incomplete; complete-result retention is unavailable; "
+                            "use file_search for recovery]\n")
+                extra.update(output_continuation=None, output_retention="unavailable")
+        elif not coverage["coverage_complete"] and output:
+            rendered += "[search incomplete; use file_search for recovery]\n"
+        if coverage.get("omitted_reference"):
+            omitted_reference = coverage["omitted_reference"]["reference"]
+            rendered += f"\n[Complete omitted paths: tool_output_read reference={omitted_reference} offset=0]"
+        return _result(
+            rendered, operation="search",
+            exit_code=(2 if not coverage["coverage_complete"] else 0 if matches else 1),
+            matches=matches, search_backend="python", **extra,
+        )
 
 
 async def execute_workspace_inspect(
@@ -738,48 +866,9 @@ async def execute_workspace_inspect(
             search_backend = "grep"
             executable = shutil.which("grep")
             if not executable:
-                try:
-                    output, matches, coverage = await _run_python_workspace_search(
-                        target, query=query, regex=regex, collect_all=retain_coverage is not None,
-                    )
-                except re.error as exc:
-                    return _result(
-                        f"Error: workspace search failed: invalid regex: {exc}",
-                        operation=operation,
-                        exit_code=2,
-                        search_backend="python",
-                    )
-                except (OSError, ValueError) as exc:
-                    return _result(
-                        f"Error: workspace search failed: {exc}",
-                        operation=operation,
-                        exit_code=2,
-                        search_backend="python",
-                    )
-                _page_coverage_details(
-                    coverage, key="omitted", truncated_key="omitted_paths_truncated",
-                    retain_coverage=retain_coverage)
-                extra = {}
-                if not coverage["coverage_complete"] or coverage["large_files_scanned"]:
-                    extra = {**coverage, "complete_content": coverage["coverage_complete"] and
-                             not coverage["excerpt_count"]}
-                if not coverage["coverage_complete"]:
-                    extra["recovery"] = "Use file_search for paged results or large regex files"
-                empty = ("No matches." if coverage["coverage_complete"] else
-                         "No matches in inspected files; search coverage is incomplete.")
-                rendered = output or empty
-                if not coverage["coverage_complete"] and output:
-                    rendered += "[search incomplete; use file_search for recovery]\n"
-                if coverage.get("omitted_reference"):
-                    reference = coverage["omitted_reference"]["reference"]
-                    rendered += f"\n[Complete omitted paths: tool_output_read reference={reference} offset=0]"
-                return _result(
-                    rendered,
-                    operation=operation,
-                    exit_code=(2 if not coverage["coverage_complete"] else 0 if matches else 1),
-                    matches=matches,
-                    search_backend="python",
-                    **extra,
+                return await _inspect_python_search(
+                    target, query=query, regex=regex, retain_coverage=retain_coverage,
+                    retained_output=retained_output,
                 )
             argv = [
                 executable,

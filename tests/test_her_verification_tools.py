@@ -1056,3 +1056,25 @@ async def test_workspace_git_cancellation_reaps_real_descendant(tmp_path, monkey
                         child.kill()
             except psutil.NoSuchProcess:
                 pass
+
+
+@pytest.mark.asyncio
+async def test_python_regex_search_memory_budget_can_be_configured_or_removed(tmp_path, monkeypatch):
+    source = tmp_path / "fixture.txt"
+    source.write_text("ordinary line\nneedle-123\n", encoding="utf-8")
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("HASHI_WORKSPACE_SEARCH_MEMORY_BYTES", "1")
+    limited = await her_verification.execute_workspace_inspect(
+        {"operation": "search", "query": r"needle-\d+", "regex": True, "path": source.name},
+        workspace_dir=tmp_path,
+    )
+    assert limited.details["coverage_complete"] is False
+    assert limited.details["omitted"][0]["reason"] == "large_regex_requires_file_search"
+
+    monkeypatch.setenv("HASHI_WORKSPACE_SEARCH_MEMORY_BYTES", "0")
+    unlimited = await her_verification.execute_workspace_inspect(
+        {"operation": "search", "query": r"needle-\d+", "regex": True, "path": source.name},
+        workspace_dir=tmp_path,
+    )
+    assert unlimited.details["matches"] == 1
+    assert "needle-123" in unlimited.output
