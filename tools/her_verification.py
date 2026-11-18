@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -963,7 +964,8 @@ def _workspace_authority(root: Path) -> dict[str, Any]:
 
 
 async def _run_workspace_command(
-    command: Sequence[str], *, cwd: Path, timeout_s: float
+    command: Sequence[str], *, cwd: Path, timeout_s: float,
+    capture=None, capture_errors=None, capture_sizes=None,
 ) -> tuple[int, bytes, bytes, bool, dict[str, Any]]:
     invocation = resolve_argv_invocation(command)
     child_env = dict(os.environ)
@@ -978,7 +980,12 @@ async def _run_workspace_command(
         stderr=asyncio.subprocess.PIPE,
         **process_group_kwargs(),
     )
-    communicate_task = asyncio.create_task(proc.communicate())
+    from tools.tool_activity import bounded_communicate
+
+    communicate_task = asyncio.create_task(bounded_communicate(
+        proc, limit=_MAX_OUTPUT_CHARS * 2, sinks=capture,
+        capture_errors=capture_errors, capture_sizes=capture_sizes,
+    ))
     try:
         done, _pending = await asyncio.wait({communicate_task}, timeout=timeout_s)
         if communicate_task in done:
@@ -1087,6 +1094,7 @@ async def execute_verification_run(
     *,
     workspace_dir: Path,
     options: Mapping[str, Any] | None = None,
+    retained_output=None,
 ) -> BuiltinExecutionResult:
     """List recipes or run a direct argv validation in the real workspace."""
 
@@ -1209,58 +1217,109 @@ async def execute_verification_run(
         )
 
     started_at = time.monotonic()
-    try:
-        exit_code, stdout, stderr, timed_out, cleanup = await _run_workspace_command(
-            command,
-            cwd=source,
-            timeout_s=float(timeout_policy["effective_timeout_s"]),
+    with ExitStack() as capture_files:
+        capture = None
+        capture_errors: dict[str, str] = {}
+        capture_sizes: dict[str, int] = {}
+        if retained_output is not None:
+            try:
+                capture = {
+                    "stdout_bytes": capture_files.enter_context(retained_output[0].temporary_capture_file()),
+                    "stderr_bytes": capture_files.enter_context(retained_output[0].temporary_capture_file()),
+                }
+            except OSError as exc:
+                capture_files.close()
+                capture = None
+                capture_errors["capture"] = type(exc).__name__
+        try:
+            capture_kwargs = ({
+                "capture": capture, "capture_errors": capture_errors, "capture_sizes": capture_sizes,
+            } if retained_output is not None else {})
+            exit_code, stdout, stderr, timed_out, cleanup = await _run_workspace_command(
+                command,
+                cwd=source,
+                timeout_s=float(timeout_policy["effective_timeout_s"]),
+                **capture_kwargs,
+            )
+        except Exception as exc:
+            return _result(
+                f"Error: verification command could not start: {exc}",
+                operation="run",
+                recipe=recipe_name or None,
+                unavailable=True,
+                execution_scope="workspace",
+                workspace_copied=False,
+                argv_registered=argv_registered,
+                timeout_policy=timeout_policy,
+            )
+
+        combined = _bounded_text(stdout + (b"\n" if stdout and stderr else b"") + stderr)
+        final_output = (
+            combined or f"Verification {command_ref} exited with code {exit_code}."
         )
-    except Exception as exc:
+        prefix = ""
+        if timed_out:
+            prefix = (f"Error: verification {command_ref} timed out after "
+                      f"{timeout_policy['effective_timeout_s']:g} seconds\n")
+        elif exit_code != 0:
+            prefix = f"Error: verification {command_ref} failed with exit code {exit_code}\n"
+        final_output = prefix + final_output
+        capture_details: dict[str, Any] = {}
+        output_was_large = (sum(capture_sizes.values()) > 20000 if retained_output is not None
+                            else len(stdout) + len(stderr) > _MAX_OUTPUT_CHARS)
+        if output_was_large:
+            reference = None
+            if capture is not None and not capture_errors:
+                from tools.builtins import _retain_shell_capture
+                try:
+                    reference, _ = await asyncio.to_thread(
+                        _retain_shell_capture, retained_output, capture["stdout_bytes"],
+                        capture["stderr_bytes"], str(cleanup.get("encoding") or "utf-8"),
+                        None, prefix, "",
+                    )
+                except (OSError, ValueError, TimeoutError):
+                    reference = None
+            capture_details = {
+                "complete_content": False,
+                "output_continuation": reference,
+                "output_retention": retained_output[0].retention if reference else "unavailable",
+            }
+            # Ensure the registry cannot replace the full-output reference with
+            # a reference to an already truncated preview.
+            low, high = 0, min(len(final_output), 12000)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(json.dumps(final_output[:middle], ensure_ascii=False)) <= 12000:
+                    low = middle
+                else:
+                    high = middle - 1
+            if reference:
+                final_output = (final_output[:low] + f"\n[truncated by HASHI; use tool_output_read "
+                                f"reference={reference} offset=0; retained while this Run is active]")
+            else:
+                final_output = (final_output[:low]
+                                + "\n[truncated by HASHI; complete-result retention is unavailable for this Run]")
+        authority = _workspace_authority(source)
         return _result(
-            f"Error: verification command could not start: {exc}",
+            final_output,
             operation="run",
             recipe=recipe_name or None,
-            unavailable=True,
+            command_source="registered_recipe" if argv_registered else "direct_argv",
+            exit_code=exit_code,
+            timed_out=timed_out,
+            elapsed_s=round(max(0.0, time.monotonic() - started_at), 6),
+            timeout_s=timeout_policy["effective_timeout_s"],
+            timeout_policy=timeout_policy,
             execution_scope="workspace",
+            workspace_root=str(source),
             workspace_copied=False,
             argv_registered=argv_registered,
-            timeout_policy=timeout_policy,
+            argv_sha256=hashlib.sha256(
+                json.dumps(command, ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+            shell=False,
+            process_isolated=False,
+            foreground_cleanup=cleanup,
+            **capture_details,
+            **authority,
         )
-
-    combined = _bounded_text(stdout + (b"\n" if stdout and stderr else b"") + stderr)
-    final_output = (
-        combined or f"Verification {command_ref} exited with code {exit_code}."
-    )
-    if timed_out:
-        final_output = (
-            f"Error: verification {command_ref} timed out after "
-            f"{timeout_policy['effective_timeout_s']:g} seconds\n{final_output}"
-        )
-    elif exit_code != 0:
-        final_output = (
-            f"Error: verification {command_ref} failed with exit code "
-            f"{exit_code}\n{final_output}"
-        )
-    authority = _workspace_authority(source)
-    return _result(
-        final_output,
-        operation="run",
-        recipe=recipe_name or None,
-        command_source="registered_recipe" if argv_registered else "direct_argv",
-        exit_code=exit_code,
-        timed_out=timed_out,
-        elapsed_s=round(max(0.0, time.monotonic() - started_at), 6),
-        timeout_s=timeout_policy["effective_timeout_s"],
-        timeout_policy=timeout_policy,
-        execution_scope="workspace",
-        workspace_root=str(source),
-        workspace_copied=False,
-        argv_registered=argv_registered,
-        argv_sha256=hashlib.sha256(
-            json.dumps(command, ensure_ascii=False).encode("utf-8")
-        ).hexdigest(),
-        shell=False,
-        process_isolated=False,
-        foreground_cleanup=cleanup,
-        **authority,
-    )

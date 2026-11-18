@@ -521,3 +521,40 @@ def test_malformed_optional_policy_does_not_disable_derived_core_protection(tmp_
         is None
     )
 # HASHI-Fingerprint: hfp_bd21f58119e14009837bbd0fcec8cc4f
+
+def test_run_output_storage_is_protected_from_generic_tools(tmp_path):
+    import asyncio
+    from tools.tool_output_store import run_binding
+
+    registry, paths = _registry(tmp_path)
+    registry._allowed.update({"file_search", "log_query", "file_list", "workspace_inspect"})
+    context = {
+        "agent_name": "lily", "instance_id": "HASHI3", "owner_id": "user:one",
+        "hashi_session_id": "session-one", "hashi_run_id": "run-one", "request_id": "request-one",
+    }
+    registry.audit_context.update(context)
+    secret = "run-private-output-" + "A" * 20_000
+    reference = registry._tool_output_store.retain(run_binding(registry.audit_context), "file_read", secret)
+    store_root = paths["bridge_home"] / "state" / ".hashi-tool-output-v1"
+    data_path = next(store_root.rglob("*.data"))
+
+    async def exercise():
+        own = await registry.execute("tool_output_read", {"reference": reference, "offset": 0})
+        assert not own.is_error and "run-private-output" in own.output
+        other = await registry.execute_with_audit_context(
+            "tool_output_read", {"reference": reference, "offset": 0},
+            audit_context={"owner_id": "user:other"},
+        )
+        assert other.is_error
+        direct = await registry.execute("file_read", {"path": str(data_path)})
+        assert direct.is_error and secret not in direct.output
+        change = await registry.execute("file_write", {"path": str(data_path), "content": "changed"})
+        assert change.is_error
+        scan = await registry.execute(
+            "file_search", {"query": "run-private-output", "mode": "content",
+                            "roots": [str(store_root.parent)], "profile": "expanded", "include_hidden": True},
+        )
+        assert not scan.is_error
+        assert json.loads(scan.output)["data"]["matches"] == []
+
+    asyncio.run(exercise())

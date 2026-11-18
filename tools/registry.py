@@ -248,7 +248,7 @@ def _result_continuation_suffix(reference: str | None) -> str:
     if reference:
         return (
             f"\n[truncated by HASHI; use tool_output_read reference={reference} offset=0; "
-            "retained until the Registry exits]"
+            "retained while this Run and its retention remain available]"
         )
     return "\n[truncated by HASHI; complete-result retention is unavailable for this Run]"
 
@@ -352,18 +352,32 @@ class ToolRegistry:
         self.set_search_scope(search_scope)
         from tools.file_search import Continuations
         self.search_continuations = Continuations()
-        from tools.tool_output_store import ToolOutputStore
-        self._tool_output_store = ToolOutputStore()
+        self._audit_context_override: ContextVar[dict | None] = ContextVar(
+            f"tool_registry_audit_context_{id(self)}",
+            default=None,
+        )
+        from tools.tool_output_store import ToolOutputStore, run_state_from_context
+
+        agent_home = self.search_scope.get("agent_home")
+        global_config = self.audit_context.get("global_config")
+        instance_home = getattr(global_config, "bridge_home", None)
+        self._tool_output_store = ToolOutputStore(
+            agent_home=Path(agent_home) if agent_home else None,
+            instance_home=Path(instance_home) if instance_home else None,
+            state_resolver=lambda binding: run_state_from_context(
+                self._effective_audit_context(), binding
+            ),
+        )
+        try:
+            self._tool_output_store.reconcile_terminal()
+        except (OSError, ValueError, TimeoutError):
+            self.logger.warning("Could not reconcile retained tool outputs")
         self._hchat_attachment_selections: dict[str, dict[str, Any]] = {}
         self._live_runtime_policy_cache_key: tuple | None = None
         self._live_runtime_policy_cache = None
         self._live_runtime_verified_snapshot = None
         self._live_runtime_degraded = ContextVar(f"live_runtime_degraded_{id(self)}", default=None)
         self.canonical_audit = canonical_audit
-        self._audit_context_override: ContextVar[dict | None] = ContextVar(
-            f"tool_registry_audit_context_{id(self)}",
-            default=None,
-        )
         self.media_roots = [Path(root) for root in (media_roots or [])]
         smart_options = self.tool_options.get("smart_registry", {})
         smart_options = dict(smart_options) if isinstance(smart_options, dict) else {}
@@ -1534,7 +1548,7 @@ class ToolRegistry:
                             "image_total": image_page["total"],
                             "image_page_count_budget": image_page["page_count_budget"],
                             "image_page_byte_budget": image_page["page_byte_budget"],
-                            "output_retention": "registry_lifetime" if reference else "unavailable",
+                            "output_retention": self._tool_output_store.retention if reference else "unavailable",
                         }
                 except Exception:
                     self.logger.warning("Could not retain screenshot continuation", exc_info=True)
@@ -1565,7 +1579,7 @@ class ToolRegistry:
                 "complete_content": False,
                 "output_original_chars": original_chars,
                 "output_continuation": reference,
-                "output_retention": "registry_lifetime" if reference else "unavailable",
+                "output_retention": self._tool_output_store.retention if reference else "unavailable",
             }
         is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         if tool_name in OFFICE_TOOL_NAMES:
@@ -2288,10 +2302,10 @@ class ToolRegistry:
                 reference = arguments.get("reference")
                 item = self._tool_output_store.lookup(binding, reference)
                 if item.kind == "legacy_screenshot":
-                    from tools.legacy_screenshot import continuation_note, legacy_screenshot_page
+                    from tools.legacy_screenshot import continuation_note
 
-                    page = legacy_screenshot_page(
-                        item.source_tool, item.text, offset=arguments.get("offset", 0),
+                    page = self._tool_output_store.screenshot_page(
+                        binding, reference, offset=arguments.get("offset", 0),
                         limit=arguments.get("limit"),
                     )
                     if page is None:
@@ -2312,12 +2326,12 @@ class ToolRegistry:
                         "image_total": page["total"],
                         "image_page_count_budget": page["page_count_budget"],
                         "image_page_byte_budget": page["page_byte_budget"],
-                        "output_retention": "registry_lifetime",
+                        "output_retention": self._tool_output_store.retention,
                     }
                     summary = json.dumps({
                         "reference": reference, "offset": page["offset"],
                         "next_offset": page["next_offset"], "total_frames": page["total"],
-                        "complete": details["complete_content"], "retention": "registry_lifetime",
+                        "complete": details["complete_content"], "retention": self._tool_output_store.retention,
                     }, separators=(",", ":"))
                     if page["is_error"]:
                         summary = "Error: screenshot page has no decodable images. " + summary
@@ -2327,6 +2341,8 @@ class ToolRegistry:
                 )
             except ValueError as exc:
                 return f"Error: {exc}"
+            except (OSError, TimeoutError) as exc:
+                return f"Error: retained tool output unavailable: {type(exc).__name__}"
         if tool_name in OFFICE_TOOL_NAMES:
             from tools.office.integration import execute_office
             return await execute_office(self, tool_name, arguments, tool_call_id)
@@ -2359,6 +2375,11 @@ class ToolRegistry:
                     run_binding(context), "file_search", value))
 
         if tool_name in {"bash", "shell"}:
+            from tools.tool_output_store import run_binding
+
+            binding = run_binding(context)
+            capture_options = ({"retained_output": (self._tool_output_store, binding, tool_name)}
+                               if binding is not None else {})
             bash_opts = dict(opts.get("bash", {}) or {})
             shell_opts = dict(opts.get("shell", {}) or {})
             effective_opts = {**bash_opts, **shell_opts}
@@ -2379,6 +2400,7 @@ class ToolRegistry:
                 timeout_max=configured_timeout_max,
                 timeout_default=configured_timeout_default,
                 blocked_patterns=effective_opts.get("blocked_patterns"),
+                **capture_options,
             )
 
         if tool_name == "log_query":
@@ -2473,11 +2495,16 @@ class ToolRegistry:
 
         if tool_name == "verification_run":
             from tools.her_verification import execute_verification_run
+            from tools.tool_output_store import run_binding
 
+            binding = run_binding(self._effective_audit_context())
+            capture_options = ({"retained_output": (self._tool_output_store, binding, tool_name)}
+                               if binding is not None else {})
             return await execute_verification_run(
                 arguments,
                 workspace_dir=self.workspace_dir,
                 options=opts.get("verification_run", {}),
+                **capture_options,
             )
 
         if tool_name in {"ask_user", "get_user_answer"}:

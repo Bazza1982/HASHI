@@ -1875,6 +1875,39 @@ def _canonical_terminal_payload(
     return resolved
 
 
+def cleanup_terminal_tool_outputs(runtime: Any, run: Mapping[str, Any], owner: str) -> bool:
+    """Reclaim only output bound to an already-terminal canonical PAO Run."""
+    if str(run.get("state") or "") not in TERMINAL_RUN_STATES:
+        return False
+    home = getattr(runtime, "workspace_dir", None)
+    store = getattr(runtime, "session_store", None)
+    if home is None or not isinstance(store, SessionStore):
+        return False
+    from tools.tool_output_store import ToolOutputStore, run_binding, run_state_from_store
+
+    binding = run_binding({
+        "instance_id": str(getattr(getattr(runtime, "global_config", None), "instance_id", "") or ""),
+        "agent_name": str(getattr(runtime, "name", "") or ""),
+        "owner_id": str(owner or ""),
+        "hashi_session_id": str(run.get("session_id") or ""),
+        "hashi_run_id": str(run.get("run_id") or ""),
+        "request_id": str(run.get("request_id") or ""),
+    })
+    if binding is None or not all(binding):
+        return False
+    try:
+        instance_home = getattr(getattr(runtime, "global_config", None), "bridge_home", None)
+        outputs = ToolOutputStore(
+            agent_home=Path(home),
+            instance_home=Path(instance_home) if instance_home else None,
+            state_resolver=lambda value: run_state_from_store(store, value),
+        )
+        return outputs.cleanup_if_terminal(binding)
+    except (OSError, ValueError, TimeoutError) as exc:
+        logger.warning("Could not reclaim terminal Run tool output (%s)", type(exc).__name__)
+        return False
+
+
 def finish_request_from_listener(
     runtime: Any,
     request_id: str,
@@ -2018,6 +2051,7 @@ def finish_request_from_listener(
             request_id,
             type(exc).__name__,
         )
+    cleanup_terminal_tool_outputs(runtime, completed_run, scoped_owner)
     return TerminalResolution(
         payload=canonical_payload,
         run=dict(completed_run),

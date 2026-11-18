@@ -23,7 +23,7 @@ POLICY_SCHEMA = 1
 POLICY_RELATIVE_PATH = Path("state") / "platform" / "live-runtime-protection.json"
 
 _PATH_WRITE_TOOLS = frozenset({"file_write", "apply_patch"})
-_PATH_READ_TOOLS = frozenset({"file_read", "log_query"})
+_PATH_READ_TOOLS = frozenset({"file_read", "log_query", "file_list", "media_read", "vision_inspect", "workspace_inspect"})
 _COMMAND_TOOLS = frozenset(
     {"bash", "shell", "background_job_start", "verification_run"}
 )
@@ -210,7 +210,11 @@ def load_live_runtime_policy(
         qualification_error = qualification_error or "missing_core_receipt"
     runtime_roots.extend(admitted_roots)
     protected_write.extend(admitted_files)
-    protected_read: list[Path] = []
+    # Run-bound tool outputs are private PAO state, not Agent workspace files.
+    # They are read only through the existing exact-Run continuation.
+    output_store_path = bridge_home / "state" / ".hashi-tool-output-v1"
+    protected_read: list[Path] = [output_store_path]
+    protected_write.append(output_store_path)
     secrets_path = _config_path(global_config, "secrets_path")
     if secrets_path is not None:
         protected_write.append(secrets_path)

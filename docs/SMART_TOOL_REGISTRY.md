@@ -48,14 +48,14 @@ can be slow; literal `log_query` remains available for targeted log searches.
 ## Retained tool-result continuations
 
 When a Run-bound plain or structured text result exceeds the model projection
-budget, the original text is retained in the owning Registry and the projected
-result supplies a reference. `tool_output_read` reads it in pages from offset
+budget, the original text is retained in a private Run-bound disk store and
+the projected result supplies a reference. `tool_output_read` reads it in pages from offset
 zero, reports the exact SHA-256 and completeness, and verifies the original
 Run binding. Structured image blocks remain unchanged. An incomplete projection
 and its effect receipt explicitly report `complete_content=false`.
 
 Legacy screenshot strings with more frames or image bytes than fit in one MCP
-page are retained by the owning Registry under the same Run binding.
+page are retained in the same Run-bound store.
 `tool_output_read` returns image blocks, and its `offset`/`next_offset` count
 source frames rather than text characters for these references. Invalid frames
 are reported and prevent a complete-coverage claim. Each page defaults to six
@@ -65,11 +65,21 @@ budgets, not negotiated provider limits. Existing image decode/source limits and
 the owner-proxy response limit still apply. Already-structured image results
 continue through their existing path.
 
-The current retention is process-local: a Registry or Worker restart loses
-these references, and a context without a Run identity cannot use this path.
-There is no automatic eviction while that Registry lives, so retained results
-consume memory. Persistent, lifecycle-managed retention and managed execution
-channel support remain to be completed.
+When instance state is available, continuations use a protected private store,
+survive Registry and Worker replacement, and are removed after the canonical
+Run finishes or is cancelled. Shell and verification stdout/stderr are spooled
+privately and can be retrieved in full without holding complete output in memory.
+If a shell command times out, the captured output can still be paged while the
+Run remains active. Cancelling the Run closes its temporary spools.
+On startup, the owner reconciles abandoned terminal Runs; a Run whose state
+cannot be proven is retained until it can be reconciled. A Registry without an
+Agent home uses a private temporary store for that Registry's lifetime.
+A context without a Run identity cannot use this path. Retained text is read
+in pages; legacy screenshot continuations read indexed frames rather than
+reloading the full result. Store or integrity failures are reported, not
+treated as successful retrieval. Concurrent retention waits for the shared
+store lock by default; operators may set `HASHI_TOOL_OUTPUT_LOCK_TIMEOUT_SECONDS`
+to a nonnegative total wait budget when needed.
 
 ## Browser and desktop deadlines
 

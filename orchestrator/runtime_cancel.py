@@ -92,6 +92,7 @@ async def cancel_session_run(
     async with transition_lock(runtime):
         run = store.get_run(run_id, owner_id=owner_id)
         if run["state"] in TERMINAL_RUN_STATES:
+            await asyncio.to_thread(runtime_session.cleanup_terminal_tool_outputs, runtime, run, owner_id)
             return {"ok": True, "request_id": request_id, "run_id": run_id,
                     "session_id": session_id, "status": run["state"], "terminal": True,
                     "already_terminal": True}
@@ -105,6 +106,13 @@ async def cancel_session_run(
         if removed is not None:
             await finish_queued_request(runtime, removed)
             await runtime_pending.complete_removed_turn(runtime, request_id)
+            try:
+                stopped = store.get_run(run_id, owner_id=owner_id)
+                await asyncio.to_thread(runtime_session.cleanup_terminal_tool_outputs, runtime, stopped, owner_id)
+            except Exception as exc:
+                logger = getattr(runtime, "logger", None)
+                if logger is not None:
+                    logger.warning("Terminal tool-output cleanup remains unverified (%s)", type(exc).__name__)
             return {"ok": True, "request_id": request_id, "run_id": run_id,
                     "session_id": session_id, "status": "stopped", "terminal": True}
 
@@ -144,6 +152,7 @@ async def cancel_session_run(
         # later-arriving item without starting the provider.
         if run["state"] == "queued":
             stopped = store.cancel_run(run_id, owner_id=owner_id, reason=reason)
+            await asyncio.to_thread(runtime_session.cleanup_terminal_tool_outputs, runtime, stopped, owner_id)
             # A quota waiter has left the ready queue but still owns no backend.
             task = getattr(runtime,"_session_execution_tasks",{}).get(request_id)
             if isinstance(task,asyncio.Task) and not task.done():
@@ -160,6 +169,7 @@ async def cancel_session_run(
             if logger is not None:
                 logger.warning("Fencing running Run without local execution: %s", run_id)
             stopped = store.cancel_run(run_id, owner_id=owner_id, reason=reason)
+            await asyncio.to_thread(runtime_session.cleanup_terminal_tool_outputs, runtime, stopped, owner_id)
             await runtime_pending.complete_removed_turn(runtime, request_id)
             return {"ok": True, "request_id": request_id, "run_id": run_id,
                     "session_id": session_id, "status": stopped["state"],

@@ -7,13 +7,16 @@ All file operations are sandboxed to access_root.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import inspect
+import locale
 import json
 import math
 import os
 import re
 import shutil
 import signal
+from contextlib import ExitStack
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -365,12 +368,74 @@ def _communicate_partial_tail(communicate_task, encoding) -> str:
     return _bounded_partial_tail(stdout, stderr, encoding)
 
 
+def _stream_encoding(stream, preferred: str) -> tuple[str, str]:
+    """Match normal process decoding without holding the complete byte stream."""
+    candidates = [preferred]
+    if os.name == "nt":
+        try:
+            import ctypes
+            candidates.append(f"cp{int(ctypes.windll.kernel32.GetOEMCP())}")
+        except Exception:
+            candidates.append("mbcs")
+    candidates.append(locale.getpreferredencoding(False) or "utf-8")
+    for name in dict.fromkeys(candidates):
+        try:
+            decoder = codecs.getincrementaldecoder(name)(errors="strict")
+            stream.seek(0)
+            while chunk := stream.read(64 * 1024):
+                decoder.decode(chunk, final=False)
+            decoder.decode(b"", final=True)
+            return name, "strict"
+        except (LookupError, UnicodeDecodeError):
+            continue
+    try:
+        codecs.lookup(preferred)
+        return preferred, "replace"
+    except LookupError:
+        return "utf-8", "replace"
+
+
+def _decoded_stream(stream, encoding: str):
+    selected, errors = _stream_encoding(stream, encoding)
+    decoder = codecs.getincrementaldecoder(selected)(errors=errors)
+    stream.seek(0)
+    while chunk := stream.read(64 * 1024):
+        text = decoder.decode(chunk, final=False)
+        if text:
+            yield text
+    final = decoder.decode(b"", final=True)
+    if final:
+        yield final
+
+
+def _retain_shell_capture(retention, stdout_file, stderr_file, encoding: str, exit_code, prefix="",
+                          stderr_marker="[stderr]\n"):
+    store, binding, source_tool = retention
+    stdout_size = stdout_file.tell()
+    stderr_size = stderr_file.tell()
+
+    def parts():
+        if prefix:
+            yield prefix
+        elif exit_code:
+            yield f"[exit code {exit_code}]\n"
+        if stdout_size:
+            yield from _decoded_stream(stdout_file, encoding)
+        if stderr_size:
+            yield ("\n" if stdout_size else "") + stderr_marker
+            yield from _decoded_stream(stderr_file, encoding)
+
+    reference = store.retain_text_chunks(binding, source_tool, parts())
+    return reference, stdout_size + stderr_size
+
+
 async def execute_shell(
     args: dict,
     workspace_dir: Path,
     timeout_max: float | None = None,
     timeout_default: float | None = None,
     blocked_patterns: Optional[list[str]] = None,
+    retained_output=None,
 ) -> str | BuiltinExecutionResult:
     command = str(args.get("command", "")).strip()
     if not command:
@@ -392,6 +457,20 @@ async def execute_shell(
     communicate_task: asyncio.Task | None = None
     pgid: int | None = None
     invocation = None
+    capture_files = ExitStack()
+    capture = None
+    capture_errors: dict[str, str] = {}
+    capture_sizes: dict[str, int] = {}
+    if retained_output is not None:
+        try:
+            capture = {
+                "stdout_bytes": capture_files.enter_context(retained_output[0].temporary_capture_file()),
+                "stderr_bytes": capture_files.enter_context(retained_output[0].temporary_capture_file()),
+            }
+        except OSError as exc:
+            capture_files.close()
+            capture = None
+            capture_errors["capture"] = type(exc).__name__
     try:
         invocation = resolve_shell_invocation(command, args.get("shell"))
         proc = await asyncio.create_subprocess_exec(
@@ -408,7 +487,9 @@ async def execute_shell(
         if activity:
             activity.watch_process(proc)
             activity.update(state="running", liveness="alive")
-        communicate_task = asyncio.create_task(bounded_communicate(proc, activity=activity))
+        communicate_task = asyncio.create_task(bounded_communicate(
+            proc, activity=activity, sinks=capture, capture_errors=capture_errors, capture_sizes=capture_sizes,
+        ))
         if timeout is None:
             stdout, stderr = await asyncio.shield(communicate_task)
         else:
@@ -429,10 +510,34 @@ async def execute_shell(
                 message = f"Error: command timed out after {_seconds_label(timeout)}s"
                 if partial_tail:
                     message += f"\n[partial output]\n{partial_tail}"
+                timeout_capture_details: dict[str, Any] = {}
+                if any(capture_sizes.values()):
+                    reference = None
+                    if capture is not None and not capture_errors:
+                        try:
+                            reference, _ = await asyncio.to_thread(
+                                _retain_shell_capture, retained_output,
+                                capture["stdout_bytes"], capture["stderr_bytes"],
+                                invocation.encoding, None,
+                                f"Error: command timed out after {_seconds_label(timeout)}s\n[partial output]\n",
+                            )
+                        except (OSError, ValueError, TimeoutError):
+                            reference = None
+                    timeout_capture_details = {
+                        "complete_content": False,
+                        "output_continuation": reference,
+                        "output_retention": retained_output[0].retention if reference else "unavailable",
+                    }
+                    if reference:
+                        message += (f"\n[partial output is available with tool_output_read "
+                                    f"reference={reference} offset=0 while this Run is active]")
+                    else:
+                        message += "\n[complete partial-output retention is unavailable for this Run]"
                 return BuiltinExecutionResult(
                     message,
                     {
                         **timeout_details,
+                        **timeout_capture_details,
                         "shell": invocation.shell,
                         "shell_executable": invocation.executable,
                         "launcher": invocation.launcher,
@@ -461,9 +566,36 @@ async def execute_shell(
         if proc.returncode != 0:
             result = f"[exit code {proc.returncode}]\n{result}" if result else f"[exit code {proc.returncode}]"
 
-        # Truncate very long output
-        if len(result) > 20000:
-            result = result[:20000] + "\n...[output truncated]"
+        capture_details: dict[str, Any] = {}
+        if len(result) > 20000 or any(size > 65536 for size in capture_sizes.values()):
+            reference = None
+            if capture is not None and not capture_errors:
+                try:
+                    reference, _ = await asyncio.to_thread(
+                        _retain_shell_capture, retained_output,
+                        capture["stdout_bytes"], capture["stderr_bytes"],
+                        invocation.encoding, proc.returncode,
+                    )
+                except (OSError, ValueError, TimeoutError):
+                    reference = None
+            capture_details = {
+                "complete_content": False,
+                "output_continuation": reference,
+                "output_retention": retained_output[0].retention if reference else "unavailable",
+            }
+            # Bound the rendered JSON size even for control characters.
+            low, high = 0, min(len(result), 12000)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(json.dumps(result[:middle], ensure_ascii=False)) <= 12000:
+                    low = middle
+                else:
+                    high = middle - 1
+            if reference:
+                result = (result[:low] + f"\n[truncated by HASHI; use tool_output_read "
+                          f"reference={reference} offset=0; retained while this Run is active]")
+            else:
+                result = result[:low] + "\n[truncated by HASHI; complete-result retention is unavailable for this Run]"
 
         if _bash_group_alive(pgid):
             completion_cleanup = await _shield_bash_cleanup(
@@ -487,6 +619,7 @@ async def execute_shell(
             result or "(no output)",
             {
                 **timeout_details,
+                **capture_details,
                 "shell": invocation.shell,
                 "shell_executable": invocation.executable,
                 "launcher": invocation.launcher,
@@ -566,12 +699,17 @@ async def execute_shell(
         )
 
 
+    finally:
+        capture_files.close()
+
+
 async def execute_bash(
     args: dict,
     workspace_dir: Path,
     timeout_max: float | None = None,
     timeout_default: float | None = None,
     blocked_patterns: Optional[list[str]] = None,
+    retained_output=None,
 ) -> str | BuiltinExecutionResult:
     """Compatibility alias that always invokes a real Bash executable."""
 
@@ -583,6 +721,7 @@ async def execute_bash(
         timeout_max=timeout_max,
         timeout_default=timeout_default,
         blocked_patterns=blocked_patterns,
+        retained_output=retained_output,
     )
 
 

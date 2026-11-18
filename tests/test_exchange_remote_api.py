@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
+import pytest
 
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
@@ -174,14 +175,16 @@ def test_exchange_message_never_uses_loopback_as_authentication(tmp_path):
     assert transport.calls == []
 
 
-def test_exchange_message_refuses_unnegotiated_private_proof(tmp_path):
+@pytest.mark.parametrize("resources,proofs", [
+    (["finance"], []),
+    ([], [{"version": 1}]),
+    (["finance"], [{"version": 1}]),
+])
+def test_exchange_message_refuses_unnegotiated_private_proof(tmp_path, resources, proofs):
     app, transport, token = _app(tmp_path)
     client = TestClient(app, client=("127.0.0.1", 50123))
     body = json.dumps(
-        _payload(
-            authorization_resources=["finance"],
-            private_authorization_proofs=[{"version": 1}],
-        )
+        _payload(authorization_resources=resources, private_authorization_proofs=proofs)
     ).encode("utf-8")
 
     response = client.post(

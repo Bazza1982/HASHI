@@ -603,8 +603,8 @@ configuration changes are required.
   claim that unshown content was read or a change to tool authority.
 - Each next complete payload still passes the native check. A same-Run
   continuation reads small pages without replaying the original operation when
-  a qualified tool_output_read is available. Its in-memory reference lasts for
-  the Registry lifetime; it is not restart-safe. If the task/history plus
+  a qualified tool_output_read is available. With an Agent home, its private
+  disk-backed reference survives Worker replacement until the Run ends. If the task/history plus
   minimum receipts cannot fit, retain the typed capacity failure rather than
   silently pruning authoritative material.
 - PAO persists the primary backend terminal first. If sending its error message

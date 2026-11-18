@@ -208,13 +208,22 @@ class ToolActivity:
 
 
 async def bounded_communicate(proc, *, activity: ToolActivity | None = None,
-                              limit: int = 65536) -> tuple[bytes, bytes]:
-    """Drain both pipes concurrently; retain bounded head/tail without spooling."""
+                              limit: int = 65536, sinks=None, capture_errors=None,
+                              capture_sizes=None) -> tuple[bytes, bytes]:
+    """Drain both pipes concurrently; keep previews and optionally spool full bytes."""
     async def drain(stream, key):
         head, tail = bytearray(), bytearray()
         total = 0
         while chunk := await stream.read(32768):
             total += len(chunk)
+            if capture_sizes is not None:
+                capture_sizes[key] = total
+            if sinks and sinks.get(key) is not None and not (capture_errors or {}).get(key):
+                try:
+                    sinks[key].write(chunk)
+                except OSError as exc:
+                    if capture_errors is not None:
+                        capture_errors[key] = type(exc).__name__
             need = max(0, limit // 2 - len(head))
             head.extend(chunk[:need])
             tail.extend(chunk[need:])
