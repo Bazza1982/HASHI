@@ -247,3 +247,243 @@ def test_wildcard_does_not_silently_adopt_toolkit_tools(tmp_path):
     assert explicit.is_allowed("tool_find")
     assert explicit.is_allowed("file_manage")
     assert not explicit.is_allowed("text_replace")
+
+def _with_protected(registry, protected: Path):
+    """Attach a minimal live-runtime policy so toolkit tools receive
+    protected_read_paths exactly as the production Registry dispatches them."""
+    from types import SimpleNamespace
+    registry._live_runtime_policy_cache = SimpleNamespace(
+        protected_read_paths=[str(protected)],
+        qualification_error=None,
+        protection_complete=True,
+        code_root=None, bridge_home=None, runtime_roots=(),
+        protected_write_paths=(), service_targets=(), core_pid=None,
+        policy_path=None, configuration_error=None,
+    )
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_code_search_never_reads_protected_descendants(tmp_path, monkeypatch):
+    """P1A: protected files inside an otherwise authorised root must never be
+    opened or reported, for the Python fallback and for a real ripgrep run."""
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "notes.txt").write_text("PROJECT-TOP-SECRET-KEYWORD", encoding="utf-8")
+    (tmp_path / "open.py").write_text("# PROJECT-TOP-SECRET-KEYWORD\n", encoding="utf-8")
+    registry = _with_protected(_registry(tmp_path), secret)
+
+    # Python fallback (both engines must behave identically).
+    monkeypatch.setattr("tools.developer_toolkit.shutil.which", lambda name: None)
+    fallback = await _run(registry, "code_search", {
+        "query": "PROJECT-TOP-SECRET-KEYWORD", "mode": "content"})
+    assert fallback["ok"] and fallback["engine"] == "python_literal"
+    assert any("open.py" in line for line in fallback["matches"])
+    assert not any("secret" in line for line in fallback["matches"]), fallback
+    files_fallback = await _run(registry, "code_search", {
+        "query": "notes", "mode": "files"})
+    assert files_fallback["ok"]
+    assert not any("secret" in line for line in files_fallback["matches"])
+
+    # Real ripgrep when available: the guard inventory must exclude the
+    # protected directory before rg opens anything.
+    import tools.developer_toolkit as toolkit
+    monkeypatch.undo()
+    if shutil.which("rg"):
+        rg_hit = await _run(registry, "code_search", {
+            "query": "PROJECT-TOP-SECRET-KEYWORD", "mode": "content"})
+        assert rg_hit["ok"] and rg_hit["engine"] == "ripgrep"
+        assert any("open.py" in line for line in rg_hit["matches"])
+        assert not any("secret" in line for line in rg_hit["matches"]), rg_hit
+
+
+@pytest.mark.asyncio
+async def test_code_search_guard_inventory_excludes_links_and_protected(tmp_path, monkeypatch):
+    """The rg guard walk itself must exclude protected directories, junctions
+    and links escaping the authorised roots (no content is read here)."""
+    from tools.developer_toolkit import _rg_guard
+    import time
+    protected = tmp_path / "p"
+    protected.mkdir()
+    (protected / "x.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "ok.txt").write_text("ok", encoding="utf-8")
+    link = tmp_path / "into_p"
+    try:
+        link.symlink_to(protected, target_is_directory=True)
+        linked = True
+    except (OSError, NotImplementedError):
+        linked = False
+    globs = _rg_guard(tmp_path, (tmp_path,), (protected,), time.monotonic() + 5)
+    assert globs is not None
+    assert "!p" in globs and "!p/**" in globs
+    if linked:
+        assert "!into_p" in globs
+
+
+@pytest.mark.asyncio
+async def test_project_locate_skips_protected_repositories(tmp_path):
+    """P1A: a protected tree containing a matching .git/config must never be
+    reported; an authorised sibling repository is still found."""
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    root = tmp_path
+    hidden = root / "hidden"
+    hidden.mkdir()
+    _git(hidden, "init", "--quiet")
+    _git(hidden, "remote", "add", "origin", "https://example.com/team/SOK.git")
+    visible = root / "ok_repo"
+    visible.mkdir()
+    _git(visible, "init", "--quiet")
+    _git(visible, "remote", "add", "origin", "https://example.com/team/OK.git")
+    registry = _with_protected(_registry(root), hidden)
+    found = await _run(registry, "project_locate", {"name": "sok", "root": str(root), "max_depth": 2})
+    assert found["ok"]
+    paths = [m["path"] for m in found["matches"]]
+    assert str(hidden.resolve()) not in paths, found
+    ok_found = await _run(registry, "project_locate", {"name": "ok", "root": str(root), "max_depth": 2})
+    assert ok_found["ok"] and any("ok_repo" in m["path"] for m in ok_found["matches"])
+
+
+@pytest.mark.asyncio
+async def test_git_inspect_rejects_metadata_outside_authorised_scope(tmp_path):
+    """P1A: a worktree whose .git pointer lives in a protected location must be
+    denied before any Git command runs."""
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    real = tmp_path / "real"
+    real.mkdir()
+    _git(real, "init", "--quiet")
+    (real / "README.md").write_text("# hi\n", encoding="utf-8")
+    _git(real, "add", "README.md")
+    _git(real, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init", "--quiet")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    # Simulate a linked worktree whose metadata is the protected real/.git.
+    (wt / ".git").write_text("gitdir: " + str(real / ".git") + "\n", encoding="utf-8")
+    registry = _registry(wt, allowed=["git_inspect"])
+    result = await registry.execute("git_inspect", {"operation": "status"}, "meta")
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_file_manage_never_copies_protected_source_descendants(tmp_path):
+    """P1B: a protected descendant of an authorised source tree must abort the
+    whole recursive copy before anything is written."""
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "ok.txt").write_text("ok", encoding="utf-8")
+    secret = src / "sub" / "secret.txt"
+    secret.write_text("PRIVATE", encoding="utf-8")
+    registry = _with_protected(_registry(tmp_path), secret)
+    copied = await _run(registry, "file_manage", {
+        "operation": "copy", "source": "src", "destination": "dst", "recursive": True})
+    assert copied["ok"] is False, copied
+    assert not (tmp_path / "dst").exists() or not any((tmp_path / "dst").iterdir())
+    assert secret.read_text(encoding="utf-8") == "PRIVATE"
+
+
+@pytest.mark.asyncio
+async def test_file_manage_never_writes_through_destination_links(tmp_path):
+    """P1B: an existing destination symlink/junction to an outside or
+    protected file must never be followed and overwritten."""
+    src = tmp_path / "source.txt"
+    src.write_text("harmless", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("ORIGINAL", encoding="utf-8")
+    link = tmp_path / "dest.txt"
+    link.symlink_to(outside)
+    registry = _with_protected(_registry(tmp_path), outside)
+    result = await _run(registry, "file_manage", {
+        "operation": "copy", "source": "source.txt", "destination": "dest.txt", "overwrite": True})
+    assert result["ok"] is False, result
+    assert outside.read_text(encoding="utf-8") == "ORIGINAL"
+    assert link.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_file_manage_directory_copy_works_when_clean(tmp_path):
+    """P1B: ordinary recursive copy still succeeds after the guards."""
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.txt").write_text("a", encoding="utf-8")
+    (src / "sub" / "b.txt").write_text("b", encoding="utf-8")
+    registry = _registry(tmp_path)
+    copied = await _run(registry, "file_manage", {
+        "operation": "copy", "source": "src", "destination": "dst", "recursive": True})
+    assert copied["ok"] and copied["copied_files"] == 2
+    assert (tmp_path / "dst" / "a.txt").read_text() == "a"
+    assert (tmp_path / "dst" / "sub" / "b.txt").read_text() == "b"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recursive_copy_makes_no_further_writes(tmp_path, monkeypatch):
+    """P1C: cancelling a large recursive copy must settle the worker thread
+    and leave no partial files or staging artifacts behind."""
+    import time as _time
+    from tools import developer_toolkit as toolkit
+    monkeypatch.setattr(toolkit, "_COPY_CHUNK_BYTES", 512)
+    src = tmp_path / "big"
+    src.mkdir()
+    for index in range(8):
+        (src / f"f{index}.bin").write_bytes(b"x" * 200000)
+    registry = _registry(tmp_path)
+    task = asyncio.create_task(registry.execute("file_manage", {
+        "operation": "copy", "source": "big", "destination": "out", "recursive": True
+    }, "cancel-me"))
+    while not (tmp_path / "out").exists():
+        await asyncio.sleep(0.01)
+    _time.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Files already atomically placed before the stop may remain; the
+    # contract is that nothing NEW is written after cancellation settles.
+    settled = sorted(p.name for p in (tmp_path / "out").iterdir())
+    await asyncio.sleep(0.2)
+    after = sorted(p.name for p in (tmp_path / "out").iterdir())
+    assert settled == after, (settled, after)
+    assert not any(name.startswith(".hashi-copy-") for name in after), after
+
+
+@pytest.mark.asyncio
+async def test_tool_find_accumulates_discoveries_within_turn(tmp_path):
+    """P2: later tool_find calls keep previously revealed, still-authorised
+    schemas (bounded, request-local)."""
+    # office_* tools are filtered by tool_availability when no Office runtime
+    # is configured, so accumulation is exercised with always-available tools.
+    registry = _registry(tmp_path, allowed=[
+        "tool_find", "file_search", "workspace_inspect", "file_read"
+    ])
+    view = OnDemandToolView(registry)
+    first = await view.execute("tool_find", {"names": ["workspace_inspect"]}, "one")
+    assert not first.is_error
+    second = await view.execute("tool_find", {"names": ["file_search"]}, "two")
+    assert not second.is_error
+    visible = {item["function"]["name"] for item in view.get_tool_definitions(tiers=["core"])}
+    assert {"workspace_inspect", "file_search"} <= visible, visible
+
+
+@pytest.mark.asyncio
+async def test_text_replace_detects_concurrent_change(tmp_path, monkeypatch):
+    """P2: an external edit between read and replace must abort instead of
+    silently losing the concurrent change."""
+    import tools.developer_toolkit as toolkit
+    target = tmp_path / "note.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    registry = _registry(tmp_path)
+    real_copymode = toolkit.shutil.copymode
+
+    def racing_copymode(source_target, staged_file, **kwargs):
+        # Simulate an external writer landing while the edit is staged,
+        # before the read-back check runs.
+        source_target.write_text("external edit\n", encoding="utf-8")
+        return real_copymode(source_target, staged_file, **kwargs)
+
+    monkeypatch.setattr(toolkit.shutil, "copymode", racing_copymode)
+    result = await registry.execute("text_replace", {
+        "path": "note.txt", "find": "alpha", "replace": "gamma", "expected_count": 1
+    }, "race")
+    payload = json.loads(result.output)
+    assert payload["ok"] is False, payload
+    assert payload["error"]["code"] == "concurrent_change", payload
+    assert target.read_text(encoding="utf-8") == "external edit\n"

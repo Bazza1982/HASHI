@@ -1145,11 +1145,15 @@ class ToolRegistry:
             details = dict(getattr(exc, "hashi_tool_details", {}) or {})
             cleanup = dict(details.get("foreground_cleanup") or {})
             cleanup_status = str(cleanup.get("status") or "not_reported")
+            mutation = dict(details.get("toolkit_mutation") or {})
+            mutation_status = str(mutation.get("status") or "")
             output = (
                 f"Error: tool '{tool_name}' cancelled"
                 + (
                     f"; foreground cleanup: {cleanup_status}"
                     if tool_name in {"bash", "shell"}
+                    else f"; threaded mutation: {mutation_status}"
+                    if mutation_status
                     else ""
                 )
             )
@@ -1954,8 +1958,11 @@ class ToolRegistry:
             from tools.office.integration import execute_office
             return await execute_office(self, tool_name, arguments, tool_call_id)
         if tool_name in TOOLKIT_TOOL_NAMES:
+            policy = self._live_runtime_policy_cache
+            protected_read_paths = tuple(getattr(policy, "protected_read_paths", ()))
             from tools.developer_toolkit import execute_toolkit
-            return await execute_toolkit(self, tool_name, arguments)
+            return await execute_toolkit(self, tool_name, arguments,
+                                         protected_read_paths=protected_read_paths)
         read_roots, search_scope, read_cwd = self._read_scope()
         context = self._effective_audit_context()
         roots = read_roots

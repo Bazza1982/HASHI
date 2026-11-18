@@ -263,6 +263,7 @@
       "tests/test_repo_discover.py",
       "tests/test_search_windows.py",
       "tests/test_search_review_regressions.py",
+      "tests/test_herv3_developer_toolkit.py",
       "tests/test_permissions_runtime_guard.py",
       "tests/test_backend_selection_transaction.py",
       "tests/test_config_admin_invariants.py",

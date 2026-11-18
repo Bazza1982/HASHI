@@ -18,6 +18,11 @@ _STARTER_TOOLS = (
     "ask_user", "get_user_answer",
 )
 
+# Bounded request-local presentation: later tool_find discoveries accumulate
+# onto earlier ones (never silently drop an already-revealed, still-authorised
+# schema), capped so the model payload stays compact for small models.
+_MAX_DISCOVERED = 48
+
 
 class OnDemandToolView:
     """Only schemas change. Every other operation delegates to the same registry."""
@@ -70,7 +75,11 @@ class OnDemandToolView:
             str((schema.get("function") or {}).get("name") or "")
             for schema in self._base.get_tool_definitions(tiers=None)
         )
-        self._discovered = set(_tool_find_selections(arguments, available))
+        revealed = set(_tool_find_selections(arguments, available))
+        # Accumulate within this request and keep only still-authorised names.
+        self._discovered = (self._discovered | revealed) & set(available)
+        if len(self._discovered) > _MAX_DISCOVERED:
+            self._discovered = set(sorted(self._discovered)[:_MAX_DISCOVERED])
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
         result = await self._base.execute(tool_name, arguments, tool_call_id)
