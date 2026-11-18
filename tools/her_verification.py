@@ -197,6 +197,24 @@ async def _inspect_command_output(
         return completed, output, details
 
 
+def _inside_protected(path: Path, protected_paths: tuple[Path, ...]) -> bool:
+    if not protected_paths:
+        return False
+    try:
+        resolved = path.resolve()
+        return any(resolved == item or resolved.is_relative_to(item) for item in protected_paths)
+    except OSError:
+        return True
+
+
+def _has_protected_descendant(path: Path, protected_paths: tuple[Path, ...]) -> bool:
+    try:
+        resolved = path.resolve()
+        return any(item == resolved or item.is_relative_to(resolved) for item in protected_paths)
+    except OSError:
+        return bool(protected_paths)
+
+
 class _WorkspaceInspectionCancelled(Exception):
     pass
 
@@ -218,26 +236,33 @@ def _sha256_file(path: Path, *, cancelled: threading.Event | None = None) -> str
     return digest.hexdigest()
 
 
-def _hash_git_untracked(digest, names: bytes, git_root: Path, root: Path, *, cancelled=None) -> int:
+def _hash_git_untracked(
+    digest, names: bytes, git_root: Path, root: Path, *, cancelled=None,
+    protected_paths: tuple[Path, ...] = (),
+) -> int:
     count = 0
     for raw_name in names.split(b"\0"):
         _check_inspection_cancelled(cancelled)
         if not raw_name:
             continue
-        count += 1
         relative = Path(raw_name.decode("utf-8", errors="surrogateescape"))
         path = (git_root / relative).resolve()
+        if _inside_protected(path, protected_paths):
+            continue
         try:
             path.relative_to(root)
         except ValueError:
             continue
+        count += 1
         digest.update(b"untracked\0" + raw_name + b"\0")
         if path.is_file():
             digest.update(_sha256_file(path, cancelled=cancelled).encode("ascii"))
     return count
 
 
-async def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
+async def _git_snapshot(
+    root: Path, *, protected_paths: tuple[Path, ...] = (),
+) -> tuple[str, dict[str, Any]] | None:
     try:
         top = await _run_read_only(["git", "rev-parse", "--show-toplevel"], cwd=root)
     except FileNotFoundError:
@@ -260,7 +285,13 @@ async def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
             # An ignored workspace cannot be represented by Git status/diff.
             return None
 
-    pathspec = ["--", relative_root_text] if relative_root_text != "." else []
+    excluded = list(dict.fromkeys(
+        path for path in protected_paths if path.is_relative_to(root) and path != root
+    ))
+    excluded_specs = [":(exclude,literal)" + path.relative_to(git_root).as_posix()
+                      for path in excluded]
+    pathspec = (["--", relative_root_text, *excluded_specs]
+                if relative_root_text != "." or excluded_specs else [])
     head = await _run_read_only(["git", "rev-parse", "HEAD"], cwd=git_root)
     status = await _run_read_only(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspec],
@@ -290,7 +321,7 @@ async def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
     ):
         digest.update(label + b"\0" + payload + b"\0")
     untracked_count = await _run_inspection_thread(
-        _hash_git_untracked, digest, untracked.stdout, git_root, root)
+        _hash_git_untracked, digest, untracked.stdout, git_root, root, protected_paths=protected_paths)
     return digest.hexdigest(), {
         "vcs": "git",
         "head": head.stdout.decode("utf-8", errors="replace").strip(),
@@ -298,12 +329,17 @@ async def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
         "untracked_files": untracked_count,
         "coverage_complete": False,
         "coverage_scope": "git_tracked_and_nonignored",
-        "coverage_limitations": ["git_ignored_paths", "external_symlink_targets"],
+        "coverage_limitations": (["git_ignored_paths", "external_symlink_targets"]
+                                 + (["reported_excluded_paths"] if excluded else [])),
+        "excluded_count": len(excluded),
+        "excluded_paths": [path.relative_to(root).as_posix() for path in excluded],
+        "excluded_paths_truncated": False,
     }
 
 
 def _filesystem_snapshot(
     root: Path, *, cancelled: threading.Event | None = None, collect_all: bool = False,
+    protected_paths: tuple[Path, ...] = (),
 ) -> tuple[str, dict[str, Any]]:
     if not root.is_dir():
         raise ValueError("workspace snapshot root is not a directory")
@@ -328,7 +364,7 @@ def _filesystem_snapshot(
         descend = []
         for name in sorted(dirs):
             path = current_path / name
-            if name in _IGNORED_COPY_DIRS:
+            if name in _IGNORED_COPY_DIRS or _inside_protected(path, protected_paths):
                 excluded(path)
             elif path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
                 relative = path.relative_to(root).as_posix()
@@ -339,6 +375,9 @@ def _filesystem_snapshot(
         for name in sorted(files):
             _check_inspection_cancelled(cancelled)
             path = current_path / name
+            if _inside_protected(path, protected_paths):
+                excluded(path)
+                continue
             relative = path.relative_to(root).as_posix()
             entry = path.lstat()
             if stat.S_ISLNK(entry.st_mode):
@@ -390,12 +429,17 @@ async def _run_inspection_thread(function, *args, **kwargs):
         raise
 
 
-async def _run_workspace_snapshot(root: Path, *, filesystem_only: bool = False, collect_all: bool = False):
+async def _run_workspace_snapshot(
+    root: Path, *, filesystem_only: bool = False, collect_all: bool = False,
+    protected_paths: tuple[Path, ...] = (),
+):
     if not filesystem_only:
-        git_value = await _git_snapshot(root)
+        git_value = await _git_snapshot(root, protected_paths=protected_paths)
         if git_value is not None:
             return git_value
-    return await _run_inspection_thread(_filesystem_snapshot, root, collect_all=collect_all)
+    return await _run_inspection_thread(
+        _filesystem_snapshot, root, collect_all=collect_all, protected_paths=protected_paths,
+    )
 
 
 def _bounded_text(raw: bytes) -> str:
@@ -431,6 +475,8 @@ def _python_workspace_search(
     cancelled: threading.Event | None = None,
     collect_all: bool = False,
     output_sink=None,
+    omission_sink=None,
+    protected_paths: tuple[Path, ...] = (),
 ) -> tuple[str, int, dict[str, Any]]:
     """Portable search with streaming for large literal files and truthful gaps."""
 
@@ -451,7 +497,9 @@ def _python_workspace_search(
                 retained = []
                 for name in sorted(dirs):
                     path = current_path / name
-                    if name in _IGNORED_COPY_DIRS:
+                    if _inside_protected(path, protected_paths):
+                        omit(path, "protected_read_scope")
+                    elif name in _IGNORED_COPY_DIRS:
                         omit(path, "directory_excluded")
                     elif path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
                         omit(path, "symlink_not_followed")
@@ -476,16 +524,25 @@ def _python_workspace_search(
     output_limited = False
     matched_count = 0
     capture_failed = False
+    omission_capture_failed = False
 
     def check_cancel(*_args):
         if cancelled is not None and cancelled.is_set():
             raise _WorkspaceSearchCancelled()
 
     def omit(path, reason):
-        nonlocal omitted_count
+        nonlocal omitted_count, omission_sink, omission_capture_failed
         omitted_count += 1
+        item = {"path": str(path), "reason": reason}
+        if omission_sink is not None:
+            try:
+                encoded = json.dumps(item, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+                omission_sink.write(b"O" + encoded + b"\n")
+            except OSError:
+                omission_capture_failed = True
+                omission_sink = None
         if collect_all or len(omitted) < 20:
-            omitted.append({"path": str(path), "reason": reason})
+            omitted.append(item)
 
     def walk_error(exc):
         omit(getattr(exc, "filename", target), type(exc).__name__)
@@ -512,6 +569,9 @@ def _python_workspace_search(
     for path in paths:
         check_cancel()
         try:
+            if _inside_protected(path, protected_paths):
+                omit(path, "protected_read_scope")
+                continue
             entry = path.lstat()
             if stat.S_ISLNK(entry.st_mode):
                 omit(path, "symlink_not_followed")
@@ -588,13 +648,17 @@ def _python_workspace_search(
         "excerpt_count": excerpt_count,
         "output_limited": output_limited,
         "capture_failed": capture_failed,
+        "omission_capture_failed": omission_capture_failed,
     }
     if output_limited and output_sink is None:
         rows.append("...[truncated; use file_search for paged results]")
     return ("\n".join(rows) + "\n" if rows else ""), matched_count, coverage
 
 
-async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: bool, output_sink=None):
+async def _run_python_workspace_regex(
+    target: Path, *, query: str, collect_all: bool, output_sink=None, omission_sink=None,
+    protected_paths: tuple[Path, ...] = (),
+):
     from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
 
     proc = await asyncio.create_subprocess_exec(
@@ -604,7 +668,9 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
     )
     group = _bash_process_group_id(proc)
     request = json.dumps({"path": str(target), "query": query, "collect_all": collect_all,
-                          "stream_results": output_sink is not None},
+                          "stream_results": output_sink is not None,
+                          "stream_omissions": omission_sink is not None,
+                          "protected_paths": [str(path) for path in protected_paths]},
                          ensure_ascii=True).encode("utf-8")
     capture_errors: dict[str, str] = {}
     if output_sink is None:
@@ -617,9 +683,11 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
             proc.stdin.write(request)
             await proc.stdin.drain()
             proc.stdin.close()
+            sinks = {"stderr_bytes": output_sink}
+            if omission_sink is not None:
+                sinks["stdout_bytes"] = omission_sink
             return await bounded_communicate(
-                proc, limit=_MAX_OUTPUT_CHARS * 4, sinks={"stderr_bytes": output_sink},
-                capture_errors=capture_errors,
+                proc, limit=_MAX_OUTPUT_CHARS * 4, sinks=sinks, capture_errors=capture_errors,
             )
 
         task = asyncio.create_task(run_streaming())
@@ -633,8 +701,31 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
         raise
     if proc.returncode != 0:
         raise ValueError("workspace regex worker failed: " + stderr.decode("utf-8", "replace")[-1000:])
+    observed_omissions = None
     try:
-        response = json.loads(stdout)
+        if omission_sink is not None and capture_errors.get("stdout_bytes"):
+            # The bounded pipe tail can still carry the final summary even if
+            # the separate complete omission inventory could not be spooled.
+            summary = next((line for line in reversed(stdout.splitlines()) if line.startswith(b"R")), None)
+            if summary is None:
+                raise ValueError("workspace regex coverage summary is unavailable")
+            response = json.loads(summary[1:])
+        elif omission_sink is not None:
+            omission_sink.seek(0)
+            response = None
+            observed_omissions = 0
+            for line in omission_sink:
+                if line.startswith(b"O") and response is None:
+                    item = json.loads(line[1:])
+                    if not isinstance(item, dict) or set(item) != {"path", "reason"}:
+                        raise ValueError("workspace regex coverage record is invalid")
+                    observed_omissions += 1
+                elif line.startswith(b"R") and response is None:
+                    response = json.loads(line[1:])
+                else:
+                    raise ValueError("workspace regex coverage event is invalid")
+        else:
+            response = json.loads(stdout)
     except (ValueError, UnicodeError) as exc:
         raise ValueError("workspace regex worker returned invalid data") from exc
     if not isinstance(response, dict):
@@ -652,24 +743,30 @@ async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: 
                    for key in ("omitted_count", "large_files_scanned", "excerpt_count"))
             or type(coverage.get("output_limited")) is not bool):
         raise ValueError("workspace regex worker returned invalid data")
-    if capture_errors:
+    if capture_errors.get("stderr_bytes"):
         coverage["capture_failed"] = True
         if coverage["output_limited"]:
             coverage["coverage_complete"] = False
+    if (capture_errors.get("stdout_bytes") or
+            (observed_omissions is not None and observed_omissions != coverage["omitted_count"])):
+        coverage["omission_capture_failed"] = True
     return response["output"], response["matches"], coverage
 
 
 async def _run_python_workspace_search(
     target: Path, *, query: str, regex: bool, collect_all: bool = False, output_sink=None,
+    omission_sink=None, protected_paths: tuple[Path, ...] = (),
 ):
     if regex:
         return await _run_python_workspace_regex(
             target, query=query, collect_all=collect_all, output_sink=output_sink,
+            omission_sink=omission_sink, protected_paths=protected_paths,
         )
     cancelled = threading.Event()
     task = asyncio.create_task(asyncio.to_thread(
         _python_workspace_search, target, query=query, regex=regex, cancelled=cancelled,
-        collect_all=collect_all, output_sink=output_sink,
+        collect_all=collect_all, output_sink=output_sink, omission_sink=omission_sink,
+        protected_paths=protected_paths,
     ))
     try:
         return await asyncio.shield(task)
@@ -708,21 +805,82 @@ def _page_coverage_details(
         metadata[key + "_reference_unavailable"] = True
 
 
+async def _retain_streamed_omissions(coverage, omission_capture, retained_output) -> None:
+    """Retain a large omission inventory without assembling it in memory."""
+    if coverage["omitted_count"] <= 20:
+        return
+    if omission_capture is None or retained_output is None or coverage.get("omission_capture_failed"):
+        coverage["omitted_reference_unavailable"] = True
+        return
+
+    def records():
+        omission_capture.seek(0)
+        finished = False
+        for raw in omission_capture:
+            if raw.startswith(b"O") and not finished:
+                item = json.loads(raw[1:])
+                if not isinstance(item, dict) or set(item) != {"path", "reason"}:
+                    raise ValueError("invalid omission record")
+                yield raw[1:].rstrip(b"\r\n").decode("ascii")
+            elif raw.startswith(b"R") and not finished:
+                finished = True
+            else:
+                raise ValueError("invalid omission event")
+
+    try:
+        if sum(1 for _ in records()) != coverage["omitted_count"]:
+            raise ValueError("incomplete omission inventory")
+        digest = hashlib.sha256()
+
+        def chunks():
+            def record(value):
+                digest.update(value.encode("utf-8"))
+                return value
+
+            yield record('{"version":1,"omitted":[')
+            first = True
+            for item in records():
+                if not first:
+                    yield record(",")
+                yield record(item)
+                first = False
+            yield record("]}")
+
+        reference = await asyncio.to_thread(
+            retained_output[0].retain_text_chunks, retained_output[1], retained_output[2], chunks(),
+        )
+    except (OSError, ValueError, TimeoutError, UnicodeError):
+        reference = None
+    if reference:
+        coverage["omitted_reference"] = {
+            "reference": reference, "read_tool": "tool_output_read",
+            "sha256": digest.hexdigest(), "format": "json",
+        }
+    else:
+        coverage["omitted_reference_unavailable"] = True
+
+
 async def _inspect_python_search(
     target: Path, *, query: str, regex: bool, retain_coverage, retained_output,
+    protected_paths: tuple[Path, ...] = (),
 ) -> BuiltinExecutionResult:
     """Use private Run-bound spooling for the portable workspace-search fallback."""
     with ExitStack() as files:
         capture = None
+        omission_capture = None
         if retained_output is not None:
             try:
                 capture = files.enter_context(retained_output[0].temporary_capture_file())
+                omission_capture = files.enter_context(retained_output[0].temporary_capture_file())
             except OSError:
                 files.close()
+                capture = None
+                omission_capture = None
         try:
             output, matches, coverage = await _run_python_workspace_search(
-                target, query=query, regex=regex, collect_all=retain_coverage is not None,
-                output_sink=capture,
+                target, query=query, regex=regex,
+                collect_all=retain_coverage is not None and retained_output is None,
+                output_sink=capture, omission_sink=omission_capture, protected_paths=protected_paths,
             )
         except re.error as exc:
             return _result(f"Error: workspace search failed: invalid regex: {exc}",
@@ -731,8 +889,11 @@ async def _inspect_python_search(
             return _result(f"Error: workspace search failed: {exc}",
                            operation="search", exit_code=2, search_backend="python")
 
-        _page_coverage_details(coverage, key="omitted", truncated_key="omitted_paths_truncated",
-                               retain_coverage=retain_coverage)
+        if retained_output is not None:
+            await _retain_streamed_omissions(coverage, omission_capture, retained_output)
+        else:
+            _page_coverage_details(coverage, key="omitted", truncated_key="omitted_paths_truncated",
+                                   retain_coverage=retain_coverage)
         reference = None
         if coverage["output_limited"] and capture is not None and not coverage.get("capture_failed"):
             from tools.builtins import _decoded_stream
@@ -790,15 +951,23 @@ async def execute_workspace_inspect(
     workspace_dir: Path,
     retain_coverage=None,
     retained_output=None,
+    protected_read_paths=(),
+    snapshot_excluded_paths=(),
 ) -> BuiltinExecutionResult:
     """Perform one fixed read-only inspection operation inside the workzone."""
 
     operation = str(arguments.get("operation") or "").strip().casefold()
     root = Path(workspace_dir).resolve()
+    protected_paths = tuple(Path(path).resolve() for path in protected_read_paths)
+    if _inside_protected(root, protected_paths):
+        return _result("Error: workspace inspection targets protected data.", operation=operation)
     if operation == "snapshot":
         try:
+            snapshot_exclusions = protected_paths + tuple(
+                Path(path).resolve() for path in snapshot_excluded_paths
+            )
             digest, metadata = await _run_workspace_snapshot(
-                root, collect_all=retain_coverage is not None)
+                root, collect_all=retain_coverage is not None, protected_paths=snapshot_exclusions)
         except Exception as exc:
             return _result(
                 f"Error: workspace snapshot unavailable: {exc}",
@@ -820,10 +989,16 @@ async def execute_workspace_inspect(
         target = _workspace_path(root, arguments.get("path", "."))
     except ValueError as exc:
         return _result(f"Error: {exc}", operation=operation)
+    if _inside_protected(target, protected_paths):
+        return _result("Error: workspace inspection targets protected data.", operation=operation)
+    excluded_pathspecs = [
+        ":(exclude,literal)" + item.relative_to(root).as_posix()
+        for item in protected_paths if item.is_relative_to(root) and item != root
+    ]
 
     if operation == "status":
         completed, output, details = await _inspect_command_output(
-            ["git", "status", "--short", "--branch", "--", str(target)],
+            ["git", "status", "--short", "--branch", "--", str(target), *excluded_pathspecs],
             cwd=root, retained_output=retained_output, success_codes={0},
             error_prefix="Error: workspace status is unavailable: ", empty_text="Workspace status is clean.",
         )
@@ -836,7 +1011,7 @@ async def execute_workspace_inspect(
         argv = ["git", "diff", "--no-ext-diff", "--stat", "--patch"]
         if cached:
             argv.append("--cached")
-        argv.extend(["--", str(target)])
+        argv.extend(["--", str(target), *excluded_pathspecs])
         completed, output, details = await _inspect_command_output(
             argv, cwd=root, retained_output=retained_output, success_codes={0},
             error_prefix="Error: workspace diff is unavailable: ", empty_text="No diff.",
@@ -851,7 +1026,8 @@ async def execute_workspace_inspect(
         if not isinstance(regex, bool):
             return _result("Error: regex must be a boolean", operation=operation)
         search_backend = "rg"
-        executable = shutil.which("rg")
+        force_scoped_search = _has_protected_descendant(target, protected_paths)
+        executable = None if force_scoped_search else shutil.which("rg")
         if executable:
             argv = [
                 executable,
@@ -864,11 +1040,11 @@ async def execute_workspace_inspect(
                 argv.append("--fixed-strings")
         else:
             search_backend = "grep"
-            executable = shutil.which("grep")
+            executable = None if force_scoped_search else shutil.which("grep")
             if not executable:
                 return await _inspect_python_search(
                     target, query=query, regex=regex, retain_coverage=retain_coverage,
-                    retained_output=retained_output,
+                    retained_output=retained_output, protected_paths=protected_paths,
                 )
             argv = [
                 executable,
@@ -904,7 +1080,8 @@ async def execute_workspace_inspect(
             }
         elif target.is_dir():
             digest, metadata = await _run_workspace_snapshot(
-                target, filesystem_only=True, collect_all=retain_coverage is not None)
+                target, filesystem_only=True, collect_all=retain_coverage is not None,
+                protected_paths=protected_paths)
             _page_coverage_details(
                 metadata, key="excluded_paths", truncated_key="excluded_paths_truncated",
                 retain_coverage=retain_coverage)

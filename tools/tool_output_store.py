@@ -178,6 +178,15 @@ class ToolOutputStore:
         self._lock = threading.RLock()
 
     @property
+    def private_root(self) -> Path | None:
+        return self._root
+
+    def prepare_private_root(self) -> Path:
+        with self._locked(create=True) as root:
+            assert root is not None
+            return root
+
+    @property
     def retention(self) -> str:
         return "run_lifetime" if self._instance_home is not None or self._home is not None else "registry_lifetime"
 

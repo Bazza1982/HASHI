@@ -873,3 +873,181 @@ async def test_workspace_python_regex_cancellation_reaps_worker_with_spool(tmp_p
         if child is not None and child.returncode is None:
             child.kill()
             await child.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regex", [False, True])
+async def test_workspace_python_search_never_scans_its_private_output_store(tmp_path, monkeypatch, regex):
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    (home / "visible.txt").write_text("VISIBLE-SEARCH-SENTINEL", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    binding = run_binding(context)
+    registry._tool_output_store.retain(binding, "file_read", "initialize private store")
+    private_root = registry._tool_output_store._root
+    assert private_root is not None
+    private = private_root / "nested" / "sensitive.txt"
+    private.parent.mkdir()
+    private.write_text("PRIVATE-OUTPUT-ONLY-SENTINEL\n", encoding="utf-8")
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    result = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "PRIVATE-OUTPUT-ONLY-SENTINEL", "regex": regex,
+    })
+    assert "PRIVATE-OUTPUT-ONLY-SENTINEL" not in result.output
+    assert result.details["matches"] == 0
+    visible = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "VISIBLE-SEARCH-SENTINEL", "regex": regex,
+    })
+    assert "VISIBLE-SEARCH-SENTINEL" in visible.output
+    assert visible.details["matches"] == 1
+    direct = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "PRIVATE", "path": str(private),
+    })
+    assert direct.is_error
+
+
+@pytest.mark.asyncio
+async def test_workspace_diff_and_snapshot_exclude_private_store_descendants(tmp_path):
+    import subprocess
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "repository"
+    home.mkdir()
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=home, check=True, capture_output=True,
+            text=True, encoding="utf-8",
+        )
+    git("init", "--quiet")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    registry._tool_output_store.retain(run_binding(context), "file_read", "initialize private store")
+    private_root = registry._tool_output_store.private_root
+    private = private_root / "nested" / "sensitive.txt"
+    private.parent.mkdir()
+    private.write_text("old-private\n", encoding="utf-8")
+    visible = home / "visible.txt"
+    visible.write_text("old-visible\n", encoding="utf-8")
+    git("add", "-f", "--", str(private), str(visible))
+    git("commit", "--quiet", "-m", "fixture")
+    private.write_text("PRIVATE-NEW-CONTENT\n", encoding="utf-8")
+    visible.write_text("visible-new-content\n", encoding="utf-8")
+
+    diff = await registry.execute("workspace_inspect", {"operation": "diff"})
+    assert not diff.is_error, diff.output
+    assert "visible-new-content" in diff.output
+    assert "PRIVATE-NEW-CONTENT" not in diff.output
+    denied = await registry.execute("workspace_inspect", {"operation": "hash", "path": str(private)})
+    assert denied.is_error
+
+    before = await registry.execute("workspace_inspect", {"operation": "snapshot"})
+    private.write_text("other-private-contents\n", encoding="utf-8")
+    after_private = await registry.execute("workspace_inspect", {"operation": "snapshot"})
+    assert json.loads(before.output)["snapshot_sha256"] == json.loads(after_private.output)["snapshot_sha256"]
+    visible.write_text("different-visible-content\n", encoding="utf-8")
+    after_visible = await registry.execute("workspace_inspect", {"operation": "snapshot"})
+    visible_snapshot = json.loads(after_visible.output)
+    assert json.loads(before.output)["snapshot_sha256"] != visible_snapshot["snapshot_sha256"]
+    assert visible_snapshot["vcs"] == "git"
+    assert ".hashi-tool-output-v1" in visible_snapshot["excluded_paths"]
+    git("add", "--", str(visible))
+    after_staging = await registry.execute("workspace_inspect", {"operation": "snapshot"})
+    assert json.loads(after_staging.output)["snapshot_sha256"] != visible_snapshot["snapshot_sha256"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regex", [False, True])
+async def test_regex_search_pages_large_exclusion_inventory_without_losing_results(tmp_path, monkeypatch, regex):
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    for index in range(2500):
+        (home / f"folder-{index:04d}-{'x' * 75}" / "node_modules").mkdir(parents=True)
+    (home / "visible.txt").write_text("SEARCHABLE-SENTINEL\n", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    result = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "SEARCHABLE-SENTINEL", "regex": regex,
+    })
+    assert not result.is_error, result.output
+    assert "SEARCHABLE-SENTINEL" in result.output
+    assert result.details["omitted_count"] >= 2500
+    reference = result.details["omitted_reference"]["reference"]
+    complete, final = _all_pages(registry._tool_output_store, run_binding(context), reference)
+    assert final["sha256"] == result.details["omitted_reference"]["sha256"]
+    assert final["sha256"] == hashlib.sha256(complete.encode("utf-8")).hexdigest()
+    omissions = json.loads(complete)["omitted"]
+    assert len(omissions) == result.details["omitted_count"]
+    assert any("folder-0000-" in item["path"] for item in omissions)
+    assert any("folder-2499-" in item["path"] for item in omissions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regex", [False, True])
+async def test_search_preserves_matches_when_exclusion_spool_fails(tmp_path, monkeypatch, regex):
+    from tools import her_verification
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    for index in range(50):
+        (home / f"folder-{index:03d}" / "node_modules").mkdir(parents=True)
+    (home / "visible.txt").write_text("VISIBLE-MATCH\n", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    original = registry._tool_output_store.temporary_capture_file
+    calls = 0
+    class UnavailableSpool:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def write(self, _data):
+            raise OSError("simulated full omission storage")
+    def capture():
+        nonlocal calls
+        calls += 1
+        return UnavailableSpool() if calls == 2 else original()
+    monkeypatch.setattr(registry._tool_output_store, "temporary_capture_file", capture)
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+    result = await registry.execute("workspace_inspect", {
+        "operation": "search", "query": "VISIBLE-MATCH", "regex": regex,
+    })
+    assert not result.is_error, result.output
+    assert "VISIBLE-MATCH" in result.output
+    assert result.details["matches"] == 1
+    assert result.details["omitted_count"] >= 50
+    assert result.details["omitted_reference_unavailable"] is True

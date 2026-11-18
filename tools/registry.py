@@ -2487,10 +2487,26 @@ class ToolRegistry:
             retain_coverage = (
                 lambda value: self._tool_output_store.retain(binding, "workspace_inspect", value)
             ) if binding is not None else None
+            private_root = self._tool_output_store.private_root
+            if binding is not None and private_root is None:
+                try:
+                    private_root = self._tool_output_store.prepare_private_root()
+                except (OSError, TimeoutError):
+                    pass
+            policy = self._live_runtime_policy_cache
+            protected = tuple(getattr(policy, "protected_read_paths", ()))
+            if private_root is not None:
+                protected += (private_root,)
+            from tools.tool_audit import default_audit_path
+            audit_home = Path(self._read_scope()[1].get("agent_home") or self.workspace_dir)
+            transient_audit = (self.smart_tools.ledger_path if self.smart_tools.enabled
+                               else default_audit_path(audit_home))
             return await execute_workspace_inspect(
                 arguments,
                 workspace_dir=self.workspace_dir,
                 retain_coverage=retain_coverage,
+                protected_read_paths=protected,
+                snapshot_excluded_paths=(transient_audit,),
                 **({"retained_output": (self._tool_output_store, binding, tool_name)}
                    if binding is not None else {}),
             )

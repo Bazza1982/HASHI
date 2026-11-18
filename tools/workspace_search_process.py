@@ -15,14 +15,18 @@ from tools.her_verification import _python_workspace_search
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    stream_results = False
     try:
         request = json.load(sys.stdin)
+        stream_results = request.get("stream_results") is True
         output, matches, coverage = _python_workspace_search(
             Path(request["path"]), query=request["query"], regex=True,
             collect_all=request.get("collect_all") is True,
-            output_sink=sys.stderr.buffer if request.get("stream_results") is True else None,
+            output_sink=sys.stderr.buffer if stream_results else None,
+            omission_sink=sys.stdout.buffer if request.get("stream_omissions") is True else None,
+            protected_paths=tuple(Path(path).resolve() for path in request.get("protected_paths", ())),
         )
-        if request.get("stream_results") is True:
+        if stream_results:
             sys.stderr.buffer.flush()
             # Metadata travels separately from the complete spooled rows.
             # Bound its JSON-encoded preview even for non-ASCII characters.
@@ -41,7 +45,12 @@ def main() -> int:
         response = {"error": "invalid_regex", "message": str(exc)}
     except Exception as exc:
         response = {"error": "worker_failure", "message": f"{type(exc).__name__}: {exc}"}
-    print(json.dumps(response, ensure_ascii=True, separators=(",", ":")), flush=True)
+    encoded = json.dumps(response, ensure_ascii=True, separators=(",", ":"))
+    if stream_results:
+        sys.stdout.buffer.write(b"R" + encoded.encode("ascii") + b"\n")
+        sys.stdout.buffer.flush()
+    else:
+        print(encoded, flush=True)
     return 0
 
 

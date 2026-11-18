@@ -83,7 +83,14 @@ defaults to 32 MiB; set `HASHI_WORKSPACE_SEARCH_MEMORY_BYTES` to another
 nonnegative byte count, or zero to opt out. When a large regex file exceeds the
 budget, search reports incomplete coverage and points to `file_search`
 recovery. Unreadable or excluded files and excerpt-only matches remain explicit
-coverage limitations.
+coverage limitations. Long inventories of skipped paths have a separate
+disk-backed continuation; if its storage fails, matching results remain
+available and the missing inventory is reported. Workspace inspection searches,
+Git status/diff and snapshots exclude the actual private result store and
+existing read-protected descendants.
+Snapshots also exclude the active tool audit receipt so recording a check
+does not itself invalidate the next one; the snapshot reports excluded paths
+and preserves Git staged and unstaged state.
 On startup, the owner reconciles abandoned terminal Runs; a Run whose state
 cannot be proven is retained until it can be reconciled. A Registry without an
 Agent home uses a private temporary store for that Registry's lifetime.
