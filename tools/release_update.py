@@ -1,7 +1,7 @@
-"""Closed-loop source release coordinator for a registered HASHI instance.
+"""Source preparation and closed-loop adoption for a registered HASHI instance.
 
-A source release is successful only after the fetched commit is running in Core,
-Functions, every Worker, and the independently supervised Remote process.
+Staging qualifies source without activation. A full release additionally verifies
+Core, Functions, every Worker, and the independently supervised Remote process.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def _git(
     timeout: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
     return _run(
-        ["git", *args],
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=root,
         phase=phase,
         timeout=timeout,
@@ -708,6 +708,7 @@ def _release_environment(
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUNBUFFERED": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
     return environment
@@ -746,6 +747,183 @@ def _runtime_release_argv(
     ]
 
 
+def _verify_release_source(root: Path, home: Path, instance_id: str, runtime_command: Sequence[str]) -> None:
+    protected_check = root / "scripts" / "check_protected_core_changes.py"
+    if not protected_check.is_file():
+        raise ReleaseUpdateError("source_verify", "protected-Core release gate is missing")
+    _run(
+        [*runtime_command, str(protected_check)], cwd=root,
+        phase="protected_core_gate", timeout=120.0,
+        env=_release_environment(root, home, instance_id),
+    )
+
+
+def _qualify_staged_functions(root: Path, home: Path, staging: Path) -> dict[str, Any]:
+    # Reuse the owning qualification contract, without preparing/activating a
+    # live application or publishing the active generation/recovery pointer.
+    from types import SimpleNamespace
+    from orchestrator.function_generation import probe_function_generation
+    from orchestrator.function_worker_supervisor import materialize_generation_artifact
+    from orchestrator.pathing import build_bridge_paths
+    from orchestrator.runtime_contract import (
+        bind_process_runtime, enforce_runtime_contract, load_core_runtime_selection,
+    )
+
+    try:
+        selection = load_core_runtime_selection(root)
+        bind_process_runtime(selection.functions, code_root=root)
+        runtime = enforce_runtime_contract(root)
+    except Exception as exc:
+        raise ReleaseUpdateError(
+            "stage_runtime",
+            "The selected Core/Functions runtime pair cannot run this source. "
+            "Prepare a qualified runtime pair for the target before retrying; "
+            "no packages were installed and nothing was restarted.",
+            details=str(exc),
+        ) from exc
+    try:
+        kernel = SimpleNamespace(
+            paths=build_bridge_paths(root, home, canonical_home=True),
+            runtime_fingerprint=runtime,
+        )
+        generation = probe_function_generation(kernel)
+        artifact = materialize_generation_artifact(staging, generation)
+    except Exception as exc:
+        raise ReleaseUpdateError(
+            "stage_qualification",
+            "The fetched Functions failed isolated qualification; fix the reported "
+            "source or dependency problem before adopting it.",
+            details=str(exc),
+        ) from exc
+    return {
+        "source_commit": generation.receipt.source_commit,
+        "generation_id": generation.manifest.generation_id,
+        "artifact_root": str(artifact),
+        "functions_runtime_id": selection.functions.runtime_id,
+        "core_runtime_id": selection.core.runtime_id,
+    }
+
+
+def prepare_staged_release(
+    *, code_root: Path | str, bridge_home: Path | str,
+    instance_id: str, expected_commit: str,
+) -> dict[str, Any]:
+    """Qualify committed source and persist a receipt; never activate it."""
+    from datetime import datetime
+    from uuid import uuid4
+    from orchestrator.config_json import write_config_json
+
+    root = Path(code_root).expanduser().resolve()
+    home = Path(bridge_home).expanduser().resolve()
+    target = str(expected_commit).casefold()
+    if not _HEX_COMMIT.fullmatch(target):
+        raise ReleaseUpdateError("stage_verify", "expected source commit is invalid")
+    if _require_clean_checkout(root, phase="stage_verify") != target:
+        raise ReleaseUpdateError("stage_verify", "source commit changed before qualification")
+    staging = home / "state" / "source_deployments" / uuid4().hex
+    qualification = _qualify_staged_functions(root, home, staging)
+    if qualification.get("source_commit") != target:
+        raise ReleaseUpdateError("stage_verify", "qualified source commit differs from target")
+    if _require_clean_checkout(root, phase="stage_verify") != target:
+        raise ReleaseUpdateError("stage_verify", "source commit changed during qualification")
+    receipt_path = staging / "ready.json"
+    result = {
+        "ok": True, "state": "ready_to_reboot", "message": "Ready to reboot",
+        "instance_id": instance_id, "target_commit": target,
+        "code_root": str(root), "bridge_home": str(home),
+        "restarts_performed": False, "running_verified": False,
+        "qualification": qualification, "receipt_path": str(receipt_path),
+        "validated_at": datetime.now().astimezone().isoformat(),
+        "next_action": "Adopt the prepared Functions with /reboot when ready, then "
+                       "check /version full. Core and Remote adoption remain separate.",
+    }
+    try:
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        write_config_json(receipt_path, result, expected_revision=None)
+    except Exception as exc:
+        raise ReleaseUpdateError(
+            "stage_receipt", "Could not durably record readiness; inspect the "
+            "receipt before retrying. Nothing was restarted.", details=str(exc),
+        ) from exc
+    return result
+
+
+def run_staged_source_release(
+    *, code_root: Path | str, bridge_home: Path | str, instance_id: str,
+    runtime_command: Sequence[str], remote: str = "origin", branch: str = "main",
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    """Fetch, verify and prepare source without any live lifecycle adapter."""
+    from orchestrator.config_json import file_write_lock
+
+    root = Path(code_root).expanduser().resolve()
+    home = Path(bridge_home).expanduser().resolve()
+    if not runtime_command:
+        raise ReleaseUpdateError("stage_runtime", "a qualified management runtime is required")
+    source = None
+    try:
+        (home / "state").mkdir(parents=True, exist_ok=True)
+        with file_write_lock(home / "state" / "source_deployment.lock"):
+            source = fast_forward_checkout(root, remote=remote, branch=branch)
+            _verify_release_source(root, home, instance_id, runtime_command)
+            # An older fetched coordinator rejects the distinct 'stage' verb;
+            # it can never silently fall back to the restarting 'deploy' verb.
+            argv = [
+                *runtime_command, "-m", "tools.release_update", "stage",
+                "--code-root", str(root), "--release-home", str(home),
+                "--instance-id", instance_id,
+                "--expected-commit", source["target_commit"],
+            ]
+            completed = _run(
+                argv, cwd=root, phase="stage_qualification",
+                timeout=float(timeout) + 180.0,
+                env=_release_environment(root, home, instance_id), check=False,
+                stderr=None,
+            )
+            try:
+                result = json.loads(completed.stdout or "")
+            except (ValueError, TypeError) as exc:
+                raise ReleaseUpdateError(
+                    "stage_qualification", "The fetched coordinator did not return a "
+                    "staging receipt. It may not support stage-only deployment.",
+                    details=_bounded_output(completed.stdout),
+                ) from exc
+            if not isinstance(result, dict):
+                raise ReleaseUpdateError("stage_qualification", "invalid staging receipt")
+            if completed.returncode != 0 or result.get("ok") is not True:
+                raise ReleaseUpdateError(
+                    str(result.get("phase") or "stage_qualification"),
+                    str(result.get("error") or "source staging failed"),
+                    details=result.get("details"),
+                )
+            if (
+                result.get("state") != "ready_to_reboot"
+                or result.get("target_commit") != source["target_commit"]
+                or result.get("instance_id") != instance_id
+                or result.get("restarts_performed") is not False
+                or result.get("running_verified") is not False
+            ):
+                raise ReleaseUpdateError("stage_verify", "staging receipt does not match the request")
+            if _require_clean_checkout(root, phase="stage_verify") != source["target_commit"]:
+                raise ReleaseUpdateError("stage_verify", "source changed after qualification")
+            return {**result, "source": source}
+    except ReleaseUpdateError as exc:
+        raise ReleaseUpdateError(
+            exc.phase, str(exc),
+            details={"cause": exc.details, "source": source,
+                     "restarts_performed": False,
+                     "next_action": "Inspect the reported source/runtime error before "
+                                    "retrying or adopting. Source is retained at the "
+                                    "reported target; no automatic rewind was attempted."},
+        ) from exc
+    except OSError as exc:
+        raise ReleaseUpdateError(
+            "stage_io", "Source staging could not access or lock the deployment files. "
+            "Check permissions and whether another deployment is in progress.",
+            details={"source": source, "restarts_performed": False, "cause": str(exc)},
+        ) from exc
+
+
 def run_source_release(
     *,
     code_root: Path | str,
@@ -756,8 +934,15 @@ def run_source_release(
     remote: str = "origin",
     branch: str = "main",
     timeout: float = 300.0,
+    stage_only: bool = False,
 ) -> dict[str, Any]:
     """Preflight, fast-forward, re-exec updated coordinator, and require closure."""
+
+    if stage_only:
+        return run_staged_source_release(
+            code_root=code_root, bridge_home=bridge_home, instance_id=instance_id,
+            runtime_command=runtime_command, remote=remote, branch=branch, timeout=timeout,
+        )
 
     root = Path(code_root).expanduser().resolve()
     home = Path(bridge_home).expanduser().resolve()
@@ -774,18 +959,7 @@ def run_source_release(
     preflight_adapter.preflight()
     source = fast_forward_checkout(root, remote=remote, branch=branch)
 
-    protected_check = root / "scripts" / "check_protected_core_changes.py"
-    if not protected_check.is_file():
-        raise ReleaseUpdateError(
-            "source_verify", "protected-Core release gate is missing"
-        )
-    _run(
-        [*runtime_command, str(protected_check)],
-        cwd=root,
-        phase="protected_core_gate",
-        timeout=120.0,
-        env=_release_environment(root, home, instance_id),
-    )
+    _verify_release_source(root, home, instance_id, runtime_command)
 
     argv = _runtime_release_argv(
         runtime_command=runtime_command,
@@ -865,6 +1039,11 @@ def _parser() -> argparse.ArgumentParser:
     deploy.add_argument("--api-port", type=int, required=True)
     deploy.add_argument("--expected-commit", required=True)
     deploy.add_argument("--timeout", type=float, default=300.0)
+    stage = commands.add_parser("stage", add_help=False)
+    stage.add_argument("--code-root", type=Path, required=True)
+    stage.add_argument("--release-home", dest="bridge_home", type=Path, required=True)
+    stage.add_argument("--instance-id", required=True)
+    stage.add_argument("--expected-commit", required=True)
     return parser
 
 
@@ -872,6 +1051,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "deploy":
         return _deploy_command(args)
+    if args.command == "stage":
+        try:
+            result = prepare_staged_release(
+                code_root=args.code_root, bridge_home=args.bridge_home,
+                instance_id=args.instance_id, expected_commit=args.expected_commit,
+            )
+        except ReleaseUpdateError as exc:
+            print(json.dumps(exc.to_payload(), ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
     return 64
 
 

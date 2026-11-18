@@ -1,72 +1,89 @@
-# HASHI source release closure
+# HASHI source preparation and release adoption
 
-## Decision
+PAO owns source deployment in Functions and platform configuration. Protected
+Core, runtime selectors and ordinary Agent tool protection are unchanged.
 
-A Git source update is complete only when the exact fetched commit is active in
-the HASHI Core, shared Functions, every configured Function Worker, and the
-independently supervised Hashi Remote process. Moving the checkout alone is not
-a deployment, and a partial adoption must return failure.
+## Operator commands and result states
 
-The supported operator command is:
+| Command | Result | Live actions |
+|---|---|---|
+| `hashi --instance <name> deploy --confirm <name>` | Ready to reboot | None |
+| `hashi --instance <name> update --stage-only --confirm <name>` | Ready to reboot | None |
+| `/hashideploy` | Ready to reboot | None |
+| `hashi --instance <name> update --confirm <name>` | Complete running release | Core and Remote restart |
 
-```text
-hashi --instance <name> update --confirm <name>
-```
+CLI source commands default to `origin/main`; `--remote` and `--branch` select
+another explicit source. The standard owner-only slash command always prepares
+`origin/main` for the current configured instance, with no executable, root,
+peer or lifecycle argument. It is discovered by the shared command registry,
+including help and frontend command dispatch.
 
-It defaults to `origin/main`. `--remote` and `--branch` may select another
-explicit release source. This command is intentionally unavailable for packaged
-installs; those must adopt one complete verified package.
+Git source preparation is a supported successful outcome. It explicitly does
+**not** mean the target is already running. Complete running adoption still
+requires source, Core, shared Functions, every configured Worker and the
+independently supervised Remote to report the target commit.
 
-## Closed-loop sequence
+## Preparation without restart
 
-The update command performs one coordinated operation:
+1. Resolve the exact instance and source; CLI requires the exact registered
+   name as confirmation. The slash command verifies the authorized owner.
+2. Serialize preparation per instance. Require a clean Git checkout and fetch
+   the requested branch, allowing only an exact fast-forward. Git hooks are
+   disabled so a post-merge hook cannot perform an implicit lifecycle action.
+3. Run the protected-Core source gate and invoke the fetched coordinator with
+   the separate `stage` verb. An older coordinator without that verb fails
+   safely; it cannot fall back to restarting deployment.
+4. Verify the installer-owned Core/Functions runtime pair and its file seals,
+   then qualify the complete committed Function source/assets, configured
+   observers and dependency/import contract in an isolated process. Missing
+   or incompatible runtimes produce a useful error; no packages are installed
+   in an existing interpreter.
+5. Materialize an immutable candidate under a new
+   `state/source_deployments/<invocation>` directory. Recheck the exact clean
+   target after qualification and publish a private atomic `ready.json`
+   receipt. Do not publish an active generation or recovery-cache pointer.
+6. Return `state=ready_to_reboot`, `message=Ready to reboot`,
+   `restarts_performed=false` and `running_verified=false`, with the exact
+   commit, instance, qualification and receipt location.
 
-1. Resolve the exact registered instance and require its exact name as
-   confirmation.
-2. Require a clean Git checkout, a healthy idle Core, verified Agent and
-   background-job activity, and a reachable independently supervised Remote
-   with the fixed Core-restart capability.
-3. Fetch the requested remote branch and allow only a fast-forward to the exact
-   fetched commit.
-4. Run the protected-Core release gate, then re-execute the release coordinator
-   from the fetched checkout.
-5. Keep Remote alive while it performs a durable, terminally verified cold
-   restart of HASHI Core. The new Core starts Functions and all Workers from the
-   fetched source.
-6. Re-register the Remote supervisor from the fetched source and restart Remote
-   itself.
-7. Poll the structured version endpoint and succeed only when source, Core,
-   Functions, every active Worker, and Remote all report the exact target
-   commit, every Worker is active and accepting, the source is clean, and the
-   aggregate state is `running_matches_source`.
+Preparation does not require an idle live instance, an available Remote,
+shared-token credentials or a running API. Its isolated probes never activate
+providers or connectors. It never stops, starts, restarts, reloads or reboots
+Core, Functions, Workers, Remote, Workbench or the computer.
 
-Any failed or unverified phase returns a non-zero result naming that phase.
-The command never reports success for a source-only update or mixed generation.
-It does not automatically rewind source after an adoption failure; automatic
-rewind could cross migrations or discard valid state. After correcting the
-reported cause, rerunning the same command safely targets the same commit and
-closes the remaining adoption.
+The slash command retains its preparation task until the actual work finishes.
+Cancelling the command or interrupting a notification does not stop the source
+operation or admit a second preparation. Completion releases the busy state
+and records the final result in the log even without a reply recipient. To
+reconcile an interrupted reply, compare the checkout HEAD with the exact target
+in its persisted readiness receipt; cancellation alone does not establish
+success or failure, and absence of a matching receipt is not readiness.
 
-## Remote independence
+The user chooses when to adopt. Ordinary Function updates use the existing
+`/reboot` controls; shared Functions use `/reboot max`. Core and Remote retain
+their separate maintenance lifecycles. Check `/version full` after adoption.
+A readiness receipt is dated evidence, not permission to skip later source,
+runtime, busy-state or adoption checks.
 
-Remote remains a separately supervised rescue program. Ordinary
-`/reboot min|same|max` continues to manage Function/Worker generations and
-does not restart Remote.
+## Existing complete update
 
-That independence is what lets Remote restart a stopped or unhealthy Core. It
-is not an exemption from release adoption. A complete HASHI source release
-therefore uses the old Remote to restart Core, then explicitly adopts and
-verifies the new Remote before the release can succeed.
+The default `hashi update` workflow retains its healthy/idle runtime and
+independently supervised Remote preflight. After the same exact fast-forward
+and source gate it re-executes the fetched `deploy` coordinator, asks Remote
+to cold-restart Core, re-registers and restarts Remote, then verifies the complete
+Worker set and all component versions. Partial or mixed adoption returns failure.
 
-## Safety boundaries
+## Failure and recovery
 
-- No merge commit, force update, hard reset, branch creation, or worktree is
-  performed.
-- A dirty checkout, non-fast-forward target, busy or unverifiable runtime,
-  missing Remote supervision, failed Core receipt, offline component, missing
-  provenance, or commit mismatch blocks success.
-- Instance configuration, credentials, databases, sessions, and runtime data
-  remain in place; the command advances only the registered source checkout and
-  invokes the existing fixed lifecycle controllers.
-- Published packages remain a separate release channel and are never converted
-  into a Git checkout by this command.
+Failures return a non-zero result naming the failed phase. A failed preparation
+never returns readiness or an activation claim. Errors after source advancement
+include the previous and target commit, state that no restart occurred, and
+retain the updated source for investigation. The command never performs an
+automatic reset or rewind, which could discard concurrent work or cross a
+migration. Resolve the cause and retry; an unchanged target is requalified.
+
+Existing configuration, credentials, databases, sessions and runtime selectors
+stay in place. Packaged installs remain a separate verified release channel;
+these source commands do not convert them into Git checkouts. A source/root
+permission error is reported, without widening ordinary Agent tool permissions
+or disguising a protected write as a read.
