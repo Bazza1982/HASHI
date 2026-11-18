@@ -10,6 +10,14 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "hashideploy.denied": "🔒 Only the authorized owner can prepare an instance deployment.",
+    "hashideploy.usage": "Use <code>/hashideploy</code> to prepare origin/main for this instance. Nothing is restarted; adoption is a later user action.",
+    "hashideploy.busy": "⚠️ Source preparation is already running. Wait for its result before retrying.",
+    "hashideploy.target_missing": "❌ The configured instance source or home is unavailable. Check the instance configuration; no deployment was started.",
+    "hashideploy.preparing": "ℹ️ Preparing <b>{instance}</b> from origin/main. Running components stay active.",
+    "hashideploy.ready": "Ready to reboot",
+    "hashideploy.prepared": "<b>{instance}</b> · <code>{commit}</code>\nSource and isolated candidate validation passed. No restart or reload was performed.\n\nUse <code>/reboot</code> when ready to adopt Functions, then <code>/version full</code> to check running versions. Core and Remote adoption remain separate.",
+    "hashideploy.failed": "❌ Deployment is not ready · <code>{phase}</code>\n{reason}\n\nSource target: <code>{commit}</code>. Nothing was restarted. Resolve this error before adopting; existing source changes are retained.",
     "getfile.coverage": "Recent 10 distinct files · managed tools and reported Engine edits. Shell/background coverage is incomplete.",
     "getfile.empty": "No recorded files yet. A literal file path can still be requested.",
     "getfile.created": "Created",
@@ -3207,6 +3215,7 @@
     "safety.human_scope_note": "These choices allow access for longer. Check their scope and expiry before choosing."
   },
   "commands": {
+    "hashideploy": "Prepare latest source without restarting",
     "getfile": "Get recent or named files",
     "phone": "Audio call settings",
     "call": "Video call settings",

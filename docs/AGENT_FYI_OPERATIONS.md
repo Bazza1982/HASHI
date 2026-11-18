@@ -66,6 +66,11 @@ HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
 
 `hashi update` adopts source, Core, Workers and Remote together or fails.
 
+Source preparation is separately supported by `hashi update --stage-only`,
+`hashi deploy` and owner-only `/hashideploy`: qualify source without restarting,
+then return `Ready to reboot` or a useful error. See
+[source preparation and adoption](HASHI_SOURCE_RELEASE_CLOSURE.md).
+
 ## Configuration, identity, and persistence
 
 Prove isolated speech locks/runtimes/releases separately:

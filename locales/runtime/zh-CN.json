@@ -10,6 +10,14 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "hashideploy.denied": "🔒 仅授权所有者可准备实例部署。",
+    "hashideploy.usage": "使用 <code>/hashideploy</code> 为当前实例拉取并验证 origin/main。不会重启任何组件，采用由用户稍后操作。",
+    "hashideploy.busy": "⚠️ 源码准备正在进行，请等待结果再重试。",
+    "hashideploy.target_missing": "❌ 缺少实例源码目录或状态目录，请检查实例配置；部署未开始。",
+    "hashideploy.preparing": "ℹ️ 正在为 <b>{instance}</b> 拉取并验证 origin/main，运行组件保持当前状态。",
+    "hashideploy.ready": "Ready to reboot · 已准备好，等待采用",
+    "hashideploy.prepared": "<b>{instance}</b> · <code>{commit}</code>\n源码及隔离候选验证通过，未执行任何重启或重载。\n\n您准备好后可用 <code>/reboot</code> 采用功能更新，再用 <code>/version full</code> 核验运行版本。Core 与 Remote 的采用仍为单独操作。",
+    "hashideploy.failed": "❌ 部署尚未准备好 · <code>{phase}</code>\n{reason}\n\n源码目标：<code>{commit}</code>。未执行重启；请先解决上述错误再采用，已完成的源码更新会保留。",
     "getfile.coverage": "最近 10 个不同文件 · 受管工具与 Engine 报告。Shell／后台写入覆盖不完整。",
     "getfile.empty": "暂无文件活动记录；仍可输入明确的文件路径。",
     "getfile.created": "已创建",
@@ -3207,6 +3215,7 @@
     "safety.human_scope_note": "以下选项会延长授权范围或时间，请核对后再选择。"
   },
   "commands": {
+    "hashideploy": "准备最新源码，保持当前运行",
     "getfile": "获取最近文件或指定路径的文件",
     "phone": "语音通话设置",
     "call": "视频通话设置",
