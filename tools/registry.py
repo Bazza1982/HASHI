@@ -2491,6 +2491,8 @@ class ToolRegistry:
                 arguments,
                 workspace_dir=self.workspace_dir,
                 retain_coverage=retain_coverage,
+                **({"retained_output": (self._tool_output_store, binding, tool_name)}
+                   if binding is not None else {}),
             )
 
         if tool_name == "verification_run":

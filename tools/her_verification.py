@@ -86,7 +86,7 @@ def _workspace_path(workspace_dir: Path, raw_path: Any = ".") -> Path:
 
 
 async def _run_read_only(
-    argv: Sequence[str], *, cwd: Path
+    argv: Sequence[str], *, cwd: Path, capture=None, capture_errors=None, capture_sizes=None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one inspection child with cancellable process-tree cleanup."""
     from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
@@ -98,7 +98,15 @@ async def _run_read_only(
         **process_group_kwargs(),
     )
     group = _bash_process_group_id(proc)
-    task = asyncio.create_task(proc.communicate())
+    if capture_sizes is None:
+        task = asyncio.create_task(proc.communicate())
+    else:
+        from tools.tool_activity import bounded_communicate
+
+        task = asyncio.create_task(bounded_communicate(
+            proc, limit=_MAX_OUTPUT_CHARS * 2, sinks=capture,
+            capture_errors=capture_errors, capture_sizes=capture_sizes,
+        ))
     try:
         stdout, stderr = await asyncio.shield(task)
     except asyncio.CancelledError as exc:
@@ -108,6 +116,80 @@ async def _run_read_only(
         })
         raise
     return subprocess.CompletedProcess(arguments, proc.returncode, stdout, stderr)
+
+
+async def _inspect_command_output(
+    argv: Sequence[str], *, cwd: Path, retained_output, success_codes: set[int],
+    error_prefix: str, empty_text: str,
+) -> tuple[subprocess.CompletedProcess[bytes], str, dict[str, Any]]:
+    """Keep fixed-command inspection previews small while retaining complete output."""
+    with ExitStack() as files:
+        capture = None
+        errors: dict[str, str] = {}
+        sizes: dict[str, int] = {}
+        if retained_output is not None:
+            try:
+                capture = {
+                    "stdout_bytes": files.enter_context(retained_output[0].temporary_capture_file()),
+                    "stderr_bytes": files.enter_context(retained_output[0].temporary_capture_file()),
+                }
+            except OSError as exc:
+                files.close()
+                errors["capture"] = type(exc).__name__
+        completed = await _run_read_only(
+            argv, cwd=cwd, capture=capture, capture_errors=errors, capture_sizes=sizes,
+        )
+        success = completed.returncode in success_codes
+        selected = "stdout_bytes" if success else "stderr_bytes"
+        raw = completed.stdout if success else completed.stderr
+        prefix = "" if success else error_prefix
+        output = prefix + (_bounded_text(raw) or (empty_text if success else ""))
+        large = sizes.get(selected, 0) > 20000
+        details: dict[str, Any] = {}
+        if large:
+            reference = None
+            line_count = None
+            if capture is not None and not errors:
+                from tools.builtins import _decoded_stream
+
+                counter = {"lines": 0, "last": ""}
+
+                def chunks():
+                    if prefix:
+                        yield prefix
+                    for chunk in _decoded_stream(capture[selected], "utf-8"):
+                        counter["lines"] += chunk.count("\n")
+                        if chunk:
+                            counter["last"] = chunk[-1]
+                        yield chunk
+
+                try:
+                    reference = await asyncio.to_thread(
+                        retained_output[0].retain_text_chunks, retained_output[1], retained_output[2], chunks(),
+                    )
+                    line_count = counter["lines"] + (1 if counter["last"] and counter["last"] != "\n" else 0)
+                except (OSError, ValueError, TimeoutError):
+                    reference = None
+            details = {
+                "complete_content": False,
+                "output_continuation": reference,
+                "output_retention": retained_output[0].retention if reference else "unavailable",
+                "output_line_count": line_count,
+            }
+            low, high = 0, min(len(output), 12000)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(json.dumps(output[:middle], ensure_ascii=False)) <= 12000:
+                    low = middle
+                else:
+                    high = middle - 1
+            if reference:
+                output = (output[:low] + f"\n[truncated by HASHI; use tool_output_read "
+                          f"reference={reference} offset=0; retained while this Run is active]")
+            else:
+                output = (output[:low]
+                          + "\n[truncated by HASHI; complete-result retention is unavailable for this Run]")
+        return completed, output, details
 
 
 class _WorkspaceInspectionCancelled(Exception):
@@ -574,6 +656,7 @@ async def execute_workspace_inspect(
     *,
     workspace_dir: Path,
     retain_coverage=None,
+    retained_output=None,
 ) -> BuiltinExecutionResult:
     """Perform one fixed read-only inspection operation inside the workzone."""
 
@@ -606,22 +689,12 @@ async def execute_workspace_inspect(
         return _result(f"Error: {exc}", operation=operation)
 
     if operation == "status":
-        completed = await _run_read_only(
+        completed, output, details = await _inspect_command_output(
             ["git", "status", "--short", "--branch", "--", str(target)],
-            cwd=root,
+            cwd=root, retained_output=retained_output, success_codes={0},
+            error_prefix="Error: workspace status is unavailable: ", empty_text="Workspace status is clean.",
         )
-        if completed.returncode != 0:
-            return _result(
-                "Error: workspace status is unavailable: "
-                + _bounded_text(completed.stderr),
-                operation=operation,
-                exit_code=completed.returncode,
-            )
-        return _result(
-            _bounded_text(completed.stdout) or "Workspace status is clean.",
-            operation=operation,
-            exit_code=0,
-        )
+        return _result(output, operation=operation, exit_code=completed.returncode, **details)
 
     if operation == "diff":
         cached = arguments.get("cached", False)
@@ -631,20 +704,11 @@ async def execute_workspace_inspect(
         if cached:
             argv.append("--cached")
         argv.extend(["--", str(target)])
-        completed = await _run_read_only(argv, cwd=root)
-        if completed.returncode != 0:
-            return _result(
-                "Error: workspace diff is unavailable: "
-                + _bounded_text(completed.stderr),
-                operation=operation,
-                exit_code=completed.returncode,
-            )
-        return _result(
-            _bounded_text(completed.stdout) or "No diff.",
-            operation=operation,
-            exit_code=0,
-            cached=cached,
+        completed, output, details = await _inspect_command_output(
+            argv, cwd=root, retained_output=retained_output, success_codes={0},
+            error_prefix="Error: workspace diff is unavailable: ", empty_text="No diff.",
         )
+        return _result(output, operation=operation, exit_code=completed.returncode, cached=cached, **details)
 
     if operation == "search":
         query = str(arguments.get("query") or "")
@@ -720,21 +784,17 @@ async def execute_workspace_inspect(
                 "--extended-regexp" if regex else "--fixed-strings",
             ]
         argv.extend(["--", query, str(target)])
-        completed = await _run_read_only(argv, cwd=root)
-        if completed.returncode not in {0, 1}:
-            return _result(
-                "Error: workspace search failed: " + _bounded_text(completed.stderr),
-                operation=operation,
-                exit_code=completed.returncode,
-            )
-        output = _bounded_text(completed.stdout)
-        return _result(
-            output or "No matches.",
-            operation=operation,
-            exit_code=completed.returncode,
-            matches=0 if completed.returncode == 1 else len(output.splitlines()),
-            search_backend=search_backend,
+        completed, output, details = await _inspect_command_output(
+            argv, cwd=root, retained_output=retained_output, success_codes={0, 1},
+            error_prefix="Error: workspace search failed: ", empty_text="No matches.",
         )
+        if completed.returncode not in {0, 1}:
+            return _result(output, operation=operation, exit_code=completed.returncode, **details)
+        matches = (0 if completed.returncode == 1 else
+                   details.get("output_line_count") if details.get("complete_content") is False
+                   else len(output.splitlines()))
+        return _result(output, operation=operation, exit_code=completed.returncode,
+                       matches=matches, search_backend=search_backend, **details)
 
     if operation in {"hash", "artifact"}:
         if not target.exists():

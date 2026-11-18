@@ -71,6 +71,11 @@ Run finishes or is cancelled. Shell and verification stdout/stderr are spooled
 privately and can be retrieved in full without holding complete output in memory.
 If a shell command times out, the captured output can still be paged while the
 Run remains active. Cancelling the Run closes its temporary spools.
+Workspace inspection spools full Git status, Git diff, and external-search output
+before projecting a preview; continuation pages recover the selected stream.
+Without a bound Run or available storage, omitted output is explicitly reported.
+The Python search fallback and separate developer-toolkit Git inspector still
+have their own output limits and are not covered by this continuation guarantee.
 On startup, the owner reconciles abandoned terminal Runs; a Run whose state
 cannot be proven is retained until it can be reconciled. A Registry without an
 Agent home uses a private temporary store for that Registry's lifetime.

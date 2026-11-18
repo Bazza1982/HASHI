@@ -635,3 +635,123 @@ async def test_verification_large_output_is_completely_retrievable(tmp_path):
     reference = result.details["output_continuation"]
     captured, _ = _all_pages(registry._tool_output_store, run_binding(context), reference)
     assert captured == "Error: verification direct_argv failed with exit code 7\n" + "V" * 110000 + "\n" + "E" * 90000
+
+@pytest.mark.asyncio
+async def test_workspace_inspection_search_pages_all_matches(tmp_path):
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    source = home / "many.txt"
+    source.write_text("MATCH row-" + "x" * 65 + "\n", encoding="utf-8")
+    with source.open("a", encoding="utf-8") as output:
+        for index in range(5000):
+            output.write(f"MATCH {index:05d} " + "y" * 65 + "\n")
+        output.write("MATCH last-sentinel\n")
+    sessions = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI3")
+    session = sessions.ensure_default_session(owner_id="user:7", agent_id="lily")
+    run = sessions.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="inspect-search", text="work", source="session-api", idempotency_key="inspect-search",
+    )
+    sessions.mark_request_running(run.request_id, worker_id="worker-1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": session["session_id"], "hashi_run_id": run.run_id,
+        "request_id": run.request_id, "_runtime": SimpleNamespace(session_store=sessions),
+    }
+    scope = {"agent_id": "lily", "agent_home": str(home)}
+    registry = ToolRegistry(["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+                            audit_context=context, search_scope=scope)
+    result = await registry.execute("workspace_inspect", {"operation": "search", "query": "MATCH", "path": "many.txt"})
+    assert not result.is_error, result.output
+    reference = result.details["output_continuation"]
+    complete, _ = _all_pages(registry._tool_output_store, run_binding(context), reference)
+    assert "MATCH row-" in complete and "MATCH last-sentinel" in complete
+    assert complete.count("MATCH ") == 5002
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["status", "diff"])
+async def test_workspace_inspection_pages_full_git_output(tmp_path, operation):
+    import subprocess
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "repository"
+    home.mkdir()
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=home, check=True, capture_output=True,
+            text=True, encoding="utf-8",
+        )
+
+    git("init", "--quiet")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    source = home / "tracked.txt"
+    source.write_text("original\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "--quiet", "-m", "fixture")
+    if operation == "diff":
+        source.write_text("".join(f"row {i:05d} " + "x" * 75 + "\n" for i in range(3000))
+                          + "unique diff final sentinel\n", encoding="utf-8")
+        expected = "unique diff final sentinel"
+    else:
+        for index in range(1100):
+            (home / f"item-{index:04d}-{'x' * 80}.txt").touch()
+        (home / "zz-status-final-sentinel.txt").touch()
+        expected = "zz-status-final-sentinel.txt"
+
+    sessions = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI3")
+    session = sessions.ensure_default_session(owner_id="user:7", agent_id="lily")
+    run = sessions.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="inspect-git", text="work", source="session-api", idempotency_key="inspect-git",
+    )
+    sessions.mark_request_running(run.request_id, worker_id="worker-1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": session["session_id"], "hashi_run_id": run.run_id,
+        "request_id": run.request_id, "_runtime": SimpleNamespace(session_store=sessions),
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    result = await registry.execute("workspace_inspect", {"operation": operation})
+    assert not result.is_error, result.output
+    reference = result.details["output_continuation"]
+    actual, page = _all_pages(registry._tool_output_store, run_binding(context), reference)
+    assert expected in actual
+    assert page["complete"]
+    if operation == "status":
+        assert "item-0000-" in actual and "item-1099-" in actual
+    else:
+        assert "+row 00000 " in actual and "+row 02999 " in actual
+
+
+@pytest.mark.asyncio
+async def test_workspace_inspection_reports_retention_failure_without_inventing_match_count(tmp_path, monkeypatch):
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    (home / "many.txt").write_text("MATCH " + "x" * 40000 + "\n", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["workspace_inspect"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    def no_storage():
+        raise OSError("simulated unavailable capture storage")
+    monkeypatch.setattr(registry._tool_output_store, "temporary_capture_file", no_storage)
+    result = await registry.execute(
+        "workspace_inspect", {"operation": "search", "query": "MATCH", "path": "many.txt"},
+    )
+    assert "retention is unavailable" in result.output
+    assert result.details["complete_content"] is False
+    assert result.details["output_continuation"] is None
+    assert result.details["matches"] is None
