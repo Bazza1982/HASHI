@@ -495,7 +495,7 @@ TOOL_SCHEMAS = [
                     },
                     "max_length": {
                         "type": "integer",
-                        "description": "Maximum characters to return (default 10000).",
+                        "description": "Optional maximum characters to return; omitted returns the full result using continuation pages when needed.",
                     },
                 },
                 "required": ["url"],

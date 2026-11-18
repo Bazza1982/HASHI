@@ -1051,3 +1051,53 @@ async def test_search_preserves_matches_when_exclusion_spool_fails(tmp_path, mon
     assert result.details["matches"] == 1
     assert result.details["omitted_count"] >= 50
     assert result.details["omitted_reference_unavailable"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_pages_full_default_result_and_honors_explicit_length(tmp_path, monkeypatch):
+    import asyncio
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    body = ("<html><body><p>" + ("data " * 12000)
+            + "UNIQUE-FINAL-WEB-SENTINEL</p></body></html>").encode("utf-8")
+
+    async def reply(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii") + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    url = f"http://127.0.0.1:{port}/article"
+    try:
+        result = await registry.execute("web_fetch", {"url": url})
+        assert not result.is_error, result.output
+        reference = result.details["output_continuation"]
+        full, _ = _all_pages(registry._tool_output_store, run_binding(context), reference)
+        assert "UNIQUE-FINAL-WEB-SENTINEL" in full
+        assert full.count("data ") == 12000
+        explicit = await registry.execute("web_fetch", {"url": url, "max_length": 100})
+        assert "...[content truncated]" in explicit.output
+        assert "UNIQUE-FINAL-WEB-SENTINEL" not in explicit.output
+    finally:
+        server.close()
+        await server.wait_closed()

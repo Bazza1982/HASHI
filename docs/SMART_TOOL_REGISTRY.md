@@ -54,6 +54,10 @@ zero, reports the exact SHA-256 and completeness, and verifies the original
 Run binding. Structured image blocks remain unchanged. An incomplete projection
 and its effect receipt explicitly report `complete_content=false`.
 
+Web fetch returns the full converted text to this paging layer unless the caller
+explicitly supplies a character limit; fetching and HTML conversion themselves
+still buffer the upstream page before that layer.
+
 Legacy screenshot strings with more frames or image bytes than fit in one MCP
 page are retained in the same Run-bound store.
 `tool_output_read` returns image blocks, and its `offset`/`next_offset` count

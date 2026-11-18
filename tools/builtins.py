@@ -2575,13 +2575,16 @@ async def execute_http_request(
 
 async def execute_web_fetch(
     args: dict,
-    max_length: int = 10000,
+    max_length: int | None = None,
 ) -> str:
     url = str(args.get("url", "")).strip()
     if not url:
         return "Error: no URL provided"
 
-    max_len = int(args.get("max_length", max_length))
+    raw_limit = args.get("max_length", max_length)
+    max_len = None if raw_limit is None else int(raw_limit)
+    if max_len is not None and max_len < 0:
+        return "Error: max_length must be nonnegative"
 
     try:
         import httpx
@@ -2608,7 +2611,7 @@ async def execute_web_fetch(
             text = _re.sub(r"<[^>]+>", "", html)
             text = _re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        if len(text) > max_len:
+        if max_len is not None and len(text) > max_len:
             text = text[:max_len] + "\n...[content truncated]"
 
         return f"[Fetched: {url}]\n\n{text}"
